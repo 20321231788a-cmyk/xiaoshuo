@@ -35,7 +35,15 @@ jobs:
       - name: Build desktop
         run: npm run build:desktop
 
-      - name: Publish release
-        run: npm run release -w @xiaoshuo/desktop-shell
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Package installer
+        run: npm run dist -w @xiaoshuo/desktop-shell
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          make_latest: true
+          files: |
+            apps/desktop-shell/release/ArcWriter Setup *.exe
+            apps/desktop-shell/release/ArcWriter Setup *.exe.blockmap
+            apps/desktop-shell/release/latest.yml

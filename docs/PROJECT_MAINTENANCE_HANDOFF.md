@@ -59,15 +59,16 @@ git tag -a vx.y.z -m "ArcWriter x.y.z"
 git push origin vx.y.z
 ```
 
-5. GitHub Actions 会自动构建 Windows 安装包并上传到 Release，产物应包含：
+5. GitHub Actions 会自动构建 Windows 安装包，并通过 Release action 上传产物。Release 资产应包含：
 
-- `ArcWriter-Setup-x.y.z.exe`
+- `ArcWriter Setup x.y.z.exe`
+- `ArcWriter Setup x.y.z.exe.blockmap`
 - `latest.yml`
 
 ## 软件更新链路
 
 - 客户端使用公开 GitHub Releases 检查更新。
-- 更新源在 `apps/desktop-shell/package.json` 的 `build.publish` 中配置。
+- 安装包元数据在 `apps/desktop-shell/package.json` 中配置，GitHub Release 上传在 `.github/workflows/release.yml` 中执行。
 - 主进程更新服务在 `apps/desktop-shell/src/main/update-service.ts`。
 - 设置页“软件更新”面板在 `apps/workbench/src/App.tsx`。
 - 不要在客户端写入 GitHub token；CI 使用仓库自带 `GITHUB_TOKEN` 发布。
