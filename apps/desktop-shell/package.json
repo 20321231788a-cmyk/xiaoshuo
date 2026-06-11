@@ -1,0 +1,95 @@
+{
+  "name": "@xiaoshuo/desktop-shell",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/main/main.js",
+  "scripts": {
+    "build": "npm run build -w @xiaoshuo/shared && npm run build -w @xiaoshuo/config-service && npm run build -w @xiaoshuo/conversation-service && npm run build -w @xiaoshuo/document-service && npm run build -w @xiaoshuo/job-service && npm run build -w @xiaoshuo/project-session && npm run build -w @xiaoshuo/project-manifest && npm run build -w @xiaoshuo/generated-cache && npm run build -w @xiaoshuo/skill-service && npm run build -w @xiaoshuo/model-client && npm run build -w @xiaoshuo/crawler-service && npm run build -w @xiaoshuo/agent-runtime && npm run build -w @xiaoshuo/vector-service && tsc -p tsconfig.json",
+    "start": "electron .",
+    "dev": "node scripts/start-desktop.mjs",
+    "smoke": "node scripts/smoke-desktop.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dist": "npm --prefix ../.. run build:workbench && npm run build && electron-builder --win --publish never -c.npmRebuild=false",
+    "release": "npm --prefix ../.. run build:workbench && npm run build && electron-builder --win --publish always"
+  },
+  "build": {
+    "appId": "online.matian.arcwriter",
+    "productName": "ArcWriter",
+    "copyright": "Copyright © 2026 ArcWriter",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../workbench/dist",
+        "to": "workbench",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "extraMetadata": {
+      "main": "dist/main/main.js"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "ArcWriter Setup ${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": false
+    },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "20321231788a-cmyk",
+        "repo": "xiaoshuo",
+        "releaseType": "release"
+      }
+    ]
+  },
+  "dependencies": {
+    "@sentry/electron": "^5.6.0",
+    "@xiaoshuo/agent-runtime": "file:../../packages/agent-runtime",
+    "@xiaoshuo/config-service": "file:../../packages/config-service",
+    "@xiaoshuo/conversation-service": "file:../../packages/conversation-service",
+    "@xiaoshuo/crawler-service": "file:../../packages/crawler-service",
+    "@xiaoshuo/document-service": "file:../../packages/document-service",
+    "@xiaoshuo/generated-cache": "file:../../packages/generated-cache",
+    "@xiaoshuo/job-service": "file:../../packages/job-service",
+    "@xiaoshuo/project-manifest": "file:../../packages/project-manifest",
+    "@xiaoshuo/project-session": "file:../../packages/project-session",
+    "@xiaoshuo/shared": "file:../../packages/shared",
+    "@xiaoshuo/skill-service": "file:../../packages/skill-service",
+    "@xiaoshuo/vector-service": "file:../../packages/vector-service",
+    "electron-context-menu": "^4.0.0",
+    "electron-dl": "^4.0.0",
+    "electron-updater": "^6.8.9",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "electron": "42.3.0",
+    "electron-builder": "^26.15.2",
+    "typescript": "^5.6.0"
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^11.7.0",
+    "node-pty": "^1.0.0",
+    "ws": "^8.18.0"
+  }
+}

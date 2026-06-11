@@ -1,0 +1,14 @@
+node_modules/
+dist/
+release/
+coverage/
+test-results/
+playwright-report/
+output/
+*.log
+*.local
+.env
+.env.*
+/studio_config.json
+/*.png
+sandbox-projects/

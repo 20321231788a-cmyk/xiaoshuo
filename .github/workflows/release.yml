@@ -1,0 +1,41 @@
+name: Release Desktop
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows installer
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck --workspaces --if-present
+
+      - name: Build workbench
+        run: npm run build:workbench
+
+      - name: Build desktop
+        run: npm run build:desktop
+
+      - name: Publish release
+        run: npm run release -w @xiaoshuo/desktop-shell
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
