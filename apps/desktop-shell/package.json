@@ -1,6 +1,6 @@
 {
   "name": "@xiaoshuo/desktop-shell",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "main": "dist/main/main.js",
@@ -21,6 +21,7 @@
       "output": "release"
     },
     "files": [
+      "assets/**/*",
       "dist/**/*",
       "package.json"
     ],
@@ -37,6 +38,7 @@
       "main": "dist/main/main.js"
     },
     "win": {
+      "icon": "assets/quill.ico",
       "target": [
         {
           "target": "nsis",
@@ -51,7 +53,10 @@
       "oneClick": false,
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
-      "deleteAppDataOnUninstall": false
+      "deleteAppDataOnUninstall": false,
+      "installerIcon": "assets/quill.ico",
+      "uninstallerIcon": "assets/quill.ico",
+      "installerHeaderIcon": "assets/quill.ico"
     },
     "publish": [
       {

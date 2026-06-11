@@ -18,6 +18,7 @@ import { UpdateService } from "./update-service.js";
 import { ipcChannels } from "../shared/channels.js";
 
 const runtimeState: RuntimeServerState = {};
+const appIconPath = path.join(app.getAppPath(), "assets", "quill.ico");
 const updateService = new UpdateService({
   beforeInstall: async () => {
     killAllTerminals();
@@ -55,7 +56,8 @@ async function createWindow(): Promise<BrowserWindow> {
     height: 900,
     minWidth: 1100,
     minHeight: 720,
-    title: "XiaoShuo Agent",
+    title: "ArcWriter",
+    icon: appIconPath,
     webPreferences: {
       preload: path.join(app.getAppPath(), "dist/preload/index.js"),
       contextIsolation: true,

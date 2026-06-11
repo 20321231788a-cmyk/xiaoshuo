@@ -1,5 +1,6 @@
 import { app } from "electron";
-import { autoUpdater } from "electron-updater";
+import { createRequire } from "node:module";
+import type { AppUpdater } from "electron-updater";
 import type { DesktopUpdateStatus } from "../shared/channels.js";
 
 type UpdateStatusListener = (status: DesktopUpdateStatus) => void;
@@ -10,6 +11,8 @@ type UpdateServiceOptions = {
 
 const DEFAULT_UPDATE_OWNER = "20321231788a-cmyk";
 const DEFAULT_UPDATE_REPO = "xiaoshuo";
+const require = createRequire(import.meta.url);
+const { autoUpdater } = require("electron-updater") as { autoUpdater: AppUpdater };
 
 function normalizeReleaseNotes(notes: unknown): string | undefined {
   if (!notes) {
