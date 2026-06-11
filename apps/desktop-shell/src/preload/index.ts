@@ -23,6 +23,20 @@ const desktopApi: XiaoShuoDesktopApi = {
   versions: async () => desktopVersionsSchema.parse(await ipcRenderer.invoke(ipcChannels.appVersions)),
   backendStatus: async () => backendStatusSchema.parse(await ipcRenderer.invoke(ipcChannels.backendStatus)),
   restartBackend: async () => backendStatusSchema.parse(await ipcRenderer.invoke(ipcChannels.backendRestart)),
+  onOpenTutorial: (callback) => {
+    const listener = () => {
+      callback();
+    };
+    ipcRenderer.on(ipcChannels.appOpenTutorial, listener);
+    return () => ipcRenderer.off(ipcChannels.appOpenTutorial, listener);
+  },
+  onRequestRefresh: (callback) => {
+    const listener = () => {
+      callback();
+    };
+    ipcRenderer.on(ipcChannels.appRequestRefresh, listener);
+    return () => ipcRenderer.off(ipcChannels.appRequestRefresh, listener);
+  },
   capabilities: async () => desktopShellCapabilitiesSchema.parse(await ipcRenderer.invoke(ipcChannels.shellCapabilities)),
   pickProjectDirectory: async () => desktopProjectPickerResponseSchema.parse(await ipcRenderer.invoke(ipcChannels.shellPickProjectDirectory)),
   localState: {

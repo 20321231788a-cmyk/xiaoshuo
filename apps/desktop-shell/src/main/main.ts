@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
 import contextMenu from "electron-context-menu";
 import { download } from "electron-dl";
 import path from "node:path";
@@ -29,6 +29,31 @@ const updateService = new UpdateService({
 
 contextMenu();
 registerRuntimeShell(shell);
+
+function activeWindow(): BrowserWindow | null {
+  return BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0] || null;
+}
+
+function registerApplicationMenu(): void {
+  const menu = Menu.buildFromTemplate([
+    {
+      label: "退出",
+      accelerator: "CommandOrControl+Q",
+      click: () => app.quit()
+    },
+    {
+      label: "刷新",
+      accelerator: "CommandOrControl+R",
+      click: () => activeWindow()?.webContents.send(ipcChannels.appRequestRefresh)
+    },
+    {
+      label: "教程",
+      accelerator: "F1",
+      click: () => activeWindow()?.webContents.send(ipcChannels.appOpenTutorial)
+    }
+  ]);
+  Menu.setApplicationMenu(menu);
+}
 
 async function loadRenderer(window: BrowserWindow): Promise<void> {
   const rendererUrl = process.env.XIAOSHUO_RENDERER_URL;
@@ -140,6 +165,7 @@ function registerIpc(): void {
 }
 
 app.whenReady().then(async () => {
+  registerApplicationMenu();
   registerIpc();
   const projectRoot = resolveProjectRoot(app.getAppPath());
   try {

@@ -2762,6 +2762,7 @@ body[data-theme="dark"] {
   border: 1px solid transparent;
   border-radius: 11px;
   color: var(--xw-text);
+  text-decoration: none;
   white-space: nowrap;
 }
 
@@ -4302,6 +4303,13 @@ body[data-theme="dark"] {
   margin-top: 10px;
 }
 
+.xw-website-entry-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -2px 0 10px;
+}
+
 .xw-website-modal-backdrop {
   position: fixed;
   inset: 0;
@@ -4331,28 +4339,80 @@ body[data-theme="dark"] {
   width: min(640px, calc(100vw - 28px));
 }
 
-.xw-website-modal-head {
+.xw-tutorial-modal {
+  width: min(680px, calc(100vw - 28px));
+  max-height: min(780px, calc(100vh - 36px));
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(145, 180, 205, 0.84);
+  border-radius: 16px;
+  background: rgba(247, 252, 255, 0.98);
+  box-shadow: 0 20px 60px rgba(75, 111, 143, 0.24);
+}
+
+.xw-website-modal-head,
+.xw-tutorial-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
 }
 
-.xw-website-modal-head > div {
+.xw-website-modal-head > div,
+.xw-tutorial-head > div {
   display: flex;
   min-width: 0;
   flex-direction: column;
   gap: 4px;
 }
 
-.xw-website-modal-head strong {
+.xw-website-modal-head strong,
+.xw-tutorial-head strong {
   color: var(--xw-text);
 }
 
 .xw-website-modal-head span,
+.xw-tutorial-head span,
 .xw-website-modal-message {
   color: var(--xw-muted);
   font-size: 12px;
+}
+
+.xw-tutorial-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.xw-tutorial-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.xw-tutorial-list article {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid rgba(157, 187, 210, 0.72);
+  border-radius: 12px;
+  background: rgba(244, 250, 255, 0.78);
+}
+
+.xw-tutorial-list strong {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--xw-text);
+  font-size: 13px;
+}
+
+.xw-tutorial-list p {
+  margin: 0;
+  color: var(--xw-muted);
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .xw-website-link-button {
@@ -5443,6 +5503,7 @@ select:focus-visible {
   .xw-website-login-form,
   .xw-recharge-option-grid,
   .xw-recharge-order,
+  .xw-tutorial-list,
   .xw-operation-grid,
   .xw-operation-grid.two,
   .xw-feature-split,

@@ -65,6 +65,8 @@ const TerminalView = lazy(() => import("./views/TerminalView.js").then((module) 
 
 const runtime = readWorkbenchRuntime();
 const DEFAULT_RIGHT_WIDTH = 440;
+const WEBSITE_HOME_URL = "https://matian.online/";
+const WEBSITE_REGISTER_URL = "https://matian.online/?page=api-relay&auth=register";
 
 const punctuationMarks = ["“”", "‘’", "——", "……", "（）", "《》", "，", "。", "？", "！"];
 
@@ -130,16 +132,50 @@ export function App() {
   const [rightWidth, setRightWidth] = useState(DEFAULT_RIGHT_WIDTH);
   const [selectedDisassemblyBookId, setSelectedDisassemblyBookId] = useState("");
   const [fusionBookIds, setFusionBookIds] = useState<string[]>([]);
+  const [tutorialOpen, setTutorialOpen] = useState(false);
+  const onboardingRef = useRef(false);
 
   useEffect(() => {
     document.body.dataset.theme = darkMode ? "dark" : "light";
   }, [darkMode]);
 
   useEffect(() => {
+    const unsubscribeTutorial = window.xiaoshuoDesktop?.onOpenTutorial?.(() => setTutorialOpen(true));
+    const unsubscribeRefresh = window.xiaoshuoDesktop?.onRequestRefresh?.(() => {
+      void controller.refreshProjectWorkspace();
+    });
+    return () => {
+      unsubscribeTutorial?.();
+      unsubscribeRefresh?.();
+    };
+  }, [controller]);
+
+  useEffect(() => {
     if (controller.snapshot?.currentProject.path) {
       void controller.refreshDisassemblyLibrary();
     }
   }, [controller.snapshot?.currentProject.path]);
+
+  useEffect(() => {
+    if (onboardingRef.current || !controller.configDraft || !controller.snapshot) {
+      return;
+    }
+    onboardingRef.current = true;
+    const localState = controller.snapshot.localState;
+    const hasRecentProjects = Boolean(localState?.recent_projects?.length);
+    if (hasUsableAiConfig(controller.configDraft)) {
+      return;
+    }
+    if (hasRecentProjects || controller.snapshot.currentProject.path) {
+      return;
+    }
+    setRightMode("settings");
+    setCenterFeature("settings");
+    controller.setActiveTab("config");
+    if (controller.configDraft.ai_config_mode !== "website") {
+      controller.patchConfig({ ai_config_mode: "website" });
+    }
+  }, [controller]);
 
   useEffect(() => {
     const books = controller.disassemblyBooks.filter((book) => !book.legacy);
@@ -243,6 +279,72 @@ export function App() {
         />
         <AssistantRail controller={controller} mode={rightMode} onModeChange={selectRightMode} onSelectFeature={selectCenterFeature} />
       </main>
+      {tutorialOpen && <WebsiteTutorialDialog onClose={() => setTutorialOpen(false)} />}
+    </div>
+  );
+}
+
+function hasUsableAiConfig(config: AppConfig): boolean {
+  const manualProfile = config.manual_profile;
+  const websiteProfile = config.website_profile;
+  const legacyManualReady = Boolean(config.api_key && config.base_url && config.model);
+  const manualReady = Boolean(manualProfile?.api_key && manualProfile?.base_url && manualProfile?.model);
+  const websiteReady = Boolean(websiteProfile?.api_key && websiteProfile?.model);
+  return legacyManualReady || manualReady || websiteReady;
+}
+
+function WebsiteTutorialDialog({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="xw-website-modal-backdrop" onClick={onClose}>
+      <section className="xw-tutorial-modal" onClick={(event) => event.stopPropagation()} aria-modal="true" role="dialog" aria-label="网站使用教程">
+        <div className="xw-tutorial-head">
+          <div>
+            <strong>网站使用教程</strong>
+            <span>注册账号、接入模型、充值兑换和授权状态都从这里开始。</span>
+          </div>
+          <button className="xw-secondary-button compact" type="button" onClick={onClose} aria-label="关闭教程">
+            <X size={15} />
+          </button>
+        </div>
+
+        <div className="xw-tutorial-actions">
+          <a className="xw-primary-button compact" href={WEBSITE_REGISTER_URL} target="_blank" rel="noreferrer">
+            <ExternalLink size={14} />
+            注册账号
+          </a>
+          <a className="xw-secondary-button compact" href={WEBSITE_HOME_URL} target="_blank" rel="noreferrer">
+            <ExternalLink size={14} />
+            前往网站
+          </a>
+        </div>
+
+        <div className="xw-tutorial-list">
+          <article>
+            <strong>1. 注册网站账号</strong>
+            <p>点击“注册账号”，使用 QQ 邮箱获取验证码，设置密码后完成注册。注册完成后回到软件的“设置 - 网站配置”。</p>
+          </article>
+          <article>
+            <strong>2. 登录网站配置</strong>
+            <p>在软件里填写 QQ 邮箱和密码，点击“登录网站”。登录后会读取账号状态、余额、并发限制和可用模型列表。</p>
+          </article>
+          <article>
+            <strong>3. 选择模型并应用</strong>
+            <p>在“网站模型”中选择语言模型，按需要调整 temperature 和 top_p，然后点击“应用网站配置”。软件会隐藏写入中转连接信息，不在界面显示 URL、Key 或 token。</p>
+          </article>
+          <article>
+            <strong>4. 充值与兑换</strong>
+            <p>登录后可以在网站账号区点击“充值”选择档位，也可以点击“兑换”输入兑换码。支付或兑换成功后刷新网站状态即可看到余额变化。</p>
+          </article>
+          <article>
+            <strong>5. 授权与使用</strong>
+            <p>授权绑定网站账号。更换设备后，登录同一网站账号并应用网站配置，即可继续校验授权并使用写作、拆书、批量生成等功能。</p>
+          </article>
+          <article>
+            <strong>6. 常见处理</strong>
+            <p>模型列表为空时先刷新账号；余额不足时充值或兑换；登录失败时确认邮箱、密码和验证码注册状态；仍不可用时前往网站检查账号状态。</p>
+          </article>
+        </div>
+      </section>
     </div>
   );
 }
@@ -1776,15 +1878,14 @@ function SettingsFeaturePage({ controller }: { controller: WorkbenchController }
       <div className="xw-settings-header">
         <div>
           <strong>AI 配置</strong>
-          <span>{mode === "website" ? "使用网站账号的中转模型，敏感连接信息只写入本地配置。" : "模型线路、联网素材、向量召回与生成行为集中在这里。"}</span>
         </div>
         <div className="xw-settings-header-actions">
           <div className="xw-segmented-control" role="tablist" aria-label="AI 配置模式">
-            <button type="button" className={mode === "manual" ? "active" : ""} onClick={() => switchMode("manual")}>
-              手动配置
-            </button>
             <button type="button" className={mode === "website" ? "active" : ""} onClick={() => switchMode("website")}>
               网站配置
+            </button>
+            <button type="button" className={mode === "manual" ? "active" : ""} onClick={() => switchMode("manual")}>
+              手动配置
             </button>
           </div>
           {mode === "manual" ? (
@@ -1808,6 +1909,16 @@ function SettingsFeaturePage({ controller }: { controller: WorkbenchController }
             <div className="xw-settings-section-head">
               <strong>网站账号</strong>
               <span>{websiteLoggedIn ? "已接入网站个人页中转配置。" : "使用 QQ 邮箱登录后读取个人页模型和额度。"}</span>
+            </div>
+            <div className="xw-website-entry-actions">
+              <a className="xw-secondary-button compact" href={WEBSITE_REGISTER_URL} target="_blank" rel="noreferrer">
+                <ExternalLink size={14} />
+                注册
+              </a>
+              <a className="xw-secondary-button compact" href={WEBSITE_HOME_URL} target="_blank" rel="noreferrer">
+                <ExternalLink size={14} />
+                前往网站
+              </a>
             </div>
             {websiteLoggedIn && websiteDashboard?.account ? (
               <div className="xw-website-account">
