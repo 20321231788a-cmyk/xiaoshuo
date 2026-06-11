@@ -11,7 +11,7 @@
     "smoke": "node scripts/smoke-desktop.mjs",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dist": "npm --prefix ../.. run build:workbench && npm run build && electron-builder --win --publish never -c.npmRebuild=false",
-    "release": "npm --prefix ../.. run build:workbench && npm run build && electron-builder --win --publish always"
+    "release": "npm --prefix ../.. run build:workbench && npm run build && electron-builder --win --publish always -c.npmRebuild=false"
   },
   "build": {
     "appId": "online.matian.arcwriter",
