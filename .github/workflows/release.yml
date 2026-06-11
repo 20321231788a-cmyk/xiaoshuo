@@ -44,6 +44,6 @@ jobs:
           name: ${{ github.ref_name }}
           make_latest: true
           files: |
-            apps/desktop-shell/release/ArcWriter Setup *.exe
-            apps/desktop-shell/release/ArcWriter Setup *.exe.blockmap
+            apps/desktop-shell/release/ArcWriter-Setup-*.exe
+            apps/desktop-shell/release/ArcWriter-Setup-*.exe.blockmap
             apps/desktop-shell/release/latest.yml

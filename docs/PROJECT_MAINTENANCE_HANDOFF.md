@@ -61,8 +61,8 @@ git push origin vx.y.z
 
 5. GitHub Actions 会自动构建 Windows 安装包，并通过 Release action 上传产物。Release 资产应包含：
 
-- `ArcWriter Setup x.y.z.exe`
-- `ArcWriter Setup x.y.z.exe.blockmap`
+- `ArcWriter-Setup-x.y.z.exe`
+- `ArcWriter-Setup-x.y.z.exe.blockmap`
 - `latest.yml`
 
 ## 软件更新链路
