@@ -19,6 +19,7 @@ import { ipcChannels } from "../shared/channels.js";
 
 const runtimeState: RuntimeServerState = {};
 const appIconPath = path.join(app.getAppPath(), "assets", "quill.ico");
+const appDisplayTitle = `ArcWriter ${app.getVersion()}`;
 const updateService = new UpdateService({
   beforeInstall: async () => {
     killAllTerminals();
@@ -81,7 +82,7 @@ async function createWindow(): Promise<BrowserWindow> {
     height: 900,
     minWidth: 1100,
     minHeight: 720,
-    title: "ArcWriter",
+    title: appDisplayTitle,
     icon: appIconPath,
     webPreferences: {
       preload: path.join(app.getAppPath(), "dist/preload/index.js"),
@@ -94,6 +95,44 @@ async function createWindow(): Promise<BrowserWindow> {
   window.webContents.setWindowOpenHandler(({ url }) => {
     void shell.openExternal(url);
     return { action: "deny" };
+  });
+  window.webContents.on("did-finish-load", () => {
+    window.setTitle(appDisplayTitle);
+  });
+  window.webContents.on("before-input-event", (event, input) => {
+    if (input.type !== "keyDown" || !(input.control || input.meta)) {
+      return;
+    }
+    const key = input.key.toLowerCase();
+    if (key === "s") {
+      event.preventDefault();
+      window.webContents.send(ipcChannels.appRequestSave);
+      return;
+    }
+    if (key === "f") {
+      event.preventDefault();
+      window.webContents.send(ipcChannels.appRequestFind);
+      return;
+    }
+    if (key === "c") {
+      event.preventDefault();
+      window.webContents.copy();
+      return;
+    }
+    if (key === "x") {
+      event.preventDefault();
+      window.webContents.cut();
+      return;
+    }
+    if (key === "v") {
+      event.preventDefault();
+      window.webContents.paste();
+      return;
+    }
+    if (key === "a") {
+      event.preventDefault();
+      window.webContents.selectAll();
+    }
   });
 
   window.webContents.session.on("will-download", (event, item) => {
@@ -188,7 +227,5 @@ app.on("before-quit", () => {
 });
 
 app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
-  }
+  app.quit();
 });

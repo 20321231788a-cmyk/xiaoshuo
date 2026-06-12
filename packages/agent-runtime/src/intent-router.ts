@@ -93,11 +93,34 @@ export function routeNamedSkill(text: string, skills: SkillDefinition[]): string
     }
     const skillName = String(skill.name || "").toLowerCase();
     const skillIdText = String(skill.id || "").toLowerCase().replaceAll("_", " ");
-    if ((skillName && normalized.includes(skillName)) || (skillIdText && normalized.includes(skillIdText))) {
+    const skillDescription = String(skill.description || "").toLowerCase();
+    if (
+      (skillName && normalized.includes(skillName)) ||
+      (skillIdText && normalized.includes(skillIdText)) ||
+      skillDescriptionMatches(normalized, skillDescription)
+    ) {
       return skill.id;
     }
   }
   return "";
+}
+
+function skillDescriptionMatches(text: string, description: string): boolean {
+  const normalizedText = normalizeRouteText(text).toLowerCase();
+  const normalizedDescription = normalizeRouteText(description).toLowerCase();
+  if (normalizedDescription.length >= 6 && normalizedText.includes(normalizedDescription.slice(0, 80))) {
+    return true;
+  }
+  const tokens = description
+    .split(/[^\p{L}\p{N}_]+/u)
+    .map((token) => token.trim().toLowerCase())
+    .filter((token) => token.length >= 4 && !["skill", "prompt", "project", "conversation"].includes(token))
+    .slice(0, 12);
+  if (!tokens.length) {
+    return false;
+  }
+  const matches = tokens.filter((token) => normalizedText.includes(normalizeRouteText(token)));
+  return matches.some((token) => token.length >= 8) || matches.length >= 2;
 }
 
 export function resolveSkillRoute(text: string, manualSkillId = "", skills: SkillDefinition[] = []): string {

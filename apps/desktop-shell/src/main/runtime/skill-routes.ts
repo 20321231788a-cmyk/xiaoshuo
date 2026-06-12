@@ -4,6 +4,7 @@ import {
   skillDraftFromUrlRequestSchema,
   skillImportDraftRequestSchema,
   skillImportRequestSchema,
+  skillUpdateRequestSchema,
   skillRunRequestSchema,
   type CurrentProject
 } from "@xiaoshuo/shared";
@@ -69,6 +70,16 @@ export async function handleSkillRoutes(
   if (skillRoute.id && !skillRoute.action && request.method === "DELETE") {
     try {
       deps.writeJson(response, 200, await skills.deleteSkill(skillRoute.id));
+    } catch (error) {
+      deps.writeJson(response, 400, { detail: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
+  if (skillRoute.id && !skillRoute.action && request.method === "PATCH") {
+    try {
+      const payload = skillUpdateRequestSchema.parse(await deps.readJsonBody(request));
+      deps.writeJson(response, 200, await skills.updateSkillDescription(skillRoute.id, payload.description));
     } catch (error) {
       deps.writeJson(response, 400, { detail: error instanceof Error ? error.message : String(error) });
     }

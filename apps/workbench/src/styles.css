@@ -3112,6 +3112,34 @@ body[data-theme="dark"] {
   background: var(--xw-panel-strong);
 }
 
+.xw-find-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--xw-line);
+  border-radius: 14px;
+  background: rgba(246, 251, 255, 0.9);
+}
+
+.xw-find-bar input {
+  flex: 1 1 180px;
+  min-width: 120px;
+  min-height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--xw-line);
+  border-radius: 10px;
+  outline: none;
+  background: var(--xw-panel-strong);
+}
+
+.xw-find-bar span {
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--xw-muted);
+  font-size: 12px;
+}
+
 .xw-guard-banner {
   display: flex;
   align-items: center;
@@ -3732,6 +3760,30 @@ body[data-theme="dark"] {
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
+}
+
+.xw-skill-description-input {
+  width: 100%;
+  min-width: 0;
+  height: 28px;
+  border: 1px solid rgba(128, 162, 196, 0.46);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--xw-text);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+  padding: 4px 8px;
+}
+
+.xw-skill-description-input:focus {
+  border-color: rgba(42, 134, 232, 0.6);
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 0 0 2px rgba(42, 134, 232, 0.1);
+}
+
+.xw-skill-description-input::placeholder {
+  color: rgba(101, 122, 145, 0.72);
 }
 
 .xw-skill-main small,
@@ -5108,6 +5160,10 @@ body[data-theme="dark"] {
   inset: 0;
   opacity: 0;
   cursor: pointer;
+}
+
+.xw-hidden-file {
+  display: none;
 }
 
 .xw-ai-input {

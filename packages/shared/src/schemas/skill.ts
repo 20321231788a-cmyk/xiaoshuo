@@ -24,6 +24,12 @@ export const skillImportRequestSchema = z
   })
   .passthrough();
 
+export const skillUpdateRequestSchema = z
+  .object({
+    description: z.string().max(1000).default("")
+  })
+  .passthrough();
+
 export const skillDraftFromUrlRequestSchema = z
   .object({
     url: z.string().trim().max(2000).default(""),
@@ -87,6 +93,7 @@ export const skillRunResponseSchema = z
 
 export type SkillDefinition = z.infer<typeof skillDefinitionSchema>;
 export type SkillImportRequest = z.infer<typeof skillImportRequestSchema>;
+export type SkillUpdateRequest = z.infer<typeof skillUpdateRequestSchema>;
 export type SkillDraftFromUrlRequest = z.infer<typeof skillDraftFromUrlRequestSchema>;
 export type SkillDraftResponse = z.infer<typeof skillDraftResponseSchema>;
 export type SkillImportDraftRequest = z.infer<typeof skillImportDraftRequestSchema>;

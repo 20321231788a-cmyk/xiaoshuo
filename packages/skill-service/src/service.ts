@@ -398,6 +398,33 @@ export class SkillService {
     return { ...skill, builtin: true, disabled: nextDisabled };
   }
 
+  async updateSkillDescription(skillId: string, description: string): Promise<SkillDefinition> {
+    const id = normalizeSkillId(skillId);
+    if (!id) {
+      throw new Error("skill id 不能为空");
+    }
+    if (this.builtins.has(id)) {
+      throw new Error("默认技能简介不能直接修改");
+    }
+    const imported = await this.loadImportedSkills();
+    const index = imported.findIndex((skill) => skill.id === id);
+    if (index < 0) {
+      throw new Error("导入技能不存在");
+    }
+    const currentSkill = imported[index];
+    if (!currentSkill) {
+      throw new Error("导入技能不存在");
+    }
+    const nextDescription = normalizeSkillDescription(description);
+    const nextSkill: SkillDefinition = {
+      ...currentSkill,
+      description: nextDescription || "导入的外部 skill"
+    };
+    imported[index] = nextSkill;
+    await this.saveImportedSkills(imported);
+    return { ...nextSkill, builtin: false, disabled: false };
+  }
+
   private async importedSkillsPath(): Promise<string> {
     const filePath = path.join(this.projectRoot, AGENT_DIR, "skills", "imported.json");
     await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -507,7 +534,7 @@ export class SkillService {
     return {
       id: skillId || "imported_skill",
       name: (skill.name || skillId || "imported_skill").trim().slice(0, 80),
-      description: (skill.description || "导入的外部 skill").trim().slice(0, 300),
+      description: normalizeSkillDescription(skill.description || "导入的外部 skill"),
       input_mode: skill.input_mode || "text",
       context_requirements: normalizeStringArray(skill.context_requirements, 12, ["project_state", "conversation"]),
       handler_type: "prompt",
@@ -686,6 +713,15 @@ export class SkillService {
 function normalizeStringArray(values: readonly string[] | undefined, limit: number, fallback: string[]): string[] {
   const list = (values || []).map((item) => String(item).trim()).filter(Boolean).slice(0, limit);
   return list.length ? list : [...fallback];
+}
+
+function normalizeSkillDescription(value: string): string {
+  return String(value || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    .slice(0, 1000);
 }
 
 function normalizeSkillId(value: string): string {

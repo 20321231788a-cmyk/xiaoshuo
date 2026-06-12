@@ -6,6 +6,8 @@ export const desktopIpcChannels = {
   backendRestart: "backend:restart",
   appOpenTutorial: "app:open-tutorial",
   appRequestRefresh: "app:request-refresh",
+  appRequestSave: "app:request-save",
+  appRequestFind: "app:request-find",
   shellCapabilities: "shell:capabilities",
   shellPickProjectDirectory: "shell:pick-project-directory",
   localStateGet: "local-state:get",
@@ -244,6 +246,8 @@ export type XiaoShuoDesktopApi = {
   restartBackend: () => Promise<DesktopBackendStatus>;
   onOpenTutorial: (callback: () => void) => () => void;
   onRequestRefresh: (callback: () => void) => () => void;
+  onRequestSave: (callback: () => void) => () => void;
+  onRequestFind: (callback: () => void) => () => void;
   capabilities: () => Promise<DesktopShellCapabilities>;
   pickProjectDirectory: () => Promise<DesktopProjectPickerResponse>;
   localState: {

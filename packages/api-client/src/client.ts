@@ -23,6 +23,7 @@ import {
   skillRunRequestSchema,
   skillRunResponseSchema,
   skillDefinitionSchema,
+  skillUpdateRequestSchema,
   skillDraftResponseSchema,
   skillOpenFolderResponseSchema,
   timelineDeleteResultSchema,
@@ -444,6 +445,12 @@ export function createApiClient(options: ApiClientOptions) {
         method: "POST",
         pathParams: { skill_id: skillId },
         body: JSON.stringify(disabled === undefined ? {} : { disabled })
+      }),
+    updateSkillDescription: (skillId: string, payload: z.input<typeof skillUpdateRequestSchema>) =>
+      requestWithSchema("/api/skills/{skill_id}", skillDefinitionSchema, {
+        method: "PATCH",
+        pathParams: { skill_id: skillId },
+        body: JSON.stringify(skillUpdateRequestSchema.parse(payload))
       }),
     importSkill: (skillPath: string) =>
       requestWithSchema("/api/skills/import", skillDefinitionSchema, {

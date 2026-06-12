@@ -1590,6 +1590,31 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setConfigDraft((current) => (current ? normalizeConfigDraft({ ...current, ...patch }) : current));
   }
 
+  async function patchAndSaveConfig(patch: Partial<AppConfig>, message = "设置已保存。") {
+    const baseConfig = configDraft;
+    if (!baseConfig) {
+      return;
+    }
+    const nextConfig = normalizeConfigDraft({ ...baseConfig, ...patch });
+    setConfigDraft(nextConfig);
+    setConfigBusy(true);
+    setConfigMessage("");
+    try {
+      const saved = await client.putConfig(nextConfig);
+      const normalizedConfig = normalizeConfigDraft(saved);
+      setConfigDraft(normalizedConfig);
+      lastConfigSignatureRef.current = configSignature(normalizedConfig);
+      configDraftDirtyRef.current = false;
+      setSnapshot((current) => (current ? { ...current, config: normalizedConfig } : current));
+      setConfigMessage(message);
+    } catch (nextError) {
+      configDraftDirtyRef.current = true;
+      setConfigMessage(describeActionableError(nextError, "配置保存失败", "请检查联网搜索配置后重试。"));
+    } finally {
+      setConfigBusy(false);
+    }
+  }
+
   function applySyncedConfig(nextConfig: AppConfig) {
     const normalizedConfig = normalizeConfigDraft(nextConfig);
     setConfigDraft(normalizedConfig);
@@ -2567,6 +2592,30 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
+  async function updateSkillDescription(skillId: string, description: string) {
+    const id = skillId.trim();
+    if (!id) {
+      return null;
+    }
+    setOperationsBusy(true);
+    setOperationsMessage("");
+    try {
+      const skill = await client.updateSkillDescription(id, { description });
+      await refreshSkillCatalog();
+      if (selectedSkillId === skill.id || selectedSkillDetail?.id === skill.id) {
+        setSelectedSkillId(skill.id);
+        setSelectedSkillDetail(skill);
+      }
+      setOperationsMessage(`技能简介已保存：${skill.name}。AI 调用时会参考这段说明。`);
+      return skill;
+    } catch (nextError) {
+      setOperationsMessage(describeActionableError(nextError, "保存技能简介失败", "默认技能不可编辑简介，导入技能可直接修改。"));
+      return null;
+    } finally {
+      setOperationsBusy(false);
+    }
+  }
+
   async function selectJob(jobId: string, options: { activateTab?: boolean } = {}) {
     setOperationsBusy(true);
     setOperationsMessage("");
@@ -3378,6 +3427,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     searchVectorIndex,
     configDraft,
     patchConfig,
+    patchAndSaveConfig,
     saveConfig,
     refreshLicense,
     configMessage,
@@ -3473,6 +3523,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     openSkillFolder,
     deleteOrDisableSelectedSkill,
     restoreSelectedBuiltinSkill,
+    updateSkillDescription,
     runNuwaStyleDistillation,
     toggleNuwaStyleDistillation,
     deleteNuwaStyleDistillation,

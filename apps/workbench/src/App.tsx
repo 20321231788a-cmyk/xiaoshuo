@@ -4,6 +4,7 @@ import type {
   ConversationSummary,
   DesktopUpdateStatus,
   JobInfo,
+  SkillDefinition,
   TreeNode,
   WebsiteAiRechargeOption,
   WebsiteAiRechargeOrder
@@ -65,6 +66,7 @@ const TerminalView = lazy(() => import("./views/TerminalView.js").then((module) 
 
 const runtime = readWorkbenchRuntime();
 const DEFAULT_RIGHT_WIDTH = 440;
+const APP_WINDOW_TITLE = "ArcWriter 0.1.4";
 const WEBSITE_HOME_URL = "https://matian.online/";
 const WEBSITE_REGISTER_URL = "https://matian.online/?page=api-relay&auth=register";
 
@@ -133,7 +135,12 @@ export function App() {
   const [selectedDisassemblyBookId, setSelectedDisassemblyBookId] = useState("");
   const [fusionBookIds, setFusionBookIds] = useState<string[]>([]);
   const [tutorialOpen, setTutorialOpen] = useState(false);
+  const [findRequestTick, setFindRequestTick] = useState(0);
   const onboardingRef = useRef(false);
+
+  useEffect(() => {
+    document.title = APP_WINDOW_TITLE;
+  }, []);
 
   useEffect(() => {
     document.body.dataset.theme = darkMode ? "dark" : "light";
@@ -144,10 +151,41 @@ export function App() {
     const unsubscribeRefresh = window.xiaoshuoDesktop?.onRequestRefresh?.(() => {
       void controller.refreshProjectWorkspace();
     });
+    const unsubscribeSave = window.xiaoshuoDesktop?.onRequestSave?.(() => {
+      void controller.saveActiveDocument();
+    });
+    const unsubscribeFind = window.xiaoshuoDesktop?.onRequestFind?.(() => {
+      setCenterFeature("editor");
+      setFindRequestTick((value) => value + 1);
+    });
     return () => {
       unsubscribeTutorial?.();
       unsubscribeRefresh?.();
+      unsubscribeSave?.();
+      unsubscribeFind?.();
     };
+  }, [controller]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      if (key === "s") {
+        event.preventDefault();
+        void controller.saveActiveDocument();
+        return;
+      }
+      if (key === "f") {
+        event.preventDefault();
+        setCenterFeature("editor");
+        setFindRequestTick((value) => value + 1);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
   }, [controller]);
 
   useEffect(() => {
@@ -264,6 +302,7 @@ export function App() {
               controller={controller}
               disassemblyUi={disassemblyUi}
               feature={centerFeature}
+              findRequestTick={findRequestTick}
               onSelectFeature={selectCenterFeature}
               onSelectRightMode={selectRightMode}
             />
@@ -666,12 +705,14 @@ function DisassemblyLibraryTree({
 function CenterWorkspace({
   controller,
   feature,
+  findRequestTick,
   disassemblyUi,
   onSelectFeature,
   onSelectRightMode
 }: {
   controller: WorkbenchController;
   feature: CenterFeature;
+  findRequestTick: number;
   disassemblyUi: DisassemblyUiState;
   onSelectFeature: (feature: CenterFeature) => void;
   onSelectRightMode: (mode: RailMode) => void;
@@ -680,25 +721,40 @@ function CenterWorkspace({
     return null;
   }
 
-  return <FeatureWorkbenchPanel controller={controller} feature={feature} disassemblyUi={disassemblyUi} onSelectFeature={onSelectFeature} onSelectRightMode={onSelectRightMode} />;
+  return <FeatureWorkbenchPanel controller={controller} feature={feature} findRequestTick={findRequestTick} disassemblyUi={disassemblyUi} onSelectFeature={onSelectFeature} onSelectRightMode={onSelectRightMode} />;
 }
 
 function FeatureWorkbenchPanel({
   controller,
   feature,
+  findRequestTick,
   disassemblyUi,
   onSelectFeature,
   onSelectRightMode
 }: {
   controller: WorkbenchController;
   feature: CenterFeature;
+  findRequestTick: number;
   disassemblyUi: DisassemblyUiState;
   onSelectFeature: (feature: CenterFeature) => void;
   onSelectRightMode: (mode: RailMode) => void;
 }) {
   const activeDocument = controller.openDocuments.find((document) => document.path === controller.activeDocumentPath) || null;
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
+  const findInputRef = useRef<HTMLInputElement | null>(null);
+  const [findOpen, setFindOpen] = useState(false);
+  const [findQuery, setFindQuery] = useState("");
+  const [findMessage, setFindMessage] = useState("");
   const title = featureTitle(feature, activeDocument);
+
+  useEffect(() => {
+    if (!findRequestTick) {
+      return;
+    }
+    setFindOpen(true);
+    setFindMessage("");
+    requestAnimationFrame(() => findInputRef.current?.focus());
+  }, [findRequestTick]);
 
   function insertMark(mark: string) {
     if (!activeDocument) {
@@ -717,6 +773,32 @@ function FeatureWorkbenchPanel({
       const cursor = close && selected ? start + insertion.length : start + open.length;
       editorRef.current?.focus();
       editorRef.current?.setSelectionRange(cursor, cursor);
+    });
+  }
+
+  function findNext() {
+    if (!activeDocument || !findQuery.trim()) {
+      setFindMessage(findQuery.trim() ? "当前没有可查找文档" : "请输入查找内容");
+      return;
+    }
+    const editor = editorRef.current;
+    const content = activeDocument.content;
+    const query = findQuery.trim();
+    const source = content.toLowerCase();
+    const needle = query.toLowerCase();
+    const start = Math.max(editor?.selectionEnd ?? 0, 0);
+    let index = source.indexOf(needle, start);
+    if (index < 0 && start > 0) {
+      index = source.indexOf(needle, 0);
+    }
+    if (index < 0) {
+      setFindMessage("未找到");
+      return;
+    }
+    setFindMessage(`已定位第 ${index + 1} 个字符`);
+    requestAnimationFrame(() => {
+      editorRef.current?.focus();
+      editorRef.current?.setSelectionRange(index, index + query.length);
     });
   }
 
@@ -803,6 +885,35 @@ function FeatureWorkbenchPanel({
             </button>
           ))}
         </div>
+
+        {findOpen && (
+          <div className="xw-find-bar">
+            <input
+              ref={findInputRef}
+              value={findQuery}
+              onChange={(event) => setFindQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  findNext();
+                }
+                if (event.key === "Escape") {
+                  setFindOpen(false);
+                  setFindMessage("");
+                  editorRef.current?.focus();
+                }
+              }}
+              placeholder="查找当前文档"
+            />
+            <button className="xw-secondary-button compact" type="button" onClick={findNext} disabled={!activeDocument}>
+              查找
+            </button>
+            <button className="xw-secondary-button compact" type="button" onClick={() => setFindOpen(false)}>
+              关闭
+            </button>
+            <span>{findMessage || "Enter 查找下一个，Esc 关闭"}</span>
+          </div>
+        )}
 
         {feature === "editor" && controller.pendingCloseRequest && (
           <GuardBanner
@@ -1544,7 +1655,9 @@ function SkillFeaturePage({ controller }: { controller: WorkbenchController }) {
   const [pathInput, setPathInput] = useState("");
   const [urlInput, setUrlInput] = useState("");
   const [skillPage, setSkillPage] = useState(0);
+  const [skillDescriptionDrafts, setSkillDescriptionDrafts] = useState<Record<string, string>>({});
   const [pendingSkillAction, setPendingSkillAction] = useState<{ skillId: string; action: "run" | "delete-disable" | "restore" } | null>(null);
+  const skillFileInputRef = useRef<HTMLInputElement | null>(null);
   const skills = controller.snapshot?.skills || [];
   const skillsPerPage = 12;
   const pageCount = Math.max(1, Math.ceil(skills.length / skillsPerPage));
@@ -1582,11 +1695,51 @@ function SkillFeaturePage({ controller }: { controller: WorkbenchController }) {
     void controller.selectSkill(skillId, { activateTab: false });
   }
 
+  function submitPathImport() {
+    const path = pathInput.trim();
+    if (path) {
+      void controller.importSkillFromPath(path);
+      return;
+    }
+    skillFileInputRef.current?.click();
+  }
+
+  async function saveSkillDescription(skill: SkillDefinition) {
+    if (skill.builtin) {
+      return;
+    }
+    const draft = skillDescriptionDrafts[skill.id] ?? skill.description;
+    if (draft.trim() === String(skill.description || "").trim()) {
+      return;
+    }
+    const updated = await controller.updateSkillDescription(skill.id, draft);
+    if (updated) {
+      setSkillDescriptionDrafts((current) => {
+        const next = { ...current };
+        delete next[skill.id];
+        return next;
+      });
+    }
+  }
+
   return (
     <section className="xw-feature-page">
       <div className="xw-skill-import-row">
         <input value={pathInput} onChange={(event) => setPathInput(event.target.value)} placeholder="本地技能路径" />
-        <button className="xw-secondary-button compact" onClick={() => void controller.importSkillFromPath(pathInput)} disabled={controller.operationsBusy || !pathInput.trim()}>导入</button>
+        <button className="xw-secondary-button compact" onClick={submitPathImport} disabled={controller.operationsBusy}>导入</button>
+        <input
+          ref={skillFileInputRef}
+          type="file"
+          className="xw-hidden-file"
+          accept=".md,.markdown,.txt,.zip"
+          onChange={(event) => {
+            const file = event.currentTarget.files?.[0] || null;
+            event.currentTarget.value = "";
+            if (file) {
+              void controller.uploadSkillFile(file);
+            }
+          }}
+        />
         <input value={urlInput} onChange={(event) => setUrlInput(event.target.value)} placeholder="GitHub 或网页 URL" />
         <button className="xw-secondary-button compact" onClick={() => void controller.importSkillFromUrl(urlInput)} disabled={controller.operationsBusy || !urlInput.trim()}>URL 导入</button>
         <button className="xw-secondary-button compact" onClick={controller.openSkillFolder} disabled={controller.operationsBusy}>技能目录</button>
@@ -1596,6 +1749,7 @@ function SkillFeaturePage({ controller }: { controller: WorkbenchController }) {
           const selected = skill.id === controller.selectedSkillId;
           const restoreBuiltin = Boolean(skill.builtin && skill.disabled);
           const secondLabel = restoreBuiltin ? "恢复" : skill.builtin ? "禁用" : "删除技能";
+          const descriptionDraft = skillDescriptionDrafts[skill.id] ?? skill.description;
           return (
             <article
               key={skill.id}
@@ -1604,7 +1758,26 @@ function SkillFeaturePage({ controller }: { controller: WorkbenchController }) {
             >
               <div className="xw-skill-main">
                 <strong>{skill.disabled ? "已禁用 / " : ""}{skill.name}</strong>
-                <span>{skill.description}</span>
+                {skill.builtin ? (
+                  <span>{skill.description}</span>
+                ) : (
+                  <input
+                    className="xw-skill-description-input"
+                    value={descriptionDraft}
+                    onChange={(event) => setSkillDescriptionDrafts((current) => ({ ...current, [skill.id]: event.target.value }))}
+                    onBlur={() => void saveSkillDescription(skill)}
+                    onClick={(event) => event.stopPropagation()}
+                    onKeyDown={(event) => {
+                      event.stopPropagation();
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        event.currentTarget.blur();
+                      }
+                    }}
+                    placeholder="输入技能简介，AI 调用时会参考"
+                    disabled={controller.operationsBusy}
+                  />
+                )}
                 <small>{skill.builtin ? "默认技能" : "导入技能"} · {skill.input_mode} · {skill.handler_type} · {skill.id}</small>
                 {skill.disabled && <em>AI 自动判断时会跳过它，尝试调用相近可用技能。</em>}
               </div>
@@ -1990,6 +2163,8 @@ function SettingsFeaturePage({ controller }: { controller: WorkbenchController }
               <SliderSettingRow label="top_p" value={websiteTopP} min={0} max={1} step={0.01} onChange={(value) => patchWebsiteProfile({ top_p: value })} />
             </div>
           </section>
+
+          <WebsiteWebSearchSettings config={activeConfig} controller={controller} />
         </div>
       )}
       <SoftwareUpdateSettings />
@@ -2218,6 +2393,48 @@ function normalizeUiAiProfile(profile: Partial<AiConfigProfile> | null | undefin
     embedding_model: profile?.embedding_model || "",
     license_account_key: profile?.license_account_key || ""
   };
+}
+
+function webSearchTogglePatch(config: AppConfig, enabled: boolean): Partial<AppConfig> {
+  return {
+    web_search_enabled: enabled,
+    ...(enabled && config.web_search_provider === "custom" && !config.web_search_base_url?.trim() ? { web_search_provider: "bing" as const } : {})
+  };
+}
+
+function WebsiteWebSearchSettings({ config, controller }: { config: AppConfig; controller: WorkbenchController }) {
+  function savePatch(patch: Partial<AppConfig>) {
+    void controller.patchAndSaveConfig(patch, "联网素材搜索设置已保存。");
+  }
+
+  return (
+    <section className="xw-settings-section">
+      <div className="xw-settings-section-head">
+        <strong>联网素材搜索</strong>
+        <span>网站配置也会使用这组搜索设置；Bing 无需额外密钥，自定义搜索密钥仍在手动配置页维护。</span>
+      </div>
+      <div className="xw-settings-grid">
+        <ToggleSettingRow
+          label="联网素材搜索"
+          checked={Boolean(config.web_search_enabled)}
+          onChange={() => savePatch(webSearchTogglePatch(config, !config.web_search_enabled))}
+        />
+        <label className="xw-setting-field">
+          <span>搜索来源</span>
+          <select
+            value={config.web_search_provider === "custom" ? "custom" : "bing"}
+            onChange={(event) => savePatch({ web_search_provider: event.target.value === "custom" ? "custom" : "bing" })}
+          >
+            <option value="bing">Bing</option>
+            <option value="custom">自定义 API</option>
+          </select>
+        </label>
+        <NumberSettingRow label="结果数量" value={config.web_search_max_results || 3} min={1} max={5} onChange={(value) => savePatch({ web_search_max_results: value })} />
+        <NumberSettingRow label="搜索超时秒数" value={config.web_search_timeout || 10} min={3} max={60} onChange={(value) => savePatch({ web_search_timeout: value })} />
+        <NumberSettingRow label="素材上下文字符" value={config.web_search_context_chars || 3000} min={800} max={8000} onChange={(value) => savePatch({ web_search_context_chars: value })} />
+      </div>
+    </section>
+  );
 }
 
 function WebsiteRedeemDialog({
@@ -2830,6 +3047,30 @@ function AssistantRail({
     await controller.updateConversationTitle(nextTitle, item.id);
   }
 
+  function toggleWebSearch() {
+    const config = controller.configDraft;
+    if (!config) {
+      return;
+    }
+    void controller.patchAndSaveConfig(webSearchTogglePatch(config, !webSearchEnabled), !webSearchEnabled ? "联网搜索已开启。" : "联网搜索已关闭。");
+  }
+
+  function submitAiMessage() {
+    if (controller.conversationBusy || controller.sendingMessage || !controller.messageInput.trim()) {
+      return;
+    }
+    onSelectFeature("conversations");
+    void controller.sendMessage();
+  }
+
+  function handleAiInputKeyDown(event: ReactKeyboardEvent<HTMLTextAreaElement>) {
+    if (event.key !== "Enter" || event.shiftKey || event.nativeEvent.isComposing) {
+      return;
+    }
+    event.preventDefault();
+    submitAiMessage();
+  }
+
   const latestCrawlJob =
     [
       controller.selectedJobDetail,
@@ -2860,7 +3101,8 @@ function AssistantRail({
           <div className="xw-ai-actions">
             <button
               className={`xw-secondary-button ${webSearchEnabled ? "active" : ""}`}
-              onClick={() => controller.patchConfig({ web_search_enabled: !webSearchEnabled })}
+              onClick={toggleWebSearch}
+              disabled={controller.configBusy}
             >
               <ScanSearch size={15} />
               <span>联网搜索</span>
@@ -2990,11 +3232,12 @@ function AssistantRail({
             className="xw-ai-input"
             value={controller.messageInput}
             onChange={(event) => controller.setMessageInput(event.target.value)}
+            onKeyDown={handleAiInputKeyDown}
             placeholder="输入写作目标、修稿要求或拆书要求，系统会按内容自动调用合适的技能。"
             spellCheck={false}
           />
           <div className="xw-send-row">
-            <button className="xw-primary-button" onClick={controller.sendMessage} disabled={controller.conversationBusy || controller.sendingMessage || !controller.messageInput.trim()}>
+            <button className="xw-primary-button" onClick={submitAiMessage} disabled={controller.conversationBusy || controller.sendingMessage || !controller.messageInput.trim()}>
               <Send size={15} />
               <span>发送</span>
             </button>
