@@ -65,16 +65,21 @@ export async function handleGeneratedCacheRoutes(
           await cacheService.markCommitted(payload.cache_id, savedPaths, { cleanupContent: true });
         }
       }
-      deps.writeJson(response, 200, { saved_paths: savedPaths });
+      deps.writeJson(response, 200, { saved_paths: savedPaths, save_plan: payload.save_plan });
       return true;
     }
 
     let savedPaths: string[] = [];
     if (payload.cache_id) {
-      savedPaths = await cacheService.commitToTargets(payload.cache_id, payload.target_paths, {
-        mode: payload.mode,
-        cleanupContent: true
-      });
+      savedPaths = payload.save_plan
+        ? await cacheService.commitSavePlan(payload.cache_id, payload.save_plan, {
+            mode: payload.mode,
+            cleanupContent: true
+          })
+        : await cacheService.commitToTargets(payload.cache_id, payload.target_paths, {
+            mode: payload.mode,
+            cleanupContent: true
+          });
     } else {
       const paths = payload.target_paths.length ? payload.target_paths : (payload.target_path ? [payload.target_path] : []);
       if (!paths.length) {
@@ -98,7 +103,7 @@ export async function handleGeneratedCacheRoutes(
       index.markChanged(savedPaths, "upsert");
       index.close();
     }
-    deps.writeJson(response, 200, { saved_paths: savedPaths });
+    deps.writeJson(response, 200, { saved_paths: savedPaths, save_plan: payload.save_plan });
     return true;
   }
 
@@ -145,10 +150,16 @@ export async function handleGeneratedCacheRoutes(
       ? payload.target_paths.map(String)
       : (payload.target_path ? [String(payload.target_path)] : undefined);
 
-    const savedPaths = await cacheService.commitToTargets(cacheId, targetPaths, {
-      mode,
-      cleanupContent: true
-    });
+    const savePlan = payload.save_plan && typeof payload.save_plan === "object" ? payload.save_plan as any : undefined;
+    const savedPaths = savePlan
+      ? await cacheService.commitSavePlan(cacheId, savePlan, {
+          mode,
+          cleanupContent: true
+        })
+      : await cacheService.commitToTargets(cacheId, targetPaths, {
+          mode,
+          cleanupContent: true
+        });
     if (savedPaths.length) {
       await deps.rebuildProjectManifest(currentProject.path);
       const index = new VectorIndex(currentProject.path);

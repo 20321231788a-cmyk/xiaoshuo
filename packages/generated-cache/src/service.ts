@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { DocumentService } from "@xiaoshuo/document-service";
-import { generatedCacheMetaSchema, type GeneratedCacheMeta } from "@xiaoshuo/shared";
+import { generatedCacheMetaSchema, generatedSavePlanSchema, type GeneratedCacheMeta, type GeneratedSavePlan } from "@xiaoshuo/shared";
 
 const CACHE_ROOT_REL = "00_设定集/.agent/generated_cache";
 const CONTENT_NAME = "content.txt";
@@ -28,6 +28,7 @@ export type CreateCacheOptions = {
   conversation_id?: string;
   summary?: string;
   transient?: boolean;
+  save_plan?: GeneratedSavePlan;
 };
 
 export type CommitOptions = {
@@ -92,7 +93,8 @@ export class GeneratedCacheService {
       failed_at: "",
       saved_paths: [],
       error: "",
-      transient: options.transient ?? false
+      transient: options.transient ?? false,
+      save_plan: options.save_plan ? generatedSavePlanSchema.parse(options.save_plan) : undefined
     };
 
     await this.writeMeta(cacheId, meta);
@@ -183,6 +185,68 @@ export class GeneratedCacheService {
       const targetFullPath = await this.documentService.resolveSafePath(relPath, { allowMissing: true });
       await atomicWrite(targetFullPath, nextText);
       savedPaths.push(relPath);
+    }
+
+    await this.markCommitted(cacheId, savedPaths, { cleanupContent: options.cleanupContent });
+    return savedPaths;
+  }
+
+  async updateSavePlan(cacheId: string, savePlan: GeneratedSavePlan): Promise<GeneratedCacheMeta> {
+    const meta = await this.ensurePending(cacheId);
+    const normalizedPlan = generatedSavePlanSchema.parse({
+      ...savePlan,
+      target_paths: this.normalizePaths(savePlan.target_paths || []),
+      segments: (savePlan.segments || []).map((segment) => ({
+        ...segment,
+        target_path: this.normalizePaths([segment.target_path])[0] || ""
+      })).filter((segment) => segment.target_path)
+    });
+    meta.save_plan = normalizedPlan;
+    meta.target_paths = normalizedPlan.target_paths;
+    meta.mode = normalizedPlan.mode;
+    meta.updated_at = this.now();
+    await this.writeMeta(cacheId, meta);
+    return meta;
+  }
+
+  async commitSavePlan(cacheId: string, savePlan?: GeneratedSavePlan, options: CommitOptions = {}): Promise<string[]> {
+    const meta = await this.ensurePending(cacheId);
+    const plan = generatedSavePlanSchema.parse(savePlan || meta.save_plan || {});
+    if (plan.action === "no_save") {
+      throw new Error("保存计划没有要求写入文件");
+    }
+
+    const segments = (plan.segments || [])
+      .map((segment) => ({
+        ...segment,
+        target_path: this.normalizePaths([segment.target_path])[0] || ""
+      }))
+      .filter((segment) => segment.target_path);
+
+    if (!segments.length) {
+      return this.commitToTargets(cacheId, plan.target_paths, {
+        ...options,
+        mode: options.mode || plan.mode
+      });
+    }
+
+    const fallbackContent = await this.readContent(cacheId);
+    const strip = options.stripContent ?? true;
+    const savedPaths: string[] = [];
+
+    for (const segment of segments) {
+      let content = String(segment.content || "").trim();
+      if (!content) {
+        content = strip ? fallbackContent.trim() : fallbackContent;
+      }
+      if ((options.requireContent ?? true) && !content) {
+        throw new Error("生成内容为空，已阻止写入文件");
+      }
+      const mode = segment.mode || plan.mode || "replace";
+      const nextText = await this.composeTargetText(segment.target_path, content, mode, strip);
+      const targetFullPath = await this.documentService.resolveSafePath(segment.target_path, { allowMissing: true });
+      await atomicWrite(targetFullPath, nextText);
+      savedPaths.push(segment.target_path);
     }
 
     await this.markCommitted(cacheId, savedPaths, { cleanupContent: options.cleanupContent });

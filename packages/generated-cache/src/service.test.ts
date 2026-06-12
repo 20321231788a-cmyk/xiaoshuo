@@ -154,6 +154,42 @@ describe("generated-cache-service", () => {
     expect(await fs.readFile(path.join(tempDir, "02_正文", "第二章.txt"), "utf8")).toBe("重复生成文本");
   });
 
+  it("stores and commits an AI save plan", async () => {
+    const service = new GeneratedCacheService({
+      projectRoot: tempDir,
+      now: () => "2026-06-01 12:25:00",
+      idFactory: () => "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+    });
+
+    const savePlan = {
+      action: "append_to_existing" as const,
+      mode: "append" as const,
+      target_paths: ["01_大纲/大纲.txt"],
+      segments: [],
+      reason: "用户要求追加到大纲。",
+      confidence: 0.86,
+      requires_confirmation: false,
+      should_auto_commit: true,
+      source: "chat",
+      skill_id: "chat_generated"
+    };
+
+    await service.create({
+      source: "chat",
+      target_paths: ["01_大纲/大纲.txt"],
+      mode: "append",
+      save_plan: savePlan
+    });
+    await service.replace("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6", "追加大纲");
+
+    const meta = await service.get("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6");
+    expect(meta.save_plan?.reason).toBe("用户要求追加到大纲。");
+
+    const saved = await service.commitSavePlan("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6");
+    expect(saved).toEqual(["01_大纲/大纲.txt"]);
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("第一章\n\n---\n追加大纲\n");
+  });
+
   it("refuses to overwrite restricted file types or paths", async () => {
     const service = new GeneratedCacheService({
       projectRoot: tempDir,

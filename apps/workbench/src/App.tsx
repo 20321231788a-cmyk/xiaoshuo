@@ -56,17 +56,16 @@ import { useWorkbenchController } from "./hooks/useWorkbenchController.js";
 import { readWorkbenchRuntime } from "./lib/runtime.js";
 import {
   describeGeneratedSaveAction,
-  describeGeneratedWriteIntent,
+  describeGeneratedSaveReason,
   describePendingGeneratedTarget,
-  extractPathsFromUnknownResult,
-  type PendingGeneratedSave
+  extractPathsFromUnknownResult
 } from "./lib/workflow.js";
 
 const TerminalView = lazy(() => import("./views/TerminalView.js").then((module) => ({ default: module.TerminalView })));
 
 const runtime = readWorkbenchRuntime();
 const DEFAULT_RIGHT_WIDTH = 440;
-const APP_WINDOW_TITLE = "ArcWriter 0.1.5";
+const APP_WINDOW_TITLE = "ArcWriter 0.1.6";
 const WEBSITE_HOME_URL = "https://matian.online/";
 const WEBSITE_REGISTER_URL = "https://matian.online/?page=api-relay&auth=register";
 
@@ -280,21 +279,6 @@ export function App() {
           onOpenTimeline={() => selectCenterFeature("timeline")}
         />
         <section className="xw-center surface">
-          {controller.pendingGeneratedSave && (
-            <PendingGeneratedBanner
-              pendingSave={controller.pendingGeneratedSave}
-              busy={controller.operationsBusy || controller.conversationBusy}
-              onGoProcess={() => {
-                controller.setActiveTab(controller.pendingGeneratedSave?.source === "chat" ? "conversations" : "operations");
-                setRightMode(controller.pendingGeneratedSave?.source === "chat" ? "ai" : "skills");
-              }}
-              onSave={controller.savePendingGenerated}
-              onCopy={controller.copyPendingGeneratedContent}
-              onSaveDraft={controller.savePendingGeneratedAsDraft}
-              onDiscard={controller.discardPendingGenerated}
-            />
-          )}
-
           {controller.status === "loading" && <LoadingState />}
           {controller.status === "error" && <ErrorState message={controller.error} />}
           {controller.status === "ready" && controller.snapshot && controller.configDraft && (
@@ -2904,6 +2888,9 @@ function ResultPreview({ controller }: { controller: WorkbenchController }) {
     <article className="xw-feature-card result">
       <strong>运行结果</strong>
       <span>{controller.pendingGeneratedSave ? describePendingGeneratedTarget(controller.pendingGeneratedSave) : result?.saved_path || "未写入文件"}</span>
+      {controller.pendingGeneratedSave && describeGeneratedSaveReason(controller.pendingGeneratedSave) && (
+        <small>{describeGeneratedSaveReason(controller.pendingGeneratedSave)}</small>
+      )}
       <p>{controller.pendingGeneratedSave?.content || result?.result || result?.content || "暂无文本结果"}</p>
       {controller.pendingGeneratedSave && (
         <div className="xw-feature-actions">
@@ -2965,7 +2952,7 @@ function AssistantRail({
   const currentSkillId = activeConversation?.current_skill || "";
   const currentSkill = controller.snapshot?.skills.find((skill) => skill.id === currentSkillId) || null;
   const currentSkillName = currentSkill?.name || currentSkillId || (controller.sendingMessage ? "自动判断中" : "未调用技能");
-  const currentSkillRoute = currentSkillId ? `${currentSkillId}${activeConversation?.current_agent ? ` · ${activeConversation.current_agent}` : ""}` : "等待输入";
+  const currentSkillStatus = controller.sendingMessage ? "调用中" : currentSkillId ? "已完成" : "待命";
   const conversationItems = controller.snapshot?.conversations || [];
   const activeConversationTitle = activeConversation?.title || (activeConversationId ? "未命名对话" : "未选择会话");
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -3202,7 +3189,7 @@ function AssistantRail({
           <div className="xw-current-skill-strip">
             <span>当前技能</span>
             <strong>{currentSkillName}</strong>
-            <small>{controller.sendingMessage ? "调用中" : currentSkillRoute}</small>
+            <small>{currentSkillStatus}</small>
           </div>
           <div className="xw-context-actions">
             <button className="xw-secondary-button compact" onClick={controller.pinCurrentDocumentToConversation} disabled={!controller.activeDocumentPath || controller.conversationBusy}>
@@ -3385,77 +3372,6 @@ function LicensePill({ licensed }: { licensed: boolean }) {
       <ShieldCheck size={15} />
       <span>{licensed ? "已授权 / 永久" : "未授权"}</span>
     </div>
-  );
-}
-
-function PendingGeneratedBanner({
-  pendingSave,
-  busy,
-  onGoProcess,
-  onSave,
-  onCopy,
-  onSaveDraft,
-  onDiscard
-}: {
-  pendingSave: PendingGeneratedSave;
-  busy: boolean;
-  onGoProcess: () => void;
-  onSave: (mode: "replace" | "append") => void;
-  onCopy: () => void;
-  onSaveDraft: () => void;
-  onDiscard: () => void;
-}) {
-  const [confirmDiscard, setConfirmDiscard] = useState(false);
-  const sourceLabel = pendingSave.source === "chat" ? "会话生成" : "技能生成";
-  const chars = pendingSave.cacheChars || pendingSave.content.length;
-  const targetCount = pendingSave.targetPaths.length || (pendingSave.targetPath ? 1 : 0);
-
-  return (
-    <section className="pending-global-banner xw-pending-banner" aria-live="polite">
-      <div>
-        <p className="eyebrow">Pending Generated Result</p>
-        <strong>{describePendingGeneratedTarget(pendingSave)}</strong>
-        <p>
-          {sourceLabel} · {chars} 字 · 默认{pendingSave.defaultMode === "append" ? "追加" : "覆盖"}，处理前不会写入目标文件。
-        </p>
-        <p>{describeGeneratedWriteIntent(pendingSave)}</p>
-      </div>
-      <div className="action-pair">
-        <button className="xw-primary-button compact" onClick={onGoProcess} disabled={busy}>
-          <ArchiveRestore size={15} />
-          <span>去处理</span>
-        </button>
-        <button className="xw-secondary-button compact" onClick={() => onSave("append")} disabled={busy}>
-          <span>{describeGeneratedSaveAction("append", pendingSave.defaultMode, targetCount, pendingSave.skillId)}</span>
-        </button>
-        <button className="xw-secondary-button compact" onClick={() => onSave("replace")} disabled={busy}>
-          <span>{describeGeneratedSaveAction("replace", pendingSave.defaultMode, targetCount, pendingSave.skillId)}</span>
-        </button>
-        <button className="xw-secondary-button compact" onClick={onCopy} disabled={busy}>
-          <Copy size={15} />
-          <span>复制全文</span>
-        </button>
-        <button className="xw-secondary-button compact" onClick={onSaveDraft} disabled={busy}>
-          <FilePlus2 size={15} />
-          <span>另存草稿</span>
-        </button>
-        <button
-          className={confirmDiscard ? "xw-primary-button compact" : "xw-secondary-button compact"}
-          onClick={() => {
-            if (!confirmDiscard) {
-              setConfirmDiscard(true);
-              return;
-            }
-            setConfirmDiscard(false);
-            onDiscard();
-          }}
-          disabled={busy}
-        >
-          <Trash2 size={15} />
-          <span>{confirmDiscard ? "确认丢弃" : "丢弃"}</span>
-        </button>
-      </div>
-    </section>
   );
 }
 

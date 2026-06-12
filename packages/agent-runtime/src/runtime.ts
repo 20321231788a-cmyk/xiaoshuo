@@ -4,6 +4,8 @@ import type {
   AgentPlanRequest,
   AgentPlanResponse,
   AgentStreamEvent,
+  SkillPlan,
+  SkillPlanStep,
   SkillRunRequest,
   SkillRunResponse,
   ConversationMessageRequest,
@@ -38,6 +40,8 @@ import { DefaultWebSearchClient, formatWebSearchContext, shouldUseWebSearch, sum
 import fs from "node:fs/promises";
 import path from "node:path";
 import { applyHumanizerIfEnabled } from "./humanizer.js";
+import { GeneratedSavePlanner, hasExplicitWriteIntent } from "./generated-save-planner.js";
+import { SmartSkillOrchestrator } from "./smart-skill-orchestrator.js";
 
 const DISASSEMBLE_LIBRARY_DIR = "00_设定集/拆书库";
 const FUSION_LIBRARY_DIR = "00_设定集/融梗方案";
@@ -83,6 +87,8 @@ export class AgentRuntimeService {
   private readonly modelClient: Pick<OpenAICompatibleClient, "requestCompletion">;
   private readonly webSearchClient: WebSearchClient;
   private readonly cache: GeneratedCacheService;
+  private readonly savePlanner: GeneratedSavePlanner;
+  private readonly skillOrchestrator: SmartSkillOrchestrator;
 
   constructor(options: AgentPlannerOptions) {
     this.config = options.config ?? {};
@@ -96,6 +102,16 @@ export class AgentRuntimeService {
     this.conversations = new ConversationService({ projectRoot: options.projectRoot });
     this.documents = new DocumentService({ projectRoot: options.projectRoot });
     this.cache = new GeneratedCacheService({ projectRoot: options.projectRoot, documentService: this.documents });
+    this.savePlanner = new GeneratedSavePlanner({
+      projectRoot: options.projectRoot,
+      config: this.config,
+      modelClient: this.modelClient
+    });
+    this.skillOrchestrator = new SmartSkillOrchestrator({
+      projectRoot: options.projectRoot,
+      config: this.config,
+      modelClient: this.modelClient
+    });
   }
 
   async plan(request: AgentPlanRequest): Promise<AgentPlanResponse> {
@@ -166,7 +182,10 @@ export class AgentRuntimeService {
         ...((request as any).custom_prompt !== undefined ? { custom_prompt: (request as any).custom_prompt } : {}),
         ...((request as any).genre_hint !== undefined ? { genre_hint: (request as any).genre_hint } : {}),
         ...((request as any).output_mode !== undefined ? { output_mode: (request as any).output_mode } : {}),
-        ...((request as any).action !== undefined ? { action: (request as any).action } : {})
+        ...((request as any).action !== undefined ? { action: (request as any).action } : {}),
+        ...((request as any).suppress_conversation_record !== undefined
+          ? { suppress_conversation_record: (request as any).suppress_conversation_record }
+          : {})
       } as any;
 
       if (skillId === "body_generate" || skillId === "batch_generate") {
@@ -191,6 +210,12 @@ export class AgentRuntimeService {
   }
 
   async canRunAgentLocally(request: AgentRunRequest): Promise<boolean> {
+    if (this.shouldUseSmartSkillOrchestration(request)) {
+      const skillPlan = await this.planSkillExecution(request).catch(() => null);
+      if (skillPlan?.should_call_skill && skillPlan.steps.length) {
+        return true;
+      }
+    }
     const intent = await this.classifyIntent(request);
     if (intent === "skill") {
       const skillId = await this.resolveSkillId(request);
@@ -212,6 +237,13 @@ export class AgentRuntimeService {
   }
 
   async runAgent(request: AgentRunRequest): Promise<AgentRunResponse> {
+    if (this.shouldUseSmartSkillOrchestration(request)) {
+      const skillPlan = await this.planSkillExecution(request);
+      if (skillPlan.should_call_skill && skillPlan.steps.length) {
+        return this.runSkillPlan(skillPlan, request);
+      }
+    }
+
     const intent = await this.classifyIntent(request);
     if (intent === "file_operation") {
       return this.fileOperationRunner.runAgent(request);
@@ -241,10 +273,32 @@ export class AgentRuntimeService {
     if (intent !== "chat" && intent !== "read_context") {
       throw new Error(`TS runtime 尚未接管该意图：${intent}`);
     }
-    return this.chatRunner.runAgent(request, intent);
+    return this.attachGeneratedSaveDecision(request, await this.chatRunner.runAgent(request, intent));
   }
 
   async *streamAgentRun(request: AgentRunRequest): AsyncGenerator<AgentStreamEvent> {
+    if (this.shouldUseSmartSkillOrchestration(request)) {
+      const skillPlan = await this.planSkillExecution(request);
+      if (skillPlan.should_call_skill && skillPlan.steps.length) {
+        yield {
+          type: "start",
+          intent: "skill",
+          conversation_id: request.conversation_id || "",
+          skill_id: skillPlan.steps[0]?.skill_id || "",
+          current_skill: skillPlan.steps[0]?.name || skillPlan.steps[0]?.skill_id || "",
+          skill_steps: skillPlan.steps,
+          skill_plan: skillPlan,
+          selected_reason: skillPlan.selected_reason,
+          confidence: skillPlan.confidence
+        };
+        yield {
+          type: "final",
+          payload: await this.runSkillPlan(skillPlan, request)
+        };
+        return;
+      }
+    }
+
     const intent = await this.classifyIntent(request);
     if (intent === "file_operation") {
       yield* this.fileOperationRunner.streamAgentRun(request);
@@ -295,7 +349,16 @@ export class AgentRuntimeService {
     if (intent !== "chat" && intent !== "read_context") {
       throw new Error(`TS runtime 尚未接管该意图：${intent}`);
     }
-    yield* this.chatRunner.streamAgentRun(request, intent);
+    for await (const event of this.chatRunner.streamAgentRun(request, intent)) {
+      if (event.type === "final") {
+        yield {
+          ...event,
+          payload: await this.attachGeneratedSaveDecision(request, event.payload)
+        };
+        continue;
+      }
+      yield event;
+    }
   }
 
   private async classifyIntent(request: AgentRunRequest) {
@@ -306,6 +369,301 @@ export class AgentRuntimeService {
   private async resolveSkillId(request: AgentRunRequest): Promise<string> {
     const skills = await this.skills.listSkills().catch(() => []);
     return resolveSkillRoute(request.content || "", request.skill_id || "", skills);
+  }
+
+  private async attachGeneratedSaveDecision(request: AgentRunRequest, response: AgentRunResponse): Promise<AgentRunResponse> {
+    if (response.intent !== "chat" && response.intent !== "read_context") {
+      return response;
+    }
+    if (response.saved_paths.length || response.skill_result?.data?.pending_save) {
+      return response;
+    }
+    const content = String(response.reply || "").trim();
+    if (!content || !hasExplicitWriteIntent(request.content || "")) {
+      return response;
+    }
+
+    const plan = await this.savePlanner.planGeneratedSave({
+      instruction: request.content || "",
+      content,
+      source: "chat",
+      skillId: "chat_generated",
+      currentPath: request.current_path || "",
+      chapter: this.resolveSkillChapter("body_generate", request),
+      writeRequested: true,
+      defaultMode: "replace"
+    });
+
+    if (plan.action === "no_save" || !plan.target_paths.length) {
+      return response;
+    }
+
+    const entry = await this.cache.create({
+      source: "chat",
+      target_paths: plan.target_paths,
+      skill_id: "chat_generated",
+      conversation_id: response.conversation?.id || request.conversation_id || "",
+      mode: plan.mode,
+      summary: "AI 会话生成保存计划",
+      save_plan: plan
+    });
+    const meta = await this.cache.replace(entry.cache_id, content);
+
+    if (await this.savePlanner.shouldAutoCommit(plan)) {
+      const savedPaths = await this.cache.commitSavePlan(entry.cache_id, plan, { cleanupContent: true });
+      return {
+        ...response,
+        saved_paths: savedPaths,
+        skill_result: {
+          status: "done",
+          result: content,
+          saved_path: savedPaths[0] || "",
+          data: {
+            skill_id: "chat_generated",
+            result: content,
+            saved_paths: savedPaths,
+            target_paths: plan.target_paths,
+            target_path: plan.target_paths[0] || "",
+            save_plan: plan
+          }
+        }
+      };
+    }
+
+    return {
+      ...response,
+      skill_result: {
+        status: "done",
+        result: content,
+        saved_path: "",
+        data: {
+          skill_id: "chat_generated",
+          result: content,
+          pending_save: true,
+          target_paths: plan.target_paths,
+          target_path: plan.target_paths[0] || "",
+          default_mode: plan.mode,
+          cache_id: entry.cache_id,
+          cache_path: meta.cache_path || "",
+          cache_chars: meta.chars || content.length,
+          save_plan: plan
+        }
+      }
+    };
+  }
+
+  private async planSkillExecution(request: AgentRunRequest): Promise<SkillPlan> {
+    const skills = await this.skills.listSkills().catch(() => []);
+    return this.skillOrchestrator.plan(request, skills);
+  }
+
+  private shouldUseSmartSkillOrchestration(request: AgentRunRequest): boolean {
+    return !String(request.skill_id || "").trim() && Boolean(String(request.content || "").trim());
+  }
+
+  private async runSkillPlan(skillPlan: SkillPlan, request: AgentRunRequest): Promise<AgentRunResponse> {
+    const steps = skillPlan.steps.slice(0, 4);
+    const stepRecords: Array<Record<string, unknown>> = [];
+    const savedPaths: string[] = [];
+    const webSearchSources: WebSearchSource[] = [];
+    let lastResult: SkillRunResponse | null = null;
+    let lastReply = "";
+    let priorOutput = String(request.selection || "").trim();
+
+    for (const [index, step] of steps.entries()) {
+      const skillRequest = this.buildPlannedSkillRequest(step, request, priorOutput);
+      try {
+        const result = await this.runSkill(step.skill_id, skillRequest);
+        lastResult = result;
+        const resultText = String(result.data?.result || result.result || result.content || "").trim();
+        const stepSavedPaths = this.resolveSavedPaths(result);
+        savedPaths.push(...stepSavedPaths);
+        const stepSources = Array.isArray(result.data?.web_search_sources)
+          ? (result.data.web_search_sources as WebSearchSource[])
+          : [];
+        webSearchSources.push(...stepSources);
+        stepRecords.push({
+          index: index + 1,
+          skill_id: step.skill_id,
+          name: step.name,
+          status: "done",
+          reason: step.reason,
+          confidence: step.confidence,
+          saved_paths: stepSavedPaths,
+          result_preview: resultText.slice(0, 800)
+        });
+        priorOutput = resultText || priorOutput;
+        lastReply = resultText || (stepSavedPaths.length ? `已写入 ${stepSavedPaths.length} 个文件：\n${stepSavedPaths.join("\n")}` : `${step.name || step.skill_id} 已完成。`);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        stepRecords.push({
+          index: index + 1,
+          skill_id: step.skill_id,
+          name: step.name,
+          status: "error",
+          reason: step.reason,
+          confidence: step.confidence,
+          error: message
+        });
+        const reply = `技能 ${step.name || step.skill_id} 执行失败：${message}`;
+        const conversation = await this.recordSkillExchange(
+          { ...request, skill_id: step.skill_id },
+          reply,
+          {
+            skill_plan: skillPlan,
+            skill_steps: stepRecords,
+            current_skill: step.name || step.skill_id,
+            selected_reason: skillPlan.selected_reason,
+            confidence: skillPlan.confidence
+          }
+        );
+        return {
+          intent: "skill",
+          reply,
+          conversation,
+          results: [],
+          skill_result: {
+            status: "done",
+            result: reply,
+            saved_path: "",
+            data: {
+              skill_id: step.skill_id,
+              skill_plan: skillPlan,
+              skill_steps: stepRecords,
+              error: message
+            }
+          },
+          saved_paths: [],
+          requires_confirmation: false,
+          current_skill: step.name || step.skill_id,
+          skill_steps: steps,
+          skill_plan: skillPlan,
+          selected_reason: skillPlan.selected_reason,
+          confidence: skillPlan.confidence
+        };
+      }
+    }
+
+    const finalStep = steps.at(-1);
+    const uniqueSavedPaths = uniquePaths(savedPaths);
+    const sources = uniqueWebSearchSources(webSearchSources);
+    const reply = this.buildSkillPlanReply(lastReply, stepRecords, uniqueSavedPaths);
+    const conversation = await this.recordSkillExchange(
+      { ...request, skill_id: finalStep?.skill_id || "" },
+      reply,
+      {
+        skill_plan: skillPlan,
+        skill_steps: stepRecords,
+        current_skill: finalStep?.name || finalStep?.skill_id || "",
+        selected_reason: skillPlan.selected_reason,
+        confidence: skillPlan.confidence,
+        ...(sources.length ? { web_search_sources: sources } : {})
+      }
+    );
+    const skillResult = this.decorateSkillPlanResult(lastResult, skillPlan, stepRecords, reply, uniqueSavedPaths, sources);
+    return {
+      intent: "skill",
+      reply,
+      conversation,
+      results: [],
+      skill_result: skillResult,
+      saved_paths: uniqueSavedPaths,
+      requires_confirmation: false,
+      web_search_sources: sources,
+      current_skill: finalStep?.name || finalStep?.skill_id || "",
+      skill_steps: steps,
+      skill_plan: skillPlan,
+      selected_reason: skillPlan.selected_reason,
+      confidence: skillPlan.confidence
+    };
+  }
+
+  private buildPlannedSkillRequest(step: SkillPlanStep, request: AgentRunRequest, priorOutput: string): SkillRunRequest {
+    const instruction = [step.instruction || request.content || "", step.reason ? `调度理由：${step.reason}` : ""].filter(Boolean).join("\n");
+    const selection = String(step.text || priorOutput || request.selection || "").trim();
+    const base = this.buildSkillRequest(step.skill_id, {
+      ...request,
+      content: instruction || request.content || "",
+      selection
+    });
+    return {
+      ...base,
+      text: selection || base.text,
+      instruction: instruction || base.instruction,
+      write_result: base.write_result || this.shouldWriteSkillResult(instruction),
+      ...this.pickPlannedSkillPassthrough(request),
+      suppress_conversation_record: true
+    };
+  }
+
+  private pickPlannedSkillPassthrough(request: AgentRunRequest): Record<string, unknown> {
+    const source = request as Record<string, unknown>;
+    const keys = [
+      "action",
+      "auto_revision",
+      "score_threshold",
+      "book_title",
+      "source_book_id",
+      "source_book_ids",
+      "custom_prompt",
+      "genre_hint",
+      "output_mode",
+      "write_result",
+      "target_path",
+      "target_words",
+      "chapter",
+      "end_chapter"
+    ];
+    const picked: Record<string, unknown> = {};
+    for (const key of keys) {
+      if (source[key] !== undefined) {
+        picked[key] = source[key];
+      }
+    }
+    return picked;
+  }
+
+  private buildSkillPlanReply(lastReply: string, stepRecords: Array<Record<string, unknown>>, savedPaths: string[]): string {
+    const failed = stepRecords.find((step) => step.status === "error");
+    if (failed) {
+      return `技能 ${String(failed.name || failed.skill_id)} 执行失败：${String(failed.error || "未知错误")}`;
+    }
+    if (lastReply.trim()) {
+      return lastReply.trim();
+    }
+    if (savedPaths.length) {
+      return `已写入 ${savedPaths.length} 个文件：\n${savedPaths.join("\n")}`;
+    }
+    const names = stepRecords.map((step) => String(step.name || step.skill_id)).filter(Boolean);
+    return names.length ? `已完成：${names.join(" -> ")}` : "已完成。";
+  }
+
+  private decorateSkillPlanResult(
+    result: SkillRunResponse | null,
+    skillPlan: SkillPlan,
+    stepRecords: Array<Record<string, unknown>>,
+    reply: string,
+    savedPaths: string[],
+    webSearchSources: WebSearchSource[]
+  ): SkillRunResponse {
+    const baseData = result?.data && typeof result.data === "object" ? result.data : {};
+    return {
+      status: result?.status || "done",
+      result: result?.result || reply,
+      saved_path: result?.saved_path || savedPaths[0] || "",
+      data: {
+        ...baseData,
+        skill_plan: skillPlan,
+        skill_steps: stepRecords,
+        selected_reason: skillPlan.selected_reason,
+        confidence: skillPlan.confidence,
+        saved_paths: savedPaths,
+        ...(webSearchSources.length ? { web_search_sources: webSearchSources } : {})
+      },
+      ...(result?.job ? { job: result.job } : {}),
+      ...(result?.ok !== undefined ? { ok: result.ok } : {}),
+      ...(result?.content !== undefined ? { content: result.content } : {})
+    };
   }
 
   private async runLocalSkillIntent(skillId: string, request: AgentRunRequest): Promise<AgentRunResponse> {
@@ -491,17 +849,53 @@ export class AgentRuntimeService {
         skip: false
       });
       const text = humanized.text;
+      const writeRequested = this.shouldWriteSkillResult(request.content || "");
+      const savePlan = await this.savePlanner.planGeneratedSave({
+        instruction: request.content || "",
+        content: text,
+        source: "workflow",
+        skillId,
+        targetPaths: [outputPath],
+        targetPath: outputPath,
+        currentPath: request.current_path || "",
+        chapter,
+        writeRequested,
+        defaultMode: "replace"
+      });
 
-      if (!this.shouldWriteSkillResult(request.content || "")) {
-        // 创建物理缓存
-        const entry = await this.cache.create({
-          source: "body_generate",
-          target_paths: [outputPath],
-          skill_id: skillId,
-          summary: `正文生成缓存：第 ${chapter} 章`
-        });
-        const meta = await this.cache.replace(entry.cache_id, text);
+      const entry = await this.cache.create({
+        source: "body_generate",
+        target_paths: savePlan.target_paths.length ? savePlan.target_paths : [outputPath],
+        skill_id: skillId,
+        mode: savePlan.mode,
+        summary: `正文生成缓存：第 ${chapter} 章`,
+        save_plan: savePlan
+      });
+      const meta = await this.cache.replace(entry.cache_id, text);
 
+      const baseData = {
+        skill_id: skillId,
+        chapter,
+        chars: text.length,
+        revised,
+        deslopped: deslopped.changed,
+        humanized: humanized.applied,
+        humanizer_skill_id: humanized.applied ? "humanizer_zh" : "",
+        ...(humanized.error ? { humanizer_error: humanized.error } : {}),
+        score: check.score,
+        risks: check.risks,
+        target_paths: savePlan.target_paths.length ? savePlan.target_paths : [outputPath],
+        target_path: savePlan.target_paths[0] || outputPath,
+        result: text,
+        default_mode: savePlan.mode,
+        cache_id: entry.cache_id,
+        cache_path: meta.cache_path || "",
+        cache_chars: meta.chars || text.length,
+        save_plan: savePlan,
+        web_search_sources: webSearchSources
+      };
+
+      if (!(await this.savePlanner.shouldAutoCommit(savePlan))) {
         return {
           intent: "skill",
           reply: text,
@@ -516,24 +910,8 @@ export class AgentRuntimeService {
             result: text,
             saved_path: "",
             data: {
-              skill_id: skillId,
-              chapter,
-              chars: text.length,
-              revised,
-              deslopped: deslopped.changed,
-              humanized: humanized.applied,
-              humanizer_skill_id: humanized.applied ? "humanizer_zh" : "",
-              ...(humanized.error ? { humanizer_error: humanized.error } : {}),
-              score: check.score,
-              risks: check.risks,
-              target_paths: [outputPath],
-              target_path: outputPath,
-              result: text,
-              default_mode: "replace",
+              ...baseData,
               pending_save: true,
-              cache_id: entry.cache_id,
-              cache_path: meta.cache_path || "",
-              cache_chars: meta.chars || text.length,
               web_search_sources: webSearchSources
             }
           },
@@ -543,13 +921,12 @@ export class AgentRuntimeService {
         };
       }
 
-      await this.documents.saveDocument(outputPath, text, {
-        source: "generation",
-        summary: `生成第 ${chapter} 章`
-      });
-      await this.appendHandoff(chapter, outputPath, text, chapterOutline, check);
+      const savedPaths = await this.cache.commitSavePlan(entry.cache_id, savePlan, { cleanupContent: true });
+      if (savedPaths.includes(outputPath)) {
+        await this.appendHandoff(chapter, outputPath, text, chapterOutline, check);
+      }
 
-      const reply = `已写入 1 个文件：\n${outputPath}`;
+      const reply = `已写入 ${savedPaths.length} 个文件：\n${savedPaths.join("\n")}`;
       const conversation = await this.recordSkillExchange(
         request,
         reply,
@@ -563,7 +940,7 @@ export class AgentRuntimeService {
         skill_result: {
           status: "done",
           result: text,
-          saved_path: outputPath,
+          saved_path: savedPaths[0] || outputPath,
           data: {
             skill_id: skillId,
             chapter,
@@ -576,12 +953,13 @@ export class AgentRuntimeService {
             ...(humanized.error ? { humanizer_error: humanized.error } : {}),
             score: check.score,
             risks: check.risks,
-            target_paths: [outputPath],
-            saved_paths: [outputPath],
+            target_paths: savePlan.target_paths,
+            saved_paths: savedPaths,
+            save_plan: savePlan,
             web_search_sources: webSearchSources
           }
         },
-        saved_paths: [outputPath],
+        saved_paths: savedPaths,
         requires_confirmation: false,
         web_search_sources: webSearchSources
       };
@@ -1904,6 +2282,9 @@ export class AgentRuntimeService {
     reply: string,
     assistantMetadata: Record<string, unknown> = {}
   ): Promise<ConversationDetail | undefined> {
+    if ((request as any).suppress_conversation_record === true) {
+      return request.conversation_id ? await this.conversations.getConversation(request.conversation_id).catch(() => undefined) : undefined;
+    }
     const userText = String(request.content || "").trim();
     if (!userText) {
       return undefined;
@@ -1966,15 +2347,144 @@ export class AgentRuntimeService {
   async sendMessage(
     conversationId: string,
     payload: ConversationMessageRequest
-  ): Promise<{ conversation: ConversationDetail; reply: string; saved_path: string; web_search_sources?: import("./web-search.js").WebSearchSource[] }> {
-    return this.chatRunner.sendMessage(conversationId, payload);
+  ): Promise<{ conversation: ConversationDetail; reply: string; saved_path: string; web_search_sources?: import("./web-search.js").WebSearchSource[]; skill_result?: SkillRunResponse }> {
+    await this.validateConversationWriteBackRequest(payload);
+    const request = this.conversationPayloadToAgentRequest(conversationId, payload);
+    let agentResponse = await this.runAgent(request);
+    if (payload.write_target?.trim()) {
+      const writeMode = resolveConversationWriteBackMode(payload);
+      const savedPath = await this.writeConversationReplyBack(payload.write_target, agentResponse.reply, writeMode, Boolean(payload.confirm_write));
+      const conversation = agentResponse.conversation
+        ? await this.appendConversationWriteBackMessage(agentResponse.conversation.id, savedPath, writeMode)
+        : agentResponse.conversation;
+      agentResponse = {
+        ...agentResponse,
+        conversation,
+        saved_paths: uniquePaths([...(agentResponse.saved_paths || []), savedPath])
+      };
+    }
+    return {
+      conversation: agentResponse.conversation!,
+      reply: agentResponse.reply,
+      saved_path: agentResponse.saved_paths[0] || "",
+      web_search_sources: agentResponse.web_search_sources,
+      skill_result: agentResponse.skill_result || undefined
+    };
   }
 
   async *streamMessage(
     conversationId: string,
     payload: ConversationMessageRequest
   ): AsyncGenerator<AgentStreamEvent> {
-    yield* this.chatRunner.streamMessage(conversationId, payload);
+    await this.validateConversationWriteBackRequest(payload);
+    const agentRequest = this.conversationPayloadToAgentRequest(conversationId, payload);
+    for await (const event of this.streamAgentRun(agentRequest)) {
+      if (event.type === "final") {
+        let payloadResponse = event.payload;
+        if (payload.write_target?.trim()) {
+          const writeMode = resolveConversationWriteBackMode(payload);
+          const savedPath = await this.writeConversationReplyBack(payload.write_target, payloadResponse.reply, writeMode, Boolean(payload.confirm_write));
+          const conversation = payloadResponse.conversation
+            ? await this.appendConversationWriteBackMessage(payloadResponse.conversation.id, savedPath, writeMode)
+            : payloadResponse.conversation;
+          payloadResponse = {
+            ...payloadResponse,
+            conversation,
+            saved_paths: uniquePaths([...(payloadResponse.saved_paths || []), savedPath])
+          };
+        }
+        yield {
+          ...event,
+          payload: payloadResponse
+        };
+        continue;
+      }
+      yield event;
+    }
+  }
+
+  private conversationPayloadToAgentRequest(conversationId: string, payload: ConversationMessageRequest): AgentRunRequest {
+    return {
+      conversation_id: conversationId,
+      content: payload.content || "",
+      current_path: "",
+      selection: "",
+      project_context_hint: payload.runtime_context || "",
+      skill_id: payload.skill_id || "",
+      attachment_ids: payload.attachment_ids || []
+    };
+  }
+
+  private async validateConversationWriteBackRequest(payload: ConversationMessageRequest): Promise<void> {
+    const target = String(payload.write_target || "").trim();
+    if (!target) {
+      return;
+    }
+    if (payload.insert_mode === "none") {
+      throw new Error("写回目标已设置，但 insert_mode 为 none。请先选择追加或覆盖。");
+    }
+    const insertMode = resolveConversationWriteBackMode(payload);
+    if (insertMode !== "replace" || payload.confirm_write) {
+      return;
+    }
+    try {
+      const doc = await this.documents.readDocument(target);
+      if (String(doc.content || "").trim()) {
+        throw new Error("覆盖写入已有文档需要 confirm_write=true。");
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.includes("confirm_write")) {
+        throw error;
+      }
+    }
+  }
+
+  private async writeConversationReplyBack(targetPath: string, reply: string, insertMode: "append" | "replace", confirmWrite: boolean): Promise<string> {
+    const target = String(targetPath || "").trim();
+    if (!target) {
+      return "";
+    }
+    let existing = "";
+    let exists = false;
+    try {
+      const doc = await this.documents.readDocument(target);
+      existing = doc.content || "";
+      exists = true;
+    } catch {
+      existing = "";
+    }
+    if (insertMode === "replace" && exists && existing.trim() && !confirmWrite) {
+      throw new Error("覆盖写入已有文档需要 confirm_write=true。");
+    }
+    const content = insertMode === "append" && existing.trim()
+      ? `${existing.trimEnd()}\n\n${String(reply || "").trim()}`
+      : String(reply || "").trim();
+    await this.documents.saveDocument(target, content, { source: "agent" });
+    return target;
+  }
+
+  private async appendConversationWriteBackMessage(conversationId: string, savedPath: string, insertMode: "append" | "replace"): Promise<ConversationDetail> {
+    let detail = await this.conversations.getConversation(conversationId);
+    const now = new Date().toISOString();
+    detail = {
+      ...detail,
+      updated_at: now,
+      messages: [
+        ...detail.messages,
+        {
+          id: randomUUID().replace(/-/g, ""),
+          role: "system",
+          content: `已写回 ${savedPath}`,
+          created_at: now,
+          metadata: {
+            write_target: savedPath,
+            insert_mode: insertMode
+          }
+        }
+      ],
+      message_count: detail.messages.length + 1
+    };
+    return this.conversations.saveConversation(detail);
   }
 
   private async runBodyChapterRevision(
@@ -2518,6 +3028,10 @@ function uniqueWebSearchSources(sources: WebSearchSource[]): WebSearchSource[] {
     unique.push({ title, url });
   }
   return unique.slice(0, 5);
+}
+
+function resolveConversationWriteBackMode(payload: ConversationMessageRequest): "append" | "replace" {
+  return payload.insert_mode === "append" ? "append" : "replace";
 }
 
 function getCardDrawManifestPath(projectRoot: string, drawId: string): string {

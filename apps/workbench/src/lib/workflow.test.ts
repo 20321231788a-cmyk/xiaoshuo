@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   describeActionableError,
   describeGeneratedSaveAction,
+  describeGeneratedSaveReason,
   describeGeneratedWriteIntent,
   describeJobKind,
   describeJobStarted,
@@ -61,6 +62,32 @@ describe("workflow helpers", () => {
 
     expect(pending?.targetPath).toBe("03_设定/人物设定.txt");
     expect(pending?.cacheId).toBe("cache_1");
+  });
+
+  it("preserves AI save plan metadata on pending generated saves", () => {
+    const pending = pendingSaveFromSkill({
+      status: "done",
+      result: "正文",
+      saved_path: "",
+      data: {
+        pending_save: true,
+        skill_id: "body_generate",
+        cache_id: "cache_2",
+        target_path: "02_正文/第001章.txt",
+        save_plan: {
+          action: "replace_existing",
+          mode: "replace",
+          target_paths: ["02_正文/第001章.txt"],
+          reason: "AI 判断这是第 1 章正文。",
+          confidence: 0.8,
+          requires_confirmation: true,
+          should_auto_commit: false
+        }
+      }
+    });
+
+    expect(pending?.savePlan?.target_paths).toEqual(["02_正文/第001章.txt"]);
+    expect(describeGeneratedSaveReason(pending!)).toBe("AI 判断这是第 1 章正文。 · 置信度 80%");
   });
 
   it("summarizes operation results in plain language", () => {

@@ -7,6 +7,7 @@ import type { DashboardSnapshot } from "../lib/dashboard.js";
 import { previewText } from "../lib/richText.js";
 import {
   describeGeneratedSaveAction,
+  describeGeneratedSaveReason,
   describeGeneratedWriteIntent,
   describeJobKind,
   describePendingGeneratedTarget,
@@ -320,6 +321,7 @@ export function OperationsView({
                     下一步可以决定如何写入目标文件。
                   </p>
                   <p>{describeGeneratedWriteIntent(pendingGeneratedSave)}</p>
+                  {describeGeneratedSaveReason(pendingGeneratedSave) && <p>{describeGeneratedSaveReason(pendingGeneratedSave)}</p>}
                   {pendingTargetPaths.length > 1 && (
                     <ul className="pending-target-list">
                       {pendingTargetPaths.map((path) => (

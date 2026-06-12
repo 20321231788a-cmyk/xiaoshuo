@@ -54,6 +54,26 @@ export const webSearchSourceSchema = z
 
 export const agentIntentSchema = z.enum(["file_operation", "read_context", "skill", "chat"]);
 
+export const skillPlanStepSchema = z
+  .object({
+    skill_id: z.string().default(""),
+    name: z.string().default(""),
+    instruction: z.string().default(""),
+    text: z.string().default(""),
+    reason: z.string().default(""),
+    confidence: z.number().min(0).max(1).default(0)
+  })
+  .passthrough();
+
+export const skillPlanSchema = z
+  .object({
+    should_call_skill: z.boolean().default(false),
+    steps: z.array(skillPlanStepSchema).default([]),
+    selected_reason: z.string().default(""),
+    confidence: z.number().min(0).max(1).default(0)
+  })
+  .passthrough();
+
 export const agentRunRequestSchema = z
   .object({
     conversation_id: z.string().default(""),
@@ -76,13 +96,43 @@ export const agentRunResponseSchema = z
     skill_result: skillRunResponseSchema.nullable().optional(),
     saved_paths: z.array(z.string()),
     requires_confirmation: z.boolean(),
-    web_search_sources: z.array(webSearchSourceSchema).optional()
+    web_search_sources: z.array(webSearchSourceSchema).optional(),
+    current_skill: z.string().optional(),
+    skill_steps: z.array(skillPlanStepSchema).optional(),
+    skill_plan: skillPlanSchema.optional(),
+    selected_reason: z.string().optional(),
+    confidence: z.number().min(0).max(1).optional()
+  })
+  .passthrough();
+
+export const generatedSaveSegmentSchema = z
+  .object({
+    target_path: z.string().default(""),
+    content: z.string().default(""),
+    mode: z.enum(["replace", "append"]).default("replace"),
+    reason: z.string().default("")
+  })
+  .passthrough();
+
+export const generatedSavePlanSchema = z
+  .object({
+    action: z.enum(["no_save", "save_generated", "split_and_save", "append_to_existing", "replace_existing", "create_file"]).default("no_save"),
+    mode: z.enum(["replace", "append"]).default("replace"),
+    target_paths: z.array(z.string()).default([]),
+    segments: z.array(generatedSaveSegmentSchema).default([]),
+    reason: z.string().default(""),
+    confidence: z.number().min(0).max(1).default(0),
+    requires_confirmation: z.boolean().default(true),
+    should_auto_commit: z.boolean().default(false),
+    source: z.string().default(""),
+    skill_id: z.string().default("")
   })
   .passthrough();
 
 export const generatedSaveResponseSchema = z
   .object({
-    saved_paths: z.array(z.string()).default([])
+    saved_paths: z.array(z.string()).default([]),
+    save_plan: generatedSavePlanSchema.optional()
   })
   .passthrough();
 
@@ -94,7 +144,8 @@ export const generatedSaveRequestSchema = z
     mode: z.enum(["replace", "append"]).default("replace"),
     target_paths: z.array(z.string()).default([]),
     target_path: z.string().default(""),
-    chapter: z.number().default(0)
+    chapter: z.number().default(0),
+    save_plan: generatedSavePlanSchema.optional()
   })
   .passthrough();
 
@@ -117,7 +168,8 @@ export const generatedCacheMetaSchema = z
     failed_at: z.string().default(""),
     saved_paths: z.array(z.string()).default([]),
     error: z.string().default(""),
-    transient: z.boolean().default(false)
+    transient: z.boolean().default(false),
+    save_plan: generatedSavePlanSchema.optional()
   })
   .passthrough();
 
@@ -133,7 +185,12 @@ export const agentStreamEventSchema = z.discriminatedUnion("type", [
     type: z.literal("start"),
     intent: agentIntentSchema,
     conversation_id: z.string(),
-    skill_id: z.string().optional().default("")
+    skill_id: z.string().optional().default(""),
+    current_skill: z.string().optional(),
+    skill_steps: z.array(skillPlanStepSchema).optional(),
+    skill_plan: skillPlanSchema.optional(),
+    selected_reason: z.string().optional(),
+    confidence: z.number().min(0).max(1).optional()
   }),
   z.object({
     type: z.literal("delta"),
@@ -160,11 +217,15 @@ export type OperationResult = z.infer<typeof operationResultSchema>;
 export type WebSearchSource = z.infer<typeof webSearchSourceSchema>;
 export type ExecutePlanResponse = z.infer<typeof executePlanResponseSchema>;
 export type AgentIntent = z.infer<typeof agentIntentSchema>;
+export type SkillPlanStep = z.infer<typeof skillPlanStepSchema>;
+export type SkillPlan = z.infer<typeof skillPlanSchema>;
 export type AgentRunRequest = z.infer<typeof agentRunRequestSchema>;
 export type AgentRunResponse = z.infer<typeof agentRunResponseSchema>;
 export type AgentStreamEvent = z.infer<typeof agentStreamEventSchema>;
 export type SkillRunResponseWithJob = z.infer<typeof skillRunResponseWithJobSchema>;
 export type GeneratedSaveResponse = z.infer<typeof generatedSaveResponseSchema>;
+export type GeneratedSaveSegment = z.infer<typeof generatedSaveSegmentSchema>;
+export type GeneratedSavePlan = z.infer<typeof generatedSavePlanSchema>;
 export type GeneratedCacheMeta = z.infer<typeof generatedCacheMetaSchema>;
 export type GeneratedCacheDetail = z.infer<typeof generatedCacheDetailSchema>;
 export type GeneratedSaveRequest = z.infer<typeof generatedSaveRequestSchema>;

@@ -2785,8 +2785,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         },
         {
           onStart: (event) => {
+            const currentSkill = event.current_skill || event.skill_id || "";
             updateActiveConversationSkill(conversationId, event.skill_id || "", "");
-            setConversationMessage(event.skill_id ? `正在调用技能：${event.skill_id}` : "正在判断当前技能...");
+            setConversationMessage(currentSkill ? `正在调用技能：${currentSkill}` : "正在判断当前技能...");
           },
           onDelta: (event) => {
             streamedText += event.text;
@@ -3095,7 +3096,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         mode,
         target_path: currentPending.targetPath,
         target_paths: currentPending.targetPaths,
-        chapter: currentPending.chapter
+        chapter: currentPending.chapter,
+        save_plan: currentPending.savePlan
       });
 
       setPendingGeneratedSave(null);
@@ -3269,7 +3271,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         targetPaths: targetPaths.length ? targetPaths : [targetPath],
         chapter: 0,
         defaultMode: detail.meta.mode || cache.mode || "replace",
-        source: cache.source
+        source: cache.source,
+        savePlan: detail.meta.save_plan
       };
 
       setPendingGeneratedSave(restored);

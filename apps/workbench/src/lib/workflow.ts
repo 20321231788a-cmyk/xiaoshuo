@@ -1,4 +1,4 @@
-import type { AgentRunResponse, JobInfo, OperationResult, SkillDefinition, SkillRunResponse } from "@xiaoshuo/shared";
+import type { AgentRunResponse, GeneratedSavePlan, JobInfo, OperationResult, SkillDefinition, SkillRunResponse } from "@xiaoshuo/shared";
 
 export type PendingGeneratedSave = {
   skillId: string;
@@ -11,6 +11,7 @@ export type PendingGeneratedSave = {
   chapter: number;
   defaultMode: "replace" | "append";
   source: "chat" | "skill";
+  savePlan?: GeneratedSavePlan;
 };
 
 export type UnsavedWorkbenchStateInput = {
@@ -97,7 +98,8 @@ export function pendingSaveFromSkill(result?: SkillRunResponse | null, source: P
     targetPaths: targetPaths.length ? targetPaths : [targetPath],
     chapter: Number(data.chapter || 0),
     defaultMode: data.default_mode === "append" ? "append" : "replace",
-    source
+    source,
+    savePlan: data.save_plan && typeof data.save_plan === "object" ? data.save_plan as GeneratedSavePlan : undefined
   };
 }
 
@@ -411,6 +413,16 @@ export function describeGeneratedWriteIntent(pendingSave: Pick<PendingGeneratedS
     return `会把同一份生成内容写入 ${paths.length} 个目标文件，请先确认目标列表。`;
   }
   return "会把当前预览内容写入目标文件，请先确认内容和写入方式。";
+}
+
+export function describeGeneratedSaveReason(pendingSave: Pick<PendingGeneratedSave, "savePlan">): string {
+  const reason = String(pendingSave.savePlan?.reason || "").trim();
+  const confidence = Number(pendingSave.savePlan?.confidence || 0);
+  if (!reason) {
+    return "";
+  }
+  const confidenceLabel = confidence > 0 ? ` · 置信度 ${Math.round(confidence * 100)}%` : "";
+  return `${reason}${confidenceLabel}`;
 }
 
 export function describePendingGeneratedTarget(pendingSave: Pick<PendingGeneratedSave, "targetPath" | "targetPaths">): string {

@@ -730,6 +730,56 @@ describe("agent-runtime chat flow", () => {
     await expect(fs.readFile(targetPath, "utf8")).resolves.toBe("确认后写入");
   });
 
+  it("returns inline pending-save metadata for streamed conversation saves that would overwrite existing files", async () => {
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const conversation = await conversations.createConversation({ title: "保存测试" });
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          if (messages[0]?.content.includes("生成结果保存规划器")) {
+            return JSON.stringify({
+              action: "replace_existing",
+              mode: "replace",
+              target_paths: ["01_大纲/大纲.txt"],
+              reason: "用户要求保存到大纲。",
+              confidence: 0.91,
+              requires_confirmation: true,
+              should_auto_commit: false
+            });
+          }
+          return "新的大纲内容";
+        }
+      }
+    });
+
+    const events: AgentStreamEvent[] = [];
+    for await (const event of runtime.streamMessage(conversation.id, {
+      content: "生成新版大纲并保存到大纲",
+      skill_id: "",
+      agent_name: "",
+      write_target: "",
+      insert_mode: "none",
+      runtime_context: "",
+      attachment_ids: []
+    })) {
+      events.push(event);
+    }
+
+    const final = events.find((event) => event.type === "final");
+    expect(final?.type).toBe("final");
+    if (final?.type !== "final") {
+      throw new Error("missing final event");
+    }
+    expect(final.payload.skill_result?.data).toMatchObject({
+      pending_save: true,
+      target_path: "01_大纲/大纲.txt",
+      default_mode: "replace"
+    });
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("这是测试大纲");
+  });
+
   it("runs local prompt skill intent via manual skill id", async () => {
     const runtime = new AgentRuntimeService({
       projectRoot: tempDir,
@@ -758,7 +808,7 @@ describe("agent-runtime chat flow", () => {
     expect(result.saved_paths).toEqual([]);
   });
 
-  it("writes local prompt skill result when the instruction asks to save", async () => {
+  it("keeps local prompt skill overwrite pending when the instruction asks to save over existing content", async () => {
     const runtime = new AgentRuntimeService({
       projectRoot: tempDir,
       config: { configPath },
@@ -778,9 +828,13 @@ describe("agent-runtime chat flow", () => {
     });
 
     expect(result.intent).toBe("skill");
-    expect(result.saved_paths).toEqual(["01_大纲/大纲.txt"]);
-    expect(result.reply).toContain("已写入 1 个文件");
-    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("新的大纲内容");
+    expect(result.saved_paths).toEqual([]);
+    expect(result.skill_result?.data).toMatchObject({
+      pending_save: true,
+      target_path: "01_大纲/大纲.txt",
+      default_mode: "replace"
+    });
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("这是测试大纲");
   });
 
   it("streams local prompt skill intent with start/final events", async () => {
@@ -931,6 +985,114 @@ describe("agent-runtime chat flow", () => {
     expect(result.conversation?.messages[0]?.role).toBe("user");
     expect(result.conversation?.messages[1]?.role).toBe("assistant");
     expect(result.conversation?.messages[1]?.content).toBe("自动建会话的技能回复");
+  });
+
+  it("orchestrates multiple skills from a complex chat request", async () => {
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const conversation = await conversations.createConversation({ title: "编排会话" });
+    const calls: string[] = [];
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          const system = messages[0]?.content || "";
+          if (system.includes("技能调度器")) {
+            return JSON.stringify({
+              should_call_skill: true,
+              confidence: 0.91,
+              selected_reason: "用户要求先提取设定再做一致性检查。",
+              steps: [
+                { skill_id: "lore_extract", instruction: "提取当前内容中的设定", reason: "先结构化设定", confidence: 0.9 },
+                { skill_id: "consistency_check", instruction: "基于提取结果检查一致性", reason: "再检查冲突", confidence: 0.88 }
+              ]
+            });
+          }
+          calls.push(system);
+          if (system.includes("连续性审稿人")) {
+            return JSON.stringify({ score: 95, risks: [], reason: "一致" });
+          }
+          return "【人物设定】\n主角：林舟";
+        }
+      }
+    });
+
+    const result = await runtime.sendMessage(conversation.id, {
+      content: "请提取这段设定，然后检查一致性",
+      skill_id: "",
+      agent_name: "",
+      write_target: "",
+      insert_mode: "none" as const,
+      runtime_context: "林舟得到一枚古玉。",
+      attachment_ids: []
+    });
+
+    expect(result.skill_result?.data?.skill_steps).toHaveLength(2);
+    expect(result.skill_result?.data?.skill_steps).toMatchObject([
+      { skill_id: "lore_extract", status: "done" },
+      { skill_id: "consistency_check", status: "done" }
+    ]);
+    expect(result.conversation.current_skill).toBe("consistency_check");
+    expect(result.conversation.messages.at(-1)?.metadata.skill_plan).toBeTruthy();
+    expect(calls.length).toBeGreaterThanOrEqual(2);
+    expect(calls.some((item) => item.includes("连续性审稿人"))).toBe(true);
+  });
+
+  it("uses an imported replacement skill when a builtin is disabled", async () => {
+    const agentSkillDir = path.join(tempDir, "00_设定集", ".agent", "skills");
+    await fs.mkdir(agentSkillDir, { recursive: true });
+    await fs.writeFile(path.join(agentSkillDir, "disabled-builtins.json"), JSON.stringify(["polish_text"]), "utf8");
+    await fs.writeFile(
+      path.join(agentSkillDir, "imported.json"),
+      JSON.stringify([
+        {
+          id: "custom_polish",
+          name: "自定义润色",
+          description: "当默认润色禁用时，用于润色、改写和优化表达。",
+          input_mode: "text",
+          context_requirements: ["project_state", "style"],
+          handler_type: "prompt",
+          linked_targets: ["02_正文/润色结果.txt"],
+          prompt: "请润色文本，保持剧情事实不变。",
+          imported_from: "test",
+          writable: true
+        }
+      ]),
+      "utf8"
+    );
+
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          const system = messages[0]?.content || "";
+          if (system.includes("技能调度器")) {
+            return JSON.stringify({
+              should_call_skill: true,
+              confidence: 0.83,
+              selected_reason: "默认润色不可用，选择导入润色技能。",
+              steps: [{ skill_id: "custom_polish", instruction: "润色当前文档", reason: "相近导入技能", confidence: 0.83 }]
+            });
+          }
+          return "导入技能润色结果";
+        }
+      }
+    });
+
+    const result = await runtime.runAgent({
+      conversation_id: "",
+      content: "请润色当前文档",
+      current_path: "",
+      selection: "原始句子",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    });
+
+    expect(result.intent).toBe("skill");
+    expect(result.skill_result?.data?.skill_steps).toMatchObject([{ skill_id: "custom_polish", status: "done" }]);
+    expect(result.reply).toBe("导入技能润色结果");
   });
 
   it("routes genre_generate skill intent locally with multi-target pending-save metadata", async () => {

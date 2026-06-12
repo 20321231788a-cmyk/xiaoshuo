@@ -8,6 +8,7 @@ import { SkillService } from "@xiaoshuo/skill-service";
 import { skillRunResponseSchema, skillDraftFromUrlRequestSchema, skillDraftResponseSchema, type SkillDefinition, type SkillRunRequest, type SkillRunResponse, type SkillDraftFromUrlRequest, type SkillDraftResponse } from "@xiaoshuo/shared";
 import path from "node:path";
 import { HUMANIZER_SYSTEM_PROMPT, applyHumanizerIfEnabled } from "./humanizer.js";
+import { GeneratedSavePlanner } from "./generated-save-planner.js";
 
 const DEFAULT_TARGETS: Record<string, string> = {
   outline_generate: "01_大纲/大纲.txt",
@@ -84,6 +85,7 @@ export class PromptSkillRunner {
   private readonly cache: GeneratedCacheService;
   private readonly conversations: ConversationService;
   private readonly modelClient: Pick<OpenAICompatibleClient, "requestCompletion">;
+  private readonly savePlanner: GeneratedSavePlanner;
 
   constructor(options: PromptSkillRunnerOptions) {
     this.projectRoot = path.resolve(options.projectRoot);
@@ -93,6 +95,11 @@ export class PromptSkillRunner {
     this.cache = new GeneratedCacheService({ projectRoot: this.projectRoot });
     this.conversations = new ConversationService({ projectRoot: this.projectRoot });
     this.modelClient = options.modelClient ?? new OpenAICompatibleClient();
+    this.savePlanner = new GeneratedSavePlanner({
+      projectRoot: this.projectRoot,
+      config: this.config,
+      modelClient: this.modelClient
+    });
   }
 
   async canRunSkillLocally(skillId: string): Promise<boolean> {
@@ -233,12 +240,25 @@ export class PromptSkillRunner {
       skip: skill.id === "humanizer_zh"
     });
     const finalResult = humanized.text;
-    const targetPaths = this.pendingSaveTargets(skill, payload);
     let savedPaths: string[] = [];
     let savedPath = "";
+    const savePlan = await this.savePlanner.planGeneratedSave({
+      instruction: payload.instruction || "",
+      content: finalResult,
+      source: "skill",
+      skillId: skill.id,
+      targetPaths: this.pendingSaveTargets(skill, payload),
+      targetPath: payload.target_path || "",
+      currentPath: payload.source_path || "",
+      chapter: payload.chapter || 0,
+      writeRequested: payload.write_result,
+      defaultMode: "replace"
+    });
+    const targetPaths = savePlan.target_paths;
     const data: Record<string, unknown> = {
       skill_id: skill.id,
       saved_paths: [],
+      save_plan: savePlan,
       ...(humanized.applied ? { humanized: true, humanizer_skill_id: "humanizer_zh" } : {}),
       ...(humanized.error ? { humanizer_error: humanized.error } : {})
     };
@@ -248,24 +268,25 @@ export class PromptSkillRunner {
         source: "skill_result",
         target_paths: targetPaths,
         skill_id: skill.id,
+        mode: savePlan.mode,
         conversation_id: payload.conversation_id,
-        summary: `Skill 结果缓存：${skill.name}`
+        summary: `Skill 结果缓存：${skill.name}`,
+        save_plan: savePlan
       });
       await this.cache.replace(entry.cache_id, finalResult);
 
-      if (payload.write_result) {
+      if (await this.savePlanner.shouldAutoCommit(savePlan)) {
         savedPaths =
           skill.id === "genre_generate"
-            ? await this.saveGenreSections(finalResult, "replace", {
+            ? await this.saveGenreSections(finalResult, savePlan.mode, {
                 summaryPrefix: "题材库确认保存"
               })
             : skill.id === "lore_extract"
-              ? await this.saveLoreSections(finalResult, "replace", {
+              ? await this.saveLoreSections(finalResult, savePlan.mode, {
                   summaryPrefix: "设定提取确认保存",
                   mergeExisting: !shouldOverwriteLore(payload.instruction)
                 })
-              : await this.cache.commitToTargets(entry.cache_id, targetPaths, {
-                mode: "replace",
+              : await this.cache.commitSavePlan(entry.cache_id, savePlan, {
                 cleanupContent: true
               });
         savedPath = savedPaths[0] || "";
@@ -277,42 +298,11 @@ export class PromptSkillRunner {
         data.target_paths = targetPaths;
         data.target_path = targetPaths[0] || "";
         data.result = finalResult;
-        data.default_mode = "replace";
+        data.default_mode = savePlan.mode;
         data.cache_id = entry.cache_id;
         data.cache_path = meta.cache_path;
         data.cache_chars = meta.chars;
-      }
-    } else if (payload.write_result && finalResult) {
-      if (skill.id === "genre_generate" || skill.id === "lore_extract") {
-        savedPaths =
-          skill.id === "genre_generate"
-            ? await this.saveGenreSections(finalResult, "replace", {
-                summaryPrefix: "题材库写入"
-              })
-            : await this.saveLoreSections(finalResult, "replace", {
-                summaryPrefix: "设定提取整合写入",
-                mergeExisting: !shouldOverwriteLore(payload.instruction)
-              });
-        savedPath = savedPaths[0] || "";
-        data.saved_paths = savedPaths;
-        return skillRunResponseSchema.parse({
-          result: finalResult,
-          saved_path: savedPath,
-          data
-        });
-      }
-      const explicitTarget = normalizeOptionalPath(this.documents, payload.target_path);
-      const linkedTarget = this.normalizeTargetPaths(skill.linked_targets)[0] || "";
-      const fallbackTarget = normalizeOptionalPath(this.documents, DEFAULT_TARGETS[skill.id] || "");
-      const targetPath = explicitTarget || linkedTarget || fallbackTarget;
-      if (targetPath) {
-        await this.documents.saveDocument(targetPath, finalResult, {
-          source: "skill",
-          summary: `Skill 写入：${skill.name}`
-        });
-        savedPaths = [targetPath];
-        savedPath = targetPath;
-        data.saved_paths = savedPaths;
+        data.save_plan = meta.save_plan || savePlan;
       }
     }
 

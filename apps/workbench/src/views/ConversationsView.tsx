@@ -4,8 +4,7 @@ import { useEffect, useState } from "react";
 import { Panel } from "../components/Panel.js";
 import { RichText } from "../components/RichText.js";
 import type { OpenDocumentTab } from "../hooks/useWorkbenchController.js";
-import { previewText } from "../lib/richText.js";
-import { describeGeneratedSaveAction, describeGeneratedWriteIntent, describePendingGeneratedTarget, pendingGeneratedTargetPaths } from "../lib/workflow.js";
+import { describeGeneratedSaveAction, describeGeneratedSaveReason, describeGeneratedWriteIntent, describePendingGeneratedTarget, pendingGeneratedTargetPaths } from "../lib/workflow.js";
 import type { PendingGeneratedSave } from "../lib/workflow.js";
 
 export function ConversationsView({
@@ -73,6 +72,10 @@ export function ConversationsView({
   const [titleDraft, setTitleDraft] = useState(conversationDetail?.title || "");
   const [pinnedTextDraft, setPinnedTextDraft] = useState("");
   const [confirmDiscardGenerated, setConfirmDiscardGenerated] = useState(false);
+  const pendingMessageId =
+    pendingGeneratedSave?.source === "chat"
+      ? [...(conversationDetail?.messages || [])].reverse().find((entry) => entry.role === "assistant")?.id || ""
+      : "";
 
   useEffect(() => {
     setTitleDraft(conversationDetail?.title || "");
@@ -272,71 +275,58 @@ export function ConversationsView({
                   </div>
                   <RichText text={entry.content} />
                   <WebSearchSources metadata={entry.metadata} />
+                  {pendingGeneratedSave && entry.id === pendingMessageId && (
+                    <div className="generated-save-inline xw-generated-save-inline" data-testid="conversation-pending-save-panel">
+                      <div className="generated-save-inline-copy">
+                        <strong>{describePendingGeneratedTarget(pendingGeneratedSave)}</strong>
+                        <span>
+                          已生成约 {pendingGeneratedSave.cacheChars || pendingGeneratedSave.content.length} 字，默认
+                          {pendingGeneratedSave.defaultMode === "append" ? "追加" : "覆盖"}。
+                        </span>
+                        <span>{describeGeneratedWriteIntent(pendingGeneratedSave)}</span>
+                        {describeGeneratedSaveReason(pendingGeneratedSave) && <span>{describeGeneratedSaveReason(pendingGeneratedSave)}</span>}
+                        {pendingTargetPaths.length > 1 && (
+                          <span>{pendingTargetPaths.join(" / ")}</span>
+                        )}
+                      </div>
+                      <div className="action-pair">
+                        <button className="refresh-button compact" onClick={() => onSavePendingGenerated("replace")} disabled={busy}>
+                          <span>{describeGeneratedSaveAction("replace", pendingGeneratedSave.defaultMode, pendingTargetPaths.length, pendingGeneratedSave.skillId)}</span>
+                        </button>
+                        <button className="ghost-button compact" onClick={() => onSavePendingGenerated("append")} disabled={busy}>
+                          <span>{describeGeneratedSaveAction("append", pendingGeneratedSave.defaultMode, pendingTargetPaths.length, pendingGeneratedSave.skillId)}</span>
+                        </button>
+                        <button className="ghost-button compact" onClick={onSavePendingGeneratedAsDraft} disabled={busy}>
+                          <FilePlus2 size={15} />
+                          <span>另存草稿</span>
+                        </button>
+                        <button className="ghost-button compact" onClick={onCopyPendingGeneratedContent} disabled={busy}>
+                          <Copy size={15} />
+                          <span>复制全文</span>
+                        </button>
+                        <button
+                          className={confirmDiscardGenerated ? "refresh-button compact" : "ghost-button compact"}
+                          onClick={() => {
+                            if (!confirmDiscardGenerated) {
+                              setConfirmDiscardGenerated(true);
+                              return;
+                            }
+                            setConfirmDiscardGenerated(false);
+                            onDiscardPendingGenerated();
+                          }}
+                          disabled={busy}
+                        >
+                          <span>{confirmDiscardGenerated ? "确认丢弃" : "不保存"}</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </article>
               ))
             ) : (
               <p className="empty-copy">还没有消息。发第一条试试看，新的流式链路会在这里实时显示。</p>
             )}
           </div>
-
-          {pendingGeneratedSave && pendingGeneratedSave.source === "chat" && (
-            <div className="pending-save-panel" data-testid="conversation-pending-save-panel">
-              <div>
-                <strong>{describePendingGeneratedTarget(pendingGeneratedSave)}</strong>
-                <p>
-                  已生成约 {pendingGeneratedSave.cacheChars || pendingGeneratedSave.content.length} 字内容，默认方式是
-                  {pendingGeneratedSave.defaultMode === "append" ? "追加" : "覆盖"}。
-                </p>
-                <p>{describeGeneratedWriteIntent(pendingGeneratedSave)}</p>
-                {pendingTargetPaths.length > 1 && (
-                  <ul className="pending-target-list">
-                    {pendingTargetPaths.map((path) => (
-                      <li key={path}>{path}</li>
-                    ))}
-                  </ul>
-                )}
-                {pendingGeneratedSave.content.trim() ? (
-                  <details className="generated-preview" open>
-                    <summary>预览待写入内容</summary>
-                    <RichText text={previewText(pendingGeneratedSave.content)} />
-                  </details>
-                ) : (
-                  <p className="preview-warning">预览未加载，当前界面无法确认完整内容；建议重新生成或确认缓存后再保存。</p>
-                )}
-              </div>
-              <div className="action-pair">
-                <button className="ghost-button" onClick={() => onSavePendingGenerated("append")} disabled={busy}>
-                  <span>{describeGeneratedSaveAction("append", pendingGeneratedSave.defaultMode, pendingTargetPaths.length, pendingGeneratedSave.skillId)}</span>
-                </button>
-                <button className="refresh-button" onClick={() => onSavePendingGenerated("replace")} disabled={busy}>
-                  <span>{describeGeneratedSaveAction("replace", pendingGeneratedSave.defaultMode, pendingTargetPaths.length, pendingGeneratedSave.skillId)}</span>
-                </button>
-                <button className="ghost-button" onClick={onSavePendingGeneratedAsDraft} disabled={busy}>
-                  <FilePlus2 size={15} />
-                  <span>另存草稿</span>
-                </button>
-                <button className="ghost-button" onClick={onCopyPendingGeneratedContent} disabled={busy}>
-                  <Copy size={15} />
-                  <span>复制全文</span>
-                </button>
-                <button
-                  className={confirmDiscardGenerated ? "refresh-button" : "ghost-button"}
-                  onClick={() => {
-                    if (!confirmDiscardGenerated) {
-                      setConfirmDiscardGenerated(true);
-                      return;
-                    }
-                    setConfirmDiscardGenerated(false);
-                    onDiscardPendingGenerated();
-                  }}
-                  disabled={busy}
-                >
-                  <span>{confirmDiscardGenerated ? "确认丢弃" : "丢弃生成结果"}</span>
-                </button>
-              </div>
-              {confirmDiscardGenerated && <p className="preview-warning">再次点击会删除这次生成结果；可以先复制全文或另存草稿。</p>}
-            </div>
-          )}
 
           <div className="composer-shell">
             <div className="send-context-panel">

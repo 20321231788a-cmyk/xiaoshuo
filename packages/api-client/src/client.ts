@@ -523,6 +523,7 @@ export function createApiClient(options: ApiClientOptions) {
       target_path: string;
       target_paths?: string[];
       chapter?: number;
+      save_plan?: unknown;
     }) =>
       requestWithSchema("/api/agent/generated/save", generatedSaveResponseSchema, {
         method: "POST",

@@ -1410,6 +1410,30 @@ button {
   border-color: rgba(11, 110, 104, 0.16);
 }
 
+.xw-generated-save-inline {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(64, 119, 175, 0.14);
+}
+
+.generated-save-inline-copy {
+  display: grid;
+  gap: 3px;
+  color: #4c6374;
+  font-size: 12px;
+}
+
+.generated-save-inline-copy strong {
+  color: #18324a;
+  font-size: 13px;
+}
+
+.xw-generated-save-inline .action-pair {
+  justify-content: flex-start;
+}
+
 .composer-shell,
 .pending-save-panel,
 .skill-context {
