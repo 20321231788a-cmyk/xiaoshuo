@@ -196,13 +196,13 @@ win-unpacked/
 `latest.yml` 里的 `path` 必须能对应同目录下真实存在的安装包文件。例如：
 
 ```yaml
-path: ArcWriter-Setup-0.1.4.exe
+path: ArcWriter-Setup-0.1.5.exe
 ```
 
 则必须存在：
 
 ```text
-apps/desktop-shell/release/ArcWriter-Setup-0.1.4.exe
+apps/desktop-shell/release/ArcWriter-Setup-0.1.5.exe
 ```
 
 如果两者不一致，自动更新会失败。
@@ -254,7 +254,7 @@ git push origin main
 
 ```powershell
 # 编辑 apps/desktop-shell/package.json
-# 例如 0.1.4 -> 0.1.5
+# 例如 0.1.5 -> 0.1.6
 ```
 
 2. 同步锁文件：
@@ -329,7 +329,7 @@ Invoke-WebRequest -UseBasicParsing -Method Head "$base/ArcWriter-Setup-$version.
 1. 不要继续在失败 tag 上堆修改。
 2. 不要强推已有 tag，除非明确知道没有用户或 CI 消费过它。
 3. 本地修复 workflow 或打包配置。
-4. 升一个补丁版本，例如 `0.1.4 -> 0.1.5`。
+4. 升一个补丁版本，例如 `0.1.5 -> 0.1.6`。
 5. 重新提交、推送 `main`，再推新 tag。
 
 常见失败：
