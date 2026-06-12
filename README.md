@@ -64,3 +64,11 @@ The Electron shell starts a local TypeScript runtime gateway at `http://127.0.0.
 Desktop local state uses SQLite for recent projects, conversation/job-summary snapshots, generated-cache metadata, and workbench preferences. The shell prefers `better-sqlite3`; on Node 24 it can fall back to `node:sqlite` if the native binding is not built.
 
 The migration workbench is the frontend. It uses `@xiaoshuo/shared` and `@xiaoshuo/api-client` directly and connects to the TS runtime gateway for all backend communication.
+
+## Maintainer Handoff
+
+For maintenance, push, packaging, and GitHub Release procedures, see:
+
+```text
+docs/PROJECT_MAINTENANCE_HANDOFF.md
+```
