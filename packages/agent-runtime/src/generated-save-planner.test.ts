@@ -21,7 +21,7 @@ afterEach(async () => {
 });
 
 describe("GeneratedSavePlanner", () => {
-  it("maps explicit outline save requests to the legacy outline path and requires confirmation before overwrite", async () => {
+  it("maps explicit outline save requests to the legacy outline path and auto-commits old-project style", async () => {
     const planner = new GeneratedSavePlanner({ projectRoot: tempDir });
 
     const plan = await planner.planGeneratedSave({
@@ -34,8 +34,8 @@ describe("GeneratedSavePlanner", () => {
 
     expect(plan.target_paths).toEqual(["01_大纲/大纲.txt"]);
     expect(plan.mode).toBe("replace");
-    expect(plan.requires_confirmation).toBe(true);
-    expect(plan.should_auto_commit).toBe(false);
+    expect(plan.requires_confirmation).toBe(false);
+    expect(plan.should_auto_commit).toBe(true);
   });
 
   it("auto-commits explicit body generation when the chapter file does not exist", async () => {

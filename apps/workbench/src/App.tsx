@@ -1139,6 +1139,19 @@ function TimelineFeaturePage({ controller }: { controller: WorkbenchController }
 
 function ConversationFeaturePage({ controller }: { controller: WorkbenchController }) {
   const messages = controller.conversationDetail?.messages || [];
+  const threadEndRef = useRef<HTMLDivElement | null>(null);
+  const lastMessage = messages.at(-1);
+
+  useEffect(() => {
+    if (!messages.length) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      threadEndRef.current?.scrollIntoView({ block: "end" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [controller.conversationDetail?.id, messages.length, lastMessage?.id, lastMessage?.content.length]);
+
   return (
     <section className="xw-feature-page">
       <div className="xw-feature-list conversation">
@@ -1148,6 +1161,7 @@ function ConversationFeaturePage({ controller }: { controller: WorkbenchControll
             <p>{message.content}</p>
           </article>
         ))}
+        <div ref={threadEndRef} aria-hidden="true" />
       </div>
       {!messages.length && <p className="xw-feature-empty">右侧选择或新建会话后开始写作</p>}
     </section>
@@ -2819,10 +2833,39 @@ function NumberSettingRow({
   max: number;
   onChange: (value: number) => void;
 }) {
+  const [draft, setDraft] = useState(String(Number.isFinite(value) ? value : min));
+
+  useEffect(() => {
+    setDraft(String(Number.isFinite(value) ? value : min));
+  }, [value, min]);
+
+  function commitDraft() {
+    const parsed = Number(draft);
+    const fallback = Number.isFinite(value) ? value : min;
+    const next = Number.isFinite(parsed) ? Math.max(min, Math.min(max, Math.trunc(parsed))) : fallback;
+    setDraft(String(next));
+    if (next !== value) {
+      onChange(next);
+    }
+  }
+
   return (
     <label className="xw-setting-field">
       <span>{label}</span>
-      <input type="number" min={min} max={max} value={value} onChange={(event) => onChange(Number(event.target.value))} />
+      <input
+        type="number"
+        min={min}
+        max={max}
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commitDraft}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            commitDraft();
+            event.currentTarget.blur();
+          }
+        }}
+      />
     </label>
   );
 }

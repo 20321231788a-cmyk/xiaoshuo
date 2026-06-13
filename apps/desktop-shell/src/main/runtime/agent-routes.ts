@@ -125,6 +125,12 @@ export async function handleAgentRoutes(
     response.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8" });
     try {
       for await (const event of runtime.streamAgentRun(payload)) {
+        if (event.type === "final" && event.payload.saved_paths.length) {
+          await deps.rebuildProjectManifest(currentProject.path);
+          const index = new VectorIndex(currentProject.path);
+          index.markChanged(event.payload.saved_paths, "upsert");
+          index.close();
+        }
         deps.writeNdjsonEvent(response, event);
       }
     } catch (error) {

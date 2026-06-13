@@ -28,6 +28,7 @@ import {
   type WebSearchSource
 } from "./web-search.js";
 import { applyHumanizerIfEnabled } from "./humanizer.js";
+import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 
 const MAX_RUNTIME_CONTEXT_CHARS = 8_000;
 const MAX_USER_INPUT_CHARS = 16_000;
@@ -982,9 +983,11 @@ function buildStableProjectContext(
     "",
     `【章纲】\n${clipText(continuity.chapter_outline, outlineLimit)}`,
     "",
-    `【风格库】\n${clipText(JSON.stringify(continuity.style), libraryLimit) || "暂无"}`,
-    "",
-    `【题材库】\n${clipText(JSON.stringify(continuity.genre), libraryLimit) || "暂无"}`,
+    buildStyleGenreConstraintBlock(continuity.style, continuity.genre, {
+      compact,
+      styleLimit: libraryLimit,
+      genreLimit: libraryLimit
+    }),
     "",
     `【最近正文】\n${previous}`,
     "",

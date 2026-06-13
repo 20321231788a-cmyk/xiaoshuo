@@ -1,6 +1,6 @@
 import { ArrowUp, Copy, FilePlus2, MessageSquarePlus, Paperclip, Pencil, Pin, RefreshCw, Square, Trash2 } from "lucide-react";
 import type { ConversationDetail, ConversationSummary } from "@xiaoshuo/shared";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Panel } from "../components/Panel.js";
 import { RichText } from "../components/RichText.js";
 import type { OpenDocumentTab } from "../hooks/useWorkbenchController.js";
@@ -72,15 +72,28 @@ export function ConversationsView({
   const [titleDraft, setTitleDraft] = useState(conversationDetail?.title || "");
   const [pinnedTextDraft, setPinnedTextDraft] = useState("");
   const [confirmDiscardGenerated, setConfirmDiscardGenerated] = useState(false);
+  const threadEndRef = useRef<HTMLDivElement | null>(null);
+  const messages = conversationDetail?.messages || [];
+  const lastMessage = messages.at(-1);
   const pendingMessageId =
     pendingGeneratedSave?.source === "chat"
-      ? [...(conversationDetail?.messages || [])].reverse().find((entry) => entry.role === "assistant")?.id || ""
+      ? [...messages].reverse().find((entry) => entry.role === "assistant")?.id || ""
       : "";
 
   useEffect(() => {
     setTitleDraft(conversationDetail?.title || "");
     setPinnedTextDraft("");
   }, [conversationDetail?.id, conversationDetail?.title]);
+
+  useEffect(() => {
+    if (!messages.length) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      threadEndRef.current?.scrollIntoView({ block: "end" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [conversationDetail?.id, messages.length, lastMessage?.id, lastMessage?.content.length]);
 
   function submitTitle() {
     const title = titleDraft.trim();
@@ -266,8 +279,8 @@ export function ConversationsView({
           </div>
 
           <div className="message-list conversation-thread">
-            {conversationDetail?.messages.length ? (
-              conversationDetail.messages.map((entry) => (
+            {messages.length ? (
+              messages.map((entry) => (
                 <article key={entry.id} className={`message-card ${entry.role === "assistant" ? "assistant-card" : ""}`}>
                   <div className="message-head">
                     <strong>{entry.role}</strong>
@@ -326,6 +339,7 @@ export function ConversationsView({
             ) : (
               <p className="empty-copy">还没有消息。发第一条试试看，新的流式链路会在这里实时显示。</p>
             )}
+            <div ref={threadEndRef} aria-hidden="true" />
           </div>
 
           <div className="composer-shell">

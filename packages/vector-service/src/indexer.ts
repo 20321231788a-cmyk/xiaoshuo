@@ -23,8 +23,8 @@ const IGNORED_DIRS = new Set([".git", ".svn", ".hg", "node_modules", "__pycache_
 const BODY_DIR = "02_正文";
 const OUTLINE_DIR = "01_大纲";
 const SETTINGS_DIR = "00_设定集";
-const STYLE_DIR = "写作风格";
-const GENRE_DIR = "题材设定";
+const STYLE_DIR = "风格库";
+const GENRE_DIR = "题材库";
 
 export function getSourceType(relPath: string): string {
   const normalized = relPath.replace(/\\/g, "/");

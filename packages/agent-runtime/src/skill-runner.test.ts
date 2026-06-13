@@ -135,6 +135,72 @@ describe("prompt-skill-runner", () => {
     expect(result.result).toBe("附件分析结果");
     expect(capturedPrompt).toContain("【source.txt】");
     expect(capturedPrompt).toContain("附件里的剧情素材");
+    expect(capturedPrompt).toContain("【风格库调用规则】");
+    expect(capturedPrompt).toContain("【题材硬约束】");
+  });
+
+  it("returns multi-target pending-save metadata for style_extract", async () => {
+    const runner = new PromptSkillRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "【写作风格】\n风格规则\n\n【风格示例】\n示例特征\n\n【参考素材】\n素材摘要"
+      }
+    });
+
+    const result = await runner.runSkill("style_extract", {
+      text: "样文",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "提取风格",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: false,
+      attachment_ids: []
+    });
+
+    expect(result.data).toMatchObject({
+      pending_save: true,
+      target_paths: [
+        "00_设定集/风格库/写作风格.txt",
+        "00_设定集/风格库/风格示例.txt",
+        "00_设定集/风格库/参考素材.txt"
+      ]
+    });
+  });
+
+  it("writes style sections into multiple target files when write_result=true", async () => {
+    const runner = new PromptSkillRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "【写作风格】\n风格规则\n\n【风格示例】\n示例特征\n\n【参考素材】\n素材摘要"
+      }
+    });
+
+    const result = await runner.runSkill("style_extract", {
+      text: "样文",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "提取风格并写入",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: true,
+      attachment_ids: []
+    });
+
+    expect(result.data.saved_paths).toEqual([
+      "00_设定集/风格库/写作风格.txt",
+      "00_设定集/风格库/风格示例.txt",
+      "00_设定集/风格库/参考素材.txt"
+    ]);
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toBe("风格规则");
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "风格示例.txt"), "utf8")).toBe("示例特征");
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "参考素材.txt"), "utf8")).toBe("素材摘要");
   });
 
   it("runs detail outline skill locally and applies default deslop cleanup", async () => {

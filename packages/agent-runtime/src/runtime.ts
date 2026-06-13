@@ -42,6 +42,8 @@ import path from "node:path";
 import { applyHumanizerIfEnabled } from "./humanizer.js";
 import { GeneratedSavePlanner, hasExplicitWriteIntent } from "./generated-save-planner.js";
 import { SmartSkillOrchestrator } from "./smart-skill-orchestrator.js";
+import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
+import type { StreamingModelClient } from "./stream.js";
 
 const DISASSEMBLE_LIBRARY_DIR = "00_设定集/拆书库";
 const FUSION_LIBRARY_DIR = "00_设定集/融梗方案";
@@ -84,7 +86,7 @@ export class AgentRuntimeService {
   private readonly conversations: ConversationService;
   private readonly documents: DocumentService;
   private readonly config: ConfigServiceOptions;
-  private readonly modelClient: Pick<OpenAICompatibleClient, "requestCompletion">;
+  private readonly modelClient: StreamingModelClient;
   private readonly webSearchClient: WebSearchClient;
   private readonly cache: GeneratedCacheService;
   private readonly savePlanner: GeneratedSavePlanner;
@@ -280,21 +282,7 @@ export class AgentRuntimeService {
     if (this.shouldUseSmartSkillOrchestration(request)) {
       const skillPlan = await this.planSkillExecution(request);
       if (skillPlan.should_call_skill && skillPlan.steps.length) {
-        yield {
-          type: "start",
-          intent: "skill",
-          conversation_id: request.conversation_id || "",
-          skill_id: skillPlan.steps[0]?.skill_id || "",
-          current_skill: skillPlan.steps[0]?.name || skillPlan.steps[0]?.skill_id || "",
-          skill_steps: skillPlan.steps,
-          skill_plan: skillPlan,
-          selected_reason: skillPlan.selected_reason,
-          confidence: skillPlan.confidence
-        };
-        yield {
-          type: "final",
-          payload: await this.runSkillPlan(skillPlan, request)
-        };
+        yield* this.streamSkillPlan(skillPlan, request);
         return;
       }
     }
@@ -319,31 +307,13 @@ export class AgentRuntimeService {
         skillId === "batch_generate" ||
         skillId === "book_fusion"
       ) {
-        yield {
-          type: "start",
-          intent: "skill",
-          conversation_id: request.conversation_id || "",
-          skill_id: skillId
-        };
-        yield {
-          type: "final",
-          payload: await this.runLocalWorkflowSkill(skillId, request)
-        };
+        yield* this.streamLocalWorkflowSkill(skillId, request);
         return;
       }
       if (!(await this.skillRunner.canRunSkillLocally(skillId))) {
         throw new Error(`TS runtime 尚未接管该意图：${intent}`);
       }
-      yield {
-        type: "start",
-        intent: "skill",
-        conversation_id: request.conversation_id || "",
-        skill_id: skillId
-      };
-      yield {
-        type: "final",
-        payload: await this.runLocalSkillIntent(skillId, request)
-      };
+      yield* this.streamLocalSkillIntent(skillId, request);
       return;
     }
     if (intent !== "chat" && intent !== "read_context") {
@@ -455,6 +425,119 @@ export class AgentRuntimeService {
   private async planSkillExecution(request: AgentRunRequest): Promise<SkillPlan> {
     const skills = await this.skills.listSkills().catch(() => []);
     return this.skillOrchestrator.plan(request, skills);
+  }
+
+  private async *streamLocalSkillIntent(skillId: string, request: AgentRunRequest): AsyncGenerator<AgentStreamEvent> {
+    request = { ...request, skill_id: skillId };
+    yield {
+      type: "start",
+      intent: "skill",
+      conversation_id: request.conversation_id || "",
+      skill_id: skillId
+    };
+    const skillRequest = this.buildSkillRequest(skillId, request);
+    for await (const event of this.skillRunner.streamSkill(skillId, skillRequest)) {
+      if (event.type !== "final") {
+        yield event;
+        continue;
+      }
+      const result = event.payload.skill_result!;
+      const savedPaths = this.resolveSavedPaths(result);
+      const reply = savedPaths.length ? `已写入 ${savedPaths.length} 个文件：\n${savedPaths.join("\n")}` : result.result || "技能已完成。";
+      yield {
+        type: "final",
+        payload: {
+          intent: "skill",
+          reply,
+          conversation: await this.recordSkillExchange(request, reply),
+          results: [],
+          skill_result: result,
+          saved_paths: savedPaths,
+          requires_confirmation: false,
+          current_skill: event.payload.current_skill || skillId
+        }
+      };
+    }
+  }
+
+  private async *streamLocalWorkflowSkill(skillId: string, request: AgentRunRequest): AsyncGenerator<AgentStreamEvent> {
+    request = { ...request, skill_id: skillId };
+    yield {
+      type: "start",
+      intent: "skill",
+      conversation_id: request.conversation_id || "",
+      skill_id: skillId
+    };
+    yield {
+      type: "delta",
+      text: `正在执行：${skillId}\n`,
+      stage: "workflow_start",
+      skill_id: skillId
+    };
+    const payload = await this.runLocalWorkflowSkill(skillId, request);
+    const resultText = this.extractStreamPreviewText(payload);
+    if (resultText.trim()) {
+      yield {
+        type: "delta",
+        text: resultText,
+        stage: "workflow_result",
+        skill_id: skillId,
+        cache_id: String(payload.skill_result?.data?.cache_id || ""),
+        target_paths: this.resolveSavedPaths(payload.skill_result || { status: "done", result: "", saved_path: "", data: {} })
+      };
+    }
+    yield {
+      type: "final",
+      payload
+    };
+  }
+
+  private async *streamSkillPlan(skillPlan: SkillPlan, request: AgentRunRequest): AsyncGenerator<AgentStreamEvent> {
+    const steps = skillPlan.steps.slice(0, 4);
+    yield {
+      type: "start",
+      intent: "skill",
+      conversation_id: request.conversation_id || "",
+      skill_id: steps[0]?.skill_id || "",
+      current_skill: steps[0]?.name || steps[0]?.skill_id || "",
+      skill_steps: steps,
+      skill_plan: skillPlan,
+      selected_reason: skillPlan.selected_reason,
+      confidence: skillPlan.confidence
+    };
+    yield {
+      type: "delta",
+      text: `当前技能：${steps[0]?.name || steps[0]?.skill_id || "智能编排"}\n`,
+      stage: "skill_plan_start",
+      skill_id: steps[0]?.skill_id || ""
+    };
+    const payload = await this.runSkillPlan(skillPlan, request);
+    const resultText = this.extractStreamPreviewText(payload);
+    if (resultText.trim()) {
+      yield {
+        type: "delta",
+        text: resultText,
+        stage: "skill_plan_result",
+        skill_id: String(payload.skill_result?.data?.skill_id || steps.at(-1)?.skill_id || ""),
+        target_paths: payload.saved_paths
+      };
+    }
+    yield {
+      type: "final",
+      payload
+    };
+  }
+
+  private extractStreamPreviewText(payload: AgentRunResponse): string {
+    const data = payload.skill_result?.data || {};
+    const result = String(data.result || payload.skill_result?.result || payload.reply || "").trim();
+    if (result) {
+      return result;
+    }
+    if (payload.saved_paths?.length) {
+      return `已写入 ${payload.saved_paths.length} 个文件：\n${payload.saved_paths.join("\n")}`;
+    }
+    return "";
   }
 
   private shouldUseSmartSkillOrchestration(request: AgentRunRequest): boolean {
@@ -2003,9 +2086,7 @@ export class AgentRuntimeService {
       "",
       `【四层设定集】\n${clipForConsistency(JSON.stringify(continuity.lore), 12000)}`,
       "",
-      `【风格库】\n${clipForConsistency(JSON.stringify(continuity.style), 10000)}`,
-      "",
-      `【题材库】\n${clipForConsistency(JSON.stringify(continuity.genre), 10000)}`,
+      buildStyleGenreConstraintBlock(continuity.style, continuity.genre, { bodyPhase: true }),
       "",
       `【联网搜索小说素材】\n${webSearch.context}`,
       "",
@@ -2811,9 +2892,7 @@ export class AgentRuntimeService {
       "",
       `【四层设定集】\n${clipForConsistency(JSON.stringify(continuity.lore), 12000)}`,
       "",
-      `【风格库】\n${clipForConsistency(JSON.stringify(continuity.style), 10000)}`,
-      "",
-      `【题材库】\n${clipForConsistency(JSON.stringify(continuity.genre), 10000)}`,
+      buildStyleGenreConstraintBlock(continuity.style, continuity.genre, { bodyPhase: true }),
       "",
       `【联网搜索小说素材】\n${webSearch.context}`,
       "",

@@ -42,19 +42,21 @@ export async function handleGeneratedCacheRoutes(
     const payload = generatedSaveRequestSchema.parse(await deps.readJsonBody(request));
     const skillId = (payload.skill_id || "").trim();
 
-    if (skillId === "lore_extract" || skillId === "genre_generate") {
+    if (skillId === "lore_extract" || skillId === "style_extract" || skillId === "genre_generate") {
       const content = payload.cache_id ? await cacheService.readContent(payload.cache_id) : payload.content || "";
       const runner = new PromptSkillRunner({
         projectRoot: currentProject.path,
         config: { rootDir: context.projectRoot, env: process.env }
       });
       const finalMode = payload.mode === "append" ? "append" : "replace";
-      const savedPaths = skillId === "genre_generate"
-        ? await runner.saveGenreSections(content, finalMode, { summaryPrefix: "题材库保存" })
-        : await runner.saveLoreSections(content, finalMode, {
-            summaryPrefix: "设定提取保存",
-            mergeExisting: finalMode !== "replace"
-          });
+      const savedPaths = skillId === "style_extract"
+        ? await runner.saveStyleSections(content, finalMode, { summaryPrefix: "风格库保存" })
+        : skillId === "genre_generate"
+          ? await runner.saveGenreSections(content, finalMode, { summaryPrefix: "题材库保存" })
+          : await runner.saveLoreSections(content, finalMode, {
+              summaryPrefix: "设定提取保存",
+              mergeExisting: finalMode !== "replace"
+            });
 
       if (savedPaths.length) {
         await deps.rebuildProjectManifest(currentProject.path);
@@ -120,19 +122,21 @@ export async function handleGeneratedCacheRoutes(
       // cache not found
     }
 
-    if (skillId === "lore_extract" || skillId === "genre_generate") {
+    if (skillId === "lore_extract" || skillId === "style_extract" || skillId === "genre_generate") {
       const content = await cacheService.readContent(cacheId);
       const runner = new PromptSkillRunner({
         projectRoot: currentProject.path,
         config: { rootDir: context.projectRoot, env: process.env }
       });
       const finalMode = payload.mode === "append" ? "append" : "replace";
-      const savedPaths = skillId === "genre_generate"
-        ? await runner.saveGenreSections(content, finalMode, { summaryPrefix: "题材库保存" })
-        : await runner.saveLoreSections(content, finalMode, {
-            summaryPrefix: "设定提取保存",
-            mergeExisting: finalMode !== "replace"
-          });
+      const savedPaths = skillId === "style_extract"
+        ? await runner.saveStyleSections(content, finalMode, { summaryPrefix: "风格库保存" })
+        : skillId === "genre_generate"
+          ? await runner.saveGenreSections(content, finalMode, { summaryPrefix: "题材库保存" })
+          : await runner.saveLoreSections(content, finalMode, {
+              summaryPrefix: "设定提取保存",
+              mergeExisting: finalMode !== "replace"
+            });
 
       if (savedPaths.length) {
         await deps.rebuildProjectManifest(currentProject.path);

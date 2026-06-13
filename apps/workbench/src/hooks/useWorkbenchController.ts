@@ -2955,12 +2955,13 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setOperationsBusy(true);
     setOperationsMessage("");
     setLatestSkillResult(null);
+    let workflowController: AbortController | null = null;
     try {
       const activeDocument = getActiveDocument();
       const sourcePath = payload.source_path ?? activeDocument?.path ?? "";
       const autoRevision = Boolean(configDraft?.enable_consistency_revision);
       const scoreThreshold = configDraft?.consistency_revision_score || 80;
-      const result = await client.runSkill(skillId, {
+      const skillPayload = {
         ...(payload as Record<string, unknown>),
         text: payload.text ?? activeDocument?.content ?? "",
         chapter: payload.chapter ?? 0,
@@ -2974,11 +2975,81 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         attachment_ids: payload.attachment_ids ?? [],
         auto_revision: (payload as any).auto_revision ?? autoRevision,
         score_threshold: (payload as any).score_threshold ?? scoreThreshold
-      } as any);
+      } as any;
+      let content = String(skillPayload.instruction || skillPayload.text || "").trim();
+      if (skillId === "batch_generate" && skillPayload.chapter && skillPayload.end_chapter) {
+        content = `第${skillPayload.chapter}章到第${skillPayload.end_chapter}章 ${content}`.trim();
+      } else if (skillPayload.chapter && !/第\s*\d+\s*章/.test(content)) {
+        content = `第${skillPayload.chapter}章 ${content}`.trim();
+      }
+      if (skillPayload.target_words && /^(body_generate|batch_generate|outline_generate|detail_outline_generate|chapter_outline_generate)$/.test(skillId) && !/字|词|words?/i.test(content)) {
+        content = `${content} 约${skillPayload.target_words}字`.trim();
+      }
+      if ((skillId === "body_generate" || skillId === "batch_generate") && skillPayload.write_result && !/(同步|写入|保存|更新|替换|覆盖|落到|写回|补充|补全|完善|补齐|填充|配置|设置|设定|建立|创建)/.test(content)) {
+        content = `${content} 写入文件`.trim();
+      }
+
+      const controller = new AbortController();
+      workflowController = controller;
+      abortRef.current?.abort();
+      abortRef.current = controller;
+      let streamed = "";
+      const finalResponseRef: { current: AgentRunResponse | null } = { current: null };
+      await client.streamAgentRun({
+        conversation_id: skillPayload.conversation_id || "",
+        content,
+        current_path: sourcePath,
+        selection: String(skillPayload.text || ""),
+        project_context_hint: "",
+        skill_id: skillId,
+        attachment_ids: skillPayload.attachment_ids || [],
+        ...skillPayload
+      } as any, {
+        onStart: () => {
+          setOperationsMessage("开始生成，正在接收流式输出...");
+        },
+        onDelta: (event) => {
+          streamed += event.text || "";
+          setLatestSkillResult({
+            status: "done",
+            result: streamed,
+            saved_path: "",
+            data: {
+              skill_id: skillId,
+              result: streamed,
+              cache_id: event.cache_id || "",
+              target_paths: event.target_paths || []
+            }
+          });
+          setOperationsMessage("正在生成...");
+        },
+        onFinal: async (event) => {
+          finalResponseRef.current = event.payload;
+        },
+        onError: (event) => {
+          throw new Error(event.message);
+        }
+      }, controller.signal);
+
+      abortRef.current = null;
+      const finalResponse = finalResponseRef.current;
+      const result = finalResponse?.skill_result || {
+        status: "done",
+        result: finalResponse?.reply || streamed,
+        saved_path: finalResponse?.saved_paths?.[0] || "",
+        data: {
+          skill_id: skillId,
+          result: finalResponse?.reply || streamed,
+          saved_paths: finalResponse?.saved_paths || []
+        }
+      };
       await handleSkillRunResult(result, skillId, sourcePath);
     } catch (nextError) {
       setOperationsMessage(describeActionableError(nextError, "执行技能失败", "请确认已打开目标文档、模型配置可用后重试。"));
     } finally {
+      if (workflowController && abortRef.current === workflowController) {
+        abortRef.current = null;
+      }
       setOperationsBusy(false);
     }
   }

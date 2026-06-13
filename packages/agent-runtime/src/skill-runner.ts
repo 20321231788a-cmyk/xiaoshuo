@@ -5,10 +5,12 @@ import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
 import { OpenAICompatibleClient, type ChatCompletionMessage } from "@xiaoshuo/model-client";
 import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
 import { SkillService } from "@xiaoshuo/skill-service";
-import { skillRunResponseSchema, skillDraftFromUrlRequestSchema, skillDraftResponseSchema, type SkillDefinition, type SkillRunRequest, type SkillRunResponse, type SkillDraftFromUrlRequest, type SkillDraftResponse } from "@xiaoshuo/shared";
+import { skillRunResponseSchema, skillDraftFromUrlRequestSchema, skillDraftResponseSchema, type AgentStreamEvent, type SkillDefinition, type SkillRunRequest, type SkillRunResponse, type SkillDraftFromUrlRequest, type SkillDraftResponse } from "@xiaoshuo/shared";
 import path from "node:path";
 import { HUMANIZER_SYSTEM_PROMPT, applyHumanizerIfEnabled } from "./humanizer.js";
 import { GeneratedSavePlanner } from "./generated-save-planner.js";
+import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
+import { streamModelText, StreamingGenerationSession, type StreamingModelClient } from "./stream.js";
 
 const DEFAULT_TARGETS: Record<string, string> = {
   outline_generate: "01_大纲/大纲.txt",
@@ -20,6 +22,12 @@ const DEFAULT_TARGETS: Record<string, string> = {
   continue_text: "02_正文/续写结果.txt",
   story_deslop: "02_正文/去AI味结果.txt",
   humanizer_zh: "02_正文/去AI味结果.txt"
+};
+
+const STYLE_SECTION_TARGETS: Record<string, string> = {
+  写作风格: "00_设定集/风格库/写作风格.txt",
+  风格示例: "00_设定集/风格库/风格示例.txt",
+  参考素材: "00_设定集/风格库/参考素材.txt"
 };
 
 const GENRE_SECTION_TARGETS: Record<string, string> = {
@@ -74,7 +82,7 @@ const STORY_DESLOP_SYSTEM_PROMPT = `
 export type PromptSkillRunnerOptions = {
   projectRoot: string;
   config?: ConfigServiceOptions;
-  modelClient?: Pick<OpenAICompatibleClient, "requestCompletion">;
+  modelClient?: StreamingModelClient;
 };
 
 export class PromptSkillRunner {
@@ -84,7 +92,7 @@ export class PromptSkillRunner {
   private readonly skills: SkillService;
   private readonly cache: GeneratedCacheService;
   private readonly conversations: ConversationService;
-  private readonly modelClient: Pick<OpenAICompatibleClient, "requestCompletion">;
+  private readonly modelClient: StreamingModelClient;
   private readonly savePlanner: GeneratedSavePlanner;
 
   constructor(options: PromptSkillRunnerOptions) {
@@ -118,6 +126,81 @@ export class PromptSkillRunner {
 
     const result = await this.runPromptSkill(skill, payload);
     return this.finalizePromptSkill(skill, payload, result);
+  }
+
+  async *streamSkill(skillId: string, payload: SkillRunRequest): AsyncGenerator<AgentStreamEvent> {
+    const skill = await this.skills.getSkill(skillId);
+    if (!skill) {
+      throw new Error(`未知 skill: ${skillId}`);
+    }
+    if (skill.handler_type !== "prompt" || LOCAL_BLOCKED_SKILLS.has(skill.id)) {
+      throw new Error(`TS runtime 尚未接管该 skill: ${skillId}`);
+    }
+
+    const config = await loadModelConfig(this.config, "primary");
+    if (!config.configured) {
+      throw new Error("未配置主线路 API Key 或模型名。");
+    }
+
+    const context = await buildProjectContinuityContext(this.projectRoot);
+    const sourceText = await this.resolvePromptSourceText(skill, payload);
+    const systemPrompt = this.resolveSystemPrompt(skill);
+    const messages = this.buildMessages(skill, systemPrompt, context, sourceText || payload.text, payload.instruction, false);
+    const compactMessages = this.buildMessages(skill, systemPrompt, context, sourceText || payload.text, payload.instruction, true);
+    const session = new StreamingGenerationSession(this.cache);
+    const initialTargets = this.pendingSaveTargets(skill, payload);
+    const initial = await session.start({
+      source: "skill_stream",
+      target_paths: initialTargets,
+      skill_id: skill.id,
+      mode: "replace",
+      conversation_id: payload.conversation_id,
+      summary: `Skill 流式缓存：${skill.name}`
+    });
+
+    try {
+      for await (const chunk of streamModelText({
+        modelClient: this.modelClient,
+        config,
+        messages,
+        fallbackMessages: compactMessages,
+        temperature: config.temperature
+      })) {
+        await session.append(chunk);
+        yield {
+          type: "delta",
+          text: chunk,
+          stage: "skill_stream",
+          skill_id: skill.id,
+          cache_id: initial.cache_id,
+          target_paths: initialTargets,
+          append_mode: "replace"
+        };
+      }
+      const raw = await session.finalize();
+      const finalText = await this.applyDefaultDeslop(skill.id, session.text || "");
+      if (finalText.trim() !== (session.text || "").trim()) {
+        await this.cache.replace(initial.cache_id, finalText);
+      }
+      yield {
+        type: "final",
+        payload: await this.skillResponseToAgentResponse(
+          skill,
+          payload,
+          await this.finalizePromptSkill(skill, payload, finalText, {
+            cacheId: initial.cache_id,
+            cachePath: raw.cache_path,
+            cacheChars: finalText.length
+          })
+        )
+      };
+    } catch (error) {
+      await session.fail(error);
+      yield {
+        type: "error",
+        message: error instanceof Error ? error.message : String(error)
+      };
+    }
   }
 
   private async runPromptSkill(skill: SkillDefinition, payload: SkillRunRequest): Promise<string> {
@@ -231,7 +314,12 @@ export class PromptSkillRunner {
     }
   }
 
-  private async finalizePromptSkill(skill: SkillDefinition, payload: SkillRunRequest, result: string): Promise<SkillRunResponse> {
+  private async finalizePromptSkill(
+    skill: SkillDefinition,
+    payload: SkillRunRequest,
+    result: string,
+    existingCache?: { cacheId: string; cachePath?: string; cacheChars?: number }
+  ): Promise<SkillRunResponse> {
     const humanized = await applyHumanizerIfEnabled({
       text: String(result || "").trim(),
       config: this.config,
@@ -263,21 +351,40 @@ export class PromptSkillRunner {
       ...(humanized.error ? { humanizer_error: humanized.error } : {})
     };
 
+    if (finalResult && existingCache?.cacheId) {
+      const updated = await this.cache.replace(existingCache.cacheId, finalResult);
+      data.result = finalResult;
+      data.cache_id = existingCache.cacheId;
+      data.cache_path = updated.cache_path || existingCache.cachePath || "";
+      data.cache_chars = updated.chars || existingCache.cacheChars || finalResult.length;
+      if (targetPaths.length) {
+        await this.cache.updateSavePlan(existingCache.cacheId, savePlan);
+      }
+    }
+
     if (targetPaths.length && finalResult) {
-      const entry = await this.cache.create({
-        source: "skill_result",
-        target_paths: targetPaths,
-        skill_id: skill.id,
-        mode: savePlan.mode,
-        conversation_id: payload.conversation_id,
-        summary: `Skill 结果缓存：${skill.name}`,
-        save_plan: savePlan
-      });
-      await this.cache.replace(entry.cache_id, finalResult);
+      const entry = existingCache?.cacheId
+        ? await this.cache.get(existingCache.cacheId)
+        : await this.cache.create({
+            source: "skill_result",
+            target_paths: targetPaths,
+            skill_id: skill.id,
+            mode: savePlan.mode,
+            conversation_id: payload.conversation_id,
+            summary: `Skill 结果缓存：${skill.name}`,
+            save_plan: savePlan
+          });
+      if (!existingCache?.cacheId) {
+        await this.cache.replace(entry.cache_id, finalResult);
+      }
 
       if (await this.savePlanner.shouldAutoCommit(savePlan)) {
         savedPaths =
-          skill.id === "genre_generate"
+          skill.id === "style_extract"
+            ? await this.saveStyleSections(finalResult, savePlan.mode, {
+                summaryPrefix: "风格库确认保存"
+              })
+            : skill.id === "genre_generate"
             ? await this.saveGenreSections(finalResult, savePlan.mode, {
                 summaryPrefix: "题材库确认保存"
               })
@@ -313,7 +420,28 @@ export class PromptSkillRunner {
     });
   }
 
+  private async skillResponseToAgentResponse(skill: SkillDefinition, payload: SkillRunRequest, result: SkillRunResponse) {
+    const savedPaths = Array.isArray(result.data?.saved_paths)
+      ? result.data.saved_paths.filter((item): item is string => typeof item === "string")
+      : result.saved_path
+        ? [result.saved_path]
+        : [];
+    return {
+      intent: "skill" as const,
+      reply: savedPaths.length ? `已写入 ${savedPaths.length} 个文件：\n${savedPaths.join("\n")}` : result.result || "技能已完成。",
+      conversation: undefined,
+      results: [],
+      skill_result: result,
+      saved_paths: savedPaths,
+      requires_confirmation: false,
+      current_skill: skill.name || skill.id
+    };
+  }
+
   private pendingSaveTargets(skill: SkillDefinition, payload: SkillRunRequest): string[] {
+    if (skill.id === "style_extract") {
+      return Object.values(STYLE_SECTION_TARGETS);
+    }
     if (skill.id === "genre_generate") {
       return Object.values(GENRE_SECTION_TARGETS);
     }
@@ -393,6 +521,32 @@ export class PromptSkillRunner {
       return `${STORY_DESLOP_SYSTEM_PROMPT}\n\n用户手动调用时，仍然只返回去AI味后的文本。若用户明确要求检测报告，再单独输出简短报告。`;
     }
     return (skill.prompt || "").trim() || `你是小说创作技能：${skill.name}。${skill.description}`;
+  }
+
+  public async saveStyleSections(
+    result: string,
+    mode: "replace" | "append",
+    options: { summaryPrefix: string }
+  ): Promise<string[]> {
+    let sections = splitStyleSections(result);
+    if (!Object.keys(sections).length) {
+      const fallback = String(result || "").trim();
+      if (!fallback) {
+        return [];
+      }
+      sections = { 写作风格: fallback };
+    }
+
+    const savedPaths: string[] = [];
+    for (const [title, relPath] of Object.entries(STYLE_SECTION_TARGETS)) {
+      const body = String(sections[title] || "").trim();
+      if (!body) {
+        continue;
+      }
+      await this.saveGeneratedText(relPath, body, mode, `${options.summaryPrefix}：${title}`);
+      savedPaths.push(relPath);
+    }
+    return savedPaths;
   }
 
   public async saveGenreSections(
@@ -610,9 +764,7 @@ function buildSkillPrompt(
       "",
       `【章纲】\n${clipText(context.chapter_outline, 1800)}`,
       "",
-      `【风格库】\n${clipText(JSON.stringify(context.style), 1400)}`,
-      "",
-      `【题材库】\n${clipText(JSON.stringify(context.genre), 1400)}`,
+      buildStyleGenreConstraintBlock(context.style, context.genre, { compact: true }),
       "",
       `【输入文本】\n${clipText(sourceText || "无", 3200)}`,
       "",
@@ -632,9 +784,7 @@ function buildSkillPrompt(
     "",
     `【章纲】\n${context.chapter_outline}`,
     "",
-    `【风格库】\n${JSON.stringify(context.style)}`,
-    "",
-    `【题材库】\n${JSON.stringify(context.genre)}`,
+    buildStyleGenreConstraintBlock(context.style, context.genre),
     "",
     `【输入文本】\n${sourceText || "无"}`,
     "",
@@ -685,6 +835,62 @@ function guardAgainstOverdelete(original: string, cleaned: string): string {
   return cleaned;
 }
 
+function splitStyleSections(result: string): Record<string, string> {
+  const text = String(result || "").trim();
+  if (!text) {
+    return {};
+  }
+
+  const sections: Record<string, string[]> = {
+    写作风格: [],
+    风格示例: [],
+    参考素材: []
+  };
+  const aliases: Record<string, keyof typeof sections> = {
+    写作风格: "写作风格",
+    写作风格规则: "写作风格",
+    文风规则: "写作风格",
+    文风: "写作风格",
+    风格示例: "风格示例",
+    风格示例特征: "风格示例",
+    参考素材: "参考素材",
+    参考素材摘要: "参考素材"
+  };
+
+  const heading =
+    /^[ \t]*(?:#{1,6}[ \t]*)?(?:[【\[])?[ \t]*(写作风格规则|写作风格|文风规则|文风|风格示例特征|风格示例|参考素材摘要|参考素材)[ \t]*(?:[】\]])?[ \t]*[:：]?[ \t]*$/gmu;
+  const matches = [...text.matchAll(heading)];
+  if (matches.length) {
+    for (let index = 0; index < matches.length; index += 1) {
+      const alias = (matches[index]?.[1] || "").trim();
+      const title = aliases[alias];
+      if (!title) {
+        continue;
+      }
+      const start = matches[index]?.index !== undefined ? matches[index]!.index! + matches[index]![0].length : 0;
+      const end = index + 1 < matches.length && matches[index + 1]?.index !== undefined ? matches[index + 1]!.index! : text.length;
+      const body = text.slice(start, end).trim();
+      if (body) {
+        sections[title]!.push(body);
+      }
+    }
+    return compactSections(sections);
+  }
+
+  const fenced = /\*\*(00_设定集\/风格库\/([^*\n]+?\.txt))\*\*\s*```(?:\w+)?\s*(.*?)```/gs;
+  for (const match of text.matchAll(fenced)) {
+    const filename = match[2] || "";
+    const body = String(match[3] || "").trim();
+    for (const [title, relPath] of Object.entries(STYLE_SECTION_TARGETS)) {
+      if (path.posix.basename(relPath) === filename && body) {
+        sections[title]!.push(body);
+      }
+    }
+  }
+
+  return compactSections(sections);
+}
+
 function splitGenreSections(result: string): Record<string, string> {
   const text = String(result || "").trim();
   if (!text) {
@@ -714,7 +920,7 @@ function splitGenreSections(result: string): Record<string, string> {
     禁用词: "违禁词"
   };
 
-  const heading = /^\s*(?:#{1,6}\s*)?(?:[【\[])?\s*(题材规则|规则|世界规则|题材素材|素材|灵感素材|脑洞素材|战斗模板|冲突模板|冲突场景模板|场景模板|违禁词|禁忌词|禁用词)\s*(?:[】\]])?\s*[:：]?\s*$/gmu;
+  const heading = /^[ \t]*(?:#{1,6}[ \t]*)?(?:[【\[])?[ \t]*(题材规则|规则|世界规则|题材素材|素材|灵感素材|脑洞素材|战斗模板|冲突模板|冲突场景模板|场景模板|违禁词|禁忌词|禁用词)[ \t]*(?:[】\]])?[ \t]*[:：]?[ \t]*$/gmu;
   const matches = [...text.matchAll(heading)];
   if (matches.length) {
     for (let index = 0; index < matches.length; index += 1) {
@@ -748,6 +954,14 @@ function splitGenreSections(result: string): Record<string, string> {
     }
   }
 
+  return Object.fromEntries(
+    Object.entries(sections)
+      .map(([title, parts]) => [title, parts.join("\n\n").trim()])
+      .filter(([, body]) => Boolean(body))
+  );
+}
+
+function compactSections(sections: Record<string, string[]>): Record<string, string> {
   return Object.fromEntries(
     Object.entries(sections)
       .map(([title, parts]) => [title, parts.join("\n\n").trim()])
@@ -793,7 +1007,7 @@ function splitLoreSections(result: string): Record<string, string> {
   };
 
   const heading =
-    /^\s*(?:#{1,6}\s*)?(?:[【\[])?\s*(人物设定|人物|角色设定|角色|体系设定|体系|世界观|世界设定|规则设定|能力体系|势力组织|地图设定|地图|地点设定|地点|地理设定|道具设定|道具|物品设定|物品|法宝设定|装备设定)\s*(?:[】\]])?\s*[:：]?\s*$/gmu;
+    /^[ \t]*(?:#{1,6}[ \t]*)?(?:[【\[])?[ \t]*(人物设定|人物|角色设定|角色|体系设定|体系|世界观|世界设定|规则设定|能力体系|势力组织|地图设定|地图|地点设定|地点|地理设定|道具设定|道具|物品设定|物品|法宝设定|装备设定)[ \t]*(?:[】\]])?[ \t]*[:：]?[ \t]*$/gmu;
   const matches = [...text.matchAll(heading)];
   if (matches.length) {
     for (let index = 0; index < matches.length; index += 1) {

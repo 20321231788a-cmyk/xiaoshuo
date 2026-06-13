@@ -730,7 +730,7 @@ describe("agent-runtime chat flow", () => {
     await expect(fs.readFile(targetPath, "utf8")).resolves.toBe("确认后写入");
   });
 
-  it("returns inline pending-save metadata for streamed conversation saves that would overwrite existing files", async () => {
+  it("auto-saves streamed conversation saves that explicitly request writing over existing files", async () => {
     const conversations = new ConversationService({ projectRoot: tempDir });
     const conversation = await conversations.createConversation({ title: "保存测试" });
     const runtime = new AgentRuntimeService({
@@ -745,8 +745,8 @@ describe("agent-runtime chat flow", () => {
               target_paths: ["01_大纲/大纲.txt"],
               reason: "用户要求保存到大纲。",
               confidence: 0.91,
-              requires_confirmation: true,
-              should_auto_commit: false
+              requires_confirmation: false,
+              should_auto_commit: true
             });
           }
           return "新的大纲内容";
@@ -773,11 +773,9 @@ describe("agent-runtime chat flow", () => {
       throw new Error("missing final event");
     }
     expect(final.payload.skill_result?.data).toMatchObject({
-      pending_save: true,
-      target_path: "01_大纲/大纲.txt",
-      default_mode: "replace"
+      saved_paths: ["01_大纲/大纲.txt"]
     });
-    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("这是测试大纲");
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("新的大纲内容");
   });
 
   it("runs local prompt skill intent via manual skill id", async () => {
@@ -808,7 +806,7 @@ describe("agent-runtime chat flow", () => {
     expect(result.saved_paths).toEqual([]);
   });
 
-  it("keeps local prompt skill overwrite pending when the instruction asks to save over existing content", async () => {
+  it("directly saves local prompt skill overwrite when the instruction asks to write", async () => {
     const runtime = new AgentRuntimeService({
       projectRoot: tempDir,
       config: { configPath },
@@ -828,13 +826,11 @@ describe("agent-runtime chat flow", () => {
     });
 
     expect(result.intent).toBe("skill");
-    expect(result.saved_paths).toEqual([]);
+    expect(result.saved_paths).toEqual(["01_大纲/大纲.txt"]);
     expect(result.skill_result?.data).toMatchObject({
-      pending_save: true,
-      target_path: "01_大纲/大纲.txt",
-      default_mode: "replace"
+      saved_paths: ["01_大纲/大纲.txt"]
     });
-    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("这是测试大纲");
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("新的大纲内容");
   });
 
   it("streams local prompt skill intent with start/final events", async () => {
@@ -859,9 +855,20 @@ describe("agent-runtime chat flow", () => {
       events.push(event);
     }
 
-    expect(events.map((event) => event.type)).toEqual(["start", "final"]);
+    expect(events.map((event) => event.type)).toEqual(["start", "delta", "final"]);
     expect(events[0]).toMatchObject({ type: "start", intent: "skill" });
     expect(events[1]).toMatchObject({
+      type: "delta",
+      text: "技能流式最终结果",
+      skill_id: "outline_generate"
+    });
+    const delta = events[1];
+    expect(delta?.type).toBe("delta");
+    if (delta?.type !== "delta") {
+      throw new Error("missing delta event");
+    }
+    expect(delta.cache_id).toBeTruthy();
+    expect(events[2]).toMatchObject({
       type: "final",
       payload: {
         intent: "skill",
@@ -1125,6 +1132,39 @@ describe("agent-runtime chat flow", () => {
         "00_设定集/题材库/题材素材.txt",
         "00_设定集/题材库/战斗模板.txt",
         "00_设定集/题材库/违禁词.txt"
+      ]
+    });
+  });
+
+  it("routes style_extract skill intent locally with multi-target pending-save metadata", async () => {
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "【写作风格】\n风格规则\n\n【风格示例】\n示例特征\n\n【参考素材】\n素材摘要"
+      }
+    });
+
+    const request = {
+      conversation_id: "",
+      content: "请提取写作风格、风格示例和参考素材",
+      current_path: "",
+      selection: "样文内容",
+      project_context_hint: "",
+      skill_id: "style_extract",
+      attachment_ids: []
+    };
+
+    expect(await runtime.canRunAgentLocally(request)).toBe(true);
+    const result = await runtime.runAgent(request);
+
+    expect(result.intent).toBe("skill");
+    expect(result.skill_result?.data).toMatchObject({
+      pending_save: true,
+      target_paths: [
+        "00_设定集/风格库/写作风格.txt",
+        "00_设定集/风格库/风格示例.txt",
+        "00_设定集/风格库/参考素材.txt"
       ]
     });
   });
@@ -1563,6 +1603,8 @@ describe("agent-runtime chat flow", () => {
     expect(firstPrompt).toContain("【联网搜索小说素材】");
     expect(firstPrompt).toContain("唐代县城与市集");
     expect(firstPrompt).toContain("https://example.test/tang-market");
+    expect(firstPrompt).toContain("【题材正文规则】");
+    expect(firstPrompt).toContain("【风格库调用规则】");
     expect(firstPrompt).not.toContain("workflow-secret");
     expect(result.web_search_sources).toEqual([{ title: "唐代县城与市集", url: "https://example.test/tang-market" }]);
     expect(result.skill_result?.data?.web_search_sources).toEqual([{ title: "唐代县城与市集", url: "https://example.test/tang-market" }]);

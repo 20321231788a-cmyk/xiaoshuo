@@ -424,6 +424,37 @@ npm run dist -w @xiaoshuo/desktop-shell
 - 教程弹层加入网站注册、登录、模型、充值兑换、授权说明。
 - 软件更新改为 GitHub Releases。
 - 安装包命名应统一为 `ArcWriter-Setup-x.y.z.exe`，与 `latest.yml` 保持一致。
+- 2026-06-13 审计后的三轮改动已合并：
+  - 会话体验与网页搜索上下文修复：AI 对话页会自动滚动到末尾；联网搜索素材上下文数字输入改成可自主输入任意范围内数值，不再被 3000/8000 固定值卡住。
+  - 题材库、风格库旧项目逻辑对齐：`style_extract` 生成并拆分保存 `写作风格.txt`、`风格示例.txt`、`参考素材.txt`；`genre_generate` 生成并拆分保存 `题材规则.txt`、`题材素材.txt`、`战斗模板.txt`、`违禁词.txt`。聊天、技能、正文生成、抽卡正文候选都会注入同一套风格/题材约束块，向量索引的来源分类也改为识别 `风格库` 和 `题材库`。
+  - 全 AI 生成流式与旧缓存保存：`/api/agent/run-stream` 的 `delta` 事件支持 `stage`、`skill_id`、`cache_id`、`target_paths`；prompt skill 生成开始即创建 `00_设定集/.agent/generated_cache/<cache_id>/`，流式追加，结束 replace 最终内容。Workbench 功能页公共入口已改为流式调用；明确“保存/写入/覆盖/追加”等意图时按旧项目逻辑直接提交缓存并刷新项目树和向量索引。
+
+### 15.1 2026-06-13 改动审计结论
+
+本次审计按最近三轮用户目标逐项确认：
+
+1. AI 对话自动到底部、联网搜索上下文可填入：
+   - 已解决。相关改动在 `apps/workbench/src/App.tsx` 和 `apps/workbench/src/views/ConversationsView.tsx`。
+   - 数字输入从直接受控 `number` 改为本地 draft + blur/Enter commit，用户可以输入中间态，不会刚键入就被归一化回固定值。
+
+2. 题材库、风格库生成逻辑向旧项目对齐：
+   - 已解决主要路径。相关改动在 `packages/skill-service/src/service.ts`、`packages/agent-runtime/src/skill-runner.ts`、`packages/agent-runtime/src/generated-save-planner.ts`、`packages/agent-runtime/src/style-genre-context.ts`、`packages/vector-service/src/indexer.ts`。
+   - 风格库/题材库的多文件拆分、保存规划、缓存提交路由和正文/会话上下文注入都已覆盖。
+
+3. 所有 AI 生成改为流式输出，保存复用旧项目缓存模式：
+   - 已解决主链路。相关改动在 `packages/agent-runtime/src/stream.ts`、`packages/agent-runtime/src/skill-runner.ts`、`packages/agent-runtime/src/runtime.ts`、`packages/shared/src/schemas/agent.ts`、`apps/workbench/src/hooks/useWorkbenchController.ts`、`apps/desktop-shell/src/main/runtime/agent-routes.ts`。
+   - 聊天与 prompt skill 是真实增量流；复杂 workflow 入口已经统一走流事件和缓存/保存链路，其中部分内部子阶段仍是“阶段提示 + 最终结果块”的兼容流。后续如果要继续细化，应优先拆 `body_generate` 的一致性检查/修订/去 AI 味、`book_fusion`、`nuwa_style_distill` 和抽卡候选生成。
+
+本轮已验证：
+
+```powershell
+npm run typecheck --workspaces --if-present
+npm run build:workbench
+npm run build:desktop
+npm test -- packages/agent-runtime/src/skill-runner.test.ts
+npm test -- packages/agent-runtime/src/runtime.test.ts
+npm test -- packages/agent-runtime/src/generated-save-planner.test.ts
+```
 
 ## 16. 交接注意
 

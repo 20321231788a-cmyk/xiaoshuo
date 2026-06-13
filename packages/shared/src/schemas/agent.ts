@@ -194,7 +194,12 @@ export const agentStreamEventSchema = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("delta"),
-    text: z.string()
+    text: z.string(),
+    stage: z.string().optional(),
+    skill_id: z.string().optional(),
+    cache_id: z.string().optional(),
+    target_paths: z.array(z.string()).optional(),
+    append_mode: z.enum(["replace", "append"]).optional()
   }),
   z.object({
     type: z.literal("final"),
