@@ -19,7 +19,7 @@ import type {
   StyleDistillationProfile
 } from "@xiaoshuo/shared";
 import { AgentChatRunner } from "./chat-runner.js";
-import { classifyAgentIntent, hasSkillAction, isReadContextIntent, resolveSkillRoute } from "./intent-router.js";
+import { classifyAgentIntent, hasSkillAction, isReadContextIntent, rankSkillRoutes } from "./intent-router.js";
 import { AgentPlanner, type AgentPlannerOptions } from "./planner.js";
 import { PromptSkillRunner } from "./skill-runner.js";
 import { SkillService } from "@xiaoshuo/skill-service";
@@ -338,7 +338,11 @@ export class AgentRuntimeService {
 
   private async resolveSkillId(request: AgentRunRequest): Promise<string> {
     const skills = await this.skills.listSkills().catch(() => []);
-    return resolveSkillRoute(request.content || "", request.skill_id || "", skills);
+    return rankSkillRoutes(request.content || "", skills, {
+      manualSkillId: request.skill_id || "",
+      currentSkillId: String((request as any).current_skill || ""),
+      limit: 1
+    })[0]?.skillId || "";
   }
 
   private async attachGeneratedSaveDecision(request: AgentRunRequest, response: AgentRunResponse): Promise<AgentRunResponse> {
@@ -2431,6 +2435,7 @@ export class AgentRuntimeService {
   ): Promise<{ conversation: ConversationDetail; reply: string; saved_path: string; web_search_sources?: import("./web-search.js").WebSearchSource[]; skill_result?: SkillRunResponse }> {
     await this.validateConversationWriteBackRequest(payload);
     const request = this.conversationPayloadToAgentRequest(conversationId, payload);
+    await this.attachCurrentSkillToRequest(request, payload.skill_id || "");
     let agentResponse = await this.runAgent(request);
     if (payload.write_target?.trim()) {
       const writeMode = resolveConversationWriteBackMode(payload);
@@ -2459,6 +2464,7 @@ export class AgentRuntimeService {
   ): AsyncGenerator<AgentStreamEvent> {
     await this.validateConversationWriteBackRequest(payload);
     const agentRequest = this.conversationPayloadToAgentRequest(conversationId, payload);
+    await this.attachCurrentSkillToRequest(agentRequest, payload.skill_id || "");
     for await (const event of this.streamAgentRun(agentRequest)) {
       if (event.type === "final") {
         let payloadResponse = event.payload;
@@ -2494,6 +2500,18 @@ export class AgentRuntimeService {
       skill_id: payload.skill_id || "",
       attachment_ids: payload.attachment_ids || []
     };
+  }
+
+  private async attachCurrentSkillToRequest(request: AgentRunRequest, explicitSkillId: string): Promise<void> {
+    if (String(explicitSkillId || "").trim()) {
+      (request as any).current_skill = explicitSkillId.trim();
+      return;
+    }
+    if (!request.conversation_id) {
+      return;
+    }
+    const detail = await this.conversations.getConversation(request.conversation_id).catch(() => null);
+    (request as any).current_skill = detail?.current_skill || "";
   }
 
   private async validateConversationWriteBackRequest(payload: ConversationMessageRequest): Promise<void> {

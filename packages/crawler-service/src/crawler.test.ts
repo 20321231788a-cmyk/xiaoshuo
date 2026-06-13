@@ -148,8 +148,7 @@ describe("NovelCrawlerService", () => {
   });
 
   describe("crawl", () => {
-    it("integrates search and chapter downloads", async () => {
-      const searchHtml = `<html><body><a href="https://www.zxtyz.com/book/123/">极品飞仙</a></body></html>`;
+    it("downloads chapters from a direct custom URL", async () => {
       const indexHtml = `
         <html>
           <body>
@@ -162,9 +161,6 @@ describe("NovelCrawlerService", () => {
       const chapter2Html = `<html><body><div id="content">第二章内容。</div></body></html>`;
 
       vi.stubGlobal("fetch", vi.fn(async (url: string) => {
-        if (url.includes("search.html")) {
-          return new Response(searchHtml, { status: 200 });
-        }
         if (url.endsWith("/book/123/") || url.endsWith("/book/123")) {
           return new Response(indexHtml, { status: 200 });
         }
@@ -178,14 +174,15 @@ describe("NovelCrawlerService", () => {
       }));
 
       const req: NovelCrawlRequest = {
-        query: "极品飞仙",
-        source: "zxtyz",
+        query: "https://www.zxtyz.com/book/123/",
+        source: "custom",
         start_chapter: 1,
         max_chapters: 2
       };
 
       const novel = await crawler.crawl(req);
-      expect(novel.title).toBe("极品飞仙");
+      expect(novel.title).toBe("123");
+      expect(novel.source).toBe("自定义来源");
       expect(novel.chapters.length).toBe(2);
       expect(novel.chapters[0]?.title).toBe("第一章：飞仙");
       expect(novel.chapters[0]?.content).toBe("第一章内容。");
@@ -262,7 +259,7 @@ describe("NovelCrawlerService", () => {
       vi.unstubAllGlobals();
     });
 
-    it("uses resolver hits for book-name crawl before legacy source fallback", async () => {
+    it("uses Bing resolver hits for book-name crawl without legacy source fallback", async () => {
       const resolver = vi.fn(async () => [
         { title: "示例书", url: "https://not-allowed.example/book/1" },
         { title: "示例书", url: "https://www.novel543.com/1206606479/" }
@@ -283,28 +280,28 @@ describe("NovelCrawlerService", () => {
 
       const novel = await crawlerWithResolver.crawl({
         query: "示例书",
-        source: "auto",
+        source: "bing",
         start_chapter: 1,
         max_chapters: 1
       });
 
-      expect(resolver).toHaveBeenCalledWith("示例书", { source: "auto" });
+      expect(resolver).toHaveBeenCalledWith("示例书", { source: "bing" });
       expect(novel.source).toBe("Novel543");
       expect(novel.source_url).toBe("https://www.novel543.com/1206606479/dir");
 
       vi.unstubAllGlobals();
     });
 
-    it("reports resolver failure clearly when a scoped new source has no directory hit", async () => {
+    it("reports Bing resolver failure clearly when there is no directory hit", async () => {
       const crawlerWithResolver = new NovelCrawlerService({ resolver: async () => [] });
       await expect(
         crawlerWithResolver.crawl({
           query: "不存在的书",
-          source: "novel543",
+          source: "bing",
           start_chapter: 1,
           max_chapters: 1
         })
-      ).rejects.toThrow("Bing/自定义搜索未定位到可用目录 URL");
+      ).rejects.toThrow("Bing 未定位到可用目录 URL");
     });
   });
 });

@@ -2,7 +2,7 @@ import { loadModelConfig, type ConfigServiceOptions } from "@xiaoshuo/config-ser
 import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
 import type { AgentRunRequest, SkillDefinition, SkillPlan, SkillPlanStep } from "@xiaoshuo/shared";
 import type { ChatCompletionMessage, OpenAICompatibleClient } from "@xiaoshuo/model-client";
-import { hasSkillAction, resolveSkillRoute } from "./intent-router.js";
+import { hasSkillAction, rankSkillRoutes, type RankedSkillRoute } from "./intent-router.js";
 
 const MAX_PLAN_STEPS = 4;
 const MAX_CANDIDATES = 8;
@@ -52,8 +52,10 @@ export class SmartSkillOrchestrator {
       return emptyPlan();
     }
 
-    const candidates = this.pickCandidates(content, enabledSkills);
-    const routedSkillId = resolveSkillRoute(content, "", enabledSkills);
+    const candidateRoutes = this.pickCandidateRoutes(content, enabledSkills, String((request as any).current_skill || ""));
+    const candidates = candidateRoutes.map((candidate) => candidate.skill).filter((skill): skill is SkillDefinition => Boolean(skill));
+    const routedCandidate = candidateRoutes[0];
+    const routedSkillId = routedCandidate?.skillId || "";
     if (!candidates.length && !routedSkillId) {
       return emptyPlan();
     }
@@ -66,15 +68,15 @@ export class SmartSkillOrchestrator {
       }
     }
 
-    if (routedSkillId && hasSkillAction(content)) {
+    if (routedSkillId && routedCandidate && this.shouldUseDirectRoute(content, routedCandidate)) {
       const skill = enabledSkills.find((item) => item.id === routedSkillId);
       if (skill) {
         return normalizePlan(
           {
             should_call_skill: true,
             confidence: DIRECT_ROUTE_CONFIDENCE,
-            selected_reason: "规则路由命中明确技能。",
-            steps: [makeStep(skill, content, "规则路由命中明确技能。", DIRECT_ROUTE_CONFIDENCE)]
+            selected_reason: routedCandidate.reasons.join("；") || "规则路由命中明确技能。",
+            steps: [makeStep(skill, content, routedCandidate.reasons.join("；") || "规则路由命中明确技能。", DIRECT_ROUTE_CONFIDENCE)]
           },
           enabledSkills
         );
@@ -84,17 +86,40 @@ export class SmartSkillOrchestrator {
     return emptyPlan(modelPlan?.selected_reason || "");
   }
 
-  private pickCandidates(text: string, skills: SkillDefinition[]): SkillDefinition[] {
-    const routed = resolveSkillRoute(text, "", skills);
-    const scored = skills
-      .filter((skill) => isRunnableByAgent(skill))
-      .map((skill) => ({
-        skill,
-        score: scoreSkillCandidate(text, skill, routed)
-      }))
-      .filter((item) => item.score > 0)
-      .sort((left, right) => right.score - left.score);
-    return scored.slice(0, MAX_CANDIDATES).map((item) => item.skill);
+  private pickCandidateRoutes(text: string, skills: SkillDefinition[], currentSkillId = ""): RankedSkillRoute[] {
+    const ranked = rankSkillRoutes(text, skills.filter((skill) => isRunnableByAgent(skill)), { currentSkillId, limit: 24 });
+    const selected: RankedSkillRoute[] = [];
+    const add = (candidate: RankedSkillRoute | undefined) => {
+      if (!candidate || selected.some((item) => item.skillId === candidate.skillId)) {
+        return;
+      }
+      selected.push(candidate);
+    };
+
+    for (const candidate of ranked.slice(0, 4)) {
+      add(candidate);
+    }
+    add(ranked.find((candidate) => candidate.skill?.builtin));
+    add(ranked.find((candidate) => candidate.skill && !candidate.skill.builtin));
+    add(ranked.find((candidate) => candidate.signals.some((signal) => signal === "explicit_name" || signal === "explicit_id")));
+    add(ranked.find((candidate) => candidate.signals.includes("current_skill")));
+    for (const candidate of ranked) {
+      add(candidate);
+      if (selected.length >= MAX_CANDIDATES) {
+        break;
+      }
+    }
+    return selected.slice(0, MAX_CANDIDATES);
+  }
+
+  private shouldUseDirectRoute(text: string, candidate: RankedSkillRoute): boolean {
+    if (!hasSkillAction(text)) {
+      return false;
+    }
+    if (candidate.signals.includes("intent:chat") || candidate.signals.includes("intent:read_context")) {
+      return false;
+    }
+    return candidate.score >= 42;
   }
 
   private async planWithModel(request: AgentRunRequest, candidates: SkillDefinition[]): Promise<SkillPlan> {
@@ -154,7 +179,9 @@ function buildPlannerPrompt(request: AgentRunRequest, candidates: SkillDefinitio
 
   return [
     "请根据用户请求决定是否调用技能。复杂任务可以规划多个技能，最多 4 步。",
-    "只有用户真的需要生成、提取、检查、拆书、抽卡、伏笔、润色、去AI味等能力时才调用技能；普通聊天、解释、答疑应返回 should_call_skill=false。",
+    "按用户想要的产物类型选择技能：大纲/细纲/章纲选规划类；正文、对白、片段、风格仿写优先选对应写作类或导入风格类技能。",
+    "风格型导入技能可以优先于泛用大纲技能；不要因为出现“写、扩展、灵感”等宽泛词就默认选择 outline_generate。",
+    "只有用户真的需要生成、提取、检查、拆书、抽卡、伏笔、润色、去AI味等能力时才调用技能；普通聊天、解释、答疑、读取上下文应返回 should_call_skill=false。",
     "如果默认技能已禁用，它不会出现在候选里；请从候选中选择相近技能。",
     "后一步可使用前一步输出，所以可以规划类似：先提取设定，再一致性检查。",
     "",
@@ -171,57 +198,6 @@ function buildPlannerPrompt(request: AgentRunRequest, candidates: SkillDefinitio
     "",
     `【可用候选技能】\n${skillCatalog}`
   ].join("\n");
-}
-
-function scoreSkillCandidate(text: string, skill: SkillDefinition, routedSkillId: string): number {
-  const normalizedText = normalizeText(text);
-  const haystack = normalizeText(
-    [
-      skill.id,
-      skill.name,
-      skill.description,
-      skill.prompt,
-      ...(skill.linked_targets || []),
-      ...(skill.context_requirements || [])
-    ].join(" ")
-  );
-  let score = skill.id === routedSkillId ? 100 : 0;
-  for (const token of skillTokens(skill)) {
-    if (normalizedText.includes(token)) {
-      score += token.length >= 4 ? 8 : 4;
-    }
-  }
-  if (haystack && normalizedText.includes(normalizeText(skill.name || ""))) {
-    score += 20;
-  }
-  if (/提取|抽取|整理|归纳/.test(normalizedText) && /提取|extract|设定|风格|细纲/.test(haystack)) {
-    score += 18;
-  }
-  if (/检查|审查|一致性|矛盾|冲突/.test(normalizedText) && /consistency|一致性|检查|审稿/.test(haystack)) {
-    score += 18;
-  }
-  if (/润色|去ai味|去味|优化|改写/.test(normalizedText) && /润色|去ai味|humanizer|deslop|polish/.test(haystack)) {
-    score += 18;
-  }
-  if (/正文|章节|续写|第\d{1,4}章/.test(normalizedText) && /正文|续写|body|chapter/.test(haystack)) {
-    score += 14;
-  }
-  return score;
-}
-
-function skillTokens(skill: SkillDefinition): string[] {
-  return [
-    skill.id,
-    skill.name,
-    skill.description,
-    ...(skill.linked_targets || []),
-    ...(skill.context_requirements || [])
-  ]
-    .join(" ")
-    .split(/[^\p{L}\p{N}_]+/u)
-    .map(normalizeText)
-    .filter((token) => token.length >= 2)
-    .slice(0, 32);
 }
 
 function isRunnableByAgent(skill: SkillDefinition): boolean {
@@ -309,10 +285,6 @@ function emptyPlan(reason = ""): SkillPlan {
     selected_reason: reason,
     confidence: 0
   };
-}
-
-function normalizeText(text: string): string {
-  return String(text || "").toLowerCase().replace(/\s+/g, "");
 }
 
 function clamp01(value: number): number {

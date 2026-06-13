@@ -184,29 +184,24 @@ function createNovelSourceResolver(
     const config = await loadWebSearchConfig({ rootDir: projectRoot, env: process.env });
     const searchConfig = forceCrawlerSearchConfig(config);
     const searchClient = new DefaultWebSearchClient();
-    const providerLabel = searchConfig.provider === "custom" ? "自定义搜索" : "Bing";
-    const sources = context.source === "shuhaige_mobile" || context.source === "novel543" ? [context.source] : ["shuhaige_mobile", "novel543"];
+    const providerLabel = "Bing";
     const collected: NovelSourceResolverResult[] = [];
 
-    for (const source of sources) {
-      const site = source === "shuhaige_mobile" ? "m.shuhaige.net" : "novel543.com";
-      const searchQuery = `${query} site:${site}`;
-      progress(0.04, `${providerLabel} 定位目录：${site}`);
-      const results = await searchClient.search(searchQuery, searchConfig);
-      for (const result of results) {
-        const normalized = normalizeNovelDirectoryUrl(result.url, source);
-        if (!normalized) {
-          continue;
-        }
-        collected.push({
-          title: result.title || query,
-          url: normalized.url,
-          source: normalized.source
-        });
+    progress(0.04, `${providerLabel} 定位目录`);
+    const results = await searchClient.search(`${query} 小说 目录`, searchConfig);
+    for (const result of results) {
+      const normalized = normalizeNovelDirectoryUrl(result.url);
+      collected.push({
+        title: result.title || query,
+        url: normalized?.url || result.url,
+        source: normalized?.source || context.source || "bing"
+      });
+      if (collected.length >= searchConfig.max_results) {
+        break;
       }
-      if (collected.some((item) => item.source === source)) {
-        progress(0.06, `已定位目录：${site}`);
-      }
+    }
+    if (collected.length) {
+      progress(0.06, `已定位 ${collected.length} 个候选目录`);
     }
 
     return dedupeResolverResults(collected);
@@ -214,11 +209,10 @@ function createNovelSourceResolver(
 }
 
 function forceCrawlerSearchConfig(config: WebSearchConfig): WebSearchConfig {
-  const provider = config.provider === "custom" && config.base_url ? "custom" : "bing";
   return {
     ...config,
     enabled: true,
-    provider,
+    provider: "bing",
     max_results: Math.max(3, Math.min(5, config.max_results || 3)),
     timeout: Math.max(5, Math.min(60, config.timeout || 10))
   };

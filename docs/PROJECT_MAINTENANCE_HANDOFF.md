@@ -456,6 +456,49 @@ npm test -- packages/agent-runtime/src/runtime.test.ts
 npm test -- packages/agent-runtime/src/generated-save-planner.test.ts
 ```
 
+### 15.2 2026-06-13 v0.1.9 发布记录
+
+本次发布版本：`0.1.9`。版本号已同步到 `apps/desktop-shell/package.json`、`package-lock.json`、Workbench 页面标题、桌面 smoke 页面标题和 `APP_WINDOW_TITLE`。
+
+主要改动：
+
+- Skill 路由从“内置规则先命中先返回”改为全局候选评分排序。新增 `rankSkillRoutes()`、`SkillRouteIntent`、`RankedSkillRoute` 等导出，`resolveSkillRoute()` 和 `routeBuiltinSkill()` 保持兼容但改为取最高分候选。
+- 正文、对白、片段、风格仿写会优先匹配语义相近的导入 Skill 或写作 Skill；明确大纲、润色、设定提取、一致性检查仍保持正确路由；普通聊天和读取上下文不强行绑定 Skill。
+- `smart-skill-orchestrator`、`runtime`、`chat-runner` 已统一使用候选评分结果。显式 `skill_id` 永远优先；当前会话 Skill 只在语义兼容时继承。
+- 拆书联网来源已收敛：Workbench 去掉旧来源下拉，只保留“自动来源：Bing”和“自定义来源”切换；输入框下方新增“保存来源”按钮，自定义 URL 保存在本地浏览器存储。
+- 爬虫后端不再自动轮询书海阁、Novel543、书库阁、zxtyz、22biqu 等旧来源，避免在用户输入其它 URL 时出现一串“其它来源 403”。书名走 Bing 定位候选目录；直接 URL 或保存的自定义 URL 走通用目录解析。
+- 右侧 AI 面板新增固定“运行结果”区域，只显示结果正文；拆书右侧状态不再展示任务 ID 和失败来源明细，只显示进度和最终写入文件。
+- 桌面 smoke 改为自动分配独立 runtime 端口，并通过 `XIAOSHUO_RUNTIME_PORT` 注入 Electron，避免本机已运行的正式 ArcWriter 占用 `127.0.0.1:18453` 时误打到真实实例。
+
+本轮已验证：
+
+```powershell
+npm test -- packages/agent-runtime/src/intent-router.test.ts
+npm test -- packages/agent-runtime/src/runtime.test.ts
+npm test -- packages/agent-runtime/src/skill-runner.test.ts
+npm test -- packages/crawler-service/src/crawler.test.ts
+npm run typecheck --workspaces --if-present
+npm run build:workbench
+npm run build:desktop
+npm run smoke:desktop
+npm run dist -w @xiaoshuo/desktop-shell
+```
+
+本地打包产物检查通过：
+
+```text
+apps/desktop-shell/release/ArcWriter-Setup-0.1.9.exe
+apps/desktop-shell/release/ArcWriter-Setup-0.1.9.exe.blockmap
+apps/desktop-shell/release/latest.yml
+```
+
+`latest.yml` 当前记录：
+
+```yaml
+version: 0.1.9
+path: ArcWriter-Setup-0.1.9.exe
+```
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

@@ -32,6 +32,12 @@ afterEach(async () => {
   }
 });
 
+async function writeImportedSkills(skills: Array<Record<string, unknown>>) {
+  const agentSkillDir = path.join(tempDir, "00_设定集", ".agent", "skills");
+  await fs.mkdir(agentSkillDir, { recursive: true });
+  await fs.writeFile(path.join(agentSkillDir, "imported.json"), JSON.stringify(skills, null, 2), "utf8");
+}
+
 describe("agent-runtime chat flow", () => {
   it("runs read-context chat locally and persists the conversation", async () => {
     let capturedMessages: ChatCompletionMessage[] = [];
@@ -1100,6 +1106,146 @@ describe("agent-runtime chat flow", () => {
     expect(result.intent).toBe("skill");
     expect(result.skill_result?.data?.skill_steps).toMatchObject([{ skill_id: "custom_polish", status: "done" }]);
     expect(result.reply).toBe("导入技能润色结果");
+  });
+
+  it("auto-binds an imported style writing skill during conversation messages", async () => {
+    await writeImportedSkills([
+      {
+        id: "baiye_dialogue",
+        name: "白野式风格对白",
+        description: "按白野式风格仿写，擅长装逼对白、短片段和场景推进。",
+        input_mode: "text",
+        context_requirements: ["project_state", "conversation"],
+        handler_type: "prompt",
+        linked_targets: [],
+        prompt: "模仿白野式语感，直接输出装逼对白或正文片段。",
+        imported_from: "test",
+        writable: false
+      }
+    ]);
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const conversation = await conversations.createConversation({ title: "风格会话" });
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          const system = messages[0]?.content || "";
+          if (system.includes("技能调度器")) {
+            return "not-json";
+          }
+          return "白野式对白结果";
+        }
+      }
+    });
+
+    const result = await runtime.sendMessage(conversation.id, {
+      content: "给我写一个白野式的装逼对话",
+      skill_id: "",
+      agent_name: "",
+      write_target: "",
+      insert_mode: "none" as const,
+      runtime_context: "",
+      attachment_ids: []
+    });
+
+    expect(result.conversation.current_skill).toBe("baiye_dialogue");
+    expect(result.conversation.messages.at(-1)?.metadata.intent).toBe("skill");
+    expect(result.reply).toBe("白野式对白结果");
+  });
+
+  it("keeps explicit skill_id ahead of automatic semantic routing", async () => {
+    await writeImportedSkills([
+      {
+        id: "baiye_dialogue",
+        name: "白野式风格对白",
+        description: "按白野式风格仿写，擅长装逼对白、短片段和场景推进。",
+        input_mode: "text",
+        context_requirements: ["project_state", "conversation"],
+        handler_type: "prompt",
+        linked_targets: [],
+        prompt: "模仿白野式语感，直接输出装逼对白或正文片段。",
+        imported_from: "test",
+        writable: false
+      }
+    ]);
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const conversation = await conversations.createConversation({ title: "显式技能" });
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "显式大纲技能结果"
+      }
+    });
+
+    const result = await runtime.sendMessage(conversation.id, {
+      content: "给我写一个白野式的装逼对话",
+      skill_id: "outline_generate",
+      agent_name: "",
+      write_target: "",
+      insert_mode: "none" as const,
+      runtime_context: "",
+      attachment_ids: []
+    });
+
+    expect(result.conversation.current_skill).toBe("outline_generate");
+    expect(result.reply).toBe("显式大纲技能结果");
+  });
+
+  it("switches away from outline skill for dialogue and keeps style skill for continuation", async () => {
+    await writeImportedSkills([
+      {
+        id: "style_dialogue",
+        name: "对白风格写作",
+        description: "用于写正文、对白、片段和风格化场景。",
+        input_mode: "text",
+        context_requirements: ["project_state", "conversation"],
+        handler_type: "prompt",
+        linked_targets: [],
+        prompt: "直接输出风格化对白、片段或正文。",
+        imported_from: "test",
+        writable: false
+      }
+    ]);
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const outlineConversation = await conversations.createConversation({ title: "大纲会话", skill_id: "outline_generate" });
+    const styleConversation = await conversations.createConversation({ title: "风格会话", skill_id: "style_dialogue" });
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          const system = messages[0]?.content || "";
+          if (system.includes("技能调度器")) {
+            return "not-json";
+          }
+          return "风格片段结果";
+        }
+      }
+    });
+
+    const switched = await runtime.sendMessage(outlineConversation.id, {
+      content: "写一段对白",
+      skill_id: "",
+      agent_name: "",
+      write_target: "",
+      insert_mode: "none" as const,
+      runtime_context: "",
+      attachment_ids: []
+    });
+    const continued = await runtime.sendMessage(styleConversation.id, {
+      content: "继续来一段",
+      skill_id: "",
+      agent_name: "",
+      write_target: "",
+      insert_mode: "none" as const,
+      runtime_context: "",
+      attachment_ids: []
+    });
+
+    expect(switched.conversation.current_skill).toBe("style_dialogue");
+    expect(continued.conversation.current_skill).toBe("style_dialogue");
   });
 
   it("routes genre_generate skill intent locally with multi-target pending-save metadata", async () => {

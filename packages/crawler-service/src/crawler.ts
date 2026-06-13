@@ -103,8 +103,8 @@ const SOURCES: Record<string, SourceConfig> = {
   }
 };
 
-const SOURCE_ORDER = ["shuhaige_mobile", "novel543", "shukuge", "zxtyz", "biquge"];
-const RESOLVER_SOURCE_ORDER = ["shuhaige_mobile", "novel543"];
+const SEARCH_SOURCE = "bing";
+const CUSTOM_SOURCE = "custom";
 
 export function normalizeNovelDirectoryUrl(rawUrl: string, sourceHint = ""): NovelSourceResolverResult | null {
   try {
@@ -164,61 +164,46 @@ export class NovelCrawlerService {
     if (!query) {
       throw new Error("请输入书名或目录 URL");
     }
-    const requestedSource = request.source || "auto";
+    const requestedSource = this.normalizeRequestedSource(request.source);
+    const customSourceUrl = this.safeUrl(String((request as { custom_source_url?: unknown }).custom_source_url || ""));
     const isDirectUrl = this.isUrl(query);
-    const urlSource = isDirectUrl ? this.sourceForUrl(query, requestedSource) : "";
-    const usedResolver = !isDirectUrl && Boolean(this.resolver) && this.supportedResolverSources(requestedSource).length > 0;
-    const sources = urlSource
-      ? [urlSource]
-      : requestedSource === "auto"
-        ? usedResolver
-          ? SOURCE_ORDER.filter((source) => !RESOLVER_SOURCE_ORDER.includes(source))
-          : SOURCE_ORDER
-        : [requestedSource];
     const errors: string[] = [];
 
-    if (usedResolver && this.resolver) {
+    if (isDirectUrl) {
+      return this.crawlDirectUrl(query, query, request, progress);
+    }
+
+    if (requestedSource === CUSTOM_SOURCE) {
+      if (!customSourceUrl) {
+        throw new Error("请先保存自定义来源 URL");
+      }
+      return this.crawlDirectUrl(customSourceUrl, query, request, progress);
+    }
+
+    if (this.resolver) {
       progress?.(0.03, "联网搜索目录 URL");
       try {
         const resolved = await this.resolver(query, { source: requestedSource });
         const candidates = this.normalizeResolvedResults(resolved, requestedSource);
         if (!candidates.length) {
-          errors.push("Bing/自定义搜索未定位到可用目录 URL");
+          errors.push("Bing 未定位到可用目录 URL");
         }
         for (const candidate of candidates) {
           try {
-            progress?.(0.08, `定位目录：${SOURCES[candidate.source]?.name || candidate.source}`);
+            progress?.(0.08, `定位目录：${candidate.title || candidate.url}`);
             const novel = await this.crawlResolvedSource(candidate, query, request, progress);
             if (novel.chapters.length > 0) {
               return novel;
             }
           } catch (exc) {
-            errors.push(`${SOURCES[candidate.source]?.name || candidate.source}: ${exc instanceof Error ? exc.message : exc}`);
+            errors.push(`Bing: ${exc instanceof Error ? exc.message : exc}`);
           }
         }
       } catch (exc) {
-        errors.push(`Bing/自定义搜索: ${exc instanceof Error ? exc.message : exc}`);
-      }
-      if (requestedSource !== "auto") {
-        throw new Error("小说拆书素材获取失败：" + (errors.length ? errors.join("；") : "未找到可用来源"));
+        errors.push(`Bing: ${exc instanceof Error ? exc.message : exc}`);
       }
     }
 
-    for (const source of sources) {
-      try {
-        const sourceConfig = SOURCES[source];
-        if (!sourceConfig) {
-          continue;
-        }
-        progress?.(0.03, `搜索 ${sourceConfig.name}`);
-        const novel = await this.crawlSource(source, query, request, progress);
-        if (novel.chapters.length > 0) {
-          return novel;
-        }
-      } catch (exc) {
-        errors.push(`${SOURCES[source]?.name || source}: ${exc instanceof Error ? exc.message : exc}`);
-      }
-    }
     throw new Error("小说拆书素材获取失败：" + (errors.length ? errors.join("；") : "未找到可用来源"));
   }
 
@@ -256,7 +241,9 @@ export class NovelCrawlerService {
   ): Promise<CrawledNovel> {
     const source = result.source;
     progress?.(0.12, `读取目录：${result.title}`);
-    const chapters = await this.getChapters(source, result.url);
+    const chapters = this.isGenericSource(source)
+      ? await this.getGenericChapters(result.url, source)
+      : await this.getChapters(source, result.url);
     if (!chapters.length) {
       throw new Error("目录页未解析到章节");
     }
@@ -289,7 +276,7 @@ export class NovelCrawlerService {
 
     return new CrawledNovel(
       result.title || query,
-      SOURCES[source]?.name || source,
+      this.sourceDisplayName(source),
       result.url,
       crawled
     );
@@ -321,10 +308,8 @@ export class NovelCrawlerService {
   }
 
   supportedResolverSources(source: string): string[] {
-    if (source === "auto") {
-      return [...RESOLVER_SOURCE_ORDER];
-    }
-    return RESOLVER_SOURCE_ORDER.includes(source) ? [source] : [];
+    const normalized = this.normalizeRequestedSource(source);
+    return normalized === SEARCH_SOURCE ? [SEARCH_SOURCE] : [];
   }
 
   async getChapters(source: string, bookUrl: string): Promise<NovelSearchResult[]> {
@@ -450,23 +435,91 @@ export class NovelCrawlerService {
     results: NovelSourceResolverResult[],
     requestedSource: string
   ): NovelSearchResult[] {
-    const allowedSources = new Set(this.supportedResolverSources(requestedSource));
     return this.dedupeResults(
       results
         .map((item) => {
           const normalized = normalizeNovelDirectoryUrl(item.url, item.source);
-          if (!normalized?.source || !normalized.url || !allowedSources.has(normalized.source)) {
+          if (normalized?.source && normalized.url) {
+            return new NovelSearchResult(item.title?.trim() || this.titleFromUrl(normalized.url), normalized.url, normalized.source);
+          }
+          const url = this.safeUrl(item.url);
+          if (!url) {
             return null;
           }
-          return new NovelSearchResult(item.title?.trim() || this.titleFromUrl(normalized.url), normalized.url, normalized.source);
+          return new NovelSearchResult(item.title?.trim() || this.titleFromUrl(url), url, SEARCH_SOURCE);
         })
         .filter((item): item is NovelSearchResult => Boolean(item))
     );
   }
 
-  private sourceForUrl(url: string, requestedSource: string): string {
+  private async crawlDirectUrl(
+    url: string,
+    query: string,
+    request: NovelCrawlRequest,
+    progress?: (value: number, message: string) => void
+  ): Promise<CrawledNovel> {
     const normalized = normalizeNovelDirectoryUrl(url);
-    return normalized?.source || (requestedSource === "auto" ? "" : requestedSource);
+    const result = normalized
+      ? new NovelSearchResult(this.titleFromUrl(url), normalized.url, normalized.source || CUSTOM_SOURCE)
+      : new NovelSearchResult(this.titleFromUrl(url), url, CUSTOM_SOURCE);
+    return this.crawlResolvedSource(result, query, request, progress);
+  }
+
+  private async getGenericChapters(bookUrl: string, source: string): Promise<NovelSearchResult[]> {
+    const html = await this.getText(bookUrl);
+    const $ = cheerio.load(html);
+    const chapters: NovelSearchResult[] = [];
+    const headingRegex = /第\s*[0-9一二三四五六七八九十百千万零〇两]+\s*[章节回]/;
+
+    $("a").each((_, anchor) => {
+      const text = this.cleanInline($(anchor).text());
+      const href = ($(anchor).attr("href") || "").trim();
+      if (!text || !href || !headingRegex.test(text)) {
+        return;
+      }
+      try {
+        const url = new URL(href, bookUrl).href;
+        if (!this.sameSiteOrRelative(new URL(bookUrl).origin, url)) {
+          return;
+        }
+        chapters.push(new NovelSearchResult(text, url, source));
+      } catch {
+        // ignore invalid URL
+      }
+    });
+
+    return this.sortChapters(this.dedupeResults(chapters));
+  }
+
+  private normalizeRequestedSource(source: string): string {
+    const normalized = String(source || "").trim().toLowerCase();
+    return normalized === CUSTOM_SOURCE ? CUSTOM_SOURCE : SEARCH_SOURCE;
+  }
+
+  private isGenericSource(source: string): boolean {
+    return source === SEARCH_SOURCE || source === CUSTOM_SOURCE;
+  }
+
+  private sourceDisplayName(source: string): string {
+    if (source === SEARCH_SOURCE) {
+      return "Bing";
+    }
+    if (source === CUSTOM_SOURCE) {
+      return "自定义来源";
+    }
+    return SOURCES[source]?.name || source;
+  }
+
+  private safeUrl(value: string): string {
+    try {
+      const parsed = new URL(String(value || "").trim());
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        return "";
+      }
+      return parsed.href;
+    } catch {
+      return "";
+    }
   }
 
   private async getText(url: string): Promise<string> {

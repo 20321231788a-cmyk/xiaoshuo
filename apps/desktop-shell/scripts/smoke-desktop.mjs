@@ -22,6 +22,9 @@ let mockModelServer = null;
 let mockModelBaseUrl = "";
 let smokeConfigDir = "";
 let smokeConfigPath = "";
+let previousStudioConfigEnv;
+let previousRuntimePortEnv;
+let smokeRuntimePort = "";
 
 function run(command, args, options = {}) {
   return new Promise((resolve, reject) => {
@@ -63,6 +66,23 @@ async function waitForUrl(url, timeoutMs = 15_000) {
     await delay(350);
   }
   throw new Error(`Timed out waiting for ${url}`);
+}
+
+async function findAvailablePort() {
+  const probe = http.createServer();
+  await new Promise((resolve, reject) => {
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", () => {
+      probe.off("error", reject);
+      resolve();
+    });
+  });
+  const address = probe.address();
+  await new Promise((resolve) => probe.close(() => resolve()));
+  if (!address || typeof address === "string") {
+    throw new Error("Could not allocate an available runtime port");
+  }
+  return String(address.port);
 }
 
 async function ensurePreview() {
@@ -171,6 +191,11 @@ async function prepareSmokeConfig() {
   const baseUrl = await startMockModelServer();
   smokeConfigDir = await fs.mkdtemp(path.join(os.tmpdir(), "xiaoshuo-desktop-smoke-"));
   smokeConfigPath = path.join(smokeConfigDir, "studio_config.json");
+  previousStudioConfigEnv = process.env.XIAOSHUO_STUDIO_CONFIG;
+  previousRuntimePortEnv = process.env.XIAOSHUO_RUNTIME_PORT;
+  smokeRuntimePort = process.env.XIAOSHUO_SMOKE_RUNTIME_PORT || await findAvailablePort();
+  process.env.XIAOSHUO_STUDIO_CONFIG = smokeConfigPath;
+  process.env.XIAOSHUO_RUNTIME_PORT = smokeRuntimePort;
   await fs.writeFile(
     smokeConfigPath,
     `${JSON.stringify({
@@ -194,6 +219,19 @@ async function cleanupSmokeResources() {
     smokeConfigDir = "";
     smokeConfigPath = "";
   }
+  if (previousStudioConfigEnv === undefined) {
+    delete process.env.XIAOSHUO_STUDIO_CONFIG;
+  } else {
+    process.env.XIAOSHUO_STUDIO_CONFIG = previousStudioConfigEnv;
+  }
+  if (previousRuntimePortEnv === undefined) {
+    delete process.env.XIAOSHUO_RUNTIME_PORT;
+  } else {
+    process.env.XIAOSHUO_RUNTIME_PORT = previousRuntimePortEnv;
+  }
+  previousStudioConfigEnv = undefined;
+  previousRuntimePortEnv = undefined;
+  smokeRuntimePort = "";
 }
 
 async function expectMissing(targetPath, message) {
@@ -226,7 +264,8 @@ try {
       env: {
         ...process.env,
         XIAOSHUO_RENDERER_URL: rendererUrl,
-        XIAOSHUO_STUDIO_CONFIG: smokeConfigPath
+        XIAOSHUO_STUDIO_CONFIG: smokeConfigPath,
+        XIAOSHUO_RUNTIME_PORT: smokeRuntimePort
       }
     });
 
@@ -244,7 +283,7 @@ try {
     if (!versions.electron) {
       throw new Error("Desktop bridge did not return Electron version");
     }
-    if (!backendStatus.url.includes("18453")) {
+    if (!backendStatus.url.includes(`:${smokeRuntimePort}`)) {
       throw new Error(`Desktop runtime did not report the TS gateway URL: ${backendStatus.url}`);
     }
     const runtimeHealth = await fetch(`${backendStatus.url}/api/health`).then((response) => response.json());
@@ -499,7 +538,14 @@ try {
     });
 
     if (conversationMessageResponse.reply !== "TS本地聊天回复" || conversationMessageResponse.conversation?.id !== smokeConv.id) {
-      throw new Error("TS runtime conversation-message route did not return the expected non-stream reply");
+      throw new Error(
+        `TS runtime conversation-message route did not return the expected non-stream reply: ${JSON.stringify({
+          reply: conversationMessageResponse.reply,
+          conversation_id: conversationMessageResponse.conversation?.id,
+          current_skill: conversationMessageResponse.conversation?.current_skill,
+          skill_result: conversationMessageResponse.skill_result
+        })}`
+      );
     }
 
     const conversationMessageStreamResponse = await fetch(`${backendStatus.url}/api/conversations/${smokeConv.id}/messages`, {

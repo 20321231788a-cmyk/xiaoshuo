@@ -18,7 +18,7 @@ import {
 } from "@xiaoshuo/shared";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { resolveSkillRoute, isReadContextIntent } from "./intent-router.js";
+import { hasSkillAction, isReadContextIntent, rankSkillRoutes, type RankedSkillRoute } from "./intent-router.js";
 import {
   DefaultWebSearchClient,
   formatWebSearchContext,
@@ -236,11 +236,20 @@ export class AgentChatRunner {
       detail = await this.conversations.renameConversation(detail.id, title);
     }
 
+    const resolvedSkillId = await this.resolveSkillId(payload.skill_id || "", userText, detail);
+    if (detail.current_skill !== resolvedSkillId) {
+      detail = await this.conversations.saveConversation({
+        ...detail,
+        current_skill: resolvedSkillId
+      });
+    }
+
     detail = await this.conversations.appendMessage(detail.id, {
       role: "user",
       content: userText,
       metadata: {
-        intent_hint: payload.skill_id ? "skill" : "chat",
+        intent_hint: resolvedSkillId ? "skill" : "chat",
+        skill_id: resolvedSkillId,
         current_path: payload.current_path || "",
         attachment_ids: payload.attachment_ids || []
       }
@@ -863,19 +872,16 @@ export class AgentChatRunner {
       return "";
     }
     const skillsList = await this.skills.listSkills().catch(() => []);
-    const routed = resolveSkillRoute(text, "", skillsList);
-    if (routed) {
-      return routed;
-    }
-
     if (isReadContextIntent(text)) {
-      return "";
-    }
-    if (detail.current_skill) {
-      const current = await this.skills.getSkill(detail.current_skill).catch(() => null);
-      if (current && (current.handler_type === "prompt" || current.handler_type === "external")) {
-        return current.id;
+      const readRanked = rankSkillRoutes(text, skillsList, { currentSkillId: detail.current_skill, limit: 1 });
+      if (!readRanked.length) {
+        return "";
       }
+    }
+    const ranked = rankSkillRoutes(text, skillsList, { currentSkillId: detail.current_skill, limit: 8 });
+    const top = ranked[0];
+    if (top && shouldBindConversationSkill(top, text)) {
+      return top.skillId;
     }
     return "";
   }
@@ -1029,4 +1035,14 @@ function buildWebSearchQuery(userText: string, runtimeContext: string): string {
 function looksGatewayTimeout(error: unknown): boolean {
   const message = String(error instanceof Error ? error.message : error || "").toLowerCase();
   return message.includes("504") || message.includes("gateway") || message.includes("超时") || message.includes("timed out");
+}
+
+function shouldBindConversationSkill(candidate: RankedSkillRoute, text: string): boolean {
+  if (candidate.signals.includes("intent:chat") || candidate.signals.includes("intent:read_context")) {
+    return false;
+  }
+  if (candidate.signals.includes("current_skill") && candidate.score >= 38) {
+    return true;
+  }
+  return candidate.score >= 42 && hasSkillAction(text);
 }

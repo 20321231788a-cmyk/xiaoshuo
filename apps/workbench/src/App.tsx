@@ -56,8 +56,6 @@ import { useWorkbenchController } from "./hooks/useWorkbenchController.js";
 import { readWorkbenchRuntime } from "./lib/runtime.js";
 import {
   describeGeneratedSaveAction,
-  describeGeneratedSaveReason,
-  describePendingGeneratedTarget,
   extractPathsFromUnknownResult
 } from "./lib/workflow.js";
 
@@ -65,11 +63,30 @@ const TerminalView = lazy(() => import("./views/TerminalView.js").then((module) 
 
 const runtime = readWorkbenchRuntime();
 const DEFAULT_RIGHT_WIDTH = 440;
-const APP_WINDOW_TITLE = "ArcWriter 0.1.7";
+const APP_WINDOW_TITLE = "ArcWriter 0.1.9";
 const WEBSITE_HOME_URL = "https://matian.online/";
 const WEBSITE_REGISTER_URL = "https://matian.online/?page=api-relay&auth=register";
+const CUSTOM_CRAWL_SOURCE_STORAGE_KEY = "arcwriter.customCrawlSourceUrl";
 
 const punctuationMarks = ["“”", "‘’", "——", "……", "（）", "《》", "，", "。", "？", "！"];
+type CrawlSourceMode = "bing" | "custom";
+
+function readStoredCustomCrawlSource(): string {
+  try {
+    return typeof window === "undefined" ? "" : window.localStorage.getItem(CUSTOM_CRAWL_SOURCE_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    const parsed = new URL(value.trim());
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
 
 type CenterFeature =
   | "editor"
@@ -1285,7 +1302,9 @@ function BatchFeaturePage({ controller }: { controller: WorkbenchController }) {
 
 function DisassembleFeaturePage({ controller, disassemblyUi }: { controller: WorkbenchController; disassemblyUi: DisassemblyUiState }) {
   const [crawlQuery, setCrawlQuery] = useState("");
-  const [crawlSource, setCrawlSource] = useState("auto");
+  const [crawlSource, setCrawlSource] = useState<CrawlSourceMode>("bing");
+  const [savedCustomCrawlSource, setSavedCustomCrawlSource] = useState(() => readStoredCustomCrawlSource());
+  const [crawlSourceMessage, setCrawlSourceMessage] = useState("");
   const [crawlStartChapter, setCrawlStartChapter] = useState(1);
   const [crawlMaxChapters, setCrawlMaxChapters] = useState(10);
   const [instruction, setInstruction] = useState("");
@@ -1375,31 +1394,60 @@ function DisassembleFeaturePage({ controller, disassemblyUi }: { controller: Wor
   }
 
   function runNovelCrawl() {
+    const query = crawlQuery.trim() || (crawlSource === "custom" ? savedCustomCrawlSource : "");
     void controller.runJob("novel_crawl", {
-      query: crawlQuery,
+      query,
       source: crawlSource,
+      custom_source_url: savedCustomCrawlSource,
       start_chapter: crawlStartChapter,
       max_chapters: crawlMaxChapters
     }, { activateTab: false });
   }
 
+  function saveCustomCrawlSource() {
+    const value = crawlQuery.trim();
+    if (!isHttpUrl(value)) {
+      setCrawlSourceMessage("请输入有效 URL");
+      return;
+    }
+    setSavedCustomCrawlSource(value);
+    setCrawlSource("custom");
+    setCrawlSourceMessage("来源已保存");
+    try {
+      window.localStorage.setItem(CUSTOM_CRAWL_SOURCE_STORAGE_KEY, value);
+    } catch {
+      // Local storage may be unavailable in restricted shells.
+    }
+  }
+
+  const canRunNovelCrawl = Boolean(crawlQuery.trim() || (crawlSource === "custom" && savedCustomCrawlSource));
+
   return (
     <section className="xw-feature-page">
       <div className="xw-operation-form">
         <div className="xw-feature-toolbar disassemble-source">
-          <input value={crawlQuery} onChange={(event) => setCrawlQuery(event.target.value)} placeholder="输入书名或目录 URL" />
-          <select value={crawlSource} onChange={(event) => setCrawlSource(event.target.value)}>
-            <option value="auto">自动来源</option>
-            <option value="shuhaige_mobile">书海阁</option>
-            <option value="novel543">Novel543</option>
-            <option value="shukuge">书库阁</option>
-            <option value="zxtyz">zxtyz</option>
-            <option value="biquge">22biqu</option>
-          </select>
+          <div className="xw-crawl-source-input">
+            <input value={crawlQuery} onChange={(event) => setCrawlQuery(event.target.value)} placeholder={crawlSource === "custom" && savedCustomCrawlSource ? savedCustomCrawlSource : "输入书名或目录 URL"} />
+            <div className="xw-crawl-source-tools">
+              <button
+                type="button"
+                className={`xw-source-toggle ${crawlSource === "custom" ? "active" : ""}`}
+                onClick={() => setCrawlSource((value) => (value === "bing" ? "custom" : "bing"))}
+              >
+                {crawlSource === "custom" ? <Link size={14} /> : <ScanSearch size={14} />}
+                <span>{crawlSource === "custom" ? "自定义来源" : "自动来源：Bing"}</span>
+              </button>
+              <button type="button" className="xw-secondary-button compact" onClick={saveCustomCrawlSource} disabled={!crawlQuery.trim()}>
+                <Save size={14} />
+                <span>保存来源</span>
+              </button>
+              {crawlSourceMessage && <small>{crawlSourceMessage}</small>}
+            </div>
+          </div>
           <button
             className="xw-primary-button compact"
             onClick={runNovelCrawl}
-            disabled={controller.operationsBusy || !crawlQuery.trim()}
+            disabled={controller.operationsBusy || !canRunNovelCrawl}
           >
             {controller.operationsBusy ? "启动中" : "联网爬取"}
           </button>
@@ -2924,17 +2972,14 @@ function TerminalFeaturePage({ controller }: { controller: WorkbenchController }
 
 function ResultPreview({ controller }: { controller: WorkbenchController }) {
   const result = controller.latestSkillResult;
+  const resultText = latestRunResultText(controller);
   if (!result && !controller.pendingGeneratedSave) {
     return null;
   }
   return (
     <article className="xw-feature-card result">
       <strong>运行结果</strong>
-      <span>{controller.pendingGeneratedSave ? describePendingGeneratedTarget(controller.pendingGeneratedSave) : result?.saved_path || "未写入文件"}</span>
-      {controller.pendingGeneratedSave && describeGeneratedSaveReason(controller.pendingGeneratedSave) && (
-        <small>{describeGeneratedSaveReason(controller.pendingGeneratedSave)}</small>
-      )}
-      <p>{controller.pendingGeneratedSave?.content || result?.result || result?.content || "暂无文本结果"}</p>
+      <p>{resultText || "暂无文本结果"}</p>
       {controller.pendingGeneratedSave && (
         <div className="xw-feature-actions">
           <button className="xw-secondary-button compact" onClick={() => controller.savePendingGenerated("append")} disabled={controller.operationsBusy}>追加保存</button>
@@ -2945,6 +2990,23 @@ function ResultPreview({ controller }: { controller: WorkbenchController }) {
       )}
     </article>
   );
+}
+
+function RailResultPreview({ controller }: { controller: WorkbenchController }) {
+  const resultText = latestRunResultText(controller);
+  if (!resultText) {
+    return null;
+  }
+  return (
+    <article className="xw-rail-result" aria-live="polite">
+      <strong>运行结果</strong>
+      <p>{resultText}</p>
+    </article>
+  );
+}
+
+function latestRunResultText(controller: WorkbenchController): string {
+  return String(controller.pendingGeneratedSave?.content || controller.latestSkillResult?.result || controller.latestSkillResult?.content || "").trim();
 }
 
 function GuardBanner({
@@ -3277,6 +3339,7 @@ function AssistantRail({
             </button>
           </div>
           {(controller.conversationMessage || controller.documentMessage) && <p className="xw-status-line">{controller.conversationMessage || controller.documentMessage}</p>}
+          <RailResultPreview controller={controller} />
         </section>
       ) : mode === "crawl" ? (
         <CrawlRailPanel
@@ -3316,16 +3379,6 @@ function CrawlRailPanel({
 }) {
   const progress = Math.max(0, Math.min(100, Math.round((job?.progress || 0) * 100)));
   const resultPaths = job?.status === "done" ? extractPathsFromUnknownResult(job.result) : [];
-  const errorText =
-    job?.error ||
-    (!job && controller.operationsMessage ? controller.operationsMessage : "") ||
-    (controller.operationsMessage.includes("小说拆书素材获取失败") ? controller.operationsMessage : "");
-  const errorSummary = errorText.split(/\nError:/)[0]?.trim() || "";
-  const errorReasons = errorSummary
-    .replace(/^小说拆书素材获取失败[:：]\s*/, "")
-    .split("；")
-    .map((item) => item.trim())
-    .filter(Boolean);
   const isLive = job?.status === "queued" || job?.status === "running";
 
   return (
@@ -3358,23 +3411,8 @@ function CrawlRailPanel({
           <div className="xw-crawl-progress-track" aria-hidden="true">
             <span style={{ width: `${job ? Math.max(progress, isLive ? 6 : 0) : 0}%` }} />
           </div>
-          <p>{job ? `任务 ID：${job.id}` : "在中间拆书页输入书名或目录 URL 后点击“联网爬取”。"}</p>
+          <p>{job ? (job.status === "done" ? `已写入 ${resultPaths.length} 个结果` : crawlJobStatusLabel(job.status)) : "在中间拆书页输入书名或目录 URL 后点击“联网爬取”。"}</p>
         </div>
-
-        {errorSummary && (
-          <div className="xw-crawl-error-card">
-            <strong>失败原因</strong>
-            {errorReasons.length > 1 ? (
-              <ul>
-                {errorReasons.map((reason) => (
-                  <li key={reason}>{reason}</li>
-                ))}
-              </ul>
-            ) : (
-              <p>{errorSummary}</p>
-            )}
-          </div>
-        )}
 
         {resultPaths.length > 0 && (
           <div className="xw-crawl-result-card">
