@@ -160,6 +160,22 @@ describe("conversation-service", () => {
     expect(await fs.readFile(originalTxtPath, "utf8")).toBe("测试文本内容");
     expect(await fs.readFile(textTxtPath, "utf8")).toBe("测试文本内容");
 
+    const longText = `第一章\n${"甲".repeat(70000)}`;
+    const longAttachment = await conversations.addAttachment(
+      detail.id,
+      "long.txt",
+      "text/plain",
+      Buffer.from(longText, "utf8")
+    );
+    const defaultText = await conversations.getAttachmentTexts(detail.id, [longAttachment.id]);
+    expect(defaultText[0]?.[1].length).toBeLessThan(3000);
+    const importedText = await conversations.getAttachmentTexts(detail.id, [longAttachment.id], {
+      limit: 60000,
+      preserveWhitespace: true
+    });
+    expect(importedText[0]?.[1]).toHaveLength(60000);
+    expect(importedText[0]?.[1]).toContain("第一章\n");
+
     // 2. Docx attachment (mocked in-memory zip)
     const mockZip = new AdmZip();
     mockZip.addFile(
@@ -182,8 +198,8 @@ describe("conversation-service", () => {
 
     // 3. Delete attachment
     const updated = await conversations.deleteAttachment(detail.id, txtAttachment.id);
-    expect(updated.attachments).toHaveLength(1);
-    expect(updated.attachment_count).toBe(1);
+    expect(updated.attachments).toHaveLength(2);
+    expect(updated.attachment_count).toBe(2);
 
     // Verify physical files are unlinked
     await expect(fs.access(originalTxtPath)).rejects.toThrow();
@@ -229,4 +245,3 @@ describe("conversation-service", () => {
     expect(reloaded.summary).toBe("这是一条 AI 摘要");
   });
 });
-

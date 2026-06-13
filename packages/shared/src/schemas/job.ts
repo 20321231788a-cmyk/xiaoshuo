@@ -22,10 +22,10 @@ export const novelCrawlRequestSchema = z
     query: z.string().default(""),
     source: z.string().default("auto"),
     start_chapter: z.number().int().min(1).default(1),
-    max_chapters: z.number().int().min(1).default(10)
+    max_chapters: z.number().int().min(1).default(30),
+    min_chars: z.number().int().min(0).default(60000)
   })
   .passthrough();
 
 export type NovelCrawlRequest = z.infer<typeof novelCrawlRequestSchema>;
-
 

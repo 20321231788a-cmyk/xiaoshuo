@@ -499,6 +499,47 @@ version: 0.1.9
 path: ArcWriter-Setup-0.1.9.exe
 ```
 
+### 15.3 2026-06-13 v0.2.0 发布记录
+
+本次发布版本：`0.2.0`。版本号已同步到 `apps/desktop-shell/package.json`、`package-lock.json`、Workbench 页面标题、桌面 smoke 页面标题和 `APP_WINDOW_TITLE`。
+
+主要改动：
+
+- 联网拆书爬虫支持直接解析 `.txt` / 纯文本小说链接，按章节标题切分原文；书名爬取时 Bing 查询同时覆盖“txt 全本”“txt 下载”“目录”候选。
+- 新增拆书爬取 `min_chars` 参数，默认 `60000`。爬虫会在基础章节数之外继续抓取，直到达到 6 万字；如果来源全文不足 6 万字，则导入已能抓取的全部内容。
+- 上传拆书 txt 原文时不再只读取附件摘要。拆书归档和 Nuwa 蒸馏读取附件会保留原文换行，最多取 6 万字，不足 6 万字完整导入。
+- 拆书库按文件夹状态显示入口：已完成拆书的文件夹显示“融梗”，只有 `原文.txt` 的原文文件夹显示“蒸馏”。原文文件夹不再进入融梗选择。
+- `book_fusion` 后端增加保护，只允许包含拆书产物的文件夹参与融梗，直接传入原文文件夹会被拒绝。
+- 会话服务列表排序增加同毫秒 ID 兜底，避免 Windows 文件 mtime 相同导致列表和测试顺序抖动。
+
+本轮已验证：
+
+```powershell
+npm test -- packages/crawler-service/src/crawler.test.ts
+npm test -- packages/conversation-service/src/service.test.ts
+npm test -- packages/agent-runtime/src/runtime.test.ts
+npm run typecheck --workspaces --if-present
+npm run build:workbench
+npm run build:desktop
+npm run smoke:desktop
+npm run dist -w @xiaoshuo/desktop-shell
+```
+
+本地打包产物检查通过：
+
+```text
+apps/desktop-shell/release/ArcWriter-Setup-0.2.0.exe
+apps/desktop-shell/release/ArcWriter-Setup-0.2.0.exe.blockmap
+apps/desktop-shell/release/latest.yml
+```
+
+`latest.yml` 当前记录：
+
+```yaml
+version: 0.2.0
+path: ArcWriter-Setup-0.2.0.exe
+```
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

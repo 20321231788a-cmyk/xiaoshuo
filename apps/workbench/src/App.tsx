@@ -63,7 +63,7 @@ const TerminalView = lazy(() => import("./views/TerminalView.js").then((module) 
 
 const runtime = readWorkbenchRuntime();
 const DEFAULT_RIGHT_WIDTH = 440;
-const APP_WINDOW_TITLE = "ArcWriter 0.1.9";
+const APP_WINDOW_TITLE = "ArcWriter 0.2.0";
 const WEBSITE_HOME_URL = "https://matian.online/";
 const WEBSITE_REGISTER_URL = "https://matian.online/?page=api-relay&auth=register";
 const CUSTOM_CRAWL_SOURCE_STORAGE_KEY = "arcwriter.customCrawlSourceUrl";
@@ -140,6 +140,20 @@ function disassemblyBookPrimaryPath(book: DisassemblyBookSummary | null): string
     return "";
   }
   return book.paths.source || book.paths.detail_outline || book.paths.reverse_outline || book.paths.lore || "";
+}
+
+function disassemblyBookReadyForFusion(book: DisassemblyBookSummary | null): boolean {
+  if (!book || book.legacy) {
+    return false;
+  }
+  return Boolean(book.paths.lore || book.paths.reverse_outline || book.paths.detail_outline);
+}
+
+function disassemblyBookIsRawSource(book: DisassemblyBookSummary | null): boolean {
+  if (!book || book.legacy) {
+    return false;
+  }
+  return Boolean(book.paths.source) && !disassemblyBookReadyForFusion(book);
 }
 
 export function App() {
@@ -234,13 +248,14 @@ export function App() {
   useEffect(() => {
     const books = controller.disassemblyBooks.filter((book) => !book.legacy);
     const ids = new Set(books.map((book) => book.id));
+    const fusionIds = new Set(books.filter(disassemblyBookReadyForFusion).map((book) => book.id));
     setSelectedDisassemblyBookId((current) => {
       if (!books.length) {
         return "";
       }
       return current && ids.has(current) ? current : books[0]?.id || "";
     });
-    setFusionBookIds((current) => current.filter((id) => ids.has(id)));
+    setFusionBookIds((current) => current.filter((id) => fusionIds.has(id)));
   }, [controller.disassemblyBooks]);
 
   function toggleFusionBook(bookId: string) {
@@ -627,12 +642,27 @@ function DisassemblyLibraryTree({
   const books = controller.disassemblyBooks.filter((book) => !book.legacy);
   const legacyBooks = controller.disassemblyBooks.filter((book) => book.legacy);
   const selectedBook = books.find((book) => book.id === disassemblyUi.selectedBookId) || null;
+  const fusionBooks = books.filter(disassemblyBookReadyForFusion);
+  const rawBooks = books.filter(disassemblyBookIsRawSource);
+
+  function runTreeDistillation(book: DisassemblyBookSummary) {
+    if (controller.styleDistillationProfile && !window.confirm("当前项目已有蒸馏文风档案，确认替换为当前原文吗？")) {
+      return;
+    }
+    void controller.runNuwaStyleDistillation({
+      replace: Boolean(controller.styleDistillationProfile),
+      sourceBookId: book.id,
+      sourcePath: disassemblyBookPrimaryPath(book),
+      bookTitle: book.title,
+      text: ""
+    });
+  }
 
   return (
     <div className="xw-disassembly-tree">
       <div className="xw-card-head">
         <span>拆书库</span>
-        <small>{books.length} 本可选</small>
+        <small>{fusionBooks.length} 拆书 / {rawBooks.length} 原文</small>
         <button className="xw-tree-refresh" onClick={() => void controller.refreshDisassemblyLibrary()} disabled={controller.disassemblyLibraryBusy}>
           <RefreshCw size={12} className={controller.disassemblyLibraryBusy ? "spin" : ""} />
         </button>
@@ -642,23 +672,30 @@ function DisassemblyLibraryTree({
           books.map((book) => {
             const active = book.id === selectedBook?.id;
             const fused = disassemblyUi.fusionBookIds.includes(book.id);
-            const primaryPath = disassemblyBookPrimaryPath(book);
+            const readyForFusion = disassemblyBookReadyForFusion(book);
+            const rawSource = disassemblyBookIsRawSource(book);
             return (
               <article key={book.id} className={`xw-disassembly-tree-item ${active ? "active" : ""}`}>
                 <button className="xw-disassembly-tree-main" onClick={() => disassemblyUi.onSelectBook(book.id)} type="button">
                   <div>
                     <strong>{book.title}</strong>
-                    <span>{book.source_summary || book.origin || "拆书库书籍"}</span>
+                    <span>{book.source_summary || (readyForFusion ? "已拆书文件夹" : rawSource ? "原文文件夹" : book.origin || "拆书库书籍")}</span>
                   </div>
-                  <small>{active ? "当前源书" : `${book.chars} 字`}</small>
+                  <small>{active ? "当前源书" : readyForFusion ? "已拆书" : `${book.chars} 字`}</small>
                 </button>
                 <div className="xw-disassembly-tree-actions">
-                  <button className={`xw-secondary-button compact ${fused ? "active" : ""}`} onClick={() => disassemblyUi.onToggleFusionBook(book.id)} type="button">
-                    {fused ? "已融" : "融梗"}
-                  </button>
-                  {primaryPath && (
-                    <button className="xw-secondary-button compact" onClick={() => void onOpenDocument(primaryPath)} type="button">
-                      原文
+                  {readyForFusion ? (
+                    <button className={`xw-secondary-button compact ${fused ? "active" : ""}`} onClick={() => disassemblyUi.onToggleFusionBook(book.id)} type="button">
+                      {fused ? "已融" : "融梗"}
+                    </button>
+                  ) : rawSource ? (
+                    <button className="xw-secondary-button compact" onClick={() => runTreeDistillation(book)} type="button" disabled={controller.operationsBusy}>
+                      蒸馏
+                    </button>
+                  ) : null}
+                  {disassemblyBookPrimaryPath(book) && (
+                    <button className="xw-secondary-button compact icon-only" onClick={() => void onOpenDocument(disassemblyBookPrimaryPath(book))} type="button" title="打开源文件">
+                      <FileText size={13} />
                     </button>
                   )}
                 </div>
@@ -1306,7 +1343,8 @@ function DisassembleFeaturePage({ controller, disassemblyUi }: { controller: Wor
   const [savedCustomCrawlSource, setSavedCustomCrawlSource] = useState(() => readStoredCustomCrawlSource());
   const [crawlSourceMessage, setCrawlSourceMessage] = useState("");
   const [crawlStartChapter, setCrawlStartChapter] = useState(1);
-  const [crawlMaxChapters, setCrawlMaxChapters] = useState(10);
+  const [crawlMaxChapters, setCrawlMaxChapters] = useState(30);
+  const [crawlMinChars, setCrawlMinChars] = useState(60000);
   const [instruction, setInstruction] = useState("");
   const [fusionEnabled, setFusionEnabled] = useState(true);
   const [fusionPrompt, setFusionPrompt] = useState("请抽象融合所选拆书的核心设定、剧情骨架、人物驱动力与题材氛围，输出一个去同质化、可继续展开的原创候选方案。禁止复写原文句式、专有名词、可识别桥段和固定角色关系。");
@@ -1316,9 +1354,10 @@ function DisassembleFeaturePage({ controller, disassemblyUi }: { controller: Wor
   const activeDocument = controller.openDocuments.find((document) => document.path === controller.activeDocumentPath) || null;
   const allBooks = controller.disassemblyBooks;
   const books = allBooks.filter((book) => !book.legacy);
+  const fusionBooks = books.filter(disassemblyBookReadyForFusion);
   const selectedBook = books.find((book) => book.id === disassemblyUi.selectedBookId) || null;
   const selectedBookSourcePath = disassemblyBookPrimaryPath(selectedBook);
-  const selectedFusionBooks = books.filter((book) => disassemblyUi.fusionBookIds.includes(book.id));
+  const selectedFusionBooks = fusionBooks.filter((book) => disassemblyUi.fusionBookIds.includes(book.id));
   const genreCards = controller.snapshot?.projectChrome.libraries.filter((card) => card.group === "题材库") || [];
   const genreReady = genreCards.some((card) => card.exists);
   const distillationSourceTitle = selectedBook?.title || activeDocument?.title || "未选择源书";
@@ -1400,7 +1439,8 @@ function DisassembleFeaturePage({ controller, disassemblyUi }: { controller: Wor
       source: crawlSource,
       custom_source_url: savedCustomCrawlSource,
       start_chapter: crawlStartChapter,
-      max_chapters: crawlMaxChapters
+      max_chapters: crawlMaxChapters,
+      min_chars: crawlMinChars
     }, { activateTab: false });
   }
 
@@ -1470,8 +1510,9 @@ function DisassembleFeaturePage({ controller, disassemblyUi }: { controller: Wor
         </div>
 
         <div className="xw-operation-grid disassemble-meta">
-          <label><span>起始章节</span><input type="number" min={1} value={crawlStartChapter} onChange={(event) => setCrawlStartChapter(Number(event.target.value))} /></label>
-          <label><span>爬取章数</span><input type="number" min={1} max={200} value={crawlMaxChapters} onChange={(event) => setCrawlMaxChapters(Number(event.target.value))} /></label>
+          <label><span>起始章节</span><input type="number" min={1} value={crawlStartChapter} onChange={(event) => setCrawlStartChapter(Math.max(1, Number(event.target.value) || 1))} /></label>
+          <label><span>基础章数</span><input type="number" min={1} max={200} value={crawlMaxChapters} onChange={(event) => setCrawlMaxChapters(Math.max(1, Number(event.target.value) || 1))} /></label>
+          <label><span>最少字数</span><input type="number" min={0} step={1000} value={crawlMinChars} onChange={(event) => setCrawlMinChars(Math.max(0, Number(event.target.value) || 0))} /></label>
           <label><span>当前文档</span><input value={activeDocument?.title || "未打开文档"} readOnly /></label>
           <label><span>当前源书</span><input value={selectedBook?.title || "尚未选择拆书库书籍"} readOnly /></label>
         </div>
@@ -1565,7 +1606,7 @@ function DisassembleFeaturePage({ controller, disassemblyUi }: { controller: Wor
                   <button key={book.id} className="xw-disassembly-chip active" type="button" onClick={() => disassemblyUi.onToggleFusionBook(book.id)}>
                     {book.title}
                   </button>
-                )) : <span className="xw-feature-empty">先在左侧勾选至少 3 本书。</span>}
+                )) : <span className="xw-feature-empty">先在左侧勾选至少 3 个已拆书文件夹。</span>}
               </div>
             </div>
 

@@ -1519,6 +1519,54 @@ describe("agent-runtime chat flow", () => {
     ).rejects.toThrow("融梗至少需要选择三本已拆书籍");
   });
 
+  it("rejects raw source folders for book fusion until disassembly outputs exist", async () => {
+    const ids: string[] = [];
+    for (const index of [1, 2, 3]) {
+      const id = `原文${index}-2026060912100${index}-raw1234${index}`;
+      ids.push(id);
+      const bookDir = path.join(tempDir, "00_设定集", "拆书库", id);
+      await fs.mkdir(bookDir, { recursive: true });
+      await fs.writeFile(path.join(bookDir, "原文.txt"), `原文${index}`, "utf8");
+      await fs.writeFile(
+        path.join(bookDir, "manifest.jsonl"),
+        JSON.stringify({
+          id,
+          title: `原文${index}`,
+          dir: `00_设定集/拆书库/${id}`,
+          created_at: "2026-06-09T12:10:00.000Z",
+          updated_at: "2026-06-09T12:10:00.000Z",
+          origin: "upload",
+          source_path: "",
+          source_summary: `原文${index}`,
+          chars: 3,
+          paths: {
+            source: `00_设定集/拆书库/${id}/原文.txt`
+          }
+        }) + "\n",
+        "utf8"
+      );
+    }
+
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: { requestCompletion: async () => "unused" }
+    });
+
+    await expect(
+      runtime.runAgent({
+        conversation_id: "",
+        content: "融梗",
+        current_path: "",
+        selection: "",
+        project_context_hint: "",
+        skill_id: "book_fusion",
+        attachment_ids: [],
+        source_book_ids: ids
+      } as any)
+    ).rejects.toThrow("融梗只能选择已经完成拆书的文件夹");
+  });
+
   it("writes fusion candidates into the fusion library when three books are selected", async () => {
     for (const index of [1, 2, 3]) {
       const bookDir = path.join(tempDir, "00_设定集", "拆书库", `书${index}-2026060912000${index}-abcd123${index}`);

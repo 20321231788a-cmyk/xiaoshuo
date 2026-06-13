@@ -177,7 +177,8 @@ describe("NovelCrawlerService", () => {
         query: "https://www.zxtyz.com/book/123/",
         source: "custom",
         start_chapter: 1,
-        max_chapters: 2
+        max_chapters: 2,
+        min_chars: 0
       };
 
       const novel = await crawler.crawl(req);
@@ -186,6 +187,66 @@ describe("NovelCrawlerService", () => {
       expect(novel.chapters.length).toBe(2);
       expect(novel.chapters[0]?.title).toBe("第一章：飞仙");
       expect(novel.chapters[0]?.content).toBe("第一章内容。");
+
+      vi.unstubAllGlobals();
+    });
+
+    it("imports plain txt files and keeps crawling until the minimum character target", async () => {
+      const txt = [
+        "第一章 风起",
+        "甲".repeat(24),
+        "第二章 雨落",
+        "乙".repeat(24),
+        "第三章 收束",
+        "丙".repeat(24)
+      ].join("\n");
+
+      vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+        if (url === "https://example.com/book.txt") {
+          return new Response(txt, {
+            status: 200,
+            headers: { "Content-Type": "text/plain; charset=utf-8" }
+          });
+        }
+        return new Response("", { status: 404 });
+      }));
+
+      const novel = await crawler.crawl({
+        query: "https://example.com/book.txt",
+        source: "custom",
+        start_chapter: 1,
+        max_chapters: 1,
+        min_chars: 40
+      } as NovelCrawlRequest);
+
+      expect(novel.source).toBe("自定义来源");
+      expect(novel.chapters.map((chapter) => chapter.title)).toEqual(["第一章 风起", "第二章 雨落"]);
+      expect(novel.toText()).toContain("乙".repeat(24));
+      expect(novel.toText()).not.toContain("丙".repeat(24));
+
+      vi.unstubAllGlobals();
+    });
+
+    it("imports all available txt content when the novel is shorter than the minimum target", async () => {
+      const txt = [
+        "第一章 短篇",
+        "甲".repeat(12),
+        "第二章 终章",
+        "乙".repeat(12)
+      ].join("\n");
+
+      vi.stubGlobal("fetch", vi.fn(async () => new Response(txt, { status: 200 })));
+
+      const novel = await crawler.crawl({
+        query: "https://example.com/short.txt",
+        source: "custom",
+        start_chapter: 1,
+        max_chapters: 1,
+        min_chars: 1000
+      } as NovelCrawlRequest);
+
+      expect(novel.chapters).toHaveLength(2);
+      expect(novel.toText()).toContain("乙".repeat(12));
 
       vi.unstubAllGlobals();
     });
@@ -215,7 +276,8 @@ describe("NovelCrawlerService", () => {
         query: "https://m.shuhaige.net/335652/",
         source: "auto",
         start_chapter: 1,
-        max_chapters: 2
+        max_chapters: 2,
+        min_chars: 0
       });
 
       expect(novel.source).toBe("书海阁");
@@ -249,7 +311,8 @@ describe("NovelCrawlerService", () => {
         query: "https://www.novel543.com/1206606479/",
         source: "auto",
         start_chapter: 1,
-        max_chapters: 1
+        max_chapters: 1,
+        min_chars: 0
       });
 
       expect(fetchMock).toHaveBeenCalledWith("https://www.novel543.com/1206606479/dir", expect.any(Object));
@@ -282,7 +345,8 @@ describe("NovelCrawlerService", () => {
         query: "示例书",
         source: "bing",
         start_chapter: 1,
-        max_chapters: 1
+        max_chapters: 1,
+        min_chars: 0
       });
 
       expect(resolver).toHaveBeenCalledWith("示例书", { source: "bing" });
@@ -299,7 +363,8 @@ describe("NovelCrawlerService", () => {
           query: "不存在的书",
           source: "bing",
           start_chapter: 1,
-          max_chapters: 1
+          max_chapters: 1,
+          min_chars: 0
         })
       ).rejects.toThrow("Bing 未定位到可用目录 URL");
     });

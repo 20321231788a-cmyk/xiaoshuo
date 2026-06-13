@@ -67,7 +67,7 @@ export class ConversationService {
     );
 
     const details: ConversationDetail[] = [];
-    for (const entry of jsonEntries.sort((left, right) => right.mtimeMs - left.mtimeMs)) {
+    for (const entry of jsonEntries.sort((left, right) => right.mtimeMs - left.mtimeMs || right.id.localeCompare(left.id))) {
       try {
         details.push(await this.getConversation(entry.id));
       } catch (error) {
@@ -255,7 +255,11 @@ export class ConversationService {
     return this.saveDetail(detail);
   }
 
-  async getAttachmentTexts(conversationId: string, attachmentIds?: string[]): Promise<[ConversationAttachment, string][]> {
+  async getAttachmentTexts(
+    conversationId: string,
+    attachmentIds?: string[],
+    options: { limit?: number; preserveWhitespace?: boolean } = {}
+  ): Promise<[ConversationAttachment, string][]> {
     const detail = await this.loadDetail(conversationId);
     const selected = new Set(attachmentIds || []);
     const outputs: [ConversationAttachment, string][] = [];
@@ -264,18 +268,22 @@ export class ConversationService {
       if (selected.size && !selected.has(attachment.id)) {
         continue;
       }
-      const text = await this.readAttachmentText(attachment);
+      const text = await this.readAttachmentText(attachment, options);
       outputs.push([attachment, text]);
     }
     return outputs;
   }
 
-  private async readAttachmentText(attachment: ConversationAttachment): Promise<string> {
+  private async readAttachmentText(
+    attachment: ConversationAttachment,
+    options: { limit?: number; preserveWhitespace?: boolean } = {}
+  ): Promise<string> {
     const root = await this.agentRoot();
     const fullPath = path.join(root, attachment.text_relative_path);
+    const limit = options.limit ?? 2400;
     try {
       const text = await fs.readFile(fullPath, "utf8");
-      return excerpt(text, 2400);
+      return options.preserveWhitespace ? clipText(text, limit) : excerpt(text, limit);
     } catch {
       return attachment.excerpt;
     }
@@ -486,6 +494,14 @@ function summarizeDeterministic(detail: ConversationDetail): string {
 function excerpt(text: string, limit: number): string {
   const normalized = (text || "").trim().replace(/\s+/g, " ");
   return normalized.length <= limit ? normalized : `${normalized.slice(0, limit)}...`;
+}
+
+function clipText(text: string, limit: number): string {
+  const normalized = text || "";
+  if (typeof limit !== "number" || limit < 0 || normalized.length <= limit) {
+    return normalized;
+  }
+  return normalized.slice(0, limit);
 }
 
 function formatNow(date: Date): string {

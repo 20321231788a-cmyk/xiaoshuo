@@ -106,6 +106,7 @@ export async function handleJobRoutes(
         const manifestPath = `${bookDir}/manifest.jsonl`;
         const targetPath = `00_设定集/拆书素材/${safeCrawlFilename(novel.title || crawlRequest.query)}.txt`;
         const sourceText = novel.toText();
+        const sourceChars = sourceText.replace(/\s+/g, "").length;
         await documents.saveDocument(sourcePath, sourceText, {
           source: "crawler",
           summary: "联网爬取拆书原文"
@@ -118,7 +119,7 @@ export async function handleJobRoutes(
           updated_at: new Date().toISOString(),
           origin: "crawl",
           source_path: crawlRequest.query || "",
-          source_summary: novel.chapters.length ? `共 ${novel.chapters.length} 章` : "",
+          source_summary: novel.chapters.length ? `共 ${novel.chapters.length} 章，约 ${sourceChars} 字` : "",
           chars: sourceText.length,
           paths: {
             source: sourcePath
@@ -138,6 +139,7 @@ export async function handleJobRoutes(
           path: sourcePath,
           title: novel.title,
           chapters: novel.chapters.length,
+          chars: sourceChars,
           source_url: novel.source_url,
           book_id: bookId,
           book_dir: bookDir
@@ -187,15 +189,26 @@ function createNovelSourceResolver(
     const providerLabel = "Bing";
     const collected: NovelSourceResolverResult[] = [];
 
+    const searchQueries = [
+      `${query} 小说 txt 全本`,
+      `${query} 小说 txt 下载`,
+      `${query} 小说 目录`
+    ];
+
     progress(0.04, `${providerLabel} 定位目录`);
-    const results = await searchClient.search(`${query} 小说 目录`, searchConfig);
-    for (const result of results) {
-      const normalized = normalizeNovelDirectoryUrl(result.url);
-      collected.push({
-        title: result.title || query,
-        url: normalized?.url || result.url,
-        source: normalized?.source || context.source || "bing"
-      });
+    for (const searchQuery of searchQueries) {
+      const results = await searchClient.search(searchQuery, searchConfig);
+      for (const result of results) {
+        const normalized = normalizeNovelDirectoryUrl(result.url);
+        collected.push({
+          title: result.title || query,
+          url: normalized?.url || result.url,
+          source: normalized?.source || context.source || "bing"
+        });
+        if (collected.length >= searchConfig.max_results) {
+          break;
+        }
+      }
       if (collected.length >= searchConfig.max_results) {
         break;
       }

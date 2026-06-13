@@ -2962,6 +2962,16 @@ body[data-theme="dark"] {
   align-self: start;
 }
 
+.xw-disassembly-tree-actions .xw-secondary-button.compact {
+  min-width: 58px;
+}
+
+.xw-disassembly-tree-actions .xw-secondary-button.compact.icon-only {
+  min-width: 30px;
+  width: 30px;
+  padding: 0;
+}
+
 .xw-disassembly-tree-legacy {
   display: grid;
   gap: 7px;

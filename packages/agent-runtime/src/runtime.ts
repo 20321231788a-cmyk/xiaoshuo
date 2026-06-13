@@ -51,6 +51,7 @@ const LEGACY_DISASSEMBLE_LORE_PATH = "00_设定集/设定集/拆书设定提取.
 const LEGACY_REVERSE_OUTLINE_PATH = "01_大纲/反向细纲.txt";
 const LEGACY_DISASSEMBLE_DETAIL_PATH = "01_大纲/拆书细纲.txt";
 const BOOK_MANIFEST_PATH = "manifest.jsonl";
+const DISASSEMBLE_SOURCE_IMPORT_CHARS = 60_000;
 const TARGET_WORD_SKILL_IDS = new Set([
   "body_generate",
   "batch_generate",
@@ -1510,7 +1511,7 @@ export class AgentRuntimeService {
     const outputMode = String((request as any).output_mode || "candidate").trim();
     const books = await this.loadBooksForFusion(sourceBookIds);
     if (books.length < 3) {
-      throw new Error("所选拆书书籍不足三本，无法融梗");
+      throw new Error("融梗只能选择已经完成拆书的文件夹，且至少需要三本");
     }
 
     const continuity = await buildProjectContinuityContext(this.documents.projectRoot);
@@ -1782,6 +1783,9 @@ export class AgentRuntimeService {
       if (!book) {
         continue;
       }
+      if (!this.isDisassembleBookReadyForFusion(book)) {
+        continue;
+      }
       selected.push({
         ...book,
         lore: await this.readDisassembleBookText(book, "lore", 24_000),
@@ -1790,6 +1794,10 @@ export class AgentRuntimeService {
       });
     }
     return selected;
+  }
+
+  private isDisassembleBookReadyForFusion(book: DisassembleBookManifest & { legacy?: boolean }): boolean {
+    return Boolean(book.paths.lore || book.paths.reverse_outline || book.paths.detail_outline);
   }
 
   private async readDisassembleBookText(
@@ -1858,7 +1866,10 @@ export class AgentRuntimeService {
     }
 
     if (payload.conversation_id && (payload.attachment_ids || []).length) {
-      const attachments = await this.conversations.getAttachmentTexts(payload.conversation_id, payload.attachment_ids);
+      const attachments = await this.conversations.getAttachmentTexts(payload.conversation_id, payload.attachment_ids, {
+        limit: DISASSEMBLE_SOURCE_IMPORT_CHARS,
+        preserveWhitespace: true
+      });
       const parts = attachments
         .map(([attachment, body]) => {
           const content = String(body || "").trim();
@@ -1879,7 +1890,7 @@ export class AgentRuntimeService {
     const sourcePath = String(payload.source_path || "").trim();
     if (sourcePath) {
       try {
-        const text = (await this.documents.readRawText(sourcePath, 60_000)).trim();
+        const text = (await this.documents.readRawText(sourcePath, DISASSEMBLE_SOURCE_IMPORT_CHARS)).trim();
         if (text) {
           return {
             text,
@@ -2338,7 +2349,10 @@ export class AgentRuntimeService {
       return direct;
     }
     if (request.conversation_id && (request.attachment_ids || []).length) {
-      const attachments = await this.conversations.getAttachmentTexts(request.conversation_id, request.attachment_ids);
+      const attachments = await this.conversations.getAttachmentTexts(request.conversation_id, request.attachment_ids, {
+        limit: DISASSEMBLE_SOURCE_IMPORT_CHARS,
+        preserveWhitespace: true
+      });
       const text = attachments
         .map(([attachment, body]) => {
           const content = String(body || "").trim();
@@ -2354,7 +2368,7 @@ export class AgentRuntimeService {
     const sourcePath = this.resolveSkillSourcePath("lore_extract", request);
     if (sourcePath) {
       try {
-        return (await this.documents.readRawText(sourcePath, 24_000)).trim();
+        return (await this.documents.readRawText(sourcePath, DISASSEMBLE_SOURCE_IMPORT_CHARS)).trim();
       } catch {
         return "";
       }

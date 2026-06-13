@@ -105,6 +105,7 @@ const SOURCES: Record<string, SourceConfig> = {
 
 const SEARCH_SOURCE = "bing";
 const CUSTOM_SOURCE = "custom";
+const DEFAULT_MIN_IMPORT_CHARS = 60_000;
 
 export function normalizeNovelDirectoryUrl(rawUrl: string, sourceHint = ""): NovelSourceResolverResult | null {
   try {
@@ -245,25 +246,35 @@ export class NovelCrawlerService {
       ? await this.getGenericChapters(result.url, source)
       : await this.getChapters(source, result.url);
     if (!chapters.length) {
+      const textNovel = await this.crawlTextDocument(result, query, request, progress);
+      if (textNovel) {
+        return textNovel;
+      }
       throw new Error("目录页未解析到章节");
     }
 
     const start = Math.max(0, request.start_chapter - 1);
-    const selected = chapters.slice(start, start + request.max_chapters);
-    if (!selected.length) {
+    const available = chapters.slice(start);
+    if (!available.length) {
       throw new Error("章节范围为空");
     }
 
     const crawled: CrawledChapter[] = [];
-    const total = selected.length;
+    const minChapterCount = Math.min(available.length, Math.max(1, Number(request.max_chapters || 1)));
+    const minChars = this.resolveMinImportChars(request);
+    let crawledChars = 0;
 
-    for (let index = 0; index < total; index++) {
-      const chapter = selected[index]!;
-      progress?.(0.16 + (index / Math.max(total, 1)) * 0.52, `获取第 ${request.start_chapter + index} 章`);
+    for (let index = 0; index < available.length; index++) {
+      if (crawled.length >= minChapterCount && (!minChars || crawledChars >= minChars)) {
+        break;
+      }
+      const chapter = available[index]!;
+      progress?.(0.16 + (index / Math.max(available.length, 1)) * 0.52, `获取第 ${request.start_chapter + index} 章`);
       try {
         const content = await this.getChapterContent(source, chapter.url);
         if (content.trim()) {
           crawled.push(new CrawledChapter(chapter.title, chapter.url, content));
+          crawledChars += this.countContentChars(content);
         }
       } catch (error) {
         // continue even if one chapter fails
@@ -279,6 +290,50 @@ export class NovelCrawlerService {
       this.sourceDisplayName(source),
       result.url,
       crawled
+    );
+  }
+
+  private async crawlTextDocument(
+    result: NovelSearchResult,
+    query: string,
+    request: NovelCrawlRequest,
+    progress?: (value: number, message: string) => void
+  ): Promise<CrawledNovel | null> {
+    if (!this.looksLikeTextDocumentUrl(result.url)) {
+      return null;
+    }
+
+    progress?.(0.14, "读取 txt 原文");
+    const raw = await this.getText(result.url);
+    if (/<(?:html|body|script|a)\b/i.test(raw.slice(0, 4000))) {
+      return null;
+    }
+    const text = this.cleanPlainTextNovel(raw);
+    if (!text) {
+      return null;
+    }
+    const chapters = this.splitPlainTextNovel(text, result.url);
+    const start = Math.max(0, request.start_chapter - 1);
+    const available = chapters.slice(start);
+    if (!available.length) {
+      return null;
+    }
+    const minChapterCount = Math.min(available.length, Math.max(1, Number(request.max_chapters || 1)));
+    const minChars = this.resolveMinImportChars(request);
+    const selected: CrawledChapter[] = [];
+    let chars = 0;
+    for (const chapter of available) {
+      if (selected.length >= minChapterCount && (!minChars || chars >= minChars)) {
+        break;
+      }
+      selected.push(chapter);
+      chars += this.countContentChars(chapter.content);
+    }
+    return new CrawledNovel(
+      result.title || query || this.titleFromUrl(result.url),
+      this.sourceDisplayName(result.source),
+      result.url,
+      selected
     );
   }
 
@@ -615,6 +670,65 @@ export class NovelCrawlerService {
     return compact.replace(/\n{3,}/g, "\n\n").trim();
   }
 
+  private cleanPlainTextNovel(text: string): string {
+    const lines: string[] = [];
+    const blocked = /(本书来自|下载地址|手机阅读|请收藏|最新网址|加入书签|返回目录|上一章|下一章|广告|www\.|http:\/\/|https:\/\/)/i;
+    for (const raw of String(text || "").replace(/^\uFEFF/, "").split(/\r?\n/)) {
+      const line = raw
+        .replace(/\u3000/g, " ")
+        .replace(/[ \t]+/g, " ")
+        .trim();
+      if (!line || blocked.test(line)) {
+        continue;
+      }
+      lines.push(line);
+    }
+    return lines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+  }
+
+  private splitPlainTextNovel(text: string, sourceUrl: string): CrawledChapter[] {
+    const headingRegex = /^第\s*[0-9０-９一二三四五六七八九十百千万零〇两壹贰叁肆伍陆柒捌玖拾佰仟]+\s*[章节回卷部集][^\n]{0,80}$/;
+    const chapters: CrawledChapter[] = [];
+    let currentTitle = "全文";
+    let currentLines: string[] = [];
+
+    const flush = () => {
+      const content = currentLines.join("\n").replace(/\n{3,}/g, "\n\n").trim();
+      if (content) {
+        chapters.push(new CrawledChapter(currentTitle, sourceUrl, content));
+      }
+    };
+
+    for (const line of text.split(/\r?\n/)) {
+      const trimmed = line.trim();
+      if (headingRegex.test(trimmed)) {
+        flush();
+        currentTitle = trimmed;
+        currentLines = [];
+        continue;
+      }
+      currentLines.push(line);
+    }
+    flush();
+
+    if (chapters.length) {
+      return chapters;
+    }
+    return [new CrawledChapter("全文", sourceUrl, text)];
+  }
+
+  private resolveMinImportChars(request: NovelCrawlRequest): number {
+    const value = Number((request as { min_chars?: unknown }).min_chars ?? DEFAULT_MIN_IMPORT_CHARS);
+    if (!Number.isFinite(value) || value <= 0) {
+      return 0;
+    }
+    return Math.trunc(value);
+  }
+
+  private countContentChars(text: string): number {
+    return String(text || "").replace(/\s+/g, "").length;
+  }
+
   private cleanInline(text: string): string {
     return (text || "")
       .replace(/\u3000/g, " ")
@@ -634,6 +748,16 @@ export class NovelCrawlerService {
 
   private isUrl(value: string): boolean {
     return value.startsWith("http://") || value.startsWith("https://");
+  }
+
+  private looksLikeTextDocumentUrl(url: string): boolean {
+    try {
+      const parsed = new URL(url);
+      const target = `${parsed.pathname}${parsed.search}`.toLowerCase();
+      return /\.(txt|text)(?:$|[?#&=])/.test(target) || /(?:^|[/?=&_-])txt(?:$|[/?=&_-])/.test(target);
+    } catch {
+      return /\.(txt|text)(?:$|[?#&=])/i.test(url);
+    }
   }
 
   private titleFromUrl(url: string): string {
