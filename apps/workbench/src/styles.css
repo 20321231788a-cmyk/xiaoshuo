@@ -2541,21 +2541,6 @@ body {
   overflow: hidden;
 }
 
-body[data-theme="dark"] {
-  --xw-bg: #0f1722;
-  --xw-panel: rgba(17, 29, 42, 0.92);
-  --xw-panel-strong: rgba(20, 34, 49, 0.96);
-  --xw-panel-soft: rgba(24, 39, 56, 0.9);
-  --xw-line: rgba(124, 165, 208, 0.26);
-  --xw-line-strong: rgba(144, 184, 222, 0.4);
-  --xw-text: #edf5fc;
-  --xw-muted: #9eb6cc;
-  --xw-primary: #4897f6;
-  --xw-primary-strong: #2e7ddb;
-  --xw-danger-soft: rgba(94, 51, 69, 0.72);
-  background: linear-gradient(135deg, #0f1722, #142235);
-}
-
 .xw-shell,
 .xw-shell.shell {
   width: 100vw;
@@ -3305,6 +3290,84 @@ body[data-theme="dark"] {
   gap: 12px;
   overflow: auto;
   padding: 2px;
+}
+
+.xw-disassemble-accordion {
+  display: grid;
+  gap: 10px;
+}
+
+.xw-disassemble-strip {
+  display: grid;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid var(--xw-line);
+  border-radius: 14px;
+  background: rgba(250, 253, 255, 0.86);
+}
+
+.xw-disassemble-strip.open {
+  background: rgba(250, 253, 255, 0.94);
+}
+
+.xw-disassemble-strip-head {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  width: 100%;
+  min-height: 56px;
+  padding: 12px 14px;
+  border: 0;
+  background: transparent;
+  color: var(--xw-text);
+  text-align: left;
+}
+
+.xw-disassemble-strip-head:hover,
+.xw-disassemble-strip-head:focus-visible {
+  background: rgba(230, 241, 251, 0.7);
+}
+
+.xw-disassemble-strip-head > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.xw-disassemble-strip-head strong {
+  font-size: 16px;
+}
+
+.xw-disassemble-strip-head span {
+  color: var(--xw-muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.xw-disassemble-strip-head small {
+  color: var(--xw-primary);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.xw-disassemble-strip-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  background: #e6f1fb;
+  color: var(--xw-primary);
+}
+
+.xw-disassemble-strip-body {
+  display: grid;
+  gap: 10px;
+  padding: 0 14px 14px;
 }
 
 .xw-disassemble-grid {
@@ -5609,6 +5672,15 @@ select:focus-visible {
 
   .xw-disassemble-grid {
     grid-template-columns: 1fr;
+  }
+
+  .xw-disassemble-strip-head {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .xw-disassemble-strip-head .fusion-switch {
+    grid-column: 2 / 4;
+    justify-self: start;
   }
 
   .xw-disassembly-book-list {

@@ -540,6 +540,44 @@ version: 0.2.0
 path: ArcWriter-Setup-0.2.0.exe
 ```
 
+### 15.4 2026-06-14 v0.2.1 发布记录
+
+本次发布版本：`0.2.1`。版本号已同步到 `apps/desktop-shell/package.json`、`package-lock.json`、Workbench 页面标题、桌面 smoke 页面标题和 `APP_WINDOW_TITLE`。
+
+主要改动：
+
+- 左侧项目卡片去掉应用内深色模式入口和“退出软件”按钮，改为“导出项目”和“导入项目”。菜单栏退出仍保留。
+- 桌面壳新增项目完整 ZIP 导入导出：导出当前项目为 `.arcwriter.zip`，保留 `.agent`、设定、正文、拆书库等项目数据，排除 `.git`、`node_modules`、临时文件和日志。
+- 导入项目归档时先选择 zip，再选择目标文件夹；重名目录自动追加时间戳，不覆盖已有项目；zip 条目会做安全路径校验，阻止路径穿越。
+- Workbench 项目导入成功后复用现有打开项目流程，刷新项目树、索引状态、会话和任务，并记录最近项目。
+- 中间“拆书”页的“拆书 / 蒸馏 / 融梗”改为三个默认收起的横条折叠卡片，点击标题条展开对应功能，减少页面首屏拥挤。
+
+本轮已验证：
+
+```powershell
+npm test -- apps/desktop-shell/src/main/project-archive.test.ts
+npm run typecheck --workspaces --if-present
+npm run build:workbench
+npm run build:desktop
+npm run smoke:desktop
+npm run dist -w @xiaoshuo/desktop-shell
+```
+
+本地打包产物检查通过：
+
+```text
+apps/desktop-shell/release/ArcWriter-Setup-0.2.1.exe
+apps/desktop-shell/release/ArcWriter-Setup-0.2.1.exe.blockmap
+apps/desktop-shell/release/latest.yml
+```
+
+`latest.yml` 当前记录：
+
+```yaml
+version: 0.2.1
+path: ArcWriter-Setup-0.2.1.exe
+```
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

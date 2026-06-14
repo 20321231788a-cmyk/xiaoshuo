@@ -32,7 +32,6 @@ import {
   Link,
   MessageSquarePlus,
   MessageSquareText,
-  Moon,
   Pin,
   RefreshCw,
   Save,
@@ -41,6 +40,7 @@ import {
   Settings,
   Shield,
   ShieldCheck,
+  SlidersHorizontal,
   Sparkles,
   Square,
   Trash2,
@@ -63,7 +63,7 @@ const TerminalView = lazy(() => import("./views/TerminalView.js").then((module) 
 
 const runtime = readWorkbenchRuntime();
 const DEFAULT_RIGHT_WIDTH = 440;
-const APP_WINDOW_TITLE = "ArcWriter 0.2.0";
+const APP_WINDOW_TITLE = "ArcWriter 0.2.1";
 const WEBSITE_HOME_URL = "https://matian.online/";
 const WEBSITE_REGISTER_URL = "https://matian.online/?page=api-relay&auth=register";
 const CUSTOM_CRAWL_SOURCE_STORAGE_KEY = "arcwriter.customCrawlSourceUrl";
@@ -160,7 +160,6 @@ export function App() {
   const controller = useWorkbenchController(runtime);
   const [rightMode, setRightMode] = useState<RailMode>("ai");
   const [centerFeature, setCenterFeature] = useState<CenterFeature>("editor");
-  const [darkMode, setDarkMode] = useState(false);
   const [rightWidth, setRightWidth] = useState(DEFAULT_RIGHT_WIDTH);
   const [selectedDisassemblyBookId, setSelectedDisassemblyBookId] = useState("");
   const [fusionBookIds, setFusionBookIds] = useState<string[]>([]);
@@ -171,10 +170,6 @@ export function App() {
   useEffect(() => {
     document.title = APP_WINDOW_TITLE;
   }, []);
-
-  useEffect(() => {
-    document.body.dataset.theme = darkMode ? "dark" : "light";
-  }, [darkMode]);
 
   useEffect(() => {
     const unsubscribeTutorial = window.xiaoshuoDesktop?.onOpenTutorial?.(() => setTutorialOpen(true));
@@ -300,8 +295,6 @@ export function App() {
         <ProjectSidebar
           controller={controller}
           disassemblyUi={disassemblyUi}
-          darkMode={darkMode}
-          onToggleDarkMode={() => setDarkMode((value) => !value)}
           onOpenDocument={async (path) => {
             const opened = await controller.openDocument(path);
             if (opened) {
@@ -426,15 +419,11 @@ function RightRailSplitter({ onDrag, onReset }: { onDrag: (clientX: number) => v
 function ProjectSidebar({
   controller,
   disassemblyUi,
-  darkMode,
-  onToggleDarkMode,
   onOpenDocument,
   onOpenTimeline
 }: {
   controller: WorkbenchController;
   disassemblyUi: DisassemblyUiState;
-  darkMode: boolean;
-  onToggleDarkMode: () => void;
   onOpenDocument: (path: string) => void | Promise<void>;
   onOpenTimeline: () => void;
 }) {
@@ -555,13 +544,13 @@ function ProjectSidebar({
             <RefreshCw size={15} className={controller.projectBusy ? "spin" : ""} />
             <span>刷新项目</span>
           </button>
-          <button className="xw-secondary-button" onClick={onToggleDarkMode}>
-            <Moon size={15} />
-            <span>{darkMode ? "浅色模式" : "深色模式"}</span>
+          <button className="xw-secondary-button" onClick={() => void controller.exportCurrentProject()} disabled={controller.projectBusy || !project?.path}>
+            <Download size={15} />
+            <span>导出项目</span>
           </button>
-          <button className="xw-danger-button" onClick={() => window.close()}>
-            <X size={15} />
-            <span>退出软件</span>
+          <button className="xw-secondary-button" onClick={() => void controller.importProjectArchive()} disabled={controller.projectBusy}>
+            <ArchiveRestore size={15} />
+            <span>导入项目</span>
           </button>
         </div>
       </section>
@@ -1350,6 +1339,11 @@ function DisassembleFeaturePage({ controller, disassemblyUi }: { controller: Wor
   const [fusionPrompt, setFusionPrompt] = useState("请抽象融合所选拆书的核心设定、剧情骨架、人物驱动力与题材氛围，输出一个去同质化、可继续展开的原创候选方案。禁止复写原文句式、专有名词、可识别桥段和固定角色关系。");
   const [fusionGenreHint, setFusionGenreHint] = useState("");
   const [fusionOutputMode, setFusionOutputMode] = useState<"candidate" | "outline" | "setting">("candidate");
+  const [expandedPanels, setExpandedPanels] = useState<Record<"disassemble" | "distill" | "fusion", boolean>>({
+    disassemble: false,
+    distill: false,
+    fusion: false
+  });
   const distillation = controller.styleDistillationProfile;
   const activeDocument = controller.openDocuments.find((document) => document.path === controller.activeDocumentPath) || null;
   const allBooks = controller.disassemblyBooks;
@@ -1461,174 +1455,210 @@ function DisassembleFeaturePage({ controller, disassemblyUi }: { controller: Wor
   }
 
   const canRunNovelCrawl = Boolean(crawlQuery.trim() || (crawlSource === "custom" && savedCustomCrawlSource));
+  const togglePanel = (panel: "disassemble" | "distill" | "fusion") => {
+    setExpandedPanels((current) => ({ ...current, [panel]: !current[panel] }));
+  };
 
   return (
     <section className="xw-feature-page">
-      <div className="xw-operation-form">
-        <div className="xw-feature-toolbar disassemble-source">
-          <div className="xw-crawl-source-input">
-            <input value={crawlQuery} onChange={(event) => setCrawlQuery(event.target.value)} placeholder={crawlSource === "custom" && savedCustomCrawlSource ? savedCustomCrawlSource : "输入书名或目录 URL"} />
-            <div className="xw-crawl-source-tools">
-              <button
-                type="button"
-                className={`xw-source-toggle ${crawlSource === "custom" ? "active" : ""}`}
-                onClick={() => setCrawlSource((value) => (value === "bing" ? "custom" : "bing"))}
-              >
-                {crawlSource === "custom" ? <Link size={14} /> : <ScanSearch size={14} />}
-                <span>{crawlSource === "custom" ? "自定义来源" : "自动来源：Bing"}</span>
-              </button>
-              <button type="button" className="xw-secondary-button compact" onClick={saveCustomCrawlSource} disabled={!crawlQuery.trim()}>
-                <Save size={14} />
-                <span>保存来源</span>
-              </button>
-              {crawlSourceMessage && <small>{crawlSourceMessage}</small>}
-            </div>
-          </div>
-          <button
-            className="xw-primary-button compact"
-            onClick={runNovelCrawl}
-            disabled={controller.operationsBusy || !canRunNovelCrawl}
-          >
-            {controller.operationsBusy ? "启动中" : "联网爬取"}
-          </button>
-          <label className="xw-upload-button compact">
-            上传拆书
-            <input
-              type="file"
-              accept=".txt,.md,.markdown,.json,.csv,.doc,.docx,.pdf"
-              onChange={(event) => {
-                const file = event.target.files?.[0] || null;
-                event.currentTarget.value = "";
-                void archiveUploadedBook(file);
-              }}
-            />
-          </label>
-          <button className="xw-secondary-button compact" onClick={() => void controller.refreshDisassemblyLibrary()} disabled={controller.disassemblyLibraryBusy}>
-            <RefreshCw size={14} className={controller.disassemblyLibraryBusy ? "spin" : ""} />
-            <span>刷新书库</span>
-          </button>
-        </div>
-
-        <div className="xw-operation-grid disassemble-meta">
-          <label><span>起始章节</span><input type="number" min={1} value={crawlStartChapter} onChange={(event) => setCrawlStartChapter(Math.max(1, Number(event.target.value) || 1))} /></label>
-          <label><span>基础章数</span><input type="number" min={1} max={200} value={crawlMaxChapters} onChange={(event) => setCrawlMaxChapters(Math.max(1, Number(event.target.value) || 1))} /></label>
-          <label><span>最少字数</span><input type="number" min={0} step={1000} value={crawlMinChars} onChange={(event) => setCrawlMinChars(Math.max(0, Number(event.target.value) || 0))} /></label>
-          <label><span>当前文档</span><input value={activeDocument?.title || "未打开文档"} readOnly /></label>
-          <label><span>当前源书</span><input value={selectedBook?.title || "尚未选择拆书库书籍"} readOnly /></label>
-        </div>
-
-        <textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} placeholder="拆书要求，例如重点提取叙事节奏、人物关系、反转与伏笔。" />
-
-        <div className="xw-operation-actions">
-          <button className="xw-primary-button" onClick={runDisassemble} disabled={controller.operationsBusy}>一键拆书</button>
-          <button className="xw-secondary-button" onClick={runContinueDisassemble} disabled={controller.operationsBusy}>继续拆细纲</button>
-        </div>
-      </div>
-
-      <div className="xw-disassemble-grid">
-        <section className="xw-distill-panel">
-          <div className="xw-settings-header compact">
+      <div className="xw-disassemble-accordion">
+        <section className={`xw-disassemble-strip ${expandedPanels.disassemble ? "open" : ""}`}>
+          <div className="xw-disassemble-strip-head" role="button" tabIndex={0} onClick={() => togglePanel("disassemble")} onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              togglePanel("disassemble");
+            }
+          }} aria-expanded={expandedPanels.disassemble}>
+            <span className="xw-disassemble-strip-icon"><BookOpen size={16} /></span>
             <div>
-              <strong>蒸馏</strong>
-              <span>蒸馏一本小说的写作风格、描写模式、角色塑造、对白习惯和叙事节奏。</span>
+              <strong>拆书</strong>
+              <span>联网爬取、上传原文，或按当前文档生成拆书结果。</span>
             </div>
-            <span className={distillation?.enabled ? "xw-status-ready" : "xw-status-warn"}>{distillation?.enabled ? "文风使用中" : "未启用"}</span>
+            <small>{expandedPanels.disassemble ? "收起" : "展开"}</small>
           </div>
-
-          <div className="xw-disassemble-panel-body">
-            <div className="xw-disassembly-note">
-              <strong>{distillationSourceTitle}</strong>
-              <span>{selectedBook ? selectedBook.source_summary || selectedBookSourcePath || "左侧拆书库当前源书" : activeDocument ? "将使用当前打开文档蒸馏" : "请先在左侧拆书库选择一本书，或打开一个文档。"}</span>
-            </div>
-
-            <div className="xw-operation-grid two">
-              <label><span>蒸馏来源</span><input value={selectedBook ? "拆书库书籍" : activeDocument ? "当前文档" : "未选择"} readOnly /></label>
-              <label><span>来源路径</span><input value={distillationSourcePath || "无可读取路径"} readOnly /></label>
-            </div>
-
-            {distillation ? (
-              <article className="xw-distill-profile">
-                <div className="xw-feature-card-head">
-                  <strong>当前档案：{distillation.book_title || "未命名书籍"}</strong>
-                  <span>{distillation.distilled_at || "未记录时间"}</span>
+          {expandedPanels.disassemble && (
+            <div className="xw-disassemble-strip-body">
+              <div className="xw-feature-toolbar disassemble-source">
+                <div className="xw-crawl-source-input">
+                  <input value={crawlQuery} onChange={(event) => setCrawlQuery(event.target.value)} placeholder={crawlSource === "custom" && savedCustomCrawlSource ? savedCustomCrawlSource : "输入书名或目录 URL"} />
+                  <div className="xw-crawl-source-tools">
+                    <button
+                      type="button"
+                      className={`xw-source-toggle ${crawlSource === "custom" ? "active" : ""}`}
+                      onClick={() => setCrawlSource((value) => (value === "bing" ? "custom" : "bing"))}
+                    >
+                      {crawlSource === "custom" ? <Link size={14} /> : <ScanSearch size={14} />}
+                      <span>{crawlSource === "custom" ? "自定义来源" : "自动来源：Bing"}</span>
+                    </button>
+                    <button type="button" className="xw-secondary-button compact" onClick={saveCustomCrawlSource} disabled={!crawlQuery.trim()}>
+                      <Save size={14} />
+                      <span>保存来源</span>
+                    </button>
+                    {crawlSourceMessage && <small>{crawlSourceMessage}</small>}
+                  </div>
                 </div>
-                <p>{distillation.source_summary || distillation.source_path || "已保存项目级文风档案。"}</p>
-                {profilePreview && <pre>{profilePreview}</pre>}
-              </article>
-            ) : (
-              <p className="xw-feature-empty">当前项目尚未蒸馏书籍。一个项目只保留一本蒸馏文风档案。</p>
-            )}
+                <button
+                  className="xw-primary-button compact"
+                  onClick={runNovelCrawl}
+                  disabled={controller.operationsBusy || !canRunNovelCrawl}
+                >
+                  {controller.operationsBusy ? "启动中" : "联网爬取"}
+                </button>
+                <label className="xw-upload-button compact">
+                  上传拆书
+                  <input
+                    type="file"
+                    accept=".txt,.md,.markdown,.json,.csv,.doc,.docx,.pdf"
+                    onChange={(event) => {
+                      const file = event.target.files?.[0] || null;
+                      event.currentTarget.value = "";
+                      void archiveUploadedBook(file);
+                    }}
+                  />
+                </label>
+                <button className="xw-secondary-button compact" onClick={() => void controller.refreshDisassemblyLibrary()} disabled={controller.disassemblyLibraryBusy}>
+                  <RefreshCw size={14} className={controller.disassemblyLibraryBusy ? "spin" : ""} />
+                  <span>刷新书库</span>
+                </button>
+              </div>
 
-            <div className="xw-operation-actions">
-              <button className="xw-primary-button" onClick={runDistillation} disabled={controller.operationsBusy || !hasDistillationSource}>
-                {distillation ? "替换蒸馏" : "开始蒸馏"}
-              </button>
-              <button className="xw-secondary-button" onClick={() => void controller.toggleNuwaStyleDistillation()} disabled={controller.operationsBusy || !distillation}>
-                {distillation?.enabled ? "停用文风" : "启用文风"}
-              </button>
-              <button className="xw-danger-button" onClick={() => void controller.deleteNuwaStyleDistillation()} disabled={controller.operationsBusy || !distillation}>
-                删除档案
-              </button>
+              <div className="xw-operation-grid disassemble-meta">
+                <label><span>起始章节</span><input type="number" min={1} value={crawlStartChapter} onChange={(event) => setCrawlStartChapter(Math.max(1, Number(event.target.value) || 1))} /></label>
+                <label><span>基础章数</span><input type="number" min={1} max={200} value={crawlMaxChapters} onChange={(event) => setCrawlMaxChapters(Math.max(1, Number(event.target.value) || 1))} /></label>
+                <label><span>最少字数</span><input type="number" min={0} step={1000} value={crawlMinChars} onChange={(event) => setCrawlMinChars(Math.max(0, Number(event.target.value) || 0))} /></label>
+                <label><span>当前文档</span><input value={activeDocument?.title || "未打开文档"} readOnly /></label>
+                <label><span>当前源书</span><input value={selectedBook?.title || "尚未选择拆书库书籍"} readOnly /></label>
+              </div>
+
+              <textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} placeholder="拆书要求，例如重点提取叙事节奏、人物关系、反转与伏笔。" />
+
+              <div className="xw-operation-actions">
+                <button className="xw-primary-button" onClick={runDisassemble} disabled={controller.operationsBusy}>一键拆书</button>
+                <button className="xw-secondary-button" onClick={runContinueDisassemble} disabled={controller.operationsBusy}>继续拆细纲</button>
+              </div>
             </div>
-          </div>
+          )}
         </section>
 
-        <section className="xw-fusion-panel">
-          <div className="xw-settings-header compact">
+        <section className={`xw-disassemble-strip ${expandedPanels.distill ? "open" : ""}`}>
+          <div className="xw-disassemble-strip-head" role="button" tabIndex={0} onClick={() => togglePanel("distill")} onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              togglePanel("distill");
+            }
+          }} aria-expanded={expandedPanels.distill}>
+            <span className="xw-disassemble-strip-icon"><Wand2 size={16} /></span>
+            <div>
+              <strong>蒸馏</strong>
+              <span>提取一本小说的写作风格、描写模式、对白习惯和叙事节奏。</span>
+            </div>
+            <span className={distillation?.enabled ? "xw-status-ready" : "xw-status-warn"}>{distillation?.enabled ? "文风使用中" : "未启用"}</span>
+            <small>{expandedPanels.distill ? "收起" : "展开"}</small>
+          </div>
+          {expandedPanels.distill && (
+            <div className="xw-disassemble-strip-body">
+              <div className="xw-disassembly-note">
+                <strong>{distillationSourceTitle}</strong>
+                <span>{selectedBook ? selectedBook.source_summary || selectedBookSourcePath || "左侧拆书库当前源书" : activeDocument ? "将使用当前打开文档蒸馏" : "请先在左侧拆书库选择一本书，或打开一个文档。"}</span>
+              </div>
+
+              <div className="xw-operation-grid two">
+                <label><span>蒸馏来源</span><input value={selectedBook ? "拆书库书籍" : activeDocument ? "当前文档" : "未选择"} readOnly /></label>
+                <label><span>来源路径</span><input value={distillationSourcePath || "无可读取路径"} readOnly /></label>
+              </div>
+
+              {distillation ? (
+                <article className="xw-distill-profile">
+                  <div className="xw-feature-card-head">
+                    <strong>当前档案：{distillation.book_title || "未命名书籍"}</strong>
+                    <span>{distillation.distilled_at || "未记录时间"}</span>
+                  </div>
+                  <p>{distillation.source_summary || distillation.source_path || "已保存项目级文风档案。"}</p>
+                  {profilePreview && <pre>{profilePreview}</pre>}
+                </article>
+              ) : (
+                <p className="xw-feature-empty">当前项目尚未蒸馏书籍。一个项目只保留一本蒸馏文风档案。</p>
+              )}
+
+              <div className="xw-operation-actions">
+                <button className="xw-primary-button" onClick={runDistillation} disabled={controller.operationsBusy || !hasDistillationSource}>
+                  {distillation ? "替换蒸馏" : "开始蒸馏"}
+                </button>
+                <button className="xw-secondary-button" onClick={() => void controller.toggleNuwaStyleDistillation()} disabled={controller.operationsBusy || !distillation}>
+                  {distillation?.enabled ? "停用文风" : "启用文风"}
+                </button>
+                <button className="xw-danger-button" onClick={() => void controller.deleteNuwaStyleDistillation()} disabled={controller.operationsBusy || !distillation}>
+                  删除档案
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+
+        <section className={`xw-disassemble-strip ${expandedPanels.fusion ? "open" : ""}`}>
+          <div className="xw-disassemble-strip-head" role="button" tabIndex={0} onClick={() => togglePanel("fusion")} onKeyDown={(event) => {
+            if (event.key === "Enter" || event.key === " ") {
+              event.preventDefault();
+              togglePanel("fusion");
+            }
+          }} aria-expanded={expandedPanels.fusion}>
+            <span className="xw-disassemble-strip-icon"><SlidersHorizontal size={16} /></span>
             <div>
               <strong>融梗</strong>
               <span>至少选择 3 本已拆书籍，再把题材库和自定义提示词一起压进去。</span>
             </div>
-            <label className="xw-check-row fusion-switch">
+            <label className="xw-check-row fusion-switch" onClick={(event) => event.stopPropagation()}>
               <input type="checkbox" checked={fusionEnabled} onChange={() => setFusionEnabled((value) => !value)} />
               <span>开启</span>
             </label>
+            <small>{expandedPanels.fusion ? "收起" : "展开"}</small>
           </div>
+          {expandedPanels.fusion && (
+            <div className="xw-disassemble-strip-body">
+              <div className="xw-operation-grid two">
+                <label><span>输出模式</span>
+                  <select value={fusionOutputMode} onChange={(event) => setFusionOutputMode(event.target.value as typeof fusionOutputMode)} disabled={!fusionEnabled}>
+                    <option value="candidate">候选方案</option>
+                    <option value="outline">大纲候选</option>
+                    <option value="setting">设定候选</option>
+                  </select>
+                </label>
+                <label><span>题材补充</span><input value={fusionGenreHint} onChange={(event) => setFusionGenreHint(event.target.value)} placeholder="可补充当前题材、禁区或风格方向" disabled={!fusionEnabled} /></label>
+              </div>
 
-          <div className="xw-disassemble-panel-body">
-            <div className="xw-operation-grid two">
-              <label><span>输出模式</span>
-                <select value={fusionOutputMode} onChange={(event) => setFusionOutputMode(event.target.value as typeof fusionOutputMode)} disabled={!fusionEnabled}>
-                  <option value="candidate">候选方案</option>
-                  <option value="outline">大纲候选</option>
-                  <option value="setting">设定候选</option>
-                </select>
-              </label>
-              <label><span>题材补充</span><input value={fusionGenreHint} onChange={(event) => setFusionGenreHint(event.target.value)} placeholder="可补充当前题材、禁区或风格方向" disabled={!fusionEnabled} /></label>
-            </div>
+              <textarea value={fusionPrompt} onChange={(event) => setFusionPrompt(event.target.value)} placeholder="可编辑融梗提示词，系统会自动加入当前题材库。" disabled={!fusionEnabled} />
 
-            <textarea value={fusionPrompt} onChange={(event) => setFusionPrompt(event.target.value)} placeholder="可编辑融梗提示词，系统会自动加入当前题材库。" disabled={!fusionEnabled} />
+              <div className="xw-disassembly-selection">
+                <span>已选 {selectedFusionBooks.length} / 3+</span>
+                <div className="xw-disassembly-chip-row">
+                  {selectedFusionBooks.length ? selectedFusionBooks.map((book) => (
+                    <button key={book.id} className="xw-disassembly-chip active" type="button" onClick={() => disassemblyUi.onToggleFusionBook(book.id)}>
+                      {book.title}
+                    </button>
+                  )) : <span className="xw-feature-empty">先在左侧勾选至少 3 个已拆书文件夹。</span>}
+                </div>
+              </div>
 
-            <div className="xw-disassembly-selection">
-              <span>已选 {selectedFusionBooks.length} / 3+</span>
-              <div className="xw-disassembly-chip-row">
-                {selectedFusionBooks.length ? selectedFusionBooks.map((book) => (
-                  <button key={book.id} className="xw-disassembly-chip active" type="button" onClick={() => disassemblyUi.onToggleFusionBook(book.id)}>
-                    {book.title}
-                  </button>
-                )) : <span className="xw-feature-empty">先在左侧勾选至少 3 个已拆书文件夹。</span>}
+              <div className="xw-operation-actions">
+                <button
+                  className="xw-primary-button"
+                  onClick={runFusion}
+                  disabled={!fusionEnabled || selectedFusionBooks.length < 3 || controller.operationsBusy}
+                >
+                  融梗
+                </button>
+                <button className="xw-secondary-button" onClick={() => void controller.refreshDisassemblyLibrary()} disabled={controller.disassemblyLibraryBusy}>
+                  <RefreshCw size={14} className={controller.disassemblyLibraryBusy ? "spin" : ""} />
+                  <span>重载书库</span>
+                </button>
+              </div>
+
+              <div className="xw-disassembly-note">
+                <strong>{selectedBook ? selectedBook.title : activeDocument?.title || "当前文档"}</strong>
+                <span>{selectedBook ? selectedBook.source_summary || selectedBook.source_path || "这本书会作为当前拆书源。" : "未选中拆书库书籍时，按当前打开文档继续。"}</span>
               </div>
             </div>
-
-            <div className="xw-operation-actions">
-              <button
-                className="xw-primary-button"
-                onClick={runFusion}
-                disabled={!fusionEnabled || selectedFusionBooks.length < 3 || controller.operationsBusy}
-              >
-                融梗
-              </button>
-              <button className="xw-secondary-button" onClick={() => void controller.refreshDisassemblyLibrary()} disabled={controller.disassemblyLibraryBusy}>
-                <RefreshCw size={14} className={controller.disassemblyLibraryBusy ? "spin" : ""} />
-                <span>重载书库</span>
-              </button>
-            </div>
-
-            <div className="xw-disassembly-note">
-              <strong>{selectedBook ? selectedBook.title : activeDocument?.title || "当前文档"}</strong>
-              <span>{selectedBook ? selectedBook.source_summary || selectedBook.source_path || "这本书会作为当前拆书源。" : "未选中拆书库书籍时，按当前打开文档继续。"}</span>
-            </div>
-          </div>
+          )}
         </section>
       </div>
 

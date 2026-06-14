@@ -10,6 +10,8 @@ export const ipcChannels = {
   appRequestFind: "app:request-find",
   shellCapabilities: "shell:capabilities",
   shellPickProjectDirectory: "shell:pick-project-directory",
+  shellExportProject: "shell:export-project",
+  shellImportProject: "shell:import-project",
   localStateGet: "local-state:get",
   localStateRecordProject: "local-state:record-project",
   localStateSyncProject: "local-state:sync-project",
@@ -77,6 +79,18 @@ export const desktopShellCapabilitiesSchema = z.object({
 export const desktopProjectPickerResponseSchema = z
   .object({
     path: z.string().default("")
+  })
+  .passthrough();
+
+export const desktopProjectExportRequestSchema = z.object({
+  project_path: z.string().min(1),
+  project_name: z.string().default("")
+});
+
+export const desktopProjectArchiveResponseSchema = z
+  .object({
+    path: z.string().default(""),
+    canceled: z.boolean().default(false)
   })
   .passthrough();
 
@@ -220,6 +234,8 @@ export type IpcChannel = (typeof ipcChannels)[keyof typeof ipcChannels];
 export type BackendStatus = z.infer<typeof backendStatusSchema>;
 export type DesktopShellCapabilities = z.infer<typeof desktopShellCapabilitiesSchema>;
 export type DesktopProjectPickerResponse = z.infer<typeof desktopProjectPickerResponseSchema>;
+export type DesktopProjectExportRequest = z.input<typeof desktopProjectExportRequestSchema>;
+export type DesktopProjectArchiveResponse = z.infer<typeof desktopProjectArchiveResponseSchema>;
 export type DesktopVersions = z.infer<typeof desktopVersionsSchema>;
 export type DesktopWorkbenchSettings = z.infer<typeof desktopWorkbenchSettingsSchema>;
 export type LocalStateSnapshot = z.infer<typeof localStateSnapshotSchema>;
@@ -247,6 +263,8 @@ export type XiaoShuoDesktopApi = {
   onRequestFind: (callback: () => void) => () => void;
   capabilities: () => Promise<DesktopShellCapabilities>;
   pickProjectDirectory: () => Promise<DesktopProjectPickerResponse>;
+  exportProject: (request: DesktopProjectExportRequest) => Promise<DesktopProjectArchiveResponse>;
+  importProject: () => Promise<DesktopProjectArchiveResponse>;
   localState: {
     get: () => Promise<LocalStateSnapshot>;
     recordProject: (request: LocalStateRecordProjectRequest) => Promise<LocalStateSnapshot>;

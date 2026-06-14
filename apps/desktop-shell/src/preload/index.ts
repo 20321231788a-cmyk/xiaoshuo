@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
   backendStatusSchema,
+  desktopProjectArchiveResponseSchema,
+  desktopProjectExportRequestSchema,
   desktopShellCapabilitiesSchema,
   desktopProjectPickerResponseSchema,
   desktopVersionsSchema,
@@ -53,6 +55,11 @@ const desktopApi: XiaoShuoDesktopApi = {
   },
   capabilities: async () => desktopShellCapabilitiesSchema.parse(await ipcRenderer.invoke(ipcChannels.shellCapabilities)),
   pickProjectDirectory: async () => desktopProjectPickerResponseSchema.parse(await ipcRenderer.invoke(ipcChannels.shellPickProjectDirectory)),
+  exportProject: async (request) =>
+    desktopProjectArchiveResponseSchema.parse(
+      await ipcRenderer.invoke(ipcChannels.shellExportProject, desktopProjectExportRequestSchema.parse(request))
+    ),
+  importProject: async () => desktopProjectArchiveResponseSchema.parse(await ipcRenderer.invoke(ipcChannels.shellImportProject)),
   localState: {
     get: async () => localStateSnapshotSchema.parse(await ipcRenderer.invoke(ipcChannels.localStateGet)),
     recordProject: async (request) =>

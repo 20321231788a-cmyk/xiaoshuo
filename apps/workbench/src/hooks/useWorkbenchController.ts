@@ -1460,6 +1460,69 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
+  async function exportCurrentProject() {
+    const currentProject = snapshot?.currentProject;
+    if (!runtime.isDesktopShell || !window.xiaoshuoDesktop?.exportProject) {
+      setProjectMessage("项目导出需要桌面版。");
+      return;
+    }
+    if (!currentProject?.path) {
+      setProjectMessage("先打开一个项目，再导出。");
+      return;
+    }
+    if (hasDirtyOpenDocuments()) {
+      setProjectMessage("当前有未保存文档，请先保存后再导出项目。");
+      return;
+    }
+
+    setProjectBusy(true);
+    setProjectMessage("请选择项目归档保存位置。");
+    try {
+      const result = await window.xiaoshuoDesktop.exportProject({
+        project_path: currentProject.path,
+        project_name: currentProject.name
+      });
+      if (result.canceled || !result.path) {
+        setProjectMessage("已取消导出项目。");
+        return;
+      }
+      setProjectMessage(`项目已导出：${result.path}`);
+    } catch (nextError) {
+      setProjectMessage(describeActionableError(nextError, "导出项目失败", "请确认项目目录和保存位置都可以访问。"));
+    } finally {
+      setProjectBusy(false);
+    }
+  }
+
+  async function importProjectArchive() {
+    if (!runtime.isDesktopShell || !window.xiaoshuoDesktop?.importProject) {
+      setProjectMessage("项目导入需要桌面版。");
+      return;
+    }
+
+    let importedPath = "";
+    setProjectBusy(true);
+    setProjectMessage("请选择项目归档和导入位置。");
+    try {
+      const result = await window.xiaoshuoDesktop.importProject();
+      if (result.canceled || !result.path) {
+        setProjectMessage("已取消导入项目。");
+        return;
+      }
+      importedPath = result.path;
+      setProjectPathInput(importedPath);
+      setProjectMessage("项目归档已导入，正在打开...");
+    } catch (nextError) {
+      setProjectMessage(describeActionableError(nextError, "导入项目失败", "请确认 zip 是 ArcWriter 项目归档，目标文件夹允许写入。"));
+    } finally {
+      setProjectBusy(false);
+    }
+
+    if (importedPath) {
+      await openProjectFromInput(importedPath);
+    }
+  }
+
   function cancelProjectSwitch() {
     setPendingProjectSwitchRequest(null);
     setProjectMessage("已保留当前项目和本地草稿，可以继续编辑后再切换。");
@@ -3495,6 +3558,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     openProjectFromInput,
     createProjectFromInput,
     pickAndOpenProject,
+    exportCurrentProject,
+    importProjectArchive,
     renameCurrentProject,
     rebuildVectorIndex,
     processPendingVectorFiles,
