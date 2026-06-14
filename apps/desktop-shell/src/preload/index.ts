@@ -1,6 +1,13 @@
 import { contextBridge, ipcRenderer } from "electron";
 import {
   backendStatusSchema,
+  cloudProjectDeleteRequestSchema,
+  cloudProjectDeleteResponseSchema,
+  cloudProjectDownloadRequestSchema,
+  cloudProjectDownloadResponseSchema,
+  cloudProjectListResponseSchema,
+  cloudProjectUploadRequestSchema,
+  cloudProjectUploadResponseSchema,
   desktopProjectArchiveResponseSchema,
   desktopProjectExportRequestSchema,
   desktopShellCapabilitiesSchema,
@@ -60,6 +67,21 @@ const desktopApi: XiaoShuoDesktopApi = {
       await ipcRenderer.invoke(ipcChannels.shellExportProject, desktopProjectExportRequestSchema.parse(request))
     ),
   importProject: async () => desktopProjectArchiveResponseSchema.parse(await ipcRenderer.invoke(ipcChannels.shellImportProject)),
+  cloudProjects: {
+    list: async () => cloudProjectListResponseSchema.parse(await ipcRenderer.invoke(ipcChannels.shellCloudProjectsList)),
+    upload: async (request) =>
+      cloudProjectUploadResponseSchema.parse(
+        await ipcRenderer.invoke(ipcChannels.shellCloudProjectsUpload, cloudProjectUploadRequestSchema.parse(request))
+      ),
+    downloadToProject: async (request) =>
+      cloudProjectDownloadResponseSchema.parse(
+        await ipcRenderer.invoke(ipcChannels.shellCloudProjectsDownload, cloudProjectDownloadRequestSchema.parse(request))
+      ),
+    delete: async (request) =>
+      cloudProjectDeleteResponseSchema.parse(
+        await ipcRenderer.invoke(ipcChannels.shellCloudProjectsDelete, cloudProjectDeleteRequestSchema.parse(request))
+      )
+  },
   localState: {
     get: async () => localStateSnapshotSchema.parse(await ipcRenderer.invoke(ipcChannels.localStateGet)),
     recordProject: async (request) =>

@@ -5,6 +5,7 @@ import type {
   CardDrawRequest,
   CardDrawResult,
   CardDrawSelectRequest,
+  CloudProjectSlot,
   ConversationDetail,
   ConversationAttachment,
   ConversationMessage,
@@ -329,6 +330,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [websiteAiRechargeBusy, setWebsiteAiRechargeBusy] = useState(false);
   const [websiteAiRechargeMessage, setWebsiteAiRechargeMessage] = useState("");
   const [websiteAiRechargeOrder, setWebsiteAiRechargeOrder] = useState<WebsiteAiRechargeOrder | null>(null);
+  const [cloudProjectSlots, setCloudProjectSlots] = useState<CloudProjectSlot[]>([]);
+  const [cloudProjectBusy, setCloudProjectBusy] = useState(false);
+  const [cloudProjectMessage, setCloudProjectMessage] = useState("");
   const [conversationDetail, setConversationDetail] = useState<ConversationDetail | null>(null);
   const [conversationBusy, setConversationBusy] = useState(false);
   const [conversationMessage, setConversationMessage] = useState("");
@@ -1520,6 +1524,141 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
 
     if (importedPath) {
       await openProjectFromInput(importedPath);
+    }
+  }
+
+  async function refreshCloudProjects(options: { silent?: boolean } = {}) {
+    if (!runtime.isDesktopShell || !window.xiaoshuoDesktop?.cloudProjects) {
+      if (!options.silent) {
+        setCloudProjectMessage("云项目需要桌面版。");
+      }
+      setCloudProjectSlots([]);
+      return [];
+    }
+
+    if (!options.silent) {
+      setCloudProjectBusy(true);
+      setCloudProjectMessage("");
+    }
+    try {
+      const result = await window.xiaoshuoDesktop.cloudProjects.list();
+      setCloudProjectSlots(result.slots);
+      if (!options.silent) {
+        setCloudProjectMessage(result.slots.length ? "云项目已刷新。" : "当前账号还没有云项目。");
+      }
+      return result.slots;
+    } catch (nextError) {
+      if (!options.silent) {
+        setCloudProjectMessage(describeActionableError(nextError, "刷新云项目失败", "请确认已登录网站账号并且网络可用。"));
+      }
+      setCloudProjectSlots([]);
+      return [];
+    } finally {
+      if (!options.silent) {
+        setCloudProjectBusy(false);
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (!snapshot?.currentProject.path) {
+      setCloudProjectSlots([]);
+      return;
+    }
+    void refreshCloudProjects({ silent: true });
+  }, [snapshot?.currentProject.path, runtime.isDesktopShell]);
+
+  async function uploadCurrentProjectToCloud(slotId: number) {
+    const currentProject = snapshot?.currentProject;
+    if (!runtime.isDesktopShell || !window.xiaoshuoDesktop?.cloudProjects) {
+      setCloudProjectMessage("云项目需要桌面版。");
+      return;
+    }
+    if (!currentProject?.path) {
+      setCloudProjectMessage("先打开一个项目，再上传。");
+      return;
+    }
+    if (hasDirtyOpenDocuments()) {
+      setCloudProjectMessage("当前有未保存文档，请先保存后再上传项目。");
+      return;
+    }
+
+    setCloudProjectBusy(true);
+    setCloudProjectMessage(`正在上传到云项目槽位 ${slotId}...`);
+    try {
+      const result = await window.xiaoshuoDesktop.cloudProjects.upload({
+        slot_id: slotId,
+        project_path: currentProject.path,
+        project_name: currentProject.name
+      });
+      await refreshCloudProjects({ silent: true });
+      setCloudProjectMessage(`已上传到槽位 ${result.slot.slot_id}：${result.slot.project_name || currentProject.name}`);
+    } catch (nextError) {
+      setCloudProjectMessage(describeActionableError(nextError, "上传云项目失败", "请确认项目小于 20MB、网站账号已登录且网络可用。"));
+    } finally {
+      setCloudProjectBusy(false);
+    }
+  }
+
+  async function syncCloudProjectToCurrent(slot: CloudProjectSlot) {
+    const currentProject = snapshot?.currentProject;
+    if (!runtime.isDesktopShell || !window.xiaoshuoDesktop?.cloudProjects) {
+      setCloudProjectMessage("云项目需要桌面版。");
+      return;
+    }
+    if (!currentProject?.path) {
+      setCloudProjectMessage("先打开一个本地项目，再同步云项目。");
+      return;
+    }
+    const unsavedState = getUnsavedWorkbenchState();
+    if (unsavedState.hasUnsavedState) {
+      setCloudProjectMessage(`同步前请先处理未保存内容：${unsavedState.summary}。`);
+      return;
+    }
+    if (!window.confirm(`确认用云项目“${slot.project_name || `槽位 ${slot.slot_id}`}”覆盖当前项目吗？软件会先自动备份当前项目。`)) {
+      return;
+    }
+
+    setCloudProjectBusy(true);
+    setCloudProjectMessage("正在备份当前项目并同步云项目...");
+    try {
+      const result = await window.xiaoshuoDesktop.cloudProjects.downloadToProject({
+        id: slot.id,
+        project_path: currentProject.path,
+        project_name: currentProject.name
+      });
+      setOpenDocuments([]);
+      setActiveDocumentPath("");
+      setPendingGeneratedSave(null);
+      await refreshProjectWorkspace();
+      await refreshCloudProjects({ silent: true });
+      setCloudProjectMessage(`云项目已同步到当前项目。备份：${result.backup_path}`);
+    } catch (nextError) {
+      setCloudProjectMessage(describeActionableError(nextError, "同步云项目失败", "已尽量保留同步前备份，请根据提示路径检查。"));
+    } finally {
+      setCloudProjectBusy(false);
+    }
+  }
+
+  async function deleteCloudProject(slot: CloudProjectSlot) {
+    if (!runtime.isDesktopShell || !window.xiaoshuoDesktop?.cloudProjects) {
+      setCloudProjectMessage("云项目需要桌面版。");
+      return;
+    }
+    if (!window.confirm(`确认删除云项目“${slot.project_name || `槽位 ${slot.slot_id}`}”吗？`)) {
+      return;
+    }
+
+    setCloudProjectBusy(true);
+    setCloudProjectMessage("正在删除云项目...");
+    try {
+      await window.xiaoshuoDesktop.cloudProjects.delete({ id: slot.id });
+      await refreshCloudProjects({ silent: true });
+      setCloudProjectMessage("云项目已删除。");
+    } catch (nextError) {
+      setCloudProjectMessage(describeActionableError(nextError, "删除云项目失败", "请稍后重试。"));
+    } finally {
+      setCloudProjectBusy(false);
     }
   }
 
@@ -3579,6 +3718,13 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     websiteAiRechargeBusy,
     websiteAiRechargeMessage,
     websiteAiRechargeOrder,
+    cloudProjectSlots,
+    cloudProjectBusy,
+    cloudProjectMessage,
+    refreshCloudProjects,
+    uploadCurrentProjectToCloud,
+    syncCloudProjectToCurrent,
+    deleteCloudProject,
     loginWebsiteAi,
     refreshWebsiteAiDashboard,
     applyWebsiteAiConfig,

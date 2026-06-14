@@ -4,15 +4,19 @@ import type { AppUpdater } from "electron-updater";
 import type { DesktopUpdateStatus } from "../shared/channels.js";
 
 type UpdateStatusListener = (status: DesktopUpdateStatus) => void;
+type UpdateSource = "github" | "mirror";
+type UpdateApp = Pick<typeof app, "getVersion" | "isPackaged">;
 
 type UpdateServiceOptions = {
   beforeInstall?: () => Promise<void> | void;
+  app?: UpdateApp;
+  autoUpdater?: AppUpdater;
 };
 
 const DEFAULT_UPDATE_OWNER = "20321231788a-cmyk";
 const DEFAULT_UPDATE_REPO = "xiaoshuo";
+const DEFAULT_UPDATE_MIRROR_URL = "https://ai-downloads-1318078295.cos.ap-guangzhou.myqcloud.com/software/novel/";
 const require = createRequire(import.meta.url);
-const { autoUpdater } = require("electron-updater") as { autoUpdater: AppUpdater };
 
 function normalizeReleaseNotes(notes: unknown): string | undefined {
   if (!notes) {
@@ -56,39 +60,58 @@ function resolveUpdateRepository(): { owner: string; repo: string } {
   return { owner: DEFAULT_UPDATE_OWNER, repo: DEFAULT_UPDATE_REPO };
 }
 
+function resolveUpdateMirrorUrl(): string {
+  const explicitMirrorUrl = process.env.XIAOSHUO_UPDATE_MIRROR_URL?.trim();
+  return ensureTrailingSlash(explicitMirrorUrl || DEFAULT_UPDATE_MIRROR_URL);
+}
+
+function ensureTrailingSlash(value: string): string {
+  return value.endsWith("/") ? value : `${value}/`;
+}
+
+function getDefaultAutoUpdater(): AppUpdater {
+  const { autoUpdater } = require("electron-updater") as { autoUpdater: AppUpdater };
+  return autoUpdater;
+}
+
 export class UpdateService {
   private readonly listeners = new Set<UpdateStatusListener>();
   private readonly beforeInstall?: () => Promise<void> | void;
+  private readonly app: UpdateApp;
+  private readonly autoUpdater: AppUpdater;
+  private readonly repository: { owner: string; repo: string };
+  private readonly mirrorUrl: string;
+  private activeSource: UpdateSource = "mirror";
   private status: DesktopUpdateStatus;
   private startupTimer: NodeJS.Timeout | null = null;
 
   constructor(options: UpdateServiceOptions = {}) {
     this.beforeInstall = options.beforeInstall;
-    const repository = resolveUpdateRepository();
-    autoUpdater.autoDownload = false;
-    autoUpdater.autoInstallOnAppQuit = false;
-    autoUpdater.allowPrerelease = false;
-    autoUpdater.setFeedURL({
-      provider: "github",
-      owner: repository.owner,
-      repo: repository.repo,
-      private: false
-    });
+    this.app = options.app || app;
+    this.autoUpdater = options.autoUpdater || getDefaultAutoUpdater();
+    this.repository = resolveUpdateRepository();
+    this.mirrorUrl = resolveUpdateMirrorUrl();
+    this.autoUpdater.autoDownload = false;
+    this.autoUpdater.autoInstallOnAppQuit = false;
+    this.autoUpdater.allowPrerelease = false;
+    this.useUpdateSource("mirror");
 
     this.status = {
       state: "idle",
-      currentVersion: app.getVersion(),
-      isPackaged: app.isPackaged,
-      canCheck: app.isPackaged
+      currentVersion: this.app.getVersion(),
+      updateSource: this.activeSource,
+      isPackaged: this.app.isPackaged,
+      canCheck: this.app.isPackaged
     };
 
-    autoUpdater.on("checking-for-update", () => {
-      this.setStatus({ state: "checking", error: undefined, checkedAt: new Date().toISOString() });
+    this.autoUpdater.on("checking-for-update", () => {
+      this.setStatus({ state: "checking", updateSource: this.activeSource, error: undefined, checkedAt: new Date().toISOString() });
     });
 
-    autoUpdater.on("update-available", (info) => {
+    this.autoUpdater.on("update-available", (info) => {
       this.setStatus({
         state: "available",
+        updateSource: this.activeSource,
         latestVersion: info.version,
         releaseName: info.releaseName || undefined,
         releaseNotes: normalizeReleaseNotes(info.releaseNotes),
@@ -98,9 +121,10 @@ export class UpdateService {
       });
     });
 
-    autoUpdater.on("update-not-available", (info) => {
+    this.autoUpdater.on("update-not-available", (info) => {
       this.setStatus({
         state: "not_available",
+        updateSource: this.activeSource,
         latestVersion: info.version,
         releaseName: info.releaseName || undefined,
         releaseNotes: normalizeReleaseNotes(info.releaseNotes),
@@ -110,9 +134,10 @@ export class UpdateService {
       });
     });
 
-    autoUpdater.on("download-progress", (progress) => {
+    this.autoUpdater.on("download-progress", (progress) => {
       this.setStatus({
         state: "downloading",
+        updateSource: this.activeSource,
         percent: Math.max(0, Math.min(100, progress.percent || 0)),
         transferred: progress.transferred,
         total: progress.total,
@@ -121,9 +146,10 @@ export class UpdateService {
       });
     });
 
-    autoUpdater.on("update-downloaded", (event) => {
+    this.autoUpdater.on("update-downloaded", (event) => {
       this.setStatus({
         state: "downloaded",
+        updateSource: this.activeSource,
         latestVersion: event.version,
         releaseName: event.releaseName || undefined,
         releaseNotes: normalizeReleaseNotes(event.releaseNotes),
@@ -133,9 +159,10 @@ export class UpdateService {
       });
     });
 
-    autoUpdater.on("error", (error) => {
+    this.autoUpdater.on("error", (error) => {
       this.setStatus({
         state: "error",
+        updateSource: this.activeSource,
         error: error instanceof Error ? error.message : String(error)
       });
     });
@@ -154,22 +181,51 @@ export class UpdateService {
     if (!this.status.canCheck) {
       return this.setStatus({
         state: "error",
-        error: "开发模式不可用：请使用正式安装包后再检查 GitHub Releases 更新。",
+        error: "开发模式不可用：请使用正式安装包后再检查软件更新。",
         checkedAt: new Date().toISOString()
       });
     }
 
+    const checkedAt = new Date().toISOString();
     try {
-      this.setStatus({ state: "checking", error: undefined, checkedAt: new Date().toISOString() });
-      await autoUpdater.checkForUpdates();
+      this.useUpdateSource("mirror");
+      this.setStatus({ state: "checking", updateSource: "mirror", error: undefined, checkedAt });
+      await this.autoUpdater.checkForUpdates();
       return this.status;
-    } catch (error) {
-      return this.setStatus({
-        state: "error",
-        error: error instanceof Error ? error.message : String(error),
-        checkedAt: new Date().toISOString()
-      });
+    } catch (mirrorError) {
+      try {
+        this.useUpdateSource("github");
+        this.setStatus({ state: "checking", updateSource: "github", error: undefined, checkedAt: new Date().toISOString() });
+        await this.autoUpdater.checkForUpdates();
+        return this.status;
+      } catch (githubError) {
+        const mirrorMessage = mirrorError instanceof Error ? mirrorError.message : String(mirrorError);
+        const githubMessage = githubError instanceof Error ? githubError.message : String(githubError);
+        return this.setStatus({
+          state: "error",
+          updateSource: "github",
+          error: `国内镜像和 GitHub 更新检查都失败。国内镜像：${mirrorMessage}；GitHub：${githubMessage}`,
+          checkedAt: new Date().toISOString()
+        });
+      }
     }
+  }
+
+  private useUpdateSource(source: UpdateSource): void {
+    this.activeSource = source;
+    if (source === "mirror") {
+      this.autoUpdater.setFeedURL({
+        provider: "generic",
+        url: this.mirrorUrl
+      });
+      return;
+    }
+    this.autoUpdater.setFeedURL({
+      provider: "github",
+      owner: this.repository.owner,
+      repo: this.repository.repo,
+      private: false
+    });
   }
 
   async downloadUpdate(): Promise<DesktopUpdateStatus> {
@@ -187,10 +243,11 @@ export class UpdateService {
     }
 
     try {
-      this.setStatus({ state: "downloading", percent: 0, error: undefined });
-      const files = await autoUpdater.downloadUpdate();
+      this.setStatus({ state: "downloading", updateSource: this.activeSource, percent: 0, error: undefined });
+      const files = await this.autoUpdater.downloadUpdate();
       return this.setStatus({
         state: "downloaded",
+        updateSource: this.activeSource,
         downloadedFile: files[0] || this.status.downloadedFile,
         percent: 100,
         error: undefined
@@ -212,7 +269,7 @@ export class UpdateService {
     if (this.beforeInstall) {
       await this.beforeInstall();
     }
-    autoUpdater.quitAndInstall(false, true);
+    this.autoUpdater.quitAndInstall(false, true);
   }
 
   scheduleStartupCheck(delayMs = 12_000): void {
@@ -229,9 +286,10 @@ export class UpdateService {
     this.status = {
       ...this.status,
       ...patch,
-      currentVersion: app.getVersion(),
-      isPackaged: app.isPackaged,
-      canCheck: app.isPackaged
+      currentVersion: this.app.getVersion(),
+      updateSource: patch.updateSource || this.status.updateSource || this.activeSource,
+      isPackaged: this.app.isPackaged,
+      canCheck: this.app.isPackaged
     };
     for (const listener of this.listeners) {
       listener(this.status);

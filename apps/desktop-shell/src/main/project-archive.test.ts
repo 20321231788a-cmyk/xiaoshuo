@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { exportProjectArchive, importProjectArchive } from "./project-archive.js";
+import { exportProjectArchive, importProjectArchive, importProjectArchiveToExisting } from "./project-archive.js";
 
 const tempDirs: string[] = [];
 
@@ -79,5 +79,35 @@ describe("project archive", () => {
     await fs.mkdir(importParent, { recursive: true });
 
     await expect(importProjectArchive({ archivePath, targetParentPath: importParent })).rejects.toThrow("不安全路径");
+  });
+
+  it("imports a project archive over an existing project after safe path validation", async () => {
+    const tempDir = await makeTempDir();
+    const sourceProject = path.join(tempDir, "Cloud Source");
+    const targetProject = path.join(tempDir, "Current Project");
+    await writeText(path.join(sourceProject, "02_正文", "云端.txt"), "云端正文");
+    await writeText(path.join(targetProject, "02_正文", "本地.txt"), "旧正文");
+    const archivePath = await exportProjectArchive({
+      projectPath: sourceProject,
+      targetPath: path.join(tempDir, "Cloud Source.arcwriter.zip")
+    });
+
+    await importProjectArchiveToExisting({ archivePath, targetProjectPath: targetProject });
+
+    await expect(fs.readFile(path.join(targetProject, "02_正文", "云端.txt"), "utf8")).resolves.toBe("云端正文");
+    await expect(fs.stat(path.join(targetProject, "02_正文", "本地.txt"))).rejects.toThrow();
+  });
+
+  it("rejects unsafe overwrite archives before clearing the existing project", async () => {
+    const tempDir = await makeTempDir();
+    const targetProject = path.join(tempDir, "Current Project");
+    await writeText(path.join(targetProject, "02_正文", "本地.txt"), "保留正文");
+    const archivePath = path.join(tempDir, "unsafe.arcwriter.zip");
+    const zip = new AdmZip();
+    zip.addFile("C:/evil.txt", Buffer.from("nope", "utf8"));
+    zip.writeZip(archivePath);
+
+    await expect(importProjectArchiveToExisting({ archivePath, targetProjectPath: targetProject })).rejects.toThrow("不安全路径");
+    await expect(fs.readFile(path.join(targetProject, "02_正文", "本地.txt"), "utf8")).resolves.toBe("保留正文");
   });
 });

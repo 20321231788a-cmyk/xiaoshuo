@@ -14,6 +14,9 @@ import {
   Bot,
   BookOpen,
   Cable,
+  ChevronDown,
+  ChevronUp,
+  Cloud,
   Copy,
   Download,
   Eye,
@@ -44,6 +47,7 @@ import {
   Sparkles,
   Square,
   Trash2,
+  Upload,
   Wand2,
   WalletCards,
   Workflow,
@@ -63,7 +67,7 @@ const TerminalView = lazy(() => import("./views/TerminalView.js").then((module) 
 
 const runtime = readWorkbenchRuntime();
 const DEFAULT_RIGHT_WIDTH = 440;
-const APP_WINDOW_TITLE = "ArcWriter 0.2.1";
+const APP_WINDOW_TITLE = "ArcWriter 0.2.2";
 const WEBSITE_HOME_URL = "https://matian.online/";
 const WEBSITE_REGISTER_URL = "https://matian.online/?page=api-relay&auth=register";
 const CUSTOM_CRAWL_SOURCE_STORAGE_KEY = "arcwriter.customCrawlSourceUrl";
@@ -432,8 +436,13 @@ function ProjectSidebar({
   const projectName = project?.name || "未打开项目";
   const projectPath = project?.path || "先打开一个小说目录";
   const [renamingProject, setRenamingProject] = useState(false);
+  const [cloudPanelOpen, setCloudPanelOpen] = useState(false);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const cancelRenameRef = useRef(false);
+  const cloudSlots = [1, 2, 3].map((slotId) => ({
+    slotId,
+    slot: controller.cloudProjectSlots.find((item) => item.slot_id === slotId) || null
+  }));
 
   useEffect(() => {
     if (!renamingProject) {
@@ -544,14 +553,86 @@ function ProjectSidebar({
             <RefreshCw size={15} className={controller.projectBusy ? "spin" : ""} />
             <span>刷新项目</span>
           </button>
-          <button className="xw-secondary-button" onClick={() => void controller.exportCurrentProject()} disabled={controller.projectBusy || !project?.path}>
-            <Download size={15} />
-            <span>导出项目</span>
-          </button>
-          <button className="xw-secondary-button" onClick={() => void controller.importProjectArchive()} disabled={controller.projectBusy}>
-            <ArchiveRestore size={15} />
-            <span>导入项目</span>
-          </button>
+          <div className={`xw-cloud-project-strip ${cloudPanelOpen ? "open" : ""}`}>
+            <button
+              className="xw-cloud-project-strip-head"
+              onClick={() => {
+                setCloudPanelOpen((value) => !value);
+                if (!cloudPanelOpen) {
+                  void controller.refreshCloudProjects({ silent: true });
+                }
+              }}
+              type="button"
+            >
+              <Cloud size={15} />
+              <strong>上传/同步项目</strong>
+              <small>{controller.cloudProjectSlots.length}/3</small>
+              {cloudPanelOpen ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+            </button>
+            {cloudPanelOpen && (
+              <div className="xw-cloud-project-panel">
+                <div className="xw-cloud-project-group">
+                  <span>本地项目</span>
+                  <div className="xw-cloud-project-local">
+                    <button className="xw-secondary-button compact" onClick={() => void controller.exportCurrentProject()} disabled={controller.projectBusy || !project?.path}>
+                      <Download size={14} />
+                      <span>导出项目 ZIP</span>
+                    </button>
+                    <button className="xw-secondary-button compact" onClick={() => void controller.importProjectArchive()} disabled={controller.projectBusy}>
+                      <ArchiveRestore size={14} />
+                      <span>导入项目 ZIP</span>
+                    </button>
+                  </div>
+                </div>
+                <div className="xw-cloud-project-group">
+                  <div className="xw-cloud-project-group-head">
+                    <span>云项目</span>
+                    <button className="xw-icon-button" onClick={() => void controller.refreshCloudProjects()} disabled={controller.cloudProjectBusy} aria-label="刷新云项目">
+                      <RefreshCw size={13} className={controller.cloudProjectBusy ? "spin" : ""} />
+                    </button>
+                  </div>
+                  <div className="xw-cloud-slot-list">
+                    {cloudSlots.map(({ slotId, slot }) => (
+                      <article key={slotId} className={`xw-cloud-slot ${slot ? "filled" : "empty"}`}>
+                        <div className="xw-cloud-slot-main">
+                          <strong>槽位 {slotId}</strong>
+                          <span>{slot ? slot.project_name || slot.file_name : "空槽"}</span>
+                          {slot && <small>{formatBytes(slot.size)} · {formatDateShort(slot.updated_at)}</small>}
+                        </div>
+                        <div className="xw-cloud-slot-actions">
+                          <button
+                            className="xw-secondary-button compact"
+                            onClick={() => void controller.uploadCurrentProjectToCloud(slotId)}
+                            disabled={controller.cloudProjectBusy || controller.projectBusy || !project?.path}
+                          >
+                            <Upload size={13} />
+                            <span>{slot ? "覆盖上传" : "上传当前项目"}</span>
+                          </button>
+                          {slot && (
+                            <>
+                              <button
+                                className="xw-secondary-button compact"
+                                onClick={() => void controller.syncCloudProjectToCurrent(slot)}
+                                disabled={controller.cloudProjectBusy || controller.projectBusy || !project?.path}
+                              >
+                                <ArchiveRestore size={13} />
+                                <span>同步</span>
+                              </button>
+                              <button className="xw-danger-button compact" onClick={() => void controller.deleteCloudProject(slot)} disabled={controller.cloudProjectBusy}>
+                                <Trash2 size={13} />
+                                <span>删除</span>
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                </div>
+                {controller.cloudProjectMessage && <p className="xw-cloud-project-message">{controller.cloudProjectMessage}</p>}
+              </div>
+            )}
+          </div>
         </div>
       </section>
 
@@ -2382,13 +2463,14 @@ function SoftwareUpdateSettings() {
     <section className="xw-settings-section xw-update-section">
       <div className="xw-settings-section-head">
         <strong>软件更新</strong>
-        <span>通过公开 GitHub Releases 检查完整桌面软件更新，不使用网站授权或客户端 GitHub token。</span>
+        <span>优先通过国内镜像检查完整桌面软件更新，失败后回退 GitHub，不使用网站授权或客户端 GitHub token。</span>
       </div>
       <div className="xw-update-panel">
         <div className="xw-update-status-grid">
           <StatusRow label="当前版本" value={status?.currentVersion || "开发预览"} />
           <StatusRow label="最新版本" value={status?.latestVersion || "-"} />
           <StatusRow label="状态" value={describeUpdateStatus(status, desktopAvailable)} />
+          <StatusRow label="更新源" value={describeUpdateSource(status?.updateSource)} />
           <StatusRow label="检查时间" value={status?.checkedAt ? formatDateTime(status.checkedAt) : "-"} />
         </div>
         {status?.state === "downloading" && (
@@ -2468,6 +2550,16 @@ function describeUpdateStatus(status: DesktopUpdateStatus | null, desktopAvailab
   return "待检查";
 }
 
+function describeUpdateSource(source: DesktopUpdateStatus["updateSource"]): string {
+  if (source === "mirror") {
+    return "国内镜像";
+  }
+  if (source === "github") {
+    return "GitHub";
+  }
+  return "-";
+}
+
 function formatUpdateBytes(value: number): string {
   if (!Number.isFinite(value) || value <= 0) {
     return "0 B";
@@ -2482,6 +2574,24 @@ function formatUpdateBytes(value: number): string {
     return `${(value / 1024).toFixed(1)} KB`;
   }
   return `${Math.round(value)} B`;
+}
+
+function formatBytes(value: number): string {
+  return formatUpdateBytes(value);
+}
+
+function formatDateShort(value: string): string {
+  if (!value) {
+    return "-";
+  }
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) {
+    return value;
+  }
+  return new Date(timestamp).toLocaleDateString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit"
+  });
 }
 
 function trimUpdateNotes(value: string): string {

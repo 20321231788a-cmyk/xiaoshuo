@@ -12,10 +12,21 @@ export type ExportProjectArchiveOptions = {
   targetPath: string;
 };
 
+export type ExportProjectArchiveTempOptions = {
+  projectPath: string;
+  tempDir: string;
+  fileName?: string;
+};
+
 export type ImportProjectArchiveOptions = {
   archivePath: string;
   targetParentPath: string;
   now?: () => Date;
+};
+
+export type ImportProjectArchiveToExistingOptions = {
+  archivePath: string;
+  targetProjectPath: string;
 };
 
 type SafeZipEntry = {
@@ -45,6 +56,18 @@ export async function exportProjectArchive(options: ExportProjectArchiveOptions)
   await fs.mkdir(path.dirname(archivePath), { recursive: true });
   zip.writeZip(archivePath);
   return archivePath;
+}
+
+export async function exportProjectArchiveToTemp(options: ExportProjectArchiveTempOptions): Promise<string> {
+  const tempDir = path.resolve(options.tempDir);
+  await fs.mkdir(tempDir, { recursive: true });
+  const projectName = safeProjectStem(path.basename(path.resolve(options.projectPath)));
+  const fileName = options.fileName || `${projectName}.arcwriter.zip`;
+  const targetPath = path.join(tempDir, fileName);
+  return exportProjectArchive({
+    projectPath: options.projectPath,
+    targetPath
+  });
 }
 
 export async function importProjectArchive(options: ImportProjectArchiveOptions): Promise<string> {
@@ -85,6 +108,43 @@ export async function importProjectArchive(options: ImportProjectArchiveOptions)
   }
 
   return targetPath;
+}
+
+export async function importProjectArchiveToExisting(options: ImportProjectArchiveToExistingOptions): Promise<void> {
+  const archivePath = path.resolve(options.archivePath);
+  const targetProjectPath = path.resolve(options.targetProjectPath);
+  const archiveStats = await fs.stat(archivePath).catch(() => null);
+  if (!archiveStats?.isFile()) {
+    throw new Error(`项目归档不存在: ${archivePath}`);
+  }
+  const targetStats = await fs.stat(targetProjectPath).catch(() => null);
+  if (!targetStats?.isDirectory()) {
+    throw new Error(`导入目标项目不存在: ${targetProjectPath}`);
+  }
+
+  let zip: AdmZip;
+  try {
+    zip = new AdmZip(archivePath);
+  } catch {
+    throw new Error("项目归档不是有效的 zip 文件");
+  }
+
+  const entries = zip.getEntries();
+  const rootToStrip = commonArchiveRoot(entries.map((entry) => entry.entryName));
+  const safeEntries = collectSafeEntries(entries, targetProjectPath, rootToStrip);
+  if (!safeEntries.length) {
+    throw new Error("项目归档为空");
+  }
+
+  await clearProjectContents(targetProjectPath);
+  for (const safeEntry of safeEntries) {
+    if (safeEntry.entry.isDirectory) {
+      await fs.mkdir(safeEntry.targetPath, { recursive: true });
+      continue;
+    }
+    await fs.mkdir(path.dirname(safeEntry.targetPath), { recursive: true });
+    await fs.writeFile(safeEntry.targetPath, safeEntry.entry.getData());
+  }
 }
 
 async function addDirectoryToArchive(zip: AdmZip, directoryPath: string, relativeDirectory: string, archivePath: string): Promise<void> {
@@ -172,6 +232,13 @@ function commonArchiveRoot(entryNames: string[]): string {
     return "";
   }
   return normalizedNames.some((entryName) => entryName.startsWith(`${root}/`)) ? root : "";
+}
+
+async function clearProjectContents(targetRoot: string): Promise<void> {
+  const entries = await fs.readdir(targetRoot, { withFileTypes: true });
+  await Promise.all(entries.map(async (entry) => {
+    await fs.rm(path.join(targetRoot, entry.name), { recursive: true, force: true });
+  }));
 }
 
 function normalizeArchiveEntry(entryName: string, rootToStrip: string): string {

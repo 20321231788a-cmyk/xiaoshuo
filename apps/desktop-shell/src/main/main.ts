@@ -16,7 +16,14 @@ import { createTerminalSession, killAllTerminals, killTerminal, resizeTerminal, 
 import { registerRuntimeShell, runtimeUrl, startRuntimeServer, stopRuntimeServer, type RuntimeServerState } from "./runtime-server.js";
 import { UpdateService } from "./update-service.js";
 import { defaultProjectArchiveName, ensureZipExtension, exportProjectArchive, importProjectArchive } from "./project-archive.js";
-import { desktopProjectExportRequestSchema, ipcChannels } from "../shared/channels.js";
+import { CloudProjectService } from "./cloud-projects.js";
+import {
+  cloudProjectDeleteRequestSchema,
+  cloudProjectDownloadRequestSchema,
+  cloudProjectUploadRequestSchema,
+  desktopProjectExportRequestSchema,
+  ipcChannels
+} from "../shared/channels.js";
 
 const runtimeState: RuntimeServerState = {};
 const appIconPath = path.join(app.getAppPath(), "assets", "quill.ico");
@@ -146,6 +153,11 @@ async function createWindow(): Promise<BrowserWindow> {
 }
 
 function registerIpc(): void {
+  const cloudProjectService = new CloudProjectService({
+    appRoot: resolveProjectRoot(app.getAppPath()),
+    tempRoot: app.getPath("temp")
+  });
+
   ipcMain.handle(ipcChannels.appVersions, () => ({
     electron: process.versions.electron,
     chrome: process.versions.chrome,
@@ -219,6 +231,16 @@ function registerIpc(): void {
     });
     return { path: projectPath, canceled: false };
   });
+  ipcMain.handle(ipcChannels.shellCloudProjectsList, async () => cloudProjectService.list());
+  ipcMain.handle(ipcChannels.shellCloudProjectsUpload, async (_event, request) =>
+    cloudProjectService.upload(cloudProjectUploadRequestSchema.parse(request))
+  );
+  ipcMain.handle(ipcChannels.shellCloudProjectsDownload, async (_event, request) =>
+    cloudProjectService.downloadToProject(cloudProjectDownloadRequestSchema.parse(request))
+  );
+  ipcMain.handle(ipcChannels.shellCloudProjectsDelete, async (_event, request) =>
+    cloudProjectService.delete(cloudProjectDeleteRequestSchema.parse(request))
+  );
   ipcMain.handle(ipcChannels.localStateGet, () => getLocalStateSnapshot());
   ipcMain.handle(ipcChannels.localStateRecordProject, (_event, request) => recordRecentProject(request));
   ipcMain.handle(ipcChannels.localStateSyncProject, (_event, request) => syncProjectLocalState(request));

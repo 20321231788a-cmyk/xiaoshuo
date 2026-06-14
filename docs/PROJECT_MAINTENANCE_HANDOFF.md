@@ -578,6 +578,48 @@ version: 0.2.1
 path: ArcWriter-Setup-0.2.1.exe
 ```
 
+### 15.5 2026-06-14 v0.2.2 发布记录
+
+本次发布版本：`0.2.2`。版本号已同步到 `apps/desktop-shell/package.json`、`package-lock.json`、Workbench 页面标题、桌面 smoke 页面标题和 `APP_WINDOW_TITLE`。
+
+主要改动：
+
+- 软件更新改为优先检查腾讯云 COS 国内镜像，镜像失败、404 或解析失败后自动回退 GitHub Releases；Workbench 更新状态区新增“更新源”，显示“国内镜像”或“GitHub”。
+- 默认国内镜像地址为 `https://ai-downloads-1318078295.cos.ap-guangzhou.myqcloud.com/software/novel/`，支持通过 `XIAOSHUO_UPDATE_MIRROR_URL` 覆盖。COS 目录仍需同步 `latest.yml`、安装包和 `.blockmap` 三个文件。
+- 左侧项目动作区将本地 ZIP 导入导出并入“上传/同步项目”折叠横条卡片，默认收起；展开后同时显示“本地项目”和“云项目”。
+- 桌面壳新增云项目 IPC 和服务：列出、上传当前项目、同步云项目覆盖当前项目、删除云项目。同步覆盖前会自动备份当前项目，并复用 ZIP 安全导入校验防止路径穿越。
+- 网站端新增 ArcWriter 云项目接口，复用 relay 登录账号的 `Authorization: Bearer <accountKey>`。每个账号最多 3 个项目槽位，项目 ZIP 保存在服务器磁盘。
+- 云项目上传限制从 35MB 调整为 20MB。桌面端会先做本地大小检查，网站端也会用 multer 限制和 ZIP 头校验拒绝超限、空文件、非 zip 和假 zip。
+
+本轮已验证：
+
+```powershell
+npm test -- apps/desktop-shell/src/main/project-archive.test.ts
+npm test -- apps/desktop-shell/src/main/update-service.test.ts
+npm run typecheck --workspaces --if-present
+npm run build:workbench
+npm run build:desktop
+npm run smoke:desktop
+npm run dist -w @xiaoshuo/desktop-shell
+cd D:\网站 && npm run test:security
+cd D:\网站 && npm run build
+```
+
+本地打包产物应包含：
+
+```text
+apps/desktop-shell/release/ArcWriter-Setup-0.2.2.exe
+apps/desktop-shell/release/ArcWriter-Setup-0.2.2.exe.blockmap
+apps/desktop-shell/release/latest.yml
+```
+
+`latest.yml` 应记录：
+
+```yaml
+version: 0.2.2
+path: ArcWriter-Setup-0.2.2.exe
+```
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

@@ -12,6 +12,10 @@ export const desktopIpcChannels = {
   shellPickProjectDirectory: "shell:pick-project-directory",
   shellExportProject: "shell:export-project",
   shellImportProject: "shell:import-project",
+  shellCloudProjectsList: "shell:cloud-projects:list",
+  shellCloudProjectsUpload: "shell:cloud-projects:upload",
+  shellCloudProjectsDownload: "shell:cloud-projects:download",
+  shellCloudProjectsDelete: "shell:cloud-projects:delete",
   localStateGet: "local-state:get",
   localStateRecordProject: "local-state:record-project",
   localStateSyncProject: "local-state:sync-project",
@@ -91,6 +95,66 @@ export const desktopProjectArchiveResponseSchema = z
   .object({
     path: z.string().default(""),
     canceled: z.boolean().default(false)
+  })
+  .passthrough();
+
+export const cloudProjectSlotSchema = z
+  .object({
+    id: z.string().default(""),
+    slot_id: z.number().int().min(1).max(3),
+    project_name: z.string().default(""),
+    file_name: z.string().default(""),
+    size: z.number().int().nonnegative().default(0),
+    sha256: z.string().default(""),
+    created_at: z.string().default(""),
+    updated_at: z.string().default("")
+  })
+  .passthrough();
+
+export const cloudProjectListResponseSchema = z
+  .object({
+    slots: z.array(cloudProjectSlotSchema).default([]),
+    limit: z.number().int().default(3),
+    max_upload_bytes: z.number().int().default(20 * 1024 * 1024)
+  })
+  .passthrough();
+
+export const cloudProjectUploadRequestSchema = z.object({
+  slot_id: z.number().int().min(1).max(3),
+  project_path: z.string().min(1),
+  project_name: z.string().default("")
+});
+
+export const cloudProjectDownloadRequestSchema = z.object({
+  id: z.string().min(1),
+  project_path: z.string().min(1),
+  project_name: z.string().default("")
+});
+
+export const cloudProjectDeleteRequestSchema = z.object({
+  id: z.string().min(1)
+});
+
+export const cloudProjectUploadResponseSchema = z
+  .object({
+    ok: z.boolean().default(true),
+    slot: cloudProjectSlotSchema,
+    uploaded_bytes: z.number().int().nonnegative().default(0)
+  })
+  .passthrough();
+
+export const cloudProjectDownloadResponseSchema = z
+  .object({
+    ok: z.boolean().default(true),
+    project_path: z.string().default(""),
+    backup_path: z.string().default("")
+  })
+  .passthrough();
+
+export const cloudProjectDeleteResponseSchema = z
+  .object({
+    ok: z.boolean().default(true),
+    deleted_id: z.string().default("")
   })
   .passthrough();
 
@@ -216,6 +280,7 @@ export const desktopUpdateStateSchema = z.enum(["idle", "checking", "available",
 export const desktopUpdateStatusSchema = z.object({
   state: desktopUpdateStateSchema,
   currentVersion: z.string(),
+  updateSource: z.enum(["github", "mirror"]).optional(),
   latestVersion: z.string().optional(),
   releaseName: z.string().optional(),
   releaseNotes: z.string().optional(),
@@ -237,6 +302,14 @@ export type DesktopShellCapabilities = z.infer<typeof desktopShellCapabilitiesSc
 export type DesktopProjectPickerResponse = z.infer<typeof desktopProjectPickerResponseSchema>;
 export type DesktopProjectExportRequest = z.input<typeof desktopProjectExportRequestSchema>;
 export type DesktopProjectArchiveResponse = z.infer<typeof desktopProjectArchiveResponseSchema>;
+export type CloudProjectSlot = z.infer<typeof cloudProjectSlotSchema>;
+export type CloudProjectListResponse = z.infer<typeof cloudProjectListResponseSchema>;
+export type CloudProjectUploadRequest = z.input<typeof cloudProjectUploadRequestSchema>;
+export type CloudProjectDownloadRequest = z.input<typeof cloudProjectDownloadRequestSchema>;
+export type CloudProjectDeleteRequest = z.input<typeof cloudProjectDeleteRequestSchema>;
+export type CloudProjectUploadResponse = z.infer<typeof cloudProjectUploadResponseSchema>;
+export type CloudProjectDownloadResponse = z.infer<typeof cloudProjectDownloadResponseSchema>;
+export type CloudProjectDeleteResponse = z.infer<typeof cloudProjectDeleteResponseSchema>;
 export type DesktopWorkbenchTab = z.infer<typeof desktopWorkbenchTabSchema>;
 export type DesktopWorkbenchSettings = z.infer<typeof desktopWorkbenchSettingsSchema>;
 export type LocalStateProject = z.infer<typeof localStateProjectSchema>;
@@ -268,6 +341,12 @@ export type XiaoShuoDesktopApi = {
   pickProjectDirectory: () => Promise<DesktopProjectPickerResponse>;
   exportProject: (request: DesktopProjectExportRequest) => Promise<DesktopProjectArchiveResponse>;
   importProject: () => Promise<DesktopProjectArchiveResponse>;
+  cloudProjects: {
+    list: () => Promise<CloudProjectListResponse>;
+    upload: (request: CloudProjectUploadRequest) => Promise<CloudProjectUploadResponse>;
+    downloadToProject: (request: CloudProjectDownloadRequest) => Promise<CloudProjectDownloadResponse>;
+    delete: (request: CloudProjectDeleteRequest) => Promise<CloudProjectDeleteResponse>;
+  };
   localState: {
     get: () => Promise<LocalStateSnapshot>;
     recordProject: (request: LocalStateRecordProjectRequest) => Promise<LocalStateSnapshot>;
