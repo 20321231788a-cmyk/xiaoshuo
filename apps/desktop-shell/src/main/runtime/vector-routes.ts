@@ -1,6 +1,7 @@
 import { vectorSearchRequestSchema, type CurrentProject } from "@xiaoshuo/shared";
 import { VectorIndex } from "@xiaoshuo/vector-service";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { writeAiLicenseRequiredIfNeeded } from "./license-guard.js";
 import type { RuntimeContext } from "./types.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -27,6 +28,13 @@ export async function handleVectorRoutes(
   const currentProject = await deps.ensureProjectSessionCurrent(context);
   if (!currentProject.path) {
     deps.writeJson(response, 400, { detail: "尚未打开项目" });
+    return true;
+  }
+
+  const usesAiVectorOperation =
+    request.method === "POST" &&
+    (pathname === "/api/vector/rebuild" || pathname === "/api/vector/process-pending" || pathname === "/api/vector/search");
+  if (usesAiVectorOperation && (await writeAiLicenseRequiredIfNeeded(context, response, deps.writeJson))) {
     return true;
   }
 

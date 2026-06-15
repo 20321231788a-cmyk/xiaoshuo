@@ -4,6 +4,7 @@ import { OpenAICompatibleClient } from "@xiaoshuo/model-client";
 import { conversationMessageRequestSchema, type CurrentProject } from "@xiaoshuo/shared";
 import { AgentRuntimeService, encodeNdjsonEvent } from "@xiaoshuo/agent-runtime";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { writeAiLicenseRequiredIfNeeded } from "./license-guard.js";
 import type { RuntimeContext } from "./types.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -67,6 +68,9 @@ export async function handleConversationRoutes(
     return true;
   }
   if (conversationRoute.id && conversationRoute.action === "messages" && request.method === "POST") {
+    if (await writeAiLicenseRequiredIfNeeded(context, response, deps.writeJson)) {
+      return true;
+    }
     const runtime = new AgentRuntimeService({
       projectRoot: projectPath,
       config: { rootDir: context.projectRoot, env: process.env }
@@ -139,6 +143,9 @@ export async function handleConversationRoutes(
     const rawBody = await deps.readRawBody(request);
     const payload = deps.parseJsonRecord(rawBody);
     if (payload.use_model === true) {
+      if (await writeAiLicenseRequiredIfNeeded(context, response, deps.writeJson)) {
+        return true;
+      }
       const configOptions = { rootDir: projectPath, env: process.env };
       const rawConfig = await readRawConfig(configOptions);
       const hasExplicitSecondary = Boolean(String(rawConfig.secondary_api_key || "").trim() && String(rawConfig.secondary_model || "").trim());

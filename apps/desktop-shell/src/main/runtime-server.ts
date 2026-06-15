@@ -55,6 +55,7 @@ import {
   type RuntimeContext,
   type RuntimeServerOptions,
   type RuntimeServerState,
+  writeAiLicenseRequiredIfNeeded,
   writeJson,
   writeNdjsonEvent
 } from "./runtime/index.js";
@@ -186,6 +187,9 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
 
   const cardDrawRoute = matchCardDrawRoute(pathname);
   if (cardDrawRoute && request.method === "POST" && !cardDrawRoute.action && !cardDrawRoute.drawId) {
+    if (await writeAiLicenseRequiredIfNeeded(context, response, writeJson)) {
+      return;
+    }
     const currentProject = await ensureProjectSessionCurrent(context);
     if (!currentProject.path) {
       writeJson(response, 400, { detail: "尚未打开项目" });

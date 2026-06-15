@@ -122,6 +122,20 @@ async function startMockModelServer() {
   }
 
   mockModelServer = http.createServer(async (request, response) => {
+    if (request.method === "POST" && String(request.url || "") === "/api/software-license/verify") {
+      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify({
+        ok: true,
+        licensed: true,
+        status: "licensed",
+        message: "smoke account licensed",
+        license: {
+          planType: "lifetime",
+          expiresAt: ""
+        }
+      }));
+      return;
+    }
     if (request.method !== "POST") {
       response.writeHead(405);
       response.end("method not allowed");
@@ -202,7 +216,12 @@ async function prepareSmokeConfig() {
       api_key: "smoke-key",
       base_url: `${baseUrl}/v1`,
       model: "smoke-model",
-      temp: 0.2
+      temp: 0.2,
+      license_account_key: "smoke-license-key",
+      website_profile: {
+        api_key: "smoke-license-key",
+        license_account_key: "smoke-license-key"
+      }
     }, null, 2)}\n`,
     "utf8"
   );
@@ -265,7 +284,8 @@ try {
         ...process.env,
         XIAOSHUO_RENDERER_URL: rendererUrl,
         XIAOSHUO_STUDIO_CONFIG: smokeConfigPath,
-        XIAOSHUO_RUNTIME_PORT: smokeRuntimePort
+        XIAOSHUO_RUNTIME_PORT: smokeRuntimePort,
+        XIAOSHUO_WEBSITE_BASE_URL: mockModelBaseUrl
       }
     });
 

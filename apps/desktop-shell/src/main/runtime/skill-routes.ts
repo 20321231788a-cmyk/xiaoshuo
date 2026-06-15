@@ -9,6 +9,7 @@ import {
   type CurrentProject
 } from "@xiaoshuo/shared";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { writeAiLicenseRequiredIfNeeded } from "./license-guard.js";
 import type { RuntimeContext } from "./types.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -139,6 +140,9 @@ export async function handleSkillRoutes(
   }
 
   if (!skillRoute.id && skillRoute.action === "draft-from-url" && request.method === "POST") {
+    if (await writeAiLicenseRequiredIfNeeded(context, response, deps.writeJson)) {
+      return true;
+    }
     const rawBody = await deps.readRawBody(request);
     const payload = skillDraftFromUrlRequestSchema.parse(deps.parseJsonRecord(rawBody));
     const runtime = new AgentRuntimeService({
@@ -154,6 +158,9 @@ export async function handleSkillRoutes(
   }
 
   if (skillRoute.id && skillRoute.action === "run" && request.method === "POST") {
+    if (await writeAiLicenseRequiredIfNeeded(context, response, deps.writeJson)) {
+      return true;
+    }
     const rawBody = await deps.readRawBody(request);
     const payload = skillRunRequestSchema.parse(deps.parseJsonRecord(rawBody));
     const runtime = new AgentRuntimeService({

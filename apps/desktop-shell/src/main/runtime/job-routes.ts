@@ -7,6 +7,7 @@ import { ProjectManifestService } from "@xiaoshuo/project-manifest";
 import { cardDrawRequestSchema, novelCrawlRequestSchema, type CurrentProject, type JobInfo } from "@xiaoshuo/shared";
 import { VectorIndex } from "@xiaoshuo/vector-service";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { writeAiLicenseRequiredIfNeeded } from "./license-guard.js";
 import type { RuntimeContext, RuntimeServerState } from "./types.js";
 import { randomUUID } from "node:crypto";
 
@@ -86,6 +87,9 @@ export async function handleJobRoutes(
     }
 
     if (kind === "novel_crawl") {
+      if (await writeAiLicenseRequiredIfNeeded(context, response, deps.writeJson)) {
+        return true;
+      }
       const currentProject = await deps.ensureProjectSessionCurrent(context);
       if (!currentProject.path) {
         deps.writeJson(response, 400, { detail: "尚未打开项目" });

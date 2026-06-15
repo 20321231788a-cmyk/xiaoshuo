@@ -4,6 +4,7 @@ export * from "./conversation-routes.js";
 export * from "./generated-cache-routes.js";
 export * from "./http-utils.js";
 export * from "./job-routes.js";
+export * from "./license-guard.js";
 export * from "./project-document-routes.js";
 export * from "./route-matchers.js";
 export * from "./runtime-helpers.js";

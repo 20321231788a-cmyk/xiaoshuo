@@ -657,6 +657,49 @@ version: 0.2.3
 path: ArcWriter-Setup-0.2.3.exe
 ```
 
+### 15.7 2026-06-15 v0.2.4 发布记录
+
+本次发布版本：`0.2.4`。版本号已同步到 `apps/desktop-shell/package.json`、`package-lock.json`、Workbench 页面标题、桌面 smoke 页面标题和 `APP_WINDOW_TITLE`。
+
+主要改动：
+
+- 未授权账号现在会在桌面 runtime 后端被硬拦截，聊天生成、Agent 计划/执行、Skill 运行、小说爬取、向量重建/搜索、抽卡生成和模型总结都会返回 `AI_LICENSE_REQUIRED`，不再只依赖 UI 提示。
+- 云项目上传纳入授权限制：桌面端上传前先校验授权，网站端 `/api/arcwriter/cloud-projects` 上传接口也要求账号拥有 ArcWriter 授权，绕过客户端直接调接口同样会被拒绝。
+- 云项目上传增加每天每账号最多 10 次限制。网站端按北京时间自然日统计成功上传次数，第 11 次返回 `ARCWRITER_CLOUD_UPLOAD_DAILY_LIMIT`，列表和上传响应会返回当天已用/剩余次数。
+- 授权验证请求已统一带 `Authorization: Bearer <accountKey>`，兼容网站端 Bearer 认证要求。
+- 桌面 smoke 已改为使用本地授权 mock 校验受保护 AI 路由；本地状态读取兼容历史数据库中的 `last_synced_at = null`。
+
+本轮已验证：
+
+```powershell
+npm test -- apps/desktop-shell/src/main/cloud-projects.test.ts
+npm test -- apps/desktop-shell/src/main/runtime/base-routes.test.ts
+npm test -- apps/desktop-shell/src/main/runtime/conversation-routes.test.ts
+npm test -- apps/desktop-shell/src/main/runtime/license-guarded-routes.test.ts
+npm run typecheck --workspaces --if-present
+npm run build:workbench
+npm run build:desktop
+npm run smoke:desktop
+npm run dist -w @xiaoshuo/desktop-shell
+cd D:\网站 && npm run build
+cd D:\网站 && npm run test:security
+```
+
+本地打包产物应包含：
+
+```text
+apps/desktop-shell/release/ArcWriter-Setup-0.2.4.exe
+apps/desktop-shell/release/ArcWriter-Setup-0.2.4.exe.blockmap
+apps/desktop-shell/release/latest.yml
+```
+
+`latest.yml` 应记录：
+
+```yaml
+version: 0.2.4
+path: ArcWriter-Setup-0.2.4.exe
+```
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

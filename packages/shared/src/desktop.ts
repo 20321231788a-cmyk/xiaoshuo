@@ -115,7 +115,10 @@ export const cloudProjectListResponseSchema = z
   .object({
     slots: z.array(cloudProjectSlotSchema).default([]),
     limit: z.number().int().default(3),
-    max_upload_bytes: z.number().int().default(20 * 1024 * 1024)
+    max_upload_bytes: z.number().int().default(20 * 1024 * 1024),
+    daily_upload_limit: z.number().int().default(10),
+    today_upload_count: z.number().int().nonnegative().default(0),
+    today_upload_remaining: z.number().int().nonnegative().default(10)
   })
   .passthrough();
 
@@ -139,7 +142,10 @@ export const cloudProjectUploadResponseSchema = z
   .object({
     ok: z.boolean().default(true),
     slot: cloudProjectSlotSchema,
-    uploaded_bytes: z.number().int().nonnegative().default(0)
+    uploaded_bytes: z.number().int().nonnegative().default(0),
+    daily_upload_limit: z.number().int().default(10),
+    today_upload_count: z.number().int().nonnegative().default(0),
+    today_upload_remaining: z.number().int().nonnegative().default(10)
   })
   .passthrough();
 
@@ -173,7 +179,7 @@ export const localStateProjectSchema = z.object({
   opened_at: z.string(),
   conversation_count: z.number().int().nonnegative().default(0),
   job_count: z.number().int().nonnegative().default(0),
-  last_synced_at: z.string().optional()
+  last_synced_at: z.string().nullish().transform((value) => value || undefined)
 });
 
 export const localStateGeneratedCacheSchema = z.object({

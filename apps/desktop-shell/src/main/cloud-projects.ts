@@ -17,6 +17,7 @@ import {
   exportProjectArchiveToTemp,
   importProjectArchiveToExisting
 } from "./project-archive.js";
+import { loadLicenseStatusForRoot } from "./runtime/license-guard.js";
 
 const DEFAULT_WEBSITE_BASE_URL = "https://matian.online";
 export const CLOUD_PROJECT_UPLOAD_LIMIT_BYTES = 20 * 1024 * 1024;
@@ -42,6 +43,7 @@ export class CloudProjectService {
   async upload(request: CloudProjectUploadRequest): Promise<CloudProjectUploadResponse> {
     const projectPath = path.resolve(request.project_path);
     const projectName = request.project_name || path.basename(projectPath);
+    await this.requireLicensedForCloudUpload();
     const { tokenKey, websiteBaseUrl } = await this.readWebsiteToken();
     const tempDir = await fs.mkdtemp(path.join(this.options.tempRoot, "arcwriter-cloud-upload-"));
     let archivePath = "";
@@ -72,7 +74,10 @@ export class CloudProjectService {
       return {
         ok: Boolean(payload.ok ?? true),
         slot: normalizeSlot(payload.slot),
-        uploaded_bytes: Number(payload.uploaded_bytes || stats.size)
+        uploaded_bytes: Number(payload.uploaded_bytes || stats.size),
+        daily_upload_limit: numberValue(payload.daily_upload_limit) || 10,
+        today_upload_count: numberValue(payload.today_upload_count),
+        today_upload_remaining: numberValue(payload.today_upload_remaining)
       };
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
@@ -149,6 +154,15 @@ export class CloudProjectService {
     return { tokenKey, websiteBaseUrl: resolveWebsiteBaseUrl(process.env) };
   }
 
+  private async requireLicensedForCloudUpload(): Promise<void> {
+    const licenseStatus = await loadLicenseStatusForRoot(this.options.appRoot);
+    if (licenseStatus.licensed) {
+      return;
+    }
+    const reason = String(licenseStatus.message || "").trim();
+    throw new Error(reason ? `当前账号未授权，无法上传云项目。${reason}` : "当前账号未授权，无法上传云项目。请登录已授权的网站账号后刷新授权状态。");
+  }
+
   private async makeBackupPath(projectPath: string, projectName: string): Promise<string> {
     const backupDir = path.join(path.dirname(projectPath), ".arcwriter-cloud-backups");
     await fs.mkdir(backupDir, { recursive: true });
@@ -198,7 +212,10 @@ function normalizeListResponse(payload: CloudProjectListResponse): CloudProjectL
   return {
     slots: Array.isArray(payload.slots) ? payload.slots.map(normalizeSlot).filter((slot) => slot.id) : [],
     limit: Number(payload.limit || 3),
-    max_upload_bytes: Number(payload.max_upload_bytes || CLOUD_PROJECT_UPLOAD_LIMIT_BYTES)
+    max_upload_bytes: Number(payload.max_upload_bytes || CLOUD_PROJECT_UPLOAD_LIMIT_BYTES),
+    daily_upload_limit: numberValue(payload.daily_upload_limit) || 10,
+    today_upload_count: numberValue(payload.today_upload_count),
+    today_upload_remaining: numberValue(payload.today_upload_remaining)
   };
 }
 

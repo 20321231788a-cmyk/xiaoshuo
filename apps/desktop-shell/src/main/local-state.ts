@@ -268,7 +268,11 @@ async function getWorkbenchSettings() {
 function normalizeRows(rows: unknown[]): LocalStateProject[] {
   return rows
     .map((row) => row as Partial<RecentProjectRow>)
-    .filter((row): row is RecentProjectRow => typeof row.path === "string" && typeof row.name === "string" && typeof row.opened_at === "string");
+    .filter((row): row is RecentProjectRow => typeof row.path === "string" && typeof row.name === "string" && typeof row.opened_at === "string")
+    .map((row) => ({
+      ...row,
+      last_synced_at: typeof row.last_synced_at === "string" ? row.last_synced_at : undefined
+    }));
 }
 
 async function listRecentProjects(): Promise<LocalStateProject[]> {

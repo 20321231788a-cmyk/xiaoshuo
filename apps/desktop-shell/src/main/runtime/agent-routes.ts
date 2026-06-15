@@ -4,6 +4,7 @@ import { DocumentService } from "@xiaoshuo/document-service";
 import { agentPlanRequestSchema, agentRunRequestSchema, fileOperationSchema, type CurrentProject, type FileOperation } from "@xiaoshuo/shared";
 import { VectorIndex } from "@xiaoshuo/vector-service";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { writeAiLicenseRequiredIfNeeded } from "./license-guard.js";
 import type { RuntimeContext } from "./types.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -72,6 +73,9 @@ export async function handleAgentRoutes(
   }
 
   if (pathname === "/api/agent/plan" && request.method === "POST") {
+    if (await writeAiLicenseRequiredIfNeeded(context, response, deps.writeJson)) {
+      return true;
+    }
     const currentProject = await deps.ensureProjectSessionCurrent(context);
     if (!currentProject.path) {
       deps.writeJson(response, 400, { detail: "尚未打开项目" });
@@ -86,6 +90,9 @@ export async function handleAgentRoutes(
   }
 
   if (pathname === "/api/agent/run" && request.method === "POST") {
+    if (await writeAiLicenseRequiredIfNeeded(context, response, deps.writeJson)) {
+      return true;
+    }
     const currentProject = await deps.ensureProjectSessionCurrent(context);
     if (!currentProject.path) {
       deps.writeJson(response, 400, { detail: "尚未打开项目" });
@@ -108,6 +115,9 @@ export async function handleAgentRoutes(
   }
 
   if (pathname === "/api/agent/run-stream" && request.method === "POST") {
+    if (await writeAiLicenseRequiredIfNeeded(context, response, deps.writeJson)) {
+      return true;
+    }
     const currentProject = await deps.ensureProjectSessionCurrent(context);
     if (!currentProject.path) {
       deps.writeJson(response, 400, { detail: "尚未打开项目" });

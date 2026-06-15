@@ -3,8 +3,9 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { handleConversationRoutes } from "./conversation-routes.js";
 import type { RuntimeContext } from "./types.js";
 
-const mockSendMessage = vi.fn();
-const mockStreamMessage = vi.fn();
+const mockSendMessage = vi.hoisted(() => vi.fn());
+const mockStreamMessage = vi.hoisted(() => vi.fn());
+const mockWriteAiLicenseRequiredIfNeeded = vi.hoisted(() => vi.fn());
 
 vi.mock("@xiaoshuo/agent-runtime", () => ({
   AgentRuntimeService: class {
@@ -12,6 +13,10 @@ vi.mock("@xiaoshuo/agent-runtime", () => ({
     streamMessage = mockStreamMessage;
   },
   encodeNdjsonEvent: vi.fn()
+}));
+
+vi.mock("./license-guard.js", () => ({
+  writeAiLicenseRequiredIfNeeded: mockWriteAiLicenseRequiredIfNeeded
 }));
 
 function createContext(): RuntimeContext {
@@ -98,6 +103,7 @@ describe("handleConversationRoutes", () => {
     const writeNdjsonEvent = vi.fn();
     const writeJson = vi.fn();
     const payload = { content: "继续", attachment_ids: [] };
+    mockWriteAiLicenseRequiredIfNeeded.mockResolvedValue(false);
 
     mockStreamMessage.mockImplementation(async function* () {
       yield { type: "message_start", conversation_id: "conv-1" };
@@ -133,5 +139,43 @@ describe("handleConversationRoutes", () => {
     expect(writeNdjsonEvent).toHaveBeenNthCalledWith(2, response, { type: "message_delta", delta: "hello" });
     expect(response.end).toHaveBeenCalled();
     expect(writeJson).not.toHaveBeenCalled();
+  });
+
+  it("blocks AI conversation messages when the account is not licensed", async () => {
+    const writeJson = vi.fn();
+    mockWriteAiLicenseRequiredIfNeeded.mockImplementation(async (_context, response, write) => {
+      write(response, 403, { detail: "当前账号未授权", code: "AI_LICENSE_REQUIRED" });
+      return true;
+    });
+
+    const handled = await handleConversationRoutes(
+      {
+        method: "POST",
+        headers: {}
+      } as IncomingMessage,
+      createResponse(),
+      "/api/conversations/conv-1/messages",
+      createContext(),
+      {
+        ensureProjectSessionCurrent: vi.fn().mockResolvedValue({ path: "D:\\projects\\novel" }),
+        readJsonBody: vi.fn(),
+        readRawBody: vi.fn(),
+        parseJsonRecord: vi.fn(),
+        stringValue: vi.fn(),
+        writeJson,
+        writeNdjsonEvent: vi.fn(),
+        addCorsHeaders: vi.fn(),
+        parseMultipartFile: vi.fn(),
+        matchConversationRoute: vi.fn().mockReturnValue({ id: "conv-1", action: "messages" })
+      }
+    );
+
+    expect(handled).toBe(true);
+    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 403, {
+      detail: "当前账号未授权",
+      code: "AI_LICENSE_REQUIRED"
+    });
+    expect(mockSendMessage).not.toHaveBeenCalled();
+    expect(mockStreamMessage).not.toHaveBeenCalled();
   });
 });

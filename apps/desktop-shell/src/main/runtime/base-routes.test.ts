@@ -131,6 +131,9 @@ describe("handleBaseRuntimeRoutes", () => {
       "https://matian.online/api/software-license/verify",
       expect.objectContaining({
         method: "POST",
+        headers: expect.objectContaining({
+          Authorization: "Bearer website-token"
+        }),
         body: expect.stringContaining("\"toolKind\":\"novel\"")
       })
     );
