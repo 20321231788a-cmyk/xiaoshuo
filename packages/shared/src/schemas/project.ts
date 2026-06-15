@@ -5,7 +5,8 @@ import { fileOperationSchema } from "./agent.js";
 export const currentProjectSchema = z
   .object({
     path: z.string(),
-    name: z.string()
+    name: z.string(),
+    previous_path: z.string().optional()
   })
   .passthrough();
 

@@ -23,6 +23,7 @@ type RuntimeProjectDocumentRouteDeps = {
   ensureProjectSessionCurrent: (context: RuntimeContext) => Promise<CurrentProject>;
   ensureDocumentSession: (sessions: Map<string, DocumentTimelineSession>, projectPath: string) => DocumentTimelineSession;
   startDocumentSession: (sessions: Map<string, DocumentTimelineSession>, projectPath: string) => DocumentTimelineSession;
+  moveDocumentSession: (sessions: Map<string, DocumentTimelineSession>, fromProjectPath: string, toProjectPath: string) => DocumentTimelineSession;
   readJsonBody: (request: IncomingMessage) => Promise<JsonRecord>;
   readRequestFields: (request: IncomingMessage) => Promise<JsonRecord>;
   rebuildProjectManifest: (projectPath: string) => Promise<void>;
@@ -66,7 +67,12 @@ export async function handleProjectDocumentRoutes(
 
   if (request.method === "PUT" && pathname === "/api/projects/current") {
     const payload = projectRenameRequestSchema.parse(await deps.readJsonBody(request));
-    deps.writeJson(response, 200, await context.projectSession.renameCurrentProject(payload.name));
+    const renamed = await context.projectSession.renameCurrentProject(payload.name);
+    if (renamed.previous_path && renamed.path) {
+      deps.moveDocumentSession(context.documentSessions, renamed.previous_path, renamed.path);
+      await deps.rebuildProjectManifest(renamed.path);
+    }
+    deps.writeJson(response, 200, renamed);
     return true;
   }
 

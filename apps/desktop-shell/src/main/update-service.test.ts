@@ -4,7 +4,7 @@ import { UpdateService } from "./update-service.js";
 
 function createPackagedApp() {
   return {
-    getVersion: () => "0.2.2",
+    getVersion: () => "0.2.3",
     isPackaged: true
   };
 }

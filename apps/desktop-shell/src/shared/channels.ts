@@ -203,7 +203,8 @@ export const localStateSnapshotSchema = z.object({
 export const localStateRecordProjectRequestSchema = z.object({
   path: z.string().min(1),
   name: z.string().min(1),
-  opened_at: z.string().optional()
+  opened_at: z.string().optional(),
+  previous_path: z.string().optional()
 });
 
 export const localStateSyncProjectRequestSchema = z.object({

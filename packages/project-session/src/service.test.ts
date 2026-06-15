@@ -54,7 +54,7 @@ describe("project-session", () => {
     });
   });
 
-  it("renames the current project and persists the state", async () => {
+  it("renames the current project folder and persists the state", async () => {
     const sessions = service();
     const created = await sessions.createProject(path.join(tempDir, "rename-me"), "", false);
 
@@ -63,10 +63,39 @@ describe("project-session", () => {
 
     expect(created.name).toBe("rename-me");
     expect(renamed.name).toBe("新项目名");
+    expect(path.basename(renamed.path)).toBe("新项目名");
+    expect(renamed.previous_path).toBe(created.path);
+    await expect(fs.stat(created.path)).rejects.toThrow();
+    await expect(fs.stat(renamed.path)).resolves.toBeTruthy();
     await expect(reloaded.getCurrentProject()).resolves.toEqual({
-      path: created.path,
+      path: renamed.path,
       name: "新项目名"
     });
+  });
+
+  it("keeps the current folder when the sanitized project name does not change", async () => {
+    const sessions = service();
+    const created = await sessions.createProject(path.join(tempDir, "Same Name"), "", false);
+
+    const renamed = await sessions.renameCurrentProject("Same   Name");
+
+    expect(renamed).toEqual({
+      path: created.path,
+      name: "Same   Name",
+      previous_path: ""
+    });
+    await expect(fs.stat(created.path)).resolves.toBeTruthy();
+  });
+
+  it("rejects project folder rename when the target sibling already exists", async () => {
+    const sessions = service();
+    const created = await sessions.createProject(path.join(tempDir, "rename-me"), "", false);
+    await fs.mkdir(path.join(tempDir, "Existing"), { recursive: true });
+
+    await expect(sessions.renameCurrentProject("Existing")).rejects.toThrow("同级目录已存在项目文件夹");
+
+    await expect(fs.stat(created.path)).resolves.toBeTruthy();
+    await expect(fs.stat(path.join(tempDir, "Existing"))).resolves.toBeTruthy();
   });
 
   it("creates unique child folders when create_in_parent is enabled", async () => {

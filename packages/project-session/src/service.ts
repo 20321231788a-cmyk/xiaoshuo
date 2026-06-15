@@ -165,15 +165,35 @@ export class ProjectSessionService {
       throw new Error("项目名称不能为空");
     }
 
-    const meta = await readProjectMeta(current.path);
+    const previousPath = path.resolve(current.path);
+    const targetName = safeProjectFolderName(displayName);
+    const targetPath = path.resolve(path.dirname(previousPath), targetName);
+    const sameLocation = pathsReferToSameLocation(previousPath, targetPath);
+    const needsDirectoryRename = path.resolve(previousPath) !== path.resolve(targetPath);
+
+    if (!sameLocation && (await exists(targetPath))) {
+      throw new Error(`同级目录已存在项目文件夹: ${targetName}`);
+    }
+
+    const meta = await readProjectMeta(previousPath);
     meta.display_name = displayName.slice(0, 80);
-    await writeProjectMeta(current.path, meta);
+    await writeProjectMeta(previousPath, meta);
+
+    if (needsDirectoryRename && sameLocation) {
+      await renameCaseOnlyDirectory(previousPath, targetPath);
+    } else if (needsDirectoryRename) {
+      await fs.rename(previousPath, targetPath);
+    }
+
     this.currentProject = {
-      path: current.path,
+      path: needsDirectoryRename ? targetPath : previousPath,
       name: meta.display_name
     };
     await this.persistState();
-    return { ...this.currentProject };
+    return {
+      ...this.currentProject,
+      previous_path: needsDirectoryRename ? previousPath : ""
+    };
   }
 
   private async ensureLoaded(): Promise<void> {
@@ -470,6 +490,36 @@ async function exists(targetPath: string): Promise<boolean> {
     return true;
   } catch {
     return false;
+  }
+}
+
+function pathsReferToSameLocation(left: string, right: string): boolean {
+  const resolvedLeft = path.resolve(left);
+  const resolvedRight = path.resolve(right);
+  return process.platform === "win32" ? resolvedLeft.toLowerCase() === resolvedRight.toLowerCase() : resolvedLeft === resolvedRight;
+}
+
+async function renameCaseOnlyDirectory(sourcePath: string, targetPath: string): Promise<void> {
+  const parent = path.dirname(sourcePath);
+  const stem = path.basename(sourcePath).replace(/^[.]+/g, "") || "project";
+  let tempPath = "";
+  for (let index = 0; index < 1000; index += 1) {
+    const candidate = path.join(parent, `.${stem}.rename-${Date.now()}-${index}`);
+    if (!(await exists(candidate))) {
+      tempPath = candidate;
+      break;
+    }
+  }
+  if (!tempPath) {
+    throw new Error("无法创建临时目录完成项目文件夹改名");
+  }
+
+  await fs.rename(sourcePath, tempPath);
+  try {
+    await fs.rename(tempPath, targetPath);
+  } catch (error) {
+    await fs.rename(tempPath, sourcePath).catch(() => {});
+    throw error;
   }
 }
 

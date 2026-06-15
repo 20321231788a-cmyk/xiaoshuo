@@ -358,6 +358,7 @@ export async function getLocalStateSnapshot(): Promise<LocalStateSnapshot> {
 export async function recordRecentProject(request: LocalStateRecordProjectRequest): Promise<LocalStateSnapshot> {
   const project = localStateRecordProjectRequestSchema.parse(request);
   const database = await openDatabase();
+  migrateProjectPath(database, project.previous_path, project.path);
   database
     .prepare(
       `
@@ -371,6 +372,19 @@ export async function recordRecentProject(request: LocalStateRecordProjectReques
     .run(project.path, project.name, project.opened_at || new Date().toISOString());
 
   return getLocalStateSnapshot();
+}
+
+function migrateProjectPath(database: LocalDatabase, previousPath: string | undefined, nextPath: string): void {
+  const oldPath = (previousPath || "").trim();
+  const newPath = (nextPath || "").trim();
+  if (!oldPath || !newPath || oldPath === newPath) {
+    return;
+  }
+
+  database.prepare("DELETE FROM recent_projects WHERE path = ?").run(oldPath);
+  database.prepare("UPDATE conversation_index SET project_path = ? WHERE project_path = ?").run(newPath, oldPath);
+  database.prepare("UPDATE job_history SET project_path = ? WHERE project_path = ?").run(newPath, oldPath);
+  database.prepare("UPDATE generated_cache_metadata SET project_path = ? WHERE project_path = ?").run(newPath, oldPath);
 }
 
 export async function patchWorkbenchSettings(request: LocalStatePatchSettingsRequest): Promise<LocalStateSnapshot> {

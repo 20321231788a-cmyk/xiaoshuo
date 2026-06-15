@@ -675,7 +675,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       const localState = await window.xiaoshuoDesktop.localState.recordProject({
         path: project.path,
         name: project.name || project.path,
-        opened_at: new Date().toISOString()
+        opened_at: new Date().toISOString(),
+        previous_path: project.previous_path || undefined
       });
       setSnapshot((current) => (current ? { ...current, localState } : current));
     } catch (nextError) {
@@ -1702,7 +1703,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       setProjectPathInput(renamed.path);
       setProjectNameInput(renamed.name);
       replaceProjectSnapshot(renamed, projectChrome);
-      setProjectMessage("项目显示名已更新");
+      setProjectMessage(renamed.previous_path ? "项目名称和文件夹已更新" : "项目显示名已更新");
     } catch (nextError) {
       setProjectMessage(describeActionableError(nextError, "项目重命名失败", "请确认项目仍然打开，然后重试。"));
     } finally {

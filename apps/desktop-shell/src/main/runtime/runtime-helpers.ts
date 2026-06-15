@@ -26,6 +26,18 @@ export function ensureDocumentSession(sessions: Map<string, DocumentTimelineSess
   return startDocumentSession(sessions, projectPath);
 }
 
+export function moveDocumentSession(sessions: Map<string, DocumentTimelineSession>, fromProjectPath: string, toProjectPath: string): DocumentTimelineSession {
+  const fromKey = normalizeProjectPath(fromProjectPath);
+  const toKey = normalizeProjectPath(toProjectPath);
+  const existing = sessions.get(fromKey);
+  if (existing) {
+    sessions.delete(fromKey);
+    sessions.set(toKey, existing);
+    return existing;
+  }
+  return startDocumentSession(sessions, toProjectPath);
+}
+
 export async function rebuildProjectManifest(projectPath: string): Promise<void> {
   const manifest = new ProjectManifestService(projectPath);
   await manifest.rebuild();

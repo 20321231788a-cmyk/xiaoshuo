@@ -66,6 +66,7 @@ function createDeps(overrides?: Partial<Parameters<typeof handleProjectDocumentR
     }),
     ensureDocumentSession: vi.fn().mockReturnValue({}),
     startDocumentSession: vi.fn(),
+    moveDocumentSession: vi.fn(),
     readJsonBody: vi.fn(),
     readRequestFields: vi.fn(),
     rebuildProjectManifest: vi.fn(),
@@ -151,6 +152,34 @@ describe("handleProjectDocumentRoutes", () => {
       { force: true, includeTree: false }
     );
     expect(deps.writeJson).toHaveBeenCalledWith(expect.anything(), 200, { ok: true });
+  });
+
+  it("moves the document session and rebuilds the manifest after folder rename", async () => {
+    const context = createContext();
+    const renamed = {
+      path: "D:\\projects\\Renamed",
+      name: "Renamed",
+      previous_path: "D:\\projects\\novel"
+    };
+    vi.mocked(context.projectSession.renameCurrentProject).mockResolvedValue(renamed);
+    const deps = createDeps({
+      readJsonBody: vi.fn().mockResolvedValue({ name: "Renamed" })
+    });
+
+    const handled = await handleProjectDocumentRoutes(
+      { method: "PUT" } as IncomingMessage,
+      createResponse(),
+      "/api/projects/current",
+      new URLSearchParams(),
+      context,
+      deps
+    );
+
+    expect(handled).toBe(true);
+    expect(context.projectSession.renameCurrentProject).toHaveBeenCalledWith("Renamed");
+    expect(deps.moveDocumentSession).toHaveBeenCalledWith(context.documentSessions, "D:\\projects\\novel", "D:\\projects\\Renamed");
+    expect(deps.rebuildProjectManifest).toHaveBeenCalledWith("D:\\projects\\Renamed");
+    expect(deps.writeJson).toHaveBeenCalledWith(expect.anything(), 200, renamed);
   });
 
   it("returns 409 when document save detects a stale base version", async () => {

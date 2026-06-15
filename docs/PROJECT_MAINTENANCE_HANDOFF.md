@@ -620,6 +620,43 @@ version: 0.2.2
 path: ArcWriter-Setup-0.2.2.exe
 ```
 
+### 15.6 2026-06-15 v0.2.3 发布记录
+
+本次发布版本：`0.2.3`。版本号已同步到 `apps/desktop-shell/package.json`、`package-lock.json`、Workbench 页面标题、桌面 smoke 页面标题和 `APP_WINDOW_TITLE`。
+
+主要改动：
+
+- 修复桌面软件登录网站账号后无法读取面板的问题。网站端 `/api/relay/dashboard` 和充值订单接口现在要求 `Authorization: Bearer <accountKey>`，桌面端已从旧的 `?key=` 查询参数切换为 Bearer 请求头。
+- 项目重命名从“只修改显示名”改为同步重命名项目根文件夹；目标同级目录已存在时会拒绝覆盖，Windows 上仅大小写变化也会通过临时目录中转完成。
+- 项目文件夹改名后会迁移文档会话、重建项目索引，并把最近项目、会话索引、任务历史和生成缓存的旧项目路径更新为新路径，避免左侧列表残留旧文件夹。
+
+本轮已验证：
+
+```powershell
+npm test -- packages/project-session/src/service.test.ts
+npm test -- apps/desktop-shell/src/main/runtime/project-document-routes.test.ts
+npm run typecheck --workspaces --if-present
+npm run build:workbench
+npm run build:desktop
+npm run smoke:desktop
+npm run dist -w @xiaoshuo/desktop-shell
+```
+
+本地打包产物应包含：
+
+```text
+apps/desktop-shell/release/ArcWriter-Setup-0.2.3.exe
+apps/desktop-shell/release/ArcWriter-Setup-0.2.3.exe.blockmap
+apps/desktop-shell/release/latest.yml
+```
+
+`latest.yml` 应记录：
+
+```yaml
+version: 0.2.3
+path: ArcWriter-Setup-0.2.3.exe
+```
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

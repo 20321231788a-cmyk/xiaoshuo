@@ -180,8 +180,8 @@ export async function handleWebsiteAiRoutes(
       const { tokenKey, websiteBaseUrl } = await readWebsiteToken(context);
       const result = await fetchWebsiteJson<JsonRecord>(`${websiteBaseUrl}/api/relay/recharge-orders`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: tokenKey, optionIndex: payload.option_index })
+        headers: { "Content-Type": "application/json", ...bearerAuthHeaders(tokenKey) },
+        body: JSON.stringify({ optionIndex: payload.option_index })
       });
       deps.writeJson(response, 200, {
         message: stringValue(result.message),
@@ -195,7 +195,8 @@ export async function handleWebsiteAiRoutes(
       const orderId = decodeURIComponent(rechargeOrderMatch[1] || "");
       const { tokenKey, websiteBaseUrl } = await readWebsiteToken(context);
       const result = await fetchWebsiteJson<JsonRecord>(
-        `${websiteBaseUrl}/api/relay/recharge-orders/${encodeURIComponent(orderId)}?key=${encodeURIComponent(tokenKey)}`
+        `${websiteBaseUrl}/api/relay/recharge-orders/${encodeURIComponent(orderId)}`,
+        { headers: bearerAuthHeaders(tokenKey) }
       );
       deps.writeJson(response, 200, {
         message: stringValue(result.message),
@@ -214,7 +215,13 @@ export async function handleWebsiteAiRoutes(
 }
 
 async function fetchWebsiteDashboard(websiteBaseUrl: string, tokenKey: string): Promise<WebsiteDashboardPayload> {
-  return fetchWebsiteJson<WebsiteDashboardPayload>(`${websiteBaseUrl}/api/relay/dashboard?key=${encodeURIComponent(tokenKey)}`);
+  return fetchWebsiteJson<WebsiteDashboardPayload>(`${websiteBaseUrl}/api/relay/dashboard`, {
+    headers: bearerAuthHeaders(tokenKey)
+  });
+}
+
+function bearerAuthHeaders(tokenKey: string): Record<string, string> {
+  return { Authorization: `Bearer ${tokenKey}` };
 }
 
 async function fetchRedeemConfig(websiteBaseUrl: string): Promise<{ purchaseUrl: string }> {
