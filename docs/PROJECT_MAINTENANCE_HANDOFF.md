@@ -700,6 +700,47 @@ version: 0.2.4
 path: ArcWriter-Setup-0.2.4.exe
 ```
 
+### 15.8 2026-06-15 v0.2.5 发布记录
+
+本次发布版本：`0.2.5`。版本号已同步到 `apps/desktop-shell/package.json`、`package-lock.json`、Workbench 页面标题、桌面 smoke 页面标题和 `APP_WINDOW_TITLE`。
+
+主要改动：
+
+- 修复桌面软件兑换码无效的问题：`/api/website-ai/redeem` 现在向网站 `/api/redeem` 发送 `Authorization: Bearer <accountKey>`，请求体只保留兑换码，匹配网站端 Bearer 认证。
+- 修复“刷新账号”读取到旧模型 Key 的问题：桌面端网站面板、应用网站配置、兑换码和 Workbench 自动刷新统一优先使用 `website_profile.license_account_key`，再回退 `api_key`。
+- 新增 `website-ai-routes` 单测，覆盖 Bearer 兑换和刷新账号时的 Key 优先级，避免后续把账号 token 与模型 key 再次混用。
+- 网站小说工具页已改为 ArcWriter 软件介绍页，不再展示旧的本地客户端连接检测、一键写入 API 配置和旧简介卡；下载按钮下方直接展示登录、授权、兑换码等账号授权入口。
+
+本轮已验证：
+
+```powershell
+npm test -- apps/desktop-shell/src/main/runtime/website-ai-routes.test.ts
+npm test -- apps/desktop-shell/src/main/runtime/base-routes.test.ts apps/desktop-shell/src/main/runtime/website-ai-routes.test.ts
+npm test -- packages/api-client/src/client.test.ts
+npm run typecheck --workspaces --if-present
+npm run build:workbench
+npm run build:desktop
+npm run smoke:desktop
+npm run dist -w @xiaoshuo/desktop-shell
+cd D:\网站 && npm run build
+cd D:\网站 && npm run test:security
+```
+
+本地打包产物应包含：
+
+```text
+apps/desktop-shell/release/ArcWriter-Setup-0.2.5.exe
+apps/desktop-shell/release/ArcWriter-Setup-0.2.5.exe.blockmap
+apps/desktop-shell/release/latest.yml
+```
+
+`latest.yml` 应记录：
+
+```yaml
+version: 0.2.5
+path: ArcWriter-Setup-0.2.5.exe
+```
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

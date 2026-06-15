@@ -96,7 +96,7 @@ export async function handleWebsiteAiRoutes(
     if (pathname === "/api/website-ai/dashboard" && request.method === "GET") {
       const config = await loadPublicConfig({ rootDir: context.projectRoot });
       const websiteProfile: Partial<AiConfigProfile> = config.website_profile || {};
-      const tokenKey = stringValue(websiteProfile.api_key || websiteProfile.license_account_key).trim();
+      const tokenKey = getWebsiteTokenKey(websiteProfile);
       if (!tokenKey) {
         deps.writeJson(response, 200, {
           logged_in: false,
@@ -131,7 +131,7 @@ export async function handleWebsiteAiRoutes(
       const payload = websiteAiApplyRequestSchema.parse(await deps.readJsonBody(request));
       const currentConfig = await loadPublicConfig({ rootDir: context.projectRoot });
       const currentWebsiteProfile: Partial<AiConfigProfile> = currentConfig.website_profile || {};
-      const tokenKey = stringValue(currentWebsiteProfile.api_key || currentWebsiteProfile.license_account_key).trim();
+      const tokenKey = getWebsiteTokenKey(currentWebsiteProfile);
       if (!tokenKey) {
         deps.writeJson(response, 400, { detail: "请先在网站配置里登录账号。" });
         return true;
@@ -168,8 +168,8 @@ export async function handleWebsiteAiRoutes(
       const { tokenKey, websiteBaseUrl } = await readWebsiteToken(context);
       const result = await fetchWebsiteJson<JsonRecord>(`${websiteBaseUrl}/api/redeem`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: tokenKey, code: payload.code })
+        headers: { "Content-Type": "application/json", ...bearerAuthHeaders(tokenKey) },
+        body: JSON.stringify({ code: payload.code })
       });
       deps.writeJson(response, 200, normalizeRedeemResult(result));
       return true;
@@ -292,11 +292,15 @@ function buildWebsiteAiDashboard(payload: WebsiteDashboardPayload, config: AppCo
 async function readWebsiteToken(context: RuntimeContext): Promise<{ config: AppConfig; tokenKey: string; websiteBaseUrl: string }> {
   const config = await loadPublicConfig({ rootDir: context.projectRoot });
   const websiteProfile: Partial<AiConfigProfile> = config.website_profile || {};
-  const tokenKey = stringValue(websiteProfile.api_key || websiteProfile.license_account_key).trim();
+  const tokenKey = getWebsiteTokenKey(websiteProfile);
   if (!tokenKey) {
     throw new Error("请先在网站配置里登录账号。");
   }
   return { config, tokenKey, websiteBaseUrl: resolveWebsiteBaseUrl(process.env) };
+}
+
+function getWebsiteTokenKey(websiteProfile: Partial<AiConfigProfile>): string {
+  return stringValue(websiteProfile.license_account_key || websiteProfile.api_key).trim();
 }
 
 function normalizeRedeemResult(result: JsonRecord): JsonRecord {

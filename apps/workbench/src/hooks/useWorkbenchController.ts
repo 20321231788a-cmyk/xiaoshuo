@@ -465,7 +465,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
 
   useEffect(() => {
     const websiteProfile = configDraft?.website_profile;
-    const websiteToken = `${websiteProfile?.api_key || websiteProfile?.license_account_key || ""}`.trim();
+    const websiteToken = `${websiteProfile?.license_account_key || websiteProfile?.api_key || ""}`.trim();
     if (status !== "ready" || configDraft?.ai_config_mode !== "website" || !websiteToken) {
       return;
     }
