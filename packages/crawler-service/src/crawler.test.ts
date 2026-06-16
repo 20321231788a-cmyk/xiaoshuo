@@ -368,5 +368,92 @@ describe("NovelCrawlerService", () => {
         })
       ).rejects.toThrow("Bing 未定位到可用目录 URL");
     });
+
+    it("tries sources in auto mode in the correct order (shukuge -> zxtyz -> biquge)", async () => {
+      const chapterHtml = "<html><body><div id=\"content\">正文内容足够长。这里是第二站抓取成功的模拟。主角站在门口。</div></body></html>";
+      vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+        if (url.includes("shukuge.com")) {
+          return new Response("Search Failed", { status: 404 });
+        }
+        if (url.includes("zxtyz.com/search.html")) {
+          const searchHtml = '<html><body><a href="https://www.zxtyz.com/book/456.html">匹配的书名</a></body></html>';
+          return new Response(searchHtml, { status: 200 });
+        }
+        if (url.includes("zxtyz.com/book/456.html")) {
+          const indexHtml = '<html><body><a href="https://www.zxtyz.com/book/456/1.html">第一章 开天</a></body></html>';
+          return new Response(indexHtml, { status: 200 });
+        }
+        if (url.includes("456/1.html")) {
+          return new Response(chapterHtml, { status: 200 });
+        }
+        return new Response("", { status: 404 });
+      }));
+
+      const novel = await crawler.crawl({
+        query: "目标小说",
+        source: "auto",
+        start_chapter: 1,
+        max_chapters: 1,
+        min_chars: 0
+      });
+
+      expect(novel.source).toBe("zxtyz");
+      expect(novel.source_url).toBe("https://www.zxtyz.com/book/456.html");
+      expect(novel.chapters[0]?.title).toBe("第一章 开天");
+
+      vi.unstubAllGlobals();
+    });
+
+    it("uses specified builtin source only", async () => {
+      vi.stubGlobal("fetch", vi.fn(async () => new Response("Failed", { status: 404 })));
+
+      await expect(
+        crawler.crawl({
+          query: "任意小说",
+          source: "shukuge",
+          start_chapter: 1,
+          max_chapters: 1,
+          min_chars: 0
+        })
+      ).rejects.toThrow("从 书库阁 爬取失败");
+
+      vi.unstubAllGlobals();
+    });
+
+    it("allows custom_source_url crawl when query is empty", async () => {
+      const indexHtml = `
+        <html>
+          <body>
+            <a href="https://www.custom.com/book/123/1.html">第一章 天地</a>
+          </body>
+        </html>
+      `;
+      const chapterHtml = `<html><body><div id="content">第一章内容足够长。故事开始了。</div></body></html>`;
+
+      vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+        if (url === "https://www.custom.com/book/123/") {
+          return new Response(indexHtml, { status: 200 });
+        }
+        if (url.endsWith("1.html")) {
+          return new Response(chapterHtml, { status: 200 });
+        }
+        return new Response("", { status: 404 });
+      }));
+
+      const novel = await crawler.crawl({
+        query: "",
+        source: "custom",
+        start_chapter: 1,
+        max_chapters: 1,
+        min_chars: 0,
+        custom_source_url: "https://www.custom.com/book/123/"
+      } as any);
+
+      expect(novel.source).toBe("自定义来源");
+      expect(novel.source_url).toBe("https://www.custom.com/book/123/");
+      expect(novel.chapters[0]?.title).toBe("第一章 天地");
+
+      vi.unstubAllGlobals();
+    });
   });
 });

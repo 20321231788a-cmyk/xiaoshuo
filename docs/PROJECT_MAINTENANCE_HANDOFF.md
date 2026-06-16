@@ -741,6 +741,45 @@ version: 0.2.5
 path: ArcWriter-Setup-0.2.5.exe
 ```
 
+### 15.9 2026-06-16 v0.2.6 发布记录
+
+本次发布版本：`0.2.6`。版本号已同步到 `apps/desktop-shell/package.json`、`package-lock.json`、Workbench 页面标题、桌面 smoke 页面标题和 `APP_WINDOW_TITLE`。
+
+主要改动：
+
+- **拆书库重排**：将“拆书库”从左侧项目 Sidebar 移除，迁移到了中间页面 Tab 中，并升级为卡片网格响应式设计。原有选书、蒸馏、融梗、打开文件能力保留。
+- **融梗锁定修复**：移除了提示词输入框的禁用逻辑，输入框始终可正常编辑，且运行时会将最新的 `fusionPrompt.trim()` 作为核心指令投递给后端。
+- **爬虫来源 UI 及本地管理**：
+  - 支持对旧版 `customCrawlSourceUrl` 单一自定义 URL 的平滑迁移与自动去重。
+  - 新增了爬虫来源选择器，默认内置 Bing、自动选择旧来源、书库阁、zxtyz、22biqu，支持删除任意来源或恢复默认。
+  - 列表删空时会触发红字异常警示并禁用普通书名爬取，但允许直接输入 URL 爬取。
+- **爬虫多路由恢复**：在 `crawler.ts` 中恢复了 `auto`（内置源优先级轮询）、指定源以及 `custom`（空 query 抓取）等路由，且在抓取成功后将 manifest 里的 `source_path` 记为实际的 `novel.source_url`。
+
+本轮已验证：
+
+```powershell
+npm test -- packages/crawler-service/src/crawler.test.ts
+npm test -- apps/workbench/src/lib/crawlSources.test.ts
+npm run typecheck --workspaces --if-present
+npm run build:workbench
+npm run build:desktop
+```
+
+本地打包产物应包含：
+
+```text
+apps/desktop-shell/release/ArcWriter-Setup-0.2.6.exe
+apps/desktop-shell/release/ArcWriter-Setup-0.2.6.exe.blockmap
+apps/desktop-shell/release/latest.yml
+```
+
+`latest.yml` 应记录：
+
+```yaml
+version: 0.2.6
+path: ArcWriter-Setup-0.2.6.exe
+```
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

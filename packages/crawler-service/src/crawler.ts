@@ -161,15 +161,19 @@ export class NovelCrawlerService {
     request: NovelCrawlRequest,
     progress?: (value: number, message: string) => void
   ): Promise<CrawledNovel> {
-    const query = (request.query || "").trim();
+    let query = (request.query || "").trim();
+    const requestedSource = this.normalizeRequestedSource(request.source);
+    const customSourceUrl = this.safeUrl(String((request as { custom_source_url?: unknown }).custom_source_url || ""));
+
+    if (!query && requestedSource === CUSTOM_SOURCE && customSourceUrl) {
+      query = customSourceUrl;
+    }
+
     if (!query) {
       throw new Error("请输入书名或目录 URL");
     }
-    const requestedSource = this.normalizeRequestedSource(request.source);
-    const customSourceUrl = this.safeUrl(String((request as { custom_source_url?: unknown }).custom_source_url || ""));
-    const isDirectUrl = this.isUrl(query);
-    const errors: string[] = [];
 
+    const isDirectUrl = this.isUrl(query);
     if (isDirectUrl) {
       return this.crawlDirectUrl(query, query, request, progress);
     }
@@ -181,27 +185,61 @@ export class NovelCrawlerService {
       return this.crawlDirectUrl(customSourceUrl, query, request, progress);
     }
 
-    if (this.resolver) {
-      progress?.(0.03, "联网搜索目录 URL");
+    const errors: string[] = [];
+
+    // 1. 指定内置来源：shukuge | zxtyz | biquge
+    if (["shukuge", "zxtyz", "biquge"].includes(requestedSource)) {
       try {
-        const resolved = await this.resolver(query, { source: requestedSource });
-        const candidates = this.normalizeResolvedResults(resolved, requestedSource);
-        if (!candidates.length) {
-          errors.push("Bing 未定位到可用目录 URL");
-        }
-        for (const candidate of candidates) {
-          try {
-            progress?.(0.08, `定位目录：${candidate.title || candidate.url}`);
-            const novel = await this.crawlResolvedSource(candidate, query, request, progress);
-            if (novel.chapters.length > 0) {
-              return novel;
-            }
-          } catch (exc) {
-            errors.push(`Bing: ${exc instanceof Error ? exc.message : exc}`);
-          }
-        }
+        progress?.(0.05, `正在从 ${this.sourceDisplayName(requestedSource)} 搜索《${query}》`);
+        return await this.crawlSource(requestedSource, query, request, progress);
       } catch (exc) {
-        errors.push(`Bing: ${exc instanceof Error ? exc.message : exc}`);
+        throw new Error(`从 ${this.sourceDisplayName(requestedSource)} 爬取失败：${exc instanceof Error ? exc.message : exc}`);
+      }
+    }
+
+    // 2. 自动选择旧来源（auto）：按 shukuge -> zxtyz -> biquge 顺序轮询
+    if (requestedSource === "auto") {
+      const autoSources = ["shukuge", "zxtyz", "biquge"];
+      for (const src of autoSources) {
+        try {
+          progress?.(0.05, `正在尝试自动来源 ${this.sourceDisplayName(src)} 搜索《${query}》`);
+          const novel = await this.crawlSource(src, query, request, progress);
+          if (novel && novel.chapters.length > 0) {
+            return novel;
+          }
+        } catch (exc) {
+          errors.push(`${this.sourceDisplayName(src)}: ${exc instanceof Error ? exc.message : exc}`);
+        }
+      }
+      throw new Error("自动选择来源爬取全部失败：" + errors.join("；"));
+    }
+
+    // 3. Bing 搜索定位模式 (bing)
+    if (requestedSource === "bing") {
+      if (this.resolver) {
+        progress?.(0.03, "联网搜索目录 URL");
+        try {
+          const resolved = await this.resolver(query, { source: "bing" });
+          const candidates = this.normalizeResolvedResults(resolved, "bing");
+          if (!candidates.length) {
+            errors.push("Bing 未定位到可用目录 URL");
+          }
+          for (const candidate of candidates) {
+            try {
+              progress?.(0.08, `定位目录：${candidate.title || candidate.url}`);
+              const novel = await this.crawlResolvedSource(candidate, query, request, progress);
+              if (novel.chapters.length > 0) {
+                return novel;
+              }
+            } catch (exc) {
+              errors.push(`Bing: ${exc instanceof Error ? exc.message : exc}`);
+            }
+          }
+        } catch (exc) {
+          errors.push(`Bing: ${exc instanceof Error ? exc.message : exc}`);
+        }
+      } else {
+        errors.push("未配置 Bing 搜索解析器");
       }
     }
 
@@ -364,7 +402,7 @@ export class NovelCrawlerService {
 
   supportedResolverSources(source: string): string[] {
     const normalized = this.normalizeRequestedSource(source);
-    return normalized === SEARCH_SOURCE ? [SEARCH_SOURCE] : [];
+    return normalized === "bing" ? ["bing"] : [];
   }
 
   async getChapters(source: string, bookUrl: string): Promise<NovelSearchResult[]> {
@@ -548,19 +586,25 @@ export class NovelCrawlerService {
 
   private normalizeRequestedSource(source: string): string {
     const normalized = String(source || "").trim().toLowerCase();
-    return normalized === CUSTOM_SOURCE ? CUSTOM_SOURCE : SEARCH_SOURCE;
+    if (["auto", "bing", "shukuge", "zxtyz", "biquge", "custom"].includes(normalized)) {
+      return normalized;
+    }
+    return "bing";
   }
 
   private isGenericSource(source: string): boolean {
-    return source === SEARCH_SOURCE || source === CUSTOM_SOURCE;
+    return source === "bing" || source === "custom";
   }
 
   private sourceDisplayName(source: string): string {
-    if (source === SEARCH_SOURCE) {
+    if (source === "bing") {
       return "Bing";
     }
-    if (source === CUSTOM_SOURCE) {
+    if (source === "custom") {
       return "自定义来源";
+    }
+    if (source === "auto") {
+      return "自动选择旧来源";
     }
     return SOURCES[source]?.name || source;
   }

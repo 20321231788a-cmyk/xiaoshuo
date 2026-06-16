@@ -62,35 +62,24 @@ import {
   describeGeneratedSaveAction,
   extractPathsFromUnknownResult
 } from "./lib/workflow.js";
+import {
+  CrawlSourceOption,
+  loadInitialCrawlSources,
+  restoreDefaultCrawlSources,
+  isHttpUrl,
+  SELECTED_CRAWL_SOURCE_KEY,
+  CRAWL_SOURCES_STORAGE_KEY
+} from "./lib/crawlSources.js";
 
 const TerminalView = lazy(() => import("./views/TerminalView.js").then((module) => ({ default: module.TerminalView })));
 
 const runtime = readWorkbenchRuntime();
 const DEFAULT_RIGHT_WIDTH = 440;
-const APP_WINDOW_TITLE = "ArcWriter 0.2.5";
+const APP_WINDOW_TITLE = "ArcWriter 0.2.6";
 const WEBSITE_HOME_URL = "https://matian.online/";
 const WEBSITE_REGISTER_URL = "https://matian.online/?page=api-relay&auth=register";
-const CUSTOM_CRAWL_SOURCE_STORAGE_KEY = "arcwriter.customCrawlSourceUrl";
 
 const punctuationMarks = ["“”", "‘’", "——", "……", "（）", "《》", "，", "。", "？", "！"];
-type CrawlSourceMode = "bing" | "custom";
-
-function readStoredCustomCrawlSource(): string {
-  try {
-    return typeof window === "undefined" ? "" : window.localStorage.getItem(CUSTOM_CRAWL_SOURCE_STORAGE_KEY) || "";
-  } catch {
-    return "";
-  }
-}
-
-function isHttpUrl(value: string): boolean {
-  try {
-    const parsed = new URL(value.trim());
-    return parsed.protocol === "http:" || parsed.protocol === "https:";
-  } catch {
-    return false;
-  }
-}
 
 type CenterFeature =
   | "editor"
@@ -99,6 +88,7 @@ type CenterFeature =
   | "settings-set"
   | "style-library"
   | "theme-library"
+  | "disassembly-library"
   | "batch"
   | "crawl"
   | "card_draw"
@@ -115,7 +105,8 @@ const pageTabs: Array<{ key: CenterFeature; label: string }> = [
   { key: "timeline", label: "时间线" },
   { key: "settings-set", label: "设定集" },
   { key: "style-library", label: "风格库" },
-  { key: "theme-library", label: "题材库" }
+  { key: "theme-library", label: "题材库" },
+  { key: "disassembly-library", label: "拆书库" }
 ];
 
 const railModes = [
@@ -649,7 +640,6 @@ function ProjectSidebar({
             <p className="xw-empty">打开项目后显示全部文本文件。</p>
           )}
         </div>
-        <DisassemblyLibraryTree controller={controller} disassemblyUi={disassemblyUi} onOpenDocument={onOpenDocument} />
       </section>
 
       <button className="xw-timeline-button" onClick={onOpenTimeline}>
@@ -700,7 +690,7 @@ function ProjectTreeNode({
   );
 }
 
-function DisassemblyLibraryTree({
+function DisassemblyLibraryFeaturePage({
   controller,
   disassemblyUi,
   onOpenDocument
@@ -729,15 +719,25 @@ function DisassemblyLibraryTree({
   }
 
   return (
-    <div className="xw-disassembly-tree">
-      <div className="xw-card-head">
-        <span>拆书库</span>
-        <small>{fusionBooks.length} 拆书 / {rawBooks.length} 原文</small>
-        <button className="xw-tree-refresh" onClick={() => void controller.refreshDisassemblyLibrary()} disabled={controller.disassemblyLibraryBusy}>
-          <RefreshCw size={12} className={controller.disassemblyLibraryBusy ? "spin" : ""} />
+    <section className="xw-feature-page">
+      <div className="xw-feature-toolbar" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "15px" }}>
+        <div className="xw-disassembly-library-title">
+          <strong style={{ fontSize: "16px", marginRight: "10px" }}>拆书库</strong>
+          <span style={{ fontSize: "13px", color: "var(--text-secondary, #666)" }}>
+            {fusionBooks.length} 已拆书 / {rawBooks.length} 原文
+          </span>
+        </div>
+        <button
+          className="xw-secondary-button compact"
+          onClick={() => void controller.refreshDisassemblyLibrary()}
+          disabled={controller.disassemblyLibraryBusy}
+        >
+          <RefreshCw size={14} className={controller.disassemblyLibraryBusy ? "spin" : ""} />
+          <span style={{ marginLeft: "5px" }}>刷新书库</span>
         </button>
       </div>
-      <div className="xw-disassembly-tree-scroll">
+
+      <div className="xw-disassembly-library-grid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: "15px", marginBottom: "20px" }}>
         {books.length ? (
           books.map((book) => {
             const active = book.id === selectedBook?.id;
@@ -745,68 +745,124 @@ function DisassemblyLibraryTree({
             const readyForFusion = disassemblyBookReadyForFusion(book);
             const rawSource = disassemblyBookIsRawSource(book);
             return (
-              <article key={book.id} className={`xw-disassembly-tree-item ${active ? "active" : ""}`}>
-                <button className="xw-disassembly-tree-main" onClick={() => disassemblyUi.onSelectBook(book.id)} type="button">
-                  <div>
-                    <strong>{book.title}</strong>
-                    <span>{book.source_summary || (readyForFusion ? "已拆书文件夹" : rawSource ? "原文文件夹" : book.origin || "拆书库书籍")}</span>
+              <div
+                key={book.id}
+                className={`xw-feature-card ${active ? "active" : ""}`}
+                style={{
+                  border: active ? "2px solid var(--primary-color, #3b82f6)" : "1px solid var(--border-color, #e5e7eb)",
+                  cursor: "pointer",
+                  display: "flex",
+                  flexDirection: "column",
+                  justifyContent: "space-between",
+                  padding: "12px",
+                  borderRadius: "8px",
+                  backgroundColor: "var(--card-bg, #ffffff)"
+                }}
+                onClick={() => disassemblyUi.onSelectBook(book.id)}
+              >
+                <div style={{ display: "flex", alignItems: "flex-start", gap: "10px", marginBottom: "12px" }}>
+                  <BookOpen size={20} style={{ color: "var(--primary-color, #3b82f6)", marginTop: "2px" }} />
+                  <div style={{ display: "flex", flexDirection: "column" }}>
+                    <strong style={{ fontSize: "14px", marginBottom: "4px" }}>{book.title}</strong>
+                    <span style={{ fontSize: "12px", color: "var(--text-secondary, #666)" }}>
+                      {book.source_summary || (readyForFusion ? "已拆书文件夹" : rawSource ? "原文文件夹" : book.origin || "拆书库书籍")}
+                    </span>
+                    <small style={{ fontSize: "11px", color: "var(--text-muted, #999)", marginTop: "4px" }}>
+                      {active ? "当前源书" : readyForFusion ? "状态：已拆书" : `${book.chars} 字`}
+                    </small>
                   </div>
-                  <small>{active ? "当前源书" : readyForFusion ? "已拆书" : `${book.chars} 字`}</small>
-                </button>
-                <div className="xw-disassembly-tree-actions">
+                </div>
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }} onClick={(e) => e.stopPropagation()}>
                   {readyForFusion ? (
-                    <button className={`xw-secondary-button compact ${fused ? "active" : ""}`} onClick={() => disassemblyUi.onToggleFusionBook(book.id)} type="button">
+                    <button
+                      className={`xw-secondary-button compact ${fused ? "active" : ""}`}
+                      onClick={() => disassemblyUi.onToggleFusionBook(book.id)}
+                      type="button"
+                    >
                       {fused ? "已融" : "融梗"}
                     </button>
                   ) : rawSource ? (
-                    <button className="xw-secondary-button compact" onClick={() => runTreeDistillation(book)} type="button" disabled={controller.operationsBusy}>
+                    <button
+                      className="xw-secondary-button compact"
+                      onClick={() => runTreeDistillation(book)}
+                      type="button"
+                      disabled={controller.operationsBusy}
+                    >
                       蒸馏
                     </button>
                   ) : null}
                   {disassemblyBookPrimaryPath(book) && (
-                    <button className="xw-secondary-button compact icon-only" onClick={() => void onOpenDocument(disassemblyBookPrimaryPath(book))} type="button" title="打开源文件">
+                    <button
+                      className="xw-secondary-button compact icon-only"
+                      onClick={() => void onOpenDocument(disassemblyBookPrimaryPath(book))}
+                      type="button"
+                      title="打开源文件"
+                    >
                       <FileText size={13} />
                     </button>
                   )}
                 </div>
-              </article>
+              </div>
             );
           })
         ) : (
-          <p className="xw-empty">先联网爬取、上传拆书或执行一键拆书，这里会自动出现拆书库。</p>
+          <p className="xw-empty" style={{ gridColumn: "1 / -1" }}>先联网爬取、上传拆书或执行一键拆书，这里会自动出现拆书库。</p>
         )}
       </div>
+
       {!!legacyBooks.length && (
-        <details className="xw-disassembly-tree-legacy">
-          <summary>历史拆书产物</summary>
-          <div className="xw-disassembly-tree-scroll legacy">
+        <details className="xw-disassembly-tree-legacy" style={{ marginTop: "20px" }}>
+          <summary style={{ cursor: "pointer", padding: "5px 0", fontWeight: "bold" }}>历史拆书产物</summary>
+          <div className="xw-disassembly-library-grid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: "15px", marginTop: "10px" }}>
             {legacyBooks.map((book) => (
-              <article key={book.id} className="xw-disassembly-tree-item legacy">
-                <div className="xw-disassembly-tree-main static">
-                  <div>
-                    <strong>{book.title}</strong>
-                    <span>{book.source_summary || "历史拆书产物"}</span>
+              <div
+                key={book.id}
+                className="xw-feature-card"
+                style={{
+                  border: "1px solid var(--border-color, #e5e7eb)",
+                  padding: "12px",
+                  borderRadius: "8px",
+                  backgroundColor: "var(--card-bg, #ffffff)",
+                  display: "flex",
+                  flexDirection: "column",
+                  justifyContent: "space-between"
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "flex-start", gap: "10px", marginBottom: "12px" }}>
+                  <BookOpen size={20} style={{ color: "var(--text-muted, #999)", marginTop: "2px" }} />
+                  <div style={{ display: "flex", flexDirection: "column" }}>
+                    <strong style={{ fontSize: "14px", marginBottom: "4px" }}>{book.title}</strong>
+                    <span style={{ fontSize: "12px", color: "var(--text-secondary, #666)" }}>
+                      {book.source_summary || "历史拆书产物"}
+                    </span>
                   </div>
-                  <small>兼容入口</small>
                 </div>
-                <div className="xw-disassembly-tree-actions">
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
                   {book.paths.source && (
-                    <button className="xw-secondary-button compact" onClick={() => void onOpenDocument(book.paths.source!)} type="button">
+                    <button
+                      className="xw-secondary-button compact"
+                      onClick={() => void onOpenDocument(book.paths.source!)}
+                      type="button"
+                    >
                       原文
                     </button>
                   )}
                   {book.paths.detail_outline && (
-                    <button className="xw-secondary-button compact" onClick={() => void onOpenDocument(book.paths.detail_outline!)} type="button">
+                    <button
+                      className="xw-secondary-button compact"
+                      onClick={() => void onOpenDocument(book.paths.detail_outline!)}
+                      type="button"
+                    >
                       细纲
                     </button>
                   )}
                 </div>
-              </article>
+              </div>
             ))}
           </div>
         </details>
       )}
-    </div>
+    </section>
   );
 }
 
@@ -1068,6 +1124,7 @@ function featureTitle(feature: CenterFeature, activeDocument: OpenDocumentTab | 
     "settings-set": "设定集",
     "style-library": "风格库",
     "theme-library": "题材库",
+    "disassembly-library": "拆书库",
     batch: "批量生成",
     crawl: "拆书",
     card_draw: "抽卡",
@@ -1152,6 +1209,20 @@ function FeatureContentSurface({
           ["战斗模板", "冲突推进与场面调度", "00_设定集/题材库/战斗模板.txt"],
           ["违禁词", "敏感词与替代表达", "00_设定集/题材库/违禁词.txt"]
         ]}
+        onOpenDocument={async (path) => {
+          const opened = await controller.openDocument(path);
+          if (opened) {
+            onSelectFeature("editor");
+          }
+        }}
+      />
+    );
+  }
+  if (feature === "disassembly-library") {
+    return (
+      <DisassemblyLibraryFeaturePage
+        controller={controller}
+        disassemblyUi={disassemblyUi}
         onOpenDocument={async (path) => {
           const opened = await controller.openDocument(path);
           if (opened) {
@@ -1409,8 +1480,20 @@ function BatchFeaturePage({ controller }: { controller: WorkbenchController }) {
 
 function DisassembleFeaturePage({ controller, disassemblyUi }: { controller: WorkbenchController; disassemblyUi: DisassemblyUiState }) {
   const [crawlQuery, setCrawlQuery] = useState("");
-  const [crawlSource, setCrawlSource] = useState<CrawlSourceMode>("bing");
-  const [savedCustomCrawlSource, setSavedCustomCrawlSource] = useState(() => readStoredCustomCrawlSource());
+  const [sources, setSources] = useState<CrawlSourceOption[]>(() => loadInitialCrawlSources());
+  const [selectedSourceId, setSelectedSourceId] = useState<string>(() => {
+    if (typeof window === "undefined") return "bing";
+    try {
+      const storedId = window.localStorage.getItem(SELECTED_CRAWL_SOURCE_KEY);
+      const initialList = loadInitialCrawlSources();
+      if (storedId && initialList.some((item) => item.id === storedId)) {
+        return storedId;
+      }
+      return initialList[0]?.id || "";
+    } catch {
+      return "bing";
+    }
+  });
   const [crawlSourceMessage, setCrawlSourceMessage] = useState("");
   const [crawlStartChapter, setCrawlStartChapter] = useState(1);
   const [crawlMaxChapters, setCrawlMaxChapters] = useState(30);
@@ -1497,8 +1580,8 @@ function DisassembleFeaturePage({ controller, disassemblyUi }: { controller: Wor
     void controller.runWorkflowSkill("book_fusion", {
       text: "",
       source_path: "",
-      instruction: fusionPrompt,
-      custom_prompt: fusionPrompt,
+      instruction: fusionPrompt.trim(),
+      custom_prompt: fusionPrompt.trim(),
       genre_hint: fusionGenreHint,
       output_mode: fusionOutputMode,
       source_book_ids: selectedFusionBooks.map((book) => book.id),
@@ -1508,11 +1591,31 @@ function DisassembleFeaturePage({ controller, disassemblyUi }: { controller: Wor
   }
 
   function runNovelCrawl() {
-    const query = crawlQuery.trim() || (crawlSource === "custom" ? savedCustomCrawlSource : "");
+    const query = crawlQuery.trim();
+    let finalSource = "";
+    let finalCustomUrl = "";
+
+    if (isHttpUrl(query)) {
+      finalSource = "custom";
+      finalCustomUrl = query;
+    } else {
+      const selectedSource = sources.find((s) => s.id === selectedSourceId);
+      if (!selectedSource) {
+        setCrawlSourceMessage("请先恢复或添加爬取来源");
+        return;
+      }
+      if (selectedSource.url) {
+        finalSource = "custom";
+        finalCustomUrl = selectedSource.url;
+      } else {
+        finalSource = selectedSource.id;
+      }
+    }
+
     void controller.runJob("novel_crawl", {
-      query,
-      source: crawlSource,
-      custom_source_url: savedCustomCrawlSource,
+      query: isHttpUrl(query) ? "" : query,
+      source: finalSource,
+      custom_source_url: finalCustomUrl,
       start_chapter: crawlStartChapter,
       max_chapters: crawlMaxChapters,
       min_chars: crawlMinChars
@@ -1525,17 +1628,63 @@ function DisassembleFeaturePage({ controller, disassemblyUi }: { controller: Wor
       setCrawlSourceMessage("请输入有效 URL");
       return;
     }
-    setSavedCustomCrawlSource(value);
-    setCrawlSource("custom");
+    const exists = sources.some((item) => item.url === value || item.id === value);
+    if (exists) {
+      setCrawlSourceMessage("来源已存在");
+      return;
+    }
+
+    const newSource: CrawlSourceOption = {
+      id: value,
+      name: value,
+      url: value,
+      isCustom: true
+    };
+    const nextSources = [...sources, newSource];
+    setSources(nextSources);
+    setSelectedSourceId(value);
     setCrawlSourceMessage("来源已保存");
     try {
-      window.localStorage.setItem(CUSTOM_CRAWL_SOURCE_STORAGE_KEY, value);
+      window.localStorage.setItem(CRAWL_SOURCES_STORAGE_KEY, JSON.stringify(nextSources));
+      window.localStorage.setItem(SELECTED_CRAWL_SOURCE_KEY, value);
     } catch {
-      // Local storage may be unavailable in restricted shells.
+      // Local storage may be unavailable
     }
   }
 
-  const canRunNovelCrawl = Boolean(crawlQuery.trim() || (crawlSource === "custom" && savedCustomCrawlSource));
+  function deleteCrawlSource(idToDelete: string) {
+    const nextSources = sources.filter((item) => item.id !== idToDelete);
+    setSources(nextSources);
+    try {
+      window.localStorage.setItem(CRAWL_SOURCES_STORAGE_KEY, JSON.stringify(nextSources));
+    } catch {}
+
+    if (selectedSourceId === idToDelete) {
+      const nextSelected = nextSources[0]?.id || "";
+      setSelectedSourceId(nextSelected);
+      try {
+        window.localStorage.setItem(SELECTED_CRAWL_SOURCE_KEY, nextSelected);
+      } catch {}
+    }
+  }
+
+  function handleRestoreDefaults() {
+    const nextSources = restoreDefaultCrawlSources(sources);
+    setSources(nextSources);
+    try {
+      window.localStorage.setItem(CRAWL_SOURCES_STORAGE_KEY, JSON.stringify(nextSources));
+    } catch {}
+    if (!nextSources.some((item) => item.id === selectedSourceId)) {
+      const nextSelected = nextSources[0]?.id || "";
+      setSelectedSourceId(nextSelected);
+      try {
+        window.localStorage.setItem(SELECTED_CRAWL_SOURCE_KEY, nextSelected);
+      } catch {}
+    }
+    setCrawlSourceMessage("已恢复默认来源");
+  }
+
+  const canRunNovelCrawl = isHttpUrl(crawlQuery.trim()) || (Boolean(crawlQuery.trim()) && Boolean(selectedSourceId));
   const togglePanel = (panel: "disassemble" | "distill" | "fusion") => {
     setExpandedPanels((current) => ({ ...current, [panel]: !current[panel] }));
   };
@@ -1561,22 +1710,72 @@ function DisassembleFeaturePage({ controller, disassemblyUi }: { controller: Wor
             <div className="xw-disassemble-strip-body">
               <div className="xw-feature-toolbar disassemble-source">
                 <div className="xw-crawl-source-input">
-                  <input value={crawlQuery} onChange={(event) => setCrawlQuery(event.target.value)} placeholder={crawlSource === "custom" && savedCustomCrawlSource ? savedCustomCrawlSource : "输入书名或目录 URL"} />
+                  <input
+                    value={crawlQuery}
+                    onChange={(event) => {
+                      setCrawlQuery(event.target.value);
+                      setCrawlSourceMessage("");
+                    }}
+                    placeholder="输入书名或目录 URL"
+                  />
                   <div className="xw-crawl-source-tools">
+                    <select
+                      value={selectedSourceId}
+                      onChange={(event) => {
+                        const val = event.target.value;
+                        setSelectedSourceId(val);
+                        try {
+                          window.localStorage.setItem(SELECTED_CRAWL_SOURCE_KEY, val);
+                        } catch {}
+                      }}
+                      disabled={sources.length === 0}
+                      style={{ maxWidth: "160px", padding: "2px 6px", borderRadius: "4px", border: "1px solid var(--border-color, #e5e7eb)" }}
+                    >
+                      {sources.map((src) => (
+                        <option key={src.id} value={src.id}>
+                          {src.name}
+                        </option>
+                      ))}
+                      {sources.length === 0 && <option value="">(无可用来源)</option>}
+                    </select>
+
+                    {selectedSourceId && (
+                      <button
+                        type="button"
+                        className="xw-danger-button compact icon-only"
+                        onClick={() => deleteCrawlSource(selectedSourceId)}
+                        title="删除当前来源"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+
                     <button
                       type="button"
-                      className={`xw-source-toggle ${crawlSource === "custom" ? "active" : ""}`}
-                      onClick={() => setCrawlSource((value) => (value === "bing" ? "custom" : "bing"))}
+                      className="xw-secondary-button compact"
+                      onClick={handleRestoreDefaults}
+                      title="恢复默认来源"
                     >
-                      {crawlSource === "custom" ? <Link size={14} /> : <ScanSearch size={14} />}
-                      <span>{crawlSource === "custom" ? "自定义来源" : "自动来源：Bing"}</span>
+                      恢复默认
                     </button>
-                    <button type="button" className="xw-secondary-button compact" onClick={saveCustomCrawlSource} disabled={!crawlQuery.trim()}>
+
+                    <button
+                      type="button"
+                      className="xw-secondary-button compact"
+                      onClick={saveCustomCrawlSource}
+                      disabled={!isHttpUrl(crawlQuery)}
+                      title="将输入的目录 URL 保存为自定义来源"
+                    >
                       <Save size={14} />
                       <span>保存来源</span>
                     </button>
-                    {crawlSourceMessage && <small>{crawlSourceMessage}</small>}
+                    {crawlSourceMessage && <small style={{ color: "var(--text-muted, #999)", marginLeft: "5px" }}>{crawlSourceMessage}</small>}
                   </div>
+                  {sources.length === 0 && !isHttpUrl(crawlQuery) && (
+                    <p className="xw-crawl-warning-tip" style={{ color: "var(--red, #ef4444)", fontSize: "12px", marginTop: "4px", width: "100%" }}>
+                      请先恢复默认来源或添加/输入自定义目录 URL。
+                    </p>
+                  )}
                 </div>
                 <button
                   className="xw-primary-button compact"
@@ -1640,7 +1839,7 @@ function DisassembleFeaturePage({ controller, disassemblyUi }: { controller: Wor
             <div className="xw-disassemble-strip-body">
               <div className="xw-disassembly-note">
                 <strong>{distillationSourceTitle}</strong>
-                <span>{selectedBook ? selectedBook.source_summary || selectedBookSourcePath || "左侧拆书库当前源书" : activeDocument ? "将使用当前打开文档蒸馏" : "请先在左侧拆书库选择一本书，或打开一个文档。"}</span>
+                <span>{selectedBook ? selectedBook.source_summary || selectedBookSourcePath || "当前源书" : activeDocument ? "将使用当前打开文档蒸馏" : "请先在拆书库中选择一本书，或打开一个文档。"}</span>
               </div>
 
               <div className="xw-operation-grid two">
@@ -1707,7 +1906,7 @@ function DisassembleFeaturePage({ controller, disassemblyUi }: { controller: Wor
                 <label><span>题材补充</span><input value={fusionGenreHint} onChange={(event) => setFusionGenreHint(event.target.value)} placeholder="可补充当前题材、禁区或风格方向" disabled={!fusionEnabled} /></label>
               </div>
 
-              <textarea value={fusionPrompt} onChange={(event) => setFusionPrompt(event.target.value)} placeholder="可编辑融梗提示词，系统会自动加入当前题材库。" disabled={!fusionEnabled} />
+              <textarea value={fusionPrompt} onChange={(event) => setFusionPrompt(event.target.value)} placeholder="可编辑融梗提示词，系统会自动加入当前题材库。" />
 
               <div className="xw-disassembly-selection">
                 <span>已选 {selectedFusionBooks.length} / 3+</span>
@@ -1716,7 +1915,7 @@ function DisassembleFeaturePage({ controller, disassemblyUi }: { controller: Wor
                     <button key={book.id} className="xw-disassembly-chip active" type="button" onClick={() => disassemblyUi.onToggleFusionBook(book.id)}>
                       {book.title}
                     </button>
-                  )) : <span className="xw-feature-empty">先在左侧勾选至少 3 个已拆书文件夹。</span>}
+                  )) : <span className="xw-feature-empty">先在拆书库中勾选至少 3 个已拆书文件夹。</span>}
                 </div>
               </div>
 

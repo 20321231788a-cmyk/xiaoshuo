@@ -122,7 +122,7 @@ export async function handleJobRoutes(
           created_at: new Date().toISOString(),
           updated_at: new Date().toISOString(),
           origin: "crawl",
-          source_path: crawlRequest.query || "",
+          source_path: novel.source_url || "",
           source_summary: novel.chapters.length ? `共 ${novel.chapters.length} 章，约 ${sourceChars} 字` : "",
           chars: sourceText.length,
           paths: {
