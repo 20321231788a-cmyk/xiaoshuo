@@ -3992,6 +3992,12 @@ body {
   font-size: 13px;
 }
 
+.xw-empty-action {
+  display: grid;
+  justify-items: start;
+  gap: 8px;
+}
+
 .xw-feature-split {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(240px, 0.85fr);
@@ -5945,4 +5951,19 @@ select:focus-visible {
   .xw-segmented-control button {
     flex: 1;
   }
+}
+
+/* Indeterminate progress bar animation */
+@keyframes xw-indeterminate-progress {
+  0% {
+    left: -30%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+
+.xw-progress-indeterminate span {
+  width: 30% !important;
+  animation: xw-indeterminate-progress 1.6s infinite ease-in-out;
 }

@@ -60,7 +60,8 @@ import { useWorkbenchController } from "./hooks/useWorkbenchController.js";
 import { readWorkbenchRuntime } from "./lib/runtime.js";
 import {
   describeGeneratedSaveAction,
-  extractPathsFromUnknownResult
+  extractPathsFromUnknownResult,
+  describeJobKind
 } from "./lib/workflow.js";
 import {
   CrawlSourceOption,
@@ -1473,7 +1474,6 @@ function BatchFeaturePage({ controller }: { controller: WorkbenchController }) {
           开始批量生成
         </button>
       </div>
-      <ResultPreview controller={controller} />
     </section>
   );
 }
@@ -1941,8 +1941,6 @@ function DisassembleFeaturePage({ controller, disassemblyUi }: { controller: Wor
           )}
         </section>
       </div>
-
-      <ResultPreview controller={controller} />
     </section>
   );
 }
@@ -2000,7 +1998,6 @@ function CardDrawFeaturePage({ controller }: { controller: WorkbenchController }
           ))}
         </div>
       )}
-      <ResultPreview controller={controller} />
     </section>
   );
 }
@@ -2054,6 +2051,8 @@ function SkillFeaturePage({ controller }: { controller: WorkbenchController }) {
   const [skillPage, setSkillPage] = useState(0);
   const [skillDescriptionDrafts, setSkillDescriptionDrafts] = useState<Record<string, string>>({});
   const [pendingSkillAction, setPendingSkillAction] = useState<{ skillId: string; action: "run" | "delete-disable" | "restore" } | null>(null);
+  const [skillRefreshError, setSkillRefreshError] = useState("");
+  const attemptedEmptySkillRefreshRef = useRef(false);
   const skillFileInputRef = useRef<HTMLInputElement | null>(null);
   const skills = controller.snapshot?.skills || [];
   const skillsPerPage = 12;
@@ -2061,11 +2060,28 @@ function SkillFeaturePage({ controller }: { controller: WorkbenchController }) {
   const currentPage = Math.min(skillPage, pageCount - 1);
   const pageSkills = skills.slice(currentPage * skillsPerPage, currentPage * skillsPerPage + skillsPerPage);
 
+  async function refreshSkills() {
+    setSkillRefreshError("");
+    try {
+      await controller.refreshSkillCatalog();
+    } catch (error) {
+      setSkillRefreshError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
   useEffect(() => {
     if (skillPage > pageCount - 1) {
       setSkillPage(pageCount - 1);
     }
   }, [pageCount, skillPage]);
+
+  useEffect(() => {
+    if (!controller.snapshot || skills.length || attemptedEmptySkillRefreshRef.current) {
+      return;
+    }
+    attemptedEmptySkillRefreshRef.current = true;
+    void refreshSkills();
+  }, [controller.snapshot, skills.length]);
 
   useEffect(() => {
     if (!pendingSkillAction || controller.operationsBusy) {
@@ -2140,6 +2156,7 @@ function SkillFeaturePage({ controller }: { controller: WorkbenchController }) {
         <input value={urlInput} onChange={(event) => setUrlInput(event.target.value)} placeholder="GitHub 或网页 URL" />
         <button className="xw-secondary-button compact" onClick={() => void controller.importSkillFromUrl(urlInput)} disabled={controller.operationsBusy || !urlInput.trim()}>URL 导入</button>
         <button className="xw-secondary-button compact" onClick={controller.openSkillFolder} disabled={controller.operationsBusy}>技能目录</button>
+        <button className="xw-secondary-button compact" onClick={() => void refreshSkills()} disabled={controller.operationsBusy}>刷新技能</button>
       </div>
       <div className="xw-skill-grid">
         {pageSkills.map((skill) => {
@@ -2204,7 +2221,12 @@ function SkillFeaturePage({ controller }: { controller: WorkbenchController }) {
           );
         })}
       </div>
-      {!pageSkills.length && <p className="xw-feature-empty">暂无技能</p>}
+      {!pageSkills.length && (
+        <div className="xw-empty-action">
+          <p className="xw-feature-empty">{skillRefreshError ? `技能目录读取失败：${skillRefreshError}` : "暂无技能，正在尝试重新读取技能目录。"}</p>
+          <button className="xw-secondary-button compact" onClick={() => void refreshSkills()} disabled={controller.operationsBusy}>重新读取技能</button>
+        </div>
+      )}
       {pageCount > 1 && (
         <div className="xw-skill-pager">
           <button className="xw-secondary-button compact" onClick={() => setSkillPage((page) => Math.max(0, page - 1))} disabled={currentPage <= 0}>
@@ -2216,7 +2238,6 @@ function SkillFeaturePage({ controller }: { controller: WorkbenchController }) {
           </button>
         </div>
       )}
-      <ResultPreview controller={controller} />
     </section>
   );
 }
@@ -3372,15 +3393,124 @@ function ResultPreview({ controller }: { controller: WorkbenchController }) {
   );
 }
 
+function describeSkillId(skillId: string): string {
+  const labels: Record<string, string> = {
+    batch_generate: "批量生成",
+    disassemble_book: "拆书",
+    continue_disassemble: "继续拆书",
+    book_fusion: "融梗",
+    consistency_check: "一致性检查",
+    scan_pits: "扫描伏笔",
+    lore_extract: "提取设定"
+  };
+  return labels[skillId] || skillId;
+}
+
 function RailResultPreview({ controller }: { controller: WorkbenchController }) {
+  const activeJob = [
+    controller.selectedJobDetail,
+    ...(controller.snapshot?.jobs || []).slice().reverse()
+  ].find((job) => job && (job.status === "running" || job.status === "queued") && job.kind !== "summarize_conversation") || null;
+
+  const latestJob = [
+    controller.selectedJobDetail,
+    ...(controller.snapshot?.jobs || []).slice().reverse()
+  ].find((job) => job && job.kind !== "summarize_conversation") || null;
+
+  const isSkillRunning = controller.operationsBusy || controller.conversationBusy || controller.sendingMessage;
+  const isJobRunning = activeJob !== null;
+  const isLive = isSkillRunning || isJobRunning;
+
   const resultText = latestRunResultText(controller);
-  if (!resultText) {
+
+  if (!isLive && !resultText && !latestJob) {
     return null;
   }
+
+  let progressPercent = 0;
+  let showProgressBar = false;
+  let isIndeterminate = false;
+  let title = "运行结果";
+  let statusMessage = "";
+
+  if (activeJob) {
+    showProgressBar = true;
+    progressPercent = Math.max(0, Math.min(100, Math.round((activeJob.progress || 0) * 100)));
+    title = describeJobKind(activeJob.kind);
+    statusMessage = activeJob.message || crawlJobStatusLabel(activeJob.status);
+  } else if (isSkillRunning) {
+    showProgressBar = true;
+    isIndeterminate = true;
+    const skillId = controller.latestSkillResult?.data?.skill_id;
+    title = skillId ? `正在执行: ${describeSkillId(String(skillId))}` : "正在执行技能";
+    statusMessage = controller.operationsMessage || controller.conversationMessage || "正在处理中...";
+  } else if (controller.pendingGeneratedSave) {
+    const skillId = controller.pendingGeneratedSave.skillId;
+    title = skillId ? `${describeSkillId(String(skillId))}结果已就绪` : "生成结果已就绪";
+    statusMessage = controller.operationsMessage || "等待选择写入方式";
+  } else if (controller.latestSkillResult) {
+    const skillId = controller.latestSkillResult?.data?.skill_id;
+    title = skillId ? `${describeSkillId(String(skillId))}执行完成` : "执行完成";
+    statusMessage = controller.operationsMessage || "技能执行完成";
+  } else if (latestJob) {
+    title = describeJobKind(latestJob.kind);
+    statusMessage = latestJob.status === "done" 
+      ? "任务已完成" 
+      : latestJob.status === "failed" 
+        ? `任务失败: ${latestJob.message || "未知错误"}` 
+        : crawlJobStatusLabel(latestJob.status);
+  }
+
+  const resultPaths = (latestJob && latestJob.status === "done") 
+    ? extractPathsFromUnknownResult(latestJob.result) 
+    : [];
+
   return (
     <article className="xw-rail-result" aria-live="polite">
-      <strong>运行结果</strong>
-      <p>{resultText}</p>
+      <div className="xw-crawl-progress-head">
+        <strong>{title}</strong>
+        {showProgressBar && !isIndeterminate && <span>{progressPercent}%</span>}
+      </div>
+
+      {showProgressBar && (
+        <div className={`xw-crawl-progress-track ${isIndeterminate ? "xw-progress-indeterminate" : ""}`} aria-hidden="true">
+          <span style={isIndeterminate ? undefined : { width: `${progressPercent}%` }} />
+        </div>
+      )}
+
+      {statusMessage && <small style={{ color: "var(--xw-muted)", fontSize: "12px", display: "block", marginTop: "4px" }}>{statusMessage}</small>}
+
+      {resultText && (
+        <p style={{ marginTop: "6px" }}>{resultText}</p>
+      )}
+
+      {controller.pendingGeneratedSave && (
+        <div className="xw-feature-actions" style={{ display: "flex", gap: "8px", marginTop: "8px", flexWrap: "wrap" }}>
+          <button className="xw-secondary-button compact" onClick={() => controller.savePendingGenerated("append")} disabled={controller.operationsBusy}>追加保存</button>
+          <button className="xw-primary-button compact" onClick={() => controller.savePendingGenerated("replace")} disabled={controller.operationsBusy}>覆盖保存</button>
+          <button className="xw-secondary-button compact" onClick={controller.copyPendingGeneratedContent} disabled={controller.operationsBusy}>复制</button>
+          <button className="xw-danger-button compact" onClick={controller.discardPendingGenerated} disabled={controller.operationsBusy}>丢弃</button>
+        </div>
+      )}
+
+      {resultPaths.length > 0 && (
+        <div className="xw-crawl-result-card" style={{ padding: 0, border: "none", background: "none", gap: "6px", marginTop: "8px" }}>
+          <strong style={{ fontSize: "13px" }}>已写入文件</strong>
+          <div style={{ display: "grid", gap: "6px" }}>
+            {resultPaths.map((path) => (
+              <button 
+                key={path} 
+                className="xw-secondary-button compact" 
+                type="button" 
+                onClick={() => void controller.openDocument(path)}
+                style={{ justifyContent: "flex-start", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap" }}
+              >
+                {path}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
     </article>
   );
 }
@@ -3719,7 +3849,6 @@ function AssistantRail({
             </button>
           </div>
           {(controller.conversationMessage || controller.documentMessage) && <p className="xw-status-line">{controller.conversationMessage || controller.documentMessage}</p>}
-          <RailResultPreview controller={controller} />
         </section>
       ) : mode === "crawl" ? (
         <CrawlRailPanel
@@ -3742,6 +3871,7 @@ function AssistantRail({
           </button>
         </section>
       )}
+      <RailResultPreview controller={controller} />
     </aside>
   );
 }
@@ -3757,10 +3887,6 @@ function CrawlRailPanel({
   onOpenFeature: () => void;
   onBackToAi: () => void;
 }) {
-  const progress = Math.max(0, Math.min(100, Math.round((job?.progress || 0) * 100)));
-  const resultPaths = job?.status === "done" ? extractPathsFromUnknownResult(job.result) : [];
-  const isLive = job?.status === "queued" || job?.status === "running";
-
   return (
     <section className="xw-ai-panel xw-crawl-rail">
       <div className="xw-rail-panel-head">
@@ -3779,37 +3905,6 @@ function CrawlRailPanel({
         <button className="xw-secondary-button" onClick={onBackToAi}>
           <Bot size={15} />
           <span>返回 AI</span>
-        </button>
-      </div>
-
-      <div className="xw-crawl-output-zone" aria-live="polite">
-        <div className="xw-crawl-status-card">
-          <div className="xw-crawl-progress-head">
-            <strong>{job ? job.message || crawlJobStatusLabel(job.status) : "等待联网爬取"}</strong>
-            <span>{job ? `${progress}%` : "0%"}</span>
-          </div>
-          <div className="xw-crawl-progress-track" aria-hidden="true">
-            <span style={{ width: `${job ? Math.max(progress, isLive ? 6 : 0) : 0}%` }} />
-          </div>
-          <p>{job ? (job.status === "done" ? `已写入 ${resultPaths.length} 个结果` : crawlJobStatusLabel(job.status)) : "在中间拆书页输入书名或目录 URL 后点击“联网爬取”。"}</p>
-        </div>
-
-        {resultPaths.length > 0 && (
-          <div className="xw-crawl-result-card">
-            <strong>已写入文件</strong>
-            <div>
-              {resultPaths.map((path) => (
-                <button key={path} type="button" onClick={() => void controller.openDocument(path)}>
-                  {path}
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-
-        <button className="xw-secondary-button compact" onClick={() => void controller.refreshDisassemblyLibrary()} disabled={controller.disassemblyLibraryBusy}>
-          <RefreshCw size={15} className={controller.disassemblyLibraryBusy ? "spin" : ""} />
-          <span>刷新书库</span>
         </button>
       </div>
     </section>

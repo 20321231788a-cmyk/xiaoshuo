@@ -754,6 +754,8 @@ path: ArcWriter-Setup-0.2.5.exe
   - 新增了爬虫来源选择器，默认内置 Bing、自动选择旧来源、书库阁、zxtyz、22biqu，支持删除任意来源或恢复默认。
   - 列表删空时会触发红字异常警示并禁用普通书名爬取，但允许直接输入 URL 爬取。
 - **爬虫多路由恢复**：在 `crawler.ts` 中恢复了 `auto`（内置源优先级轮询）、指定源以及 `custom`（空 query 抓取）等路由，且在抓取成功后将 manifest 里的 `source_path` 记为实际的 `novel.source_url`。
+- **技能页空列表兜底**：确认 `/api/skills` 可正常返回内置技能后，在 Workbench 技能页加入空列表自动重拉、手动“刷新技能/重新读取技能”和错误提示，避免前端快照或缓存偶发为空时误显示“暂无技能”。
+- **右侧结果栏 UI 收敛**：批量、拆书、抽卡和技能页不再各自重复展示结果预览，统一由右侧 RailResultPreview 承接后台任务、技能运行、待保存结果和已写入文件，并补充运行进度、待保存操作按钮和不确定进度动画。
 
 本轮已验证：
 
@@ -765,7 +767,7 @@ npm run build:workbench
 npm run build:desktop
 ```
 
-本地打包产物应包含：
+执行桌面打包后，本地发布目录应包含：
 
 ```text
 apps/desktop-shell/release/ArcWriter-Setup-0.2.6.exe

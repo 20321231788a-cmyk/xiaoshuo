@@ -3794,6 +3794,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     pendingGeneratedSave,
     styleDistillationProfile,
     selectSkill,
+    refreshSkillCatalog,
     selectJob,
     openJobResultFile,
     continueJobResultInConversation,
