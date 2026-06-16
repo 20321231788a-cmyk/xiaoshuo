@@ -782,6 +782,41 @@ version: 0.2.6
 path: ArcWriter-Setup-0.2.6.exe
 ```
 
+### 15.10 2026-06-16 v0.2.7 发布记录
+
+本次发布版本：`0.2.7`。版本号已同步到 `apps/desktop-shell/package.json`、`package-lock.json`、Workbench 页面标题、桌面 smoke 页面标题、更新服务测试版本桩和 `APP_WINDOW_TITLE`。
+
+主要改动：
+
+- **拆书库左侧页签化**：将拆书库整合到左侧项目树区域，提供“项目树 / 拆书库”二级页签；切换到拆书爬取功能时会自动打开左侧拆书库，保留选书、蒸馏、融梗、打开源文件和历史拆书产物入口。
+- **UI 审核清理**：移除了中间页面旧 `disassembly-library` 不可达入口与重复实现，避免拆书库同时存在两套展示逻辑；当前拆书库状态继续复用 `selectedDisassemblyBookId` 与 `fusionBookIds`。
+- **发布版本同步**：升级桌面端版本到 `0.2.7`，同步 Workbench 标题、桌面 smoke 标题和自动更新测试中的应用版本。
+
+本轮已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/workbench
+npm run typecheck -w @xiaoshuo/desktop-shell
+npm test -- apps/desktop-shell/src/main/update-service.test.ts
+npm run build:workbench
+npm run dist -w @xiaoshuo/desktop-shell
+```
+
+执行桌面打包后，本地发布目录应包含：
+
+```text
+apps/desktop-shell/release/ArcWriter-Setup-0.2.7.exe
+apps/desktop-shell/release/ArcWriter-Setup-0.2.7.exe.blockmap
+apps/desktop-shell/release/latest.yml
+```
+
+`latest.yml` 应记录：
+
+```yaml
+version: 0.2.7
+path: ArcWriter-Setup-0.2.7.exe
+```
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

@@ -76,7 +76,7 @@ const TerminalView = lazy(() => import("./views/TerminalView.js").then((module) 
 
 const runtime = readWorkbenchRuntime();
 const DEFAULT_RIGHT_WIDTH = 440;
-const APP_WINDOW_TITLE = "ArcWriter 0.2.6";
+const APP_WINDOW_TITLE = "ArcWriter 0.2.7";
 const WEBSITE_HOME_URL = "https://matian.online/";
 const WEBSITE_REGISTER_URL = "https://matian.online/?page=api-relay&auth=register";
 
@@ -89,7 +89,6 @@ type CenterFeature =
   | "settings-set"
   | "style-library"
   | "theme-library"
-  | "disassembly-library"
   | "batch"
   | "crawl"
   | "card_draw"
@@ -106,8 +105,7 @@ const pageTabs: Array<{ key: CenterFeature; label: string }> = [
   { key: "timeline", label: "时间线" },
   { key: "settings-set", label: "设定集" },
   { key: "style-library", label: "风格库" },
-  { key: "theme-library", label: "题材库" },
-  { key: "disassembly-library", label: "拆书库" }
+  { key: "theme-library", label: "题材库" }
 ];
 
 const railModes = [
@@ -161,7 +159,14 @@ export function App() {
   const [fusionBookIds, setFusionBookIds] = useState<string[]>([]);
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const [findRequestTick, setFindRequestTick] = useState(0);
+  const [leftSidebarTab, setLeftSidebarTab] = useState<"project" | "disassembly">("project");
   const onboardingRef = useRef(false);
+
+  useEffect(() => {
+    if (rightMode === "crawl" || centerFeature === "crawl") {
+      setLeftSidebarTab("disassembly");
+    }
+  }, [rightMode, centerFeature]);
 
   useEffect(() => {
     document.title = APP_WINDOW_TITLE;
@@ -291,6 +296,8 @@ export function App() {
         <ProjectSidebar
           controller={controller}
           disassemblyUi={disassemblyUi}
+          leftSidebarTab={leftSidebarTab}
+          onSidebarTabChange={setLeftSidebarTab}
           onOpenDocument={async (path) => {
             const opened = await controller.openDocument(path);
             if (opened) {
@@ -412,14 +419,126 @@ function RightRailSplitter({ onDrag, onReset }: { onDrag: (clientX: number) => v
   );
 }
 
+function DisassemblyLibraryTree({
+  controller,
+  disassemblyUi,
+  onOpenDocument
+}: {
+  controller: WorkbenchController;
+  disassemblyUi: DisassemblyUiState;
+  onOpenDocument: (path: string) => void | Promise<void>;
+}) {
+  const books = controller.disassemblyBooks.filter((book) => !book.legacy);
+  const legacyBooks = controller.disassemblyBooks.filter((book) => book.legacy);
+  const selectedBook = books.find((book) => book.id === disassemblyUi.selectedBookId) || null;
+
+  function runTreeDistillation(book: DisassemblyBookSummary) {
+    if (controller.styleDistillationProfile && !window.confirm("当前项目已有蒸馏文风档案，确认替换为当前原文吗？")) {
+      return;
+    }
+    void controller.runNuwaStyleDistillation({
+      replace: Boolean(controller.styleDistillationProfile),
+      sourceBookId: book.id,
+      sourcePath: disassemblyBookPrimaryPath(book),
+      bookTitle: book.title,
+      text: ""
+    });
+  }
+
+  return (
+    <>
+      {books.length ? (
+        books.map((book) => {
+          const active = book.id === selectedBook?.id;
+          const fused = disassemblyUi.fusionBookIds.includes(book.id);
+          const readyForFusion = disassemblyBookReadyForFusion(book);
+          const rawSource = disassemblyBookIsRawSource(book);
+          return (
+            <article key={book.id} className={`xw-disassembly-tree-item ${active ? "active" : ""}`} style={{ marginBottom: "6px" }}>
+              <button 
+                className="xw-disassembly-tree-main" 
+                onClick={() => disassemblyUi.onSelectBook(book.id)} 
+                type="button"
+                style={{ width: "100%", padding: 0 }}
+              >
+                <div style={{ display: "grid", textAlign: "left" }}>
+                  <strong style={{ fontSize: "13px", fontWeight: "bold" }}>{book.title}</strong>
+                  <span style={{ fontSize: "11px", color: "var(--xw-muted)" }}>
+                    {book.source_summary || (readyForFusion ? "已拆书文件夹" : rawSource ? "原文文件夹" : book.origin || "拆书库书籍")}
+                  </span>
+                </div>
+                <small style={{ fontSize: "11px", color: active ? "var(--xw-primary)" : "var(--xw-muted)", marginTop: "2px" }}>
+                  {active ? "当前源书" : readyForFusion ? "已拆书" : `${book.chars} 字`}
+                </small>
+              </button>
+              <div className="xw-disassembly-tree-actions" style={{ display: "flex", gap: "6px", marginTop: "6px" }}>
+                {readyForFusion ? (
+                  <button className={`xw-secondary-button compact ${fused ? "active" : ""}`} onClick={() => disassemblyUi.onToggleFusionBook(book.id)} type="button">
+                    {fused ? "已融" : "融梗"}
+                  </button>
+                ) : rawSource ? (
+                  <button className="xw-secondary-button compact" onClick={() => runTreeDistillation(book)} type="button" disabled={controller.operationsBusy}>
+                    蒸馏
+                  </button>
+                ) : null}
+                {disassemblyBookPrimaryPath(book) && (
+                  <button className="xw-secondary-button compact icon-only" onClick={() => void onOpenDocument(disassemblyBookPrimaryPath(book))} type="button" title="打开源文件">
+                    <FileText size={13} />
+                  </button>
+                )}
+              </div>
+            </article>
+          );
+        })
+      ) : (
+        <p className="xw-empty">先联网爬取、上传拆书或执行一键拆书，这里会自动出现拆书库。</p>
+      )}
+
+      {!!legacyBooks.length && (
+        <details className="xw-disassembly-tree-legacy" style={{ marginTop: "12px" }}>
+          <summary style={{ fontSize: "12px", cursor: "pointer", color: "var(--xw-muted)" }}>历史拆书产物</summary>
+          <div className="xw-disassembly-tree-scroll legacy" style={{ display: "grid", gap: "6px", marginTop: "6px" }}>
+            {legacyBooks.map((book) => (
+              <article key={book.id} className="xw-disassembly-tree-item legacy" style={{ padding: "6px 8px" }}>
+                <div className="xw-disassembly-tree-main static" style={{ display: "grid", textAlign: "left" }}>
+                  <div>
+                    <strong style={{ fontSize: "12px" }}>{book.title}</strong>
+                    <span style={{ fontSize: "10px", color: "var(--xw-muted)" }}>{book.source_summary || "历史拆书产物"}</span>
+                  </div>
+                </div>
+                <div className="xw-disassembly-tree-actions" style={{ display: "flex", gap: "4px", marginTop: "4px" }}>
+                  {book.paths.source && (
+                    <button className="xw-secondary-button compact" onClick={() => void onOpenDocument(book.paths.source!)} type="button">
+                      原文
+                    </button>
+                  )}
+                  {book.paths.detail_outline && (
+                    <button className="xw-secondary-button compact" onClick={() => void onOpenDocument(book.paths.detail_outline!)} type="button">
+                      细纲
+                    </button>
+                  )}
+                </div>
+              </article>
+            ))}
+          </div>
+        </details>
+      )}
+    </>
+  );
+}
+
 function ProjectSidebar({
   controller,
   disassemblyUi,
+  leftSidebarTab,
+  onSidebarTabChange,
   onOpenDocument,
   onOpenTimeline
 }: {
   controller: WorkbenchController;
   disassemblyUi: DisassemblyUiState;
+  leftSidebarTab: "project" | "disassembly";
+  onSidebarTabChange: (tab: "project" | "disassembly") => void;
   onOpenDocument: (path: string) => void | Promise<void>;
   onOpenTimeline: () => void;
 }) {
@@ -629,16 +748,65 @@ function ProjectSidebar({
       </section>
 
       <section className="xw-tree-card">
-        <div className="xw-card-head">
-          <span>项目树</span>
+        <div className="xw-card-head" style={{ justifyContent: "flex-start", gap: "10px" }}>
+          <button
+            className={`xw-sidebar-tab-btn ${leftSidebarTab === "project" ? "active" : ""}`}
+            onClick={() => onSidebarTabChange("project")}
+            style={{
+              background: "none",
+              border: "none",
+              padding: 0,
+              fontSize: "12px",
+              fontWeight: leftSidebarTab === "project" ? "bold" : "normal",
+              color: leftSidebarTab === "project" ? "var(--xw-text, #111)" : "var(--xw-muted, #777)",
+              cursor: "pointer"
+            }}
+          >
+            项目树
+          </button>
+          <span style={{ color: "var(--xw-line, #ccc)" }}>|</span>
+          <button
+            className={`xw-sidebar-tab-btn ${leftSidebarTab === "disassembly" ? "active" : ""}`}
+            onClick={() => onSidebarTabChange("disassembly")}
+            style={{
+              background: "none",
+              border: "none",
+              padding: 0,
+              fontSize: "12px",
+              fontWeight: leftSidebarTab === "disassembly" ? "bold" : "normal",
+              color: leftSidebarTab === "disassembly" ? "var(--xw-text, #111)" : "var(--xw-muted, #777)",
+              cursor: "pointer"
+            }}
+          >
+            拆书库
+          </button>
+          {leftSidebarTab === "disassembly" && (
+            <button
+              className="xw-tree-refresh"
+              onClick={() => void controller.refreshDisassemblyLibrary()}
+              disabled={controller.disassemblyLibraryBusy}
+              style={{ marginLeft: "auto", border: "none", background: "none", cursor: "pointer", display: "inline-flex", alignItems: "center" }}
+              title="刷新书库"
+            >
+              <RefreshCw size={12} className={controller.disassemblyLibraryBusy ? "spin" : ""} />
+            </button>
+          )}
         </div>
         <div className="xw-tree-scroll">
-          {snapshot?.projectChrome.tree.length ? (
-            snapshot.projectChrome.tree.map((node) => (
-              <ProjectTreeNode key={node.path} node={node} activePath={controller.activeDocumentPath} onOpenDocument={onOpenDocument} />
-            ))
+          {leftSidebarTab === "project" ? (
+            snapshot?.projectChrome.tree.length ? (
+              snapshot.projectChrome.tree.map((node) => (
+                <ProjectTreeNode key={node.path} node={node} activePath={controller.activeDocumentPath} onOpenDocument={onOpenDocument} />
+              ))
+            ) : (
+              <p className="xw-empty">打开项目后显示全部文本文件。</p>
+            )
           ) : (
-            <p className="xw-empty">打开项目后显示全部文本文件。</p>
+            <DisassemblyLibraryTree
+              controller={controller}
+              disassemblyUi={disassemblyUi}
+              onOpenDocument={onOpenDocument}
+            />
           )}
         </div>
       </section>
@@ -688,182 +856,6 @@ function ProjectTreeNode({
         </div>
       )}
     </div>
-  );
-}
-
-function DisassemblyLibraryFeaturePage({
-  controller,
-  disassemblyUi,
-  onOpenDocument
-}: {
-  controller: WorkbenchController;
-  disassemblyUi: DisassemblyUiState;
-  onOpenDocument: (path: string) => void | Promise<void>;
-}) {
-  const books = controller.disassemblyBooks.filter((book) => !book.legacy);
-  const legacyBooks = controller.disassemblyBooks.filter((book) => book.legacy);
-  const selectedBook = books.find((book) => book.id === disassemblyUi.selectedBookId) || null;
-  const fusionBooks = books.filter(disassemblyBookReadyForFusion);
-  const rawBooks = books.filter(disassemblyBookIsRawSource);
-
-  function runTreeDistillation(book: DisassemblyBookSummary) {
-    if (controller.styleDistillationProfile && !window.confirm("当前项目已有蒸馏文风档案，确认替换为当前原文吗？")) {
-      return;
-    }
-    void controller.runNuwaStyleDistillation({
-      replace: Boolean(controller.styleDistillationProfile),
-      sourceBookId: book.id,
-      sourcePath: disassemblyBookPrimaryPath(book),
-      bookTitle: book.title,
-      text: ""
-    });
-  }
-
-  return (
-    <section className="xw-feature-page">
-      <div className="xw-feature-toolbar" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "15px" }}>
-        <div className="xw-disassembly-library-title">
-          <strong style={{ fontSize: "16px", marginRight: "10px" }}>拆书库</strong>
-          <span style={{ fontSize: "13px", color: "var(--text-secondary, #666)" }}>
-            {fusionBooks.length} 已拆书 / {rawBooks.length} 原文
-          </span>
-        </div>
-        <button
-          className="xw-secondary-button compact"
-          onClick={() => void controller.refreshDisassemblyLibrary()}
-          disabled={controller.disassemblyLibraryBusy}
-        >
-          <RefreshCw size={14} className={controller.disassemblyLibraryBusy ? "spin" : ""} />
-          <span style={{ marginLeft: "5px" }}>刷新书库</span>
-        </button>
-      </div>
-
-      <div className="xw-disassembly-library-grid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: "15px", marginBottom: "20px" }}>
-        {books.length ? (
-          books.map((book) => {
-            const active = book.id === selectedBook?.id;
-            const fused = disassemblyUi.fusionBookIds.includes(book.id);
-            const readyForFusion = disassemblyBookReadyForFusion(book);
-            const rawSource = disassemblyBookIsRawSource(book);
-            return (
-              <div
-                key={book.id}
-                className={`xw-feature-card ${active ? "active" : ""}`}
-                style={{
-                  border: active ? "2px solid var(--primary-color, #3b82f6)" : "1px solid var(--border-color, #e5e7eb)",
-                  cursor: "pointer",
-                  display: "flex",
-                  flexDirection: "column",
-                  justifyContent: "space-between",
-                  padding: "12px",
-                  borderRadius: "8px",
-                  backgroundColor: "var(--card-bg, #ffffff)"
-                }}
-                onClick={() => disassemblyUi.onSelectBook(book.id)}
-              >
-                <div style={{ display: "flex", alignItems: "flex-start", gap: "10px", marginBottom: "12px" }}>
-                  <BookOpen size={20} style={{ color: "var(--primary-color, #3b82f6)", marginTop: "2px" }} />
-                  <div style={{ display: "flex", flexDirection: "column" }}>
-                    <strong style={{ fontSize: "14px", marginBottom: "4px" }}>{book.title}</strong>
-                    <span style={{ fontSize: "12px", color: "var(--text-secondary, #666)" }}>
-                      {book.source_summary || (readyForFusion ? "已拆书文件夹" : rawSource ? "原文文件夹" : book.origin || "拆书库书籍")}
-                    </span>
-                    <small style={{ fontSize: "11px", color: "var(--text-muted, #999)", marginTop: "4px" }}>
-                      {active ? "当前源书" : readyForFusion ? "状态：已拆书" : `${book.chars} 字`}
-                    </small>
-                  </div>
-                </div>
-                <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }} onClick={(e) => e.stopPropagation()}>
-                  {readyForFusion ? (
-                    <button
-                      className={`xw-secondary-button compact ${fused ? "active" : ""}`}
-                      onClick={() => disassemblyUi.onToggleFusionBook(book.id)}
-                      type="button"
-                    >
-                      {fused ? "已融" : "融梗"}
-                    </button>
-                  ) : rawSource ? (
-                    <button
-                      className="xw-secondary-button compact"
-                      onClick={() => runTreeDistillation(book)}
-                      type="button"
-                      disabled={controller.operationsBusy}
-                    >
-                      蒸馏
-                    </button>
-                  ) : null}
-                  {disassemblyBookPrimaryPath(book) && (
-                    <button
-                      className="xw-secondary-button compact icon-only"
-                      onClick={() => void onOpenDocument(disassemblyBookPrimaryPath(book))}
-                      type="button"
-                      title="打开源文件"
-                    >
-                      <FileText size={13} />
-                    </button>
-                  )}
-                </div>
-              </div>
-            );
-          })
-        ) : (
-          <p className="xw-empty" style={{ gridColumn: "1 / -1" }}>先联网爬取、上传拆书或执行一键拆书，这里会自动出现拆书库。</p>
-        )}
-      </div>
-
-      {!!legacyBooks.length && (
-        <details className="xw-disassembly-tree-legacy" style={{ marginTop: "20px" }}>
-          <summary style={{ cursor: "pointer", padding: "5px 0", fontWeight: "bold" }}>历史拆书产物</summary>
-          <div className="xw-disassembly-library-grid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: "15px", marginTop: "10px" }}>
-            {legacyBooks.map((book) => (
-              <div
-                key={book.id}
-                className="xw-feature-card"
-                style={{
-                  border: "1px solid var(--border-color, #e5e7eb)",
-                  padding: "12px",
-                  borderRadius: "8px",
-                  backgroundColor: "var(--card-bg, #ffffff)",
-                  display: "flex",
-                  flexDirection: "column",
-                  justifyContent: "space-between"
-                }}
-              >
-                <div style={{ display: "flex", alignItems: "flex-start", gap: "10px", marginBottom: "12px" }}>
-                  <BookOpen size={20} style={{ color: "var(--text-muted, #999)", marginTop: "2px" }} />
-                  <div style={{ display: "flex", flexDirection: "column" }}>
-                    <strong style={{ fontSize: "14px", marginBottom: "4px" }}>{book.title}</strong>
-                    <span style={{ fontSize: "12px", color: "var(--text-secondary, #666)" }}>
-                      {book.source_summary || "历史拆书产物"}
-                    </span>
-                  </div>
-                </div>
-                <div style={{ display: "flex", justifyContent: "flex-end", gap: "8px" }}>
-                  {book.paths.source && (
-                    <button
-                      className="xw-secondary-button compact"
-                      onClick={() => void onOpenDocument(book.paths.source!)}
-                      type="button"
-                    >
-                      原文
-                    </button>
-                  )}
-                  {book.paths.detail_outline && (
-                    <button
-                      className="xw-secondary-button compact"
-                      onClick={() => void onOpenDocument(book.paths.detail_outline!)}
-                      type="button"
-                    >
-                      细纲
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        </details>
-      )}
-    </section>
   );
 }
 
@@ -1125,7 +1117,6 @@ function featureTitle(feature: CenterFeature, activeDocument: OpenDocumentTab | 
     "settings-set": "设定集",
     "style-library": "风格库",
     "theme-library": "题材库",
-    "disassembly-library": "拆书库",
     batch: "批量生成",
     crawl: "拆书",
     card_draw: "抽卡",
@@ -1210,20 +1201,6 @@ function FeatureContentSurface({
           ["战斗模板", "冲突推进与场面调度", "00_设定集/题材库/战斗模板.txt"],
           ["违禁词", "敏感词与替代表达", "00_设定集/题材库/违禁词.txt"]
         ]}
-        onOpenDocument={async (path) => {
-          const opened = await controller.openDocument(path);
-          if (opened) {
-            onSelectFeature("editor");
-          }
-        }}
-      />
-    );
-  }
-  if (feature === "disassembly-library") {
-    return (
-      <DisassemblyLibraryFeaturePage
-        controller={controller}
-        disassemblyUi={disassemblyUi}
         onOpenDocument={async (path) => {
           const opened = await controller.openDocument(path);
           if (opened) {
