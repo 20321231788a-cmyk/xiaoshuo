@@ -4,11 +4,13 @@ import { handleAgentRoutes } from "./agent-routes.js";
 import { handleJobRoutes } from "./job-routes.js";
 import { handleSkillRoutes } from "./skill-routes.js";
 import { handleVectorRoutes } from "./vector-routes.js";
+import { handleGraphRoutes } from "./graph-routes.js";
 import type { RuntimeContext } from "./types.js";
 
 const mockAgentPlan = vi.hoisted(() => vi.fn());
 const mockRunSkill = vi.hoisted(() => vi.fn());
 const mockVectorRebuild = vi.hoisted(() => vi.fn());
+const mockGraphRebuild = vi.hoisted(() => vi.fn());
 const mockWriteAiLicenseRequiredIfNeeded = vi.hoisted(() => vi.fn());
 
 vi.mock("@xiaoshuo/agent-runtime", () => ({
@@ -27,6 +29,13 @@ vi.mock("@xiaoshuo/vector-service", () => ({
   VectorIndex: class {
     rebuild = mockVectorRebuild;
     close = vi.fn();
+  },
+  GraphContext: class {
+    rebuildGraph = mockGraphRebuild;
+    close = vi.fn();
+    getStatus = vi.fn();
+    buildWritingContext = vi.fn();
+    checkConsistency = vi.fn();
   }
 }));
 
@@ -138,6 +147,29 @@ describe("AI license guarded runtime routes", () => {
     expect(handled).toBe(true);
     expect(writeJson).toHaveBeenCalledWith(expect.anything(), 403, { detail: "当前账号未授权", code: "AI_LICENSE_REQUIRED" });
     expect(mockVectorRebuild).not.toHaveBeenCalled();
+  });
+
+  it("blocks graph rebuild when unlicensed", async () => {
+    blockLicense();
+    const writeJson = vi.fn();
+
+    const handled = await handleGraphRoutes(
+      { method: "POST" } as IncomingMessage,
+      createResponse(),
+      "/api/graph/rebuild",
+      new URLSearchParams(),
+      createContext(),
+      {
+        ensureProjectSessionCurrent: vi.fn().mockResolvedValue({ path: "D:\\projects\\novel" }),
+        readJsonBody: vi.fn(),
+        stringValue: vi.fn(),
+        writeJson
+      }
+    );
+
+    expect(handled).toBe(true);
+    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 403, { detail: "当前账号未授权", code: "AI_LICENSE_REQUIRED" });
+    expect(mockGraphRebuild).not.toHaveBeenCalled();
   });
 
   it("blocks novel crawl jobs when unlicensed", async () => {

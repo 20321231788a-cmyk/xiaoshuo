@@ -29,6 +29,7 @@ import {
   handleProjectDocumentRoutes,
   handleSkillRoutes,
   handleVectorRoutes,
+  handleGraphRoutes,
   handleWebsiteAiRoutes,
   listRuntimeJobs,
   matchCardDrawRoute,
@@ -265,6 +266,15 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
   }
 
   if (await handleVectorRoutes(request, response, pathname, url.searchParams, context, {
+    ensureProjectSessionCurrent,
+    readJsonBody,
+    stringValue,
+    writeJson
+  })) {
+    return;
+  }
+
+  if (await handleGraphRoutes(request, response, pathname, url.searchParams, context, {
     ensureProjectSessionCurrent,
     readJsonBody,
     stringValue,

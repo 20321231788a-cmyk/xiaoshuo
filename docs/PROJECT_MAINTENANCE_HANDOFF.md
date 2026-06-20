@@ -817,6 +817,107 @@ version: 0.2.7
 path: ArcWriter-Setup-0.2.7.exe
 ```
 
+### 15.11 2026-06-20 GraphRAG-lite 框架第一阶段开发记录
+
+本次为 GraphRAG-lite 第一阶段最小可用版开发。
+
+主要改动：
+
+- **数据库扩展**：在 `VectorDb` (00_设定集/.agent/vector_index.sqlite3) 中扩展创建了图谱所需的基础表：
+  - `graph_entities`（实体表）：存储世界观设定中的各类实体。
+  - `graph_relations`（关系表）：记录实体之间的一跳关系。
+  - `graph_claims`（断言事实表）：存储原子性断言及其状态，支持 confirmed / planned。
+  - `graph_communities`（社群摘要表）：保存主线、人设等全局的聚合社群大纲摘要。
+- **轻量抽取与增量索引**：
+  - 在 `GraphContext` 中实现了基于规则的实体与断言抽取引擎。通过 Markdown 标题级别提取角色/物品/术语等实体。
+  - 大纲/章纲抽取为 `planned` 状态，正文事实与设定抽取为 `confirmed` 状态，并能从正文提及实体自动推断出 `appears_in` 关系。
+  - 将 `rebuildGraph` 挂载到了 `VectorIndex.rebuild()` 与 `processPending()` 流程后，完成向向量数据库与图谱的增量重建。
+- **检索与写作接入**：
+  - 编写了 `buildWritingContext` 与 `checkConsistency`。第一阶段实现的是规则版 GraphRAG-lite：基于 chunks、关键词匹配、实体提及和图谱一跳关系生成写作约束。真正的向量相似度融合和更完整的冲突检测留待第二阶段。
+  - 整合进 `agent-runtime/runtime.ts` 的 `generateBodyChapter`（正文生成）与 `runConsistencyCheckForText`（一致性校对），提供图谱校验入口，当前第一阶段主要返回命中实体与 confirmed claims 上下文，辅助校验设定跑偏风险，深度冲突判定后续第二阶段接入。
+- **API 路由公开与 AI License 安全控制**：
+  - 新建 `graph-routes.ts` 暴露 `status`、`rebuild`、`writing-context` 和 `check` 接口，并成功挂载到 `runtime-server.ts` 路由层。
+  - 对 rebuild、writing-context 和 check 等 POST 图谱操作增加了 `writeAiLicenseRequiredIfNeeded` 授权拦截，保障未授权无法调用 AI 功能。
+- **SQLite 释放与测试覆盖**：
+  - 在 `runtime.ts` 和 `indexer.ts` 调用 Graph 数据库的位置全部使用 `try-finally` 连接管理结构，彻底规避数据库连接泄露隐患。
+  - 补全了 `checkConsistency` 的参数解包绑定与单元测试。
+  - 新建了 `graph-routes.test.ts` 测试文件，并补充了 `license-guarded-routes.test.ts` 中针对 Graph 路由的拦截测试。
+
+本轮已验证：
+
+```powershell
+npm test -- packages/vector-service/src/graph-context.test.ts
+npm test -- apps/desktop-shell/src/main/runtime/license-guarded-routes.test.ts
+npm test -- apps/desktop-shell/src/main/runtime/graph-routes.test.ts
+npm test
+npm run typecheck --workspaces --if-present
+npm run build:workbench
+```
+
+### 15.12 2026-06-20 拆书库树形化重构与主编辑区分屏系统开发记录
+
+本次为工作台 UI 界面与交互体验的多项重构优化开发。
+
+主要改动：
+
+- **拆书库树形收纳**：
+  - 为了改变海量卡片平铺堆叠的混乱体验，将拆书库从一维列表改造为了三层文件夹树结构：
+    - 一级：小说主文件夹（以书籍的 `title` 自动做 Group 分类）。
+    - 二级：“原书”子文件夹与“拆书产物”子文件夹。
+    - 三级：具体的原书记录（有蒸馏和打开操作）与已拆书产物（有融梗和打开操作）。
+  - 新增 `NovelFolderNode` 组件，重构 `DisassemblyLibraryTree` 组件，复用了项目原生树型样式，并在组件内维护折叠展开状态。
+- **多功能左右分屏系统**：
+  - 在主编辑区引入了一分为二的水平分屏布局（重构了 `FeatureWorkbenchPanel`）。支持了两个文档并排对照编辑，也支持文档与 AI对话、设定集、风格库、题材库等常用功能页进行左右分屏组合，且页面卡片支持宽度等比缩放。
+  - 引入了高亮边框指示的“聚焦侧(activePane)”概念。用户点击切换激活窗口时，系统同步调用控制器的 `activateDocument` 激活当前文档，让标点栏输入、查找、保存、刷新等工具优先作用于当前聚焦的活动文档中。
+  - 选项卡与页面按钮栏点击事件进行了分流拦截。在右侧窗口聚焦时，切换右侧将仅作用于右侧 Feature 且支持点击设定集等卡片在右侧直接打开文档。
+- **一致性检查 UI 优化**：
+  - 将 `ProjectFileSelect` 组件内的下拉选择框与相对路径输入框包裹在水平 Flex 容器内，以 1:1 等宽排布在同一行上，消除了原有的换行局促感。
+  - 在“自动一致性检查”复选框上加内联样式 `gridColumnStart: 2`，强制其定位在 CSS Grid 容器的右下槽位，移动到了风险阈值输入框的下方。
+
+本轮已验证：
+
+```powershell
+npm run typecheck --workspaces --if-present
+npm run build:workbench
+```
+
+### 15.13 2026-06-20 v0.2.8 发布记录
+
+本次将 GraphRAG-lite 写作框架首轮能力与工作台分屏体验合并进入 `0.2.8` 版本，并完成桌面端打包发布。
+
+主要改动：
+
+- **GraphRAG-lite 图谱上下文层**：
+  - 在 `packages/vector-service` 中新增 `GraphContext`，支持人物、地点、组织、道具、术语、风格规则、题材规则、伏笔等实体类型，以及属于、冲突、因果、限制、伏笔指向、出场章节、风格约束等关系类型。
+  - 新增 claims 与 communities 数据结构，用于记录已确认事实、待定事实、禁止项，以及主线、角色线、世界规则、风格语感、题材玩法、伏笔闭环等聚合摘要。
+  - 新增基于章纲/正文的图谱检索与一致性检查入口，当前为规则版 GraphRAG-lite；后续可继续接入 LLM 抽取、DRIFT-like 多跳检索与写后自动修订闭环。
+- **桌面 runtime Graph 路由**：
+  - 在桌面 runtime 中补充 graph 路由，并接入 AI License 写入权限校验。
+  - Graph 数据库访问统一使用 `try-finally` 关闭连接，避免长时间写作过程中 SQLite 连接泄露。
+- **工作台 UI 体验**：
+  - 拆书库升级为树形收纳结构，降低大量拆书卡片平铺时的浏览成本。
+  - 主编辑区新增左右分屏与聚焦侧机制，支持文档对照编辑，以及文档与 AI 对话、设定集、风格库、题材库等常用页面并排使用。
+  - 一致性检查页优化了文件选择与自动检查开关布局。
+- **版本同步**：
+  - 桌面端包版本、窗口标题、工作台 HTML 标题、smoke 页面、更新服务测试桩统一更新为 `0.2.8`。
+
+本轮已验证：
+
+```powershell
+npm test
+npm run typecheck --workspaces --if-present
+npm run build:workbench
+npm run build:desktop
+npm run smoke:desktop
+npm run dist -w @xiaoshuo/desktop-shell
+```
+
+本地打包产物：
+
+- `apps/desktop-shell/release/ArcWriter-Setup-0.2.8.exe`
+- `apps/desktop-shell/release/ArcWriter-Setup-0.2.8.exe.blockmap`
+- `apps/desktop-shell/release/latest.yml`
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

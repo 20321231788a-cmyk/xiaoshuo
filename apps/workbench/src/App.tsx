@@ -17,6 +17,7 @@ import {
   ChevronDown,
   ChevronUp,
   Cloud,
+  Columns,
   Copy,
   Download,
   Eye,
@@ -76,7 +77,7 @@ const TerminalView = lazy(() => import("./views/TerminalView.js").then((module) 
 
 const runtime = readWorkbenchRuntime();
 const DEFAULT_RIGHT_WIDTH = 440;
-const APP_WINDOW_TITLE = "ArcWriter 0.2.7";
+const APP_WINDOW_TITLE = "ArcWriter 0.2.8";
 const WEBSITE_HOME_URL = "https://matian.online/";
 const WEBSITE_REGISTER_URL = "https://matian.online/?page=api-relay&auth=register";
 
@@ -419,18 +420,28 @@ function RightRailSplitter({ onDrag, onReset }: { onDrag: (clientX: number) => v
   );
 }
 
-function DisassemblyLibraryTree({
+function NovelFolderNode({
+  title,
+  books,
   controller,
   disassemblyUi,
-  onOpenDocument
+  onOpenDocument,
+  selectedBookId
 }: {
+  title: string;
+  books: DisassemblyBookSummary[];
   controller: WorkbenchController;
   disassemblyUi: DisassemblyUiState;
   onOpenDocument: (path: string) => void | Promise<void>;
+  selectedBookId: string | null;
 }) {
-  const books = controller.disassemblyBooks.filter((book) => !book.legacy);
-  const legacyBooks = controller.disassemblyBooks.filter((book) => book.legacy);
-  const selectedBook = books.find((book) => book.id === disassemblyUi.selectedBookId) || null;
+  const rawSources = books.filter((book) => !disassemblyBookReadyForFusion(book));
+  const readyForFusions = books.filter(disassemblyBookReadyForFusion);
+
+  const hasSelected = books.some((book) => book.id === selectedBookId);
+  const [expanded, setExpanded] = useState<boolean>(hasSelected || true);
+  const [rawExpanded, setRawExpanded] = useState<boolean>(true);
+  const [fusionExpanded, setFusionExpanded] = useState<boolean>(true);
 
   function runTreeDistillation(book: DisassemblyBookSummary) {
     if (controller.styleDistillationProfile && !window.confirm("当前项目已有蒸馏文风档案，确认替换为当前原文吗？")) {
@@ -446,50 +457,219 @@ function DisassemblyLibraryTree({
   }
 
   return (
+    <div className="xw-tree-node" style={{ marginBottom: "6px" }}>
+      <button
+        className="xw-tree-row dir"
+        onClick={() => setExpanded(!expanded)}
+        type="button"
+        style={{ cursor: "pointer" }}
+      >
+        <Folder size={15} />
+        <span style={{ fontWeight: "bold" }}>{title}</span>
+        <em>{expanded ? "-" : "+"}</em>
+      </button>
+
+      {expanded && (
+        <div className="xw-tree-children" style={{ gap: "4px" }}>
+          {/* 原书 (原书文件夹) */}
+          {rawSources.length > 0 && (
+            <div className="xw-tree-node">
+              <button
+                className="xw-tree-row dir"
+                onClick={() => setRawExpanded(!rawExpanded)}
+                type="button"
+                style={{
+                  minHeight: "30px",
+                  height: "30px",
+                  fontSize: "12px",
+                  background: "transparent",
+                  border: "none",
+                  padding: "0 4px",
+                  gap: "6px",
+                  cursor: "pointer"
+                }}
+              >
+                <Folder size={13} style={{ color: "var(--xw-muted)" }} />
+                <span style={{ color: "var(--xw-text)", fontSize: "12px" }}>原书</span>
+                <em>{rawExpanded ? "-" : "+"}</em>
+              </button>
+              {rawExpanded && (
+                <div className="xw-tree-children" style={{ gap: "4px", paddingLeft: "12px" }}>
+                  {rawSources.map((book) => {
+                    const active = book.id === selectedBookId;
+                    return (
+                      <div
+                        key={book.id}
+                        className={`xw-disassembly-tree-item ${active ? "active" : ""}`}
+                        style={{
+                          padding: "6px 8px",
+                          borderRadius: "8px",
+                          marginBottom: "2px"
+                        }}
+                      >
+                        <button
+                          className="xw-disassembly-tree-main"
+                          onClick={() => disassemblyUi.onSelectBook(book.id)}
+                          type="button"
+                          style={{ width: "100%", padding: 0 }}
+                        >
+                          <div style={{ display: "grid", textAlign: "left" }}>
+                            <strong style={{ fontSize: "12px" }}>{book.source_summary || "原文"}</strong>
+                            <small style={{ fontSize: "10px", color: active ? "var(--xw-primary)" : "var(--xw-muted)", marginTop: "2px" }}>
+                              {active ? "当前源书" : `${book.chars} 字`}
+                            </small>
+                          </div>
+                        </button>
+                        <div className="xw-disassembly-tree-actions">
+                          <button
+                            className="xw-secondary-button compact"
+                            onClick={() => runTreeDistillation(book)}
+                            type="button"
+                            disabled={controller.operationsBusy}
+                            style={{ padding: "2px 6px", fontSize: "11px", minWidth: "42px", height: "22px" }}
+                          >
+                            蒸馏
+                          </button>
+                          {disassemblyBookPrimaryPath(book) && (
+                            <button
+                              className="xw-secondary-button compact icon-only"
+                              onClick={() => void onOpenDocument(disassemblyBookPrimaryPath(book))}
+                              type="button"
+                              title="打开源文件"
+                              style={{ width: "22px", minWidth: "22px", height: "22px" }}
+                            >
+                              <FileText size={11} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 拆书产物 (拆书产物文件夹) */}
+          {readyForFusions.length > 0 && (
+            <div className="xw-tree-node">
+              <button
+                className="xw-tree-row dir"
+                onClick={() => setFusionExpanded(!fusionExpanded)}
+                type="button"
+                style={{
+                  minHeight: "30px",
+                  height: "30px",
+                  fontSize: "12px",
+                  background: "transparent",
+                  border: "none",
+                  padding: "0 4px",
+                  gap: "6px",
+                  cursor: "pointer"
+                }}
+              >
+                <Folder size={13} style={{ color: "var(--xw-muted)" }} />
+                <span style={{ color: "var(--xw-text)", fontSize: "12px" }}>拆书产物</span>
+                <em>{fusionExpanded ? "-" : "+"}</em>
+              </button>
+              {fusionExpanded && (
+                <div className="xw-tree-children" style={{ gap: "4px", paddingLeft: "12px" }}>
+                  {readyForFusions.map((book) => {
+                    const active = book.id === selectedBookId;
+                    const fused = disassemblyUi.fusionBookIds.includes(book.id);
+                    return (
+                      <div
+                        key={book.id}
+                        className={`xw-disassembly-tree-item ${active ? "active" : ""}`}
+                        style={{
+                          padding: "6px 8px",
+                          borderRadius: "8px",
+                          marginBottom: "2px"
+                        }}
+                      >
+                        <button
+                          className="xw-disassembly-tree-main"
+                          onClick={() => disassemblyUi.onSelectBook(book.id)}
+                          type="button"
+                          style={{ width: "100%", padding: 0 }}
+                        >
+                          <div style={{ display: "grid", textAlign: "left" }}>
+                            <strong style={{ fontSize: "12px" }}>{book.source_summary || "已拆书"}</strong>
+                            <small style={{ fontSize: "10px", color: active ? "var(--xw-primary)" : "var(--xw-muted)", marginTop: "2px" }}>
+                              {active ? "当前源书" : "已拆书"}
+                            </small>
+                          </div>
+                        </button>
+                        <div className="xw-disassembly-tree-actions">
+                          <button
+                            className={`xw-secondary-button compact ${fused ? "active" : ""}`}
+                            onClick={() => disassemblyUi.onToggleFusionBook(book.id)}
+                            type="button"
+                            style={{ padding: "2px 6px", fontSize: "11px", minWidth: "42px", height: "22px" }}
+                          >
+                            {fused ? "已融" : "融梗"}
+                          </button>
+                          {disassemblyBookPrimaryPath(book) && (
+                            <button
+                              className="xw-secondary-button compact icon-only"
+                              onClick={() => void onOpenDocument(disassemblyBookPrimaryPath(book))}
+                              type="button"
+                              title="打开源文件"
+                              style={{ width: "22px", minWidth: "22px", height: "22px" }}
+                            >
+                              <FileText size={11} />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DisassemblyLibraryTree({
+  controller,
+  disassemblyUi,
+  onOpenDocument
+}: {
+  controller: WorkbenchController;
+  disassemblyUi: DisassemblyUiState;
+  onOpenDocument: (path: string) => void | Promise<void>;
+}) {
+  const books = controller.disassemblyBooks.filter((book) => !book.legacy);
+  const legacyBooks = controller.disassemblyBooks.filter((book) => book.legacy);
+  const selectedBook = books.find((book) => book.id === disassemblyUi.selectedBookId) || null;
+
+  // 按 title 属性进行分组
+  const groupedBooks: Record<string, DisassemblyBookSummary[]> = {};
+  for (const book of books) {
+    if (!groupedBooks[book.title]) {
+      groupedBooks[book.title] = [];
+    }
+    groupedBooks[book.title]!.push(book);
+  }
+
+  return (
     <>
       {books.length ? (
-        books.map((book) => {
-          const active = book.id === selectedBook?.id;
-          const fused = disassemblyUi.fusionBookIds.includes(book.id);
-          const readyForFusion = disassemblyBookReadyForFusion(book);
-          const rawSource = disassemblyBookIsRawSource(book);
-          return (
-            <article key={book.id} className={`xw-disassembly-tree-item ${active ? "active" : ""}`} style={{ marginBottom: "6px" }}>
-              <button 
-                className="xw-disassembly-tree-main" 
-                onClick={() => disassemblyUi.onSelectBook(book.id)} 
-                type="button"
-                style={{ width: "100%", padding: 0 }}
-              >
-                <div style={{ display: "grid", textAlign: "left" }}>
-                  <strong style={{ fontSize: "13px", fontWeight: "bold" }}>{book.title}</strong>
-                  <span style={{ fontSize: "11px", color: "var(--xw-muted)" }}>
-                    {book.source_summary || (readyForFusion ? "已拆书文件夹" : rawSource ? "原文文件夹" : book.origin || "拆书库书籍")}
-                  </span>
-                </div>
-                <small style={{ fontSize: "11px", color: active ? "var(--xw-primary)" : "var(--xw-muted)", marginTop: "2px" }}>
-                  {active ? "当前源书" : readyForFusion ? "已拆书" : `${book.chars} 字`}
-                </small>
-              </button>
-              <div className="xw-disassembly-tree-actions" style={{ display: "flex", gap: "6px", marginTop: "6px" }}>
-                {readyForFusion ? (
-                  <button className={`xw-secondary-button compact ${fused ? "active" : ""}`} onClick={() => disassemblyUi.onToggleFusionBook(book.id)} type="button">
-                    {fused ? "已融" : "融梗"}
-                  </button>
-                ) : rawSource ? (
-                  <button className="xw-secondary-button compact" onClick={() => runTreeDistillation(book)} type="button" disabled={controller.operationsBusy}>
-                    蒸馏
-                  </button>
-                ) : null}
-                {disassemblyBookPrimaryPath(book) && (
-                  <button className="xw-secondary-button compact icon-only" onClick={() => void onOpenDocument(disassemblyBookPrimaryPath(book))} type="button" title="打开源文件">
-                    <FileText size={13} />
-                  </button>
-                )}
-              </div>
-            </article>
-          );
-        })
+        Object.entries(groupedBooks).map(([title, groupBooks]) => (
+          <NovelFolderNode
+            key={title}
+            title={title}
+            books={groupBooks}
+            controller={controller}
+            disassemblyUi={disassemblyUi}
+            onOpenDocument={onOpenDocument}
+            selectedBookId={selectedBook?.id || null}
+          />
+        ))
       ) : (
         <p className="xw-empty">先联网爬取、上传拆书或执行一键拆书，这里会自动出现拆书库。</p>
       )}
@@ -898,11 +1078,37 @@ function FeatureWorkbenchPanel({
 }) {
   const activeDocument = controller.openDocuments.find((document) => document.path === controller.activeDocumentPath) || null;
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
+  const rightEditorRef = useRef<HTMLTextAreaElement | null>(null);
   const findInputRef = useRef<HTMLInputElement | null>(null);
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState("");
   const [findMessage, setFindMessage] = useState("");
-  const title = featureTitle(feature, activeDocument);
+
+  // 分屏管理状态
+  const [isSplit, setIsSplit] = useState(false);
+  const [activePane, setActivePane] = useState<"left" | "right">("left");
+  const [rightFeature, setRightFeature] = useState<CenterFeature>("conversations");
+  const [rightDocumentPath, setRightDocumentPath] = useState<string | null>(null);
+
+  // 动态降级：计算右侧正在显示的活动文档
+  const rightActiveDocument = controller.openDocuments.find((doc) => doc.path === rightDocumentPath) || controller.openDocuments[0] || null;
+
+  // 自动监测右侧文档是否已被关闭，若关闭则降级重置
+  useEffect(() => {
+    if (rightDocumentPath && !controller.openDocuments.some((doc) => doc.path === rightDocumentPath)) {
+      setRightDocumentPath(controller.openDocuments[0]?.path || null);
+    }
+  }, [controller.openDocuments, rightDocumentPath]);
+
+  // 根据当前聚焦侧获取当前面板对应的文档
+  const currentPaneDoc = isSplit
+    ? (activePane === "left" ? activeDocument : rightActiveDocument)
+    : activeDocument;
+
+  // 根据当前聚焦侧动态计算并展示头部标题
+  const title = isSplit
+    ? (activePane === "left" ? featureTitle(feature, activeDocument) : featureTitle(rightFeature, rightActiveDocument))
+    : featureTitle(feature, activeDocument);
 
   useEffect(() => {
     if (!findRequestTick) {
@@ -913,33 +1119,59 @@ function FeatureWorkbenchPanel({
     requestAnimationFrame(() => findInputRef.current?.focus());
   }, [findRequestTick]);
 
+  function handlePaneFocus(pane: "left" | "right") {
+    setActivePane(pane);
+    if (pane === "left") {
+      if (activeDocument) {
+        controller.activateDocument(activeDocument.path);
+      }
+    } else {
+      if (rightActiveDocument) {
+        controller.activateDocument(rightActiveDocument.path);
+      }
+    }
+  }
+
+  function handleSelectRightFeature(nextFeature: CenterFeature) {
+    setRightFeature(nextFeature);
+    if (nextFeature === "editor") {
+      if (controller.activeDocumentPath) {
+        setRightDocumentPath(controller.activeDocumentPath);
+      }
+    }
+  }
+
   function insertMark(mark: string) {
-    if (!activeDocument) {
+    const doc = currentPaneDoc;
+    if (!doc) {
       return;
     }
     const open = mark.length > 1 ? mark.slice(0, mark.length / 2) : mark;
     const close = mark.length > 1 ? mark.slice(mark.length / 2) : "";
-    const editor = editorRef.current;
-    const start = editor?.selectionStart ?? activeDocument.content.length;
+    const ref = isSplit ? (activePane === "left" ? editorRef : rightEditorRef) : editorRef;
+    const editor = ref.current;
+    const start = editor?.selectionStart ?? doc.content.length;
     const end = editor?.selectionEnd ?? start;
-    const selected = activeDocument.content.slice(start, end);
+    const selected = doc.content.slice(start, end);
     const insertion = close ? `${open}${selected}${close}` : open;
-    const next = `${activeDocument.content.slice(0, start)}${insertion}${activeDocument.content.slice(end)}`;
+    const next = `${doc.content.slice(0, start)}${insertion}${doc.content.slice(end)}`;
     controller.updateActiveDocument(next);
     requestAnimationFrame(() => {
       const cursor = close && selected ? start + insertion.length : start + open.length;
-      editorRef.current?.focus();
-      editorRef.current?.setSelectionRange(cursor, cursor);
+      ref.current?.focus();
+      ref.current?.setSelectionRange(cursor, cursor);
     });
   }
 
   function findNext() {
-    if (!activeDocument || !findQuery.trim()) {
+    const doc = currentPaneDoc;
+    if (!doc || !findQuery.trim()) {
       setFindMessage(findQuery.trim() ? "当前没有可查找文档" : "请输入查找内容");
       return;
     }
-    const editor = editorRef.current;
-    const content = activeDocument.content;
+    const ref = isSplit ? (activePane === "left" ? editorRef : rightEditorRef) : editorRef;
+    const editor = ref.current;
+    const content = doc.content;
     const query = findQuery.trim();
     const source = content.toLowerCase();
     const needle = query.toLowerCase();
@@ -954,8 +1186,8 @@ function FeatureWorkbenchPanel({
     }
     setFindMessage(`已定位第 ${index + 1} 个字符`);
     requestAnimationFrame(() => {
-      editorRef.current?.focus();
-      editorRef.current?.setSelectionRange(index, index + query.length);
+      ref.current?.focus();
+      ref.current?.setSelectionRange(index, index + query.length);
     });
   }
 
@@ -967,37 +1199,66 @@ function FeatureWorkbenchPanel({
           <strong>{title}</strong>
         </div>
         <div className="xw-top-actions">
-          <button className="xw-secondary-button compact" onClick={() => void controller.reopenDocumentFromDisk()} disabled={!activeDocument || controller.documentBusy}>
+          {/* 分屏控制按钮 */}
+          <button
+            className={`xw-secondary-button compact ${isSplit ? "active" : ""}`}
+            onClick={() => {
+              setIsSplit(!isSplit);
+              if (!isSplit) {
+                setActivePane("left");
+              }
+            }}
+            type="button"
+            title="左右分屏显示"
+          >
+            <Columns size={15} />
+            <span>{isSplit ? "单屏" : "分屏"}</span>
+          </button>
+
+          <button className="xw-secondary-button compact" onClick={() => void controller.reopenDocumentFromDisk()} disabled={!currentPaneDoc || controller.documentBusy}>
             <RefreshCw size={15} />
             <span>刷新</span>
           </button>
-          <button className="xw-primary-button compact" onClick={() => void controller.saveActiveDocument()} disabled={!activeDocument || controller.documentBusy}>
+          <button className="xw-primary-button compact" onClick={() => void controller.saveActiveDocument()} disabled={!currentPaneDoc || controller.documentBusy}>
             <Save size={15} />
             <span>保存当前</span>
           </button>
         </div>
       </header>
 
-      <div className="xw-editor-body">
+      <div className="xw-editor-body" style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: 1 }}>
         {controller.openDocuments.length > 0 && (
           <div className="xw-editor-tabs">
-            {controller.openDocuments.map((document) => (
-              <div key={document.path} className={`xw-editor-tab ${document.path === controller.activeDocumentPath ? "active" : ""}`}>
-                <button
-                  className="xw-editor-tab-title"
-                  onClick={() => {
-                    controller.activateDocument(document.path);
-                    onSelectFeature("editor");
-                  }}
-                >
-                  <span>{document.title}</span>
-                  {document.dirty && <em>●</em>}
-                </button>
-                <button className="xw-editor-tab-close" aria-label={`关闭 ${document.title}`} onClick={() => controller.closeDocument(document.path)}>
-                  <X size={13} />
-                </button>
-              </div>
-            ))}
+            {controller.openDocuments.map((document) => {
+              const isActive = isSplit
+                ? (activePane === "left"
+                    ? document.path === controller.activeDocumentPath && feature === "editor"
+                    : document.path === rightDocumentPath && rightFeature === "editor")
+                : document.path === controller.activeDocumentPath && feature === "editor";
+              return (
+                <div key={document.path} className={`xw-editor-tab ${isActive ? "active" : ""}`}>
+                  <button
+                    className="xw-editor-tab-title"
+                    onClick={() => {
+                      if (isSplit && activePane === "right") {
+                        setRightDocumentPath(document.path);
+                        handleSelectRightFeature("editor");
+                        controller.activateDocument(document.path);
+                      } else {
+                        controller.activateDocument(document.path);
+                        onSelectFeature("editor");
+                      }
+                    }}
+                  >
+                    <span>{document.title}</span>
+                    {document.dirty && <em>●</em>}
+                  </button>
+                  <button className="xw-editor-tab-close" aria-label={`关闭 ${document.title}`} onClick={() => controller.closeDocument(document.path)}>
+                    <X size={13} />
+                  </button>
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -1010,7 +1271,7 @@ function FeatureWorkbenchPanel({
               instruction: "提取当前页面设定：只提取当前打开文档中明确出现的人物、体系、地图、道具设定，并与现有设定合并，避免臆造。",
               write_result: true
             } as any)}
-            disabled={!activeDocument || controller.operationsBusy}
+            disabled={!currentPaneDoc || controller.operationsBusy}
           >
             提取设定
           </button>
@@ -1023,21 +1284,30 @@ function FeatureWorkbenchPanel({
         </div>
         <div className="xw-page-tabs">
           <span>页面</span>
-          {pageTabs.map((tab) => (
-            <button
-              key={tab.key}
-              className={feature === tab.key ? "active" : ""}
-              onClick={() => {
-                onSelectFeature(tab.key);
-              }}
-            >
-              {tab.label}
-            </button>
-          ))}
+          {pageTabs.map((tab) => {
+            const isActive = isSplit
+              ? (activePane === "left" ? feature === tab.key : rightFeature === tab.key)
+              : feature === tab.key;
+            return (
+              <button
+                key={tab.key}
+                className={isActive ? "active" : ""}
+                onClick={() => {
+                  if (isSplit && activePane === "right") {
+                    handleSelectRightFeature(tab.key);
+                  } else {
+                    onSelectFeature(tab.key);
+                  }
+                }}
+              >
+                {tab.label}
+              </button>
+            );
+          })}
         </div>
         <div className="xw-punctuation-bar">
           {punctuationMarks.map((mark) => (
-            <button key={mark} onClick={() => insertMark(mark)} disabled={!activeDocument}>
+            <button key={mark} onClick={() => insertMark(mark)} disabled={!currentPaneDoc}>
               {mark}
             </button>
           ))}
@@ -1057,12 +1327,13 @@ function FeatureWorkbenchPanel({
                 if (event.key === "Escape") {
                   setFindOpen(false);
                   setFindMessage("");
-                  editorRef.current?.focus();
+                  const ref = isSplit ? (activePane === "left" ? editorRef : rightEditorRef) : editorRef;
+                  ref.current?.focus();
                 }
               }}
               placeholder="查找当前文档"
             />
-            <button className="xw-secondary-button compact" type="button" onClick={findNext} disabled={!activeDocument}>
+            <button className="xw-secondary-button compact" type="button" onClick={findNext} disabled={!currentPaneDoc}>
               查找
             </button>
             <button className="xw-secondary-button compact" type="button" onClick={() => setFindOpen(false)}>
@@ -1103,7 +1374,71 @@ function FeatureWorkbenchPanel({
           />
         )}
 
-        <FeatureContentSurface controller={controller} feature={feature} disassemblyUi={disassemblyUi} activeDocument={activeDocument} editorRef={editorRef} onSelectFeature={onSelectFeature} />
+        {/* 核心页面区域条件渲染 */}
+        {isSplit ? (
+          <div style={{ display: "flex", gap: "12px", flex: 1, minHeight: 0, width: "100%", overflow: "hidden", marginTop: "8px" }}>
+            {/* 左侧分屏窗口 */}
+            <div
+              className={`xw-split-pane ${activePane === "left" ? "focused" : ""}`}
+              style={{
+                flex: 1,
+                minWidth: 0,
+                display: "flex",
+                flexDirection: "column",
+                border: activePane === "left" ? "2px solid var(--accent)" : "2px solid var(--line)",
+                boxShadow: activePane === "left" ? "0 0 8px rgba(11, 110, 104, 0.2)" : "none",
+                borderRadius: "12px",
+                overflow: "hidden",
+                transition: "all 0.2s ease"
+              }}
+              onMouseDown={() => handlePaneFocus("left")}
+            >
+              <FeatureContentSurface
+                controller={controller}
+                feature={feature}
+                disassemblyUi={disassemblyUi}
+                activeDocument={activeDocument}
+                editorRef={editorRef}
+                onSelectFeature={onSelectFeature}
+              />
+            </div>
+
+            {/* 右侧分屏窗口 */}
+            <div
+              className={`xw-split-pane ${activePane === "right" ? "focused" : ""}`}
+              style={{
+                flex: 1,
+                minWidth: 0,
+                display: "flex",
+                flexDirection: "column",
+                border: activePane === "right" ? "2px solid var(--accent)" : "2px solid var(--line)",
+                boxShadow: activePane === "right" ? "0 0 8px rgba(11, 110, 104, 0.2)" : "none",
+                borderRadius: "12px",
+                overflow: "hidden",
+                transition: "all 0.2s ease"
+              }}
+              onMouseDown={() => handlePaneFocus("right")}
+            >
+              <FeatureContentSurface
+                controller={controller}
+                feature={rightFeature}
+                disassemblyUi={disassemblyUi}
+                activeDocument={rightActiveDocument}
+                editorRef={rightEditorRef}
+                onSelectFeature={handleSelectRightFeature}
+              />
+            </div>
+          </div>
+        ) : (
+          <FeatureContentSurface
+            controller={controller}
+            feature={feature}
+            disassemblyUi={disassemblyUi}
+            activeDocument={activeDocument}
+            editorRef={editorRef}
+            onSelectFeature={onSelectFeature}
+          />
+        )}
       </div>
     </div>
   );
@@ -1390,14 +1725,16 @@ function ProjectFileSelect({
   return (
     <label>
       <span>{label}</span>
-      <select value={hasValue ? value : ""} onChange={(event) => onChange(event.target.value)}>
-        <option value="">{emptyLabel}</option>
-        {activeDocument && <option value={activeDocument.path}>当前文档：{activeDocument.title}</option>}
-        {selectableFiles.map((path) => (
-          <option key={path} value={path}>{path}</option>
-        ))}
-      </select>
-      <input value={value} onChange={(event) => onChange(event.target.value)} placeholder="也可输入项目相对路径" />
+      <div style={{ display: "flex", gap: "8px" }}>
+        <select value={hasValue ? value : ""} onChange={(event) => onChange(event.target.value)} style={{ flex: 1, minWidth: 0 }}>
+          <option value="">{emptyLabel}</option>
+          {activeDocument && <option value={activeDocument.path}>当前文档：{activeDocument.title}</option>}
+          {selectableFiles.map((path) => (
+            <option key={path} value={path}>{path}</option>
+          ))}
+        </select>
+        <input value={value} onChange={(event) => onChange(event.target.value)} placeholder="也可输入项目相对路径" style={{ flex: 1, minWidth: 0 }} />
+      </div>
     </label>
   );
 }
@@ -1998,7 +2335,7 @@ function ConsistencyFeaturePage({ controller }: { controller: WorkbenchControlle
         <div className="xw-operation-grid two">
           <ProjectFileSelect label="检查来源文件" value={sourcePath} onChange={setSourcePath} controller={controller} />
           <label><span>风险阈值</span><input type="number" min={1} max={100} value={threshold} onChange={(event) => updateThreshold(Number(event.target.value))} /></label>
-          <label className="xw-check-row">
+          <label className="xw-check-row" style={{ gridColumnStart: 2 }}>
             <input
               type="checkbox"
               checked={autoConsistency}

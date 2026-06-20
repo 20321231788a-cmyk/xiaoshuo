@@ -4,3 +4,4 @@ export { VectorDb } from "./vector-db.js";
 export { VectorHit } from "./search.js";
 export { hashText, cosineSimilarity, getKeywordTerms, searchKeywordsInChunks, mergeHits } from "./search.js";
 export { hitExcerptLimit, excerptText, prepareQuery, sourceWeight } from "./search.js";
+export { GraphContext } from "./graph-context.js";

@@ -44,6 +44,7 @@ import { GeneratedSavePlanner, hasExplicitWriteIntent } from "./generated-save-p
 import { SmartSkillOrchestrator } from "./smart-skill-orchestrator.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import type { StreamingModelClient } from "./stream.js";
+import { GraphContext } from "@xiaoshuo/vector-service";
 
 const DISASSEMBLE_LIBRARY_DIR = "00_设定集/拆书库";
 const FUSION_LIBRARY_DIR = "00_设定集/融梗方案";
@@ -2088,6 +2089,18 @@ export class AgentRuntimeService {
       [chapterOutline, continuity.state_summary, JSON.stringify(continuity.genre)].join("\n"),
       false
     );
+
+    let graphContext = "无";
+    let graph: GraphContext | null = null;
+    try {
+      graph = new GraphContext(this.documents.projectRoot);
+      graphContext = await graph.buildWritingContext([chapterOutline, request.content || ""].join("\n"), { topK: 6 });
+    } catch (err) {
+      console.error("Failed to build graph writing context:", err);
+    } finally {
+      graph?.close();
+    }
+
     const systemPrompt =
       "你是长篇网文正文写作智能体。文章连续性是最高优先级，必须严格服从设定、章纲和上一章结尾。\n" +
       "不得擅自新增主线、境界、科技词、人物关系或与题材不符的概念。\n" +
@@ -2098,6 +2111,13 @@ export class AgentRuntimeService {
       `用户补充指令：${request.content || "无"}`,
       "",
       `【本章章纲】\n${clipForConsistency(chapterOutline, 8000)}`,
+      "",
+      `【图谱写作约束】\n${graphContext}\n` +
+      "- 已确认事实必须遵守\n" +
+      "- planned 内容是当前计划，不得当作已经发生\n" +
+      "- draft 内容只作参考\n" +
+      "- contradicted 内容需要避开或提示\n" +
+      "- 空白大纲/章纲不得自行补成事实",
       "",
       `【四层设定集】\n${clipForConsistency(JSON.stringify(continuity.lore), 12000)}`,
       "",
@@ -2157,10 +2177,24 @@ export class AgentRuntimeService {
       return { score: 0, risks: [], reason: "未配置可用模型，跳过一致性评分" };
     }
     const recent = continuity.previous_chapters.map((item) => item.content).join("\n");
+
+    let graphContext = "无";
+    let graph: GraphContext | null = null;
+    try {
+      graph = new GraphContext(this.documents.projectRoot);
+      graphContext = await graph.buildWritingContext(text, { topK: 5 });
+    } catch (err) {
+      console.error("Failed to build graph consistency check context:", err);
+    } finally {
+      graph?.close();
+    }
+
     const prompt = [
       "请检查正文是否违背章纲、人物设定、体系设定、地图设定、道具设定、风格库、题材库和上一章承接。",
       '输出 JSON：{"score": 0-100, "risks": ["问题"], "reason": "简短说明"}。',
       "低于 80 分代表必须回炉。",
+      "",
+      `【图谱设定与计划事实】\n${graphContext}`,
       "",
       `【章纲】\n${clipForConsistency(chapterOutline, 5000)}`,
       "",

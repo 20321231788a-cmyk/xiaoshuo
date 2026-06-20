@@ -5,6 +5,7 @@ import type { VectorIndexStatus } from "@xiaoshuo/shared";
 import type { VectorHit } from "./search.js";
 import { EmbeddingClient } from "./embedding-client.js";
 import { VectorDb } from "./vector-db.js";
+import { GraphContext } from "./graph-context.js";
 import {
   hashText,
   getKeywordTerms,
@@ -291,6 +292,17 @@ export class VectorIndex {
       this.db.db.prepare("DELETE FROM pending_files").run();
     });
 
+    // rebuild graph context
+    let graph: GraphContext | null = null;
+    try {
+      graph = new GraphContext(this.projectPath);
+      graph.rebuildGraph();
+    } catch (err) {
+      console.error("Failed to rebuild graph database:", err);
+    } finally {
+      graph?.close();
+    }
+
     progress?.(1.0, "Vector index ready");
     const finalStatus = await this.status();
     return {
@@ -491,6 +503,17 @@ export class VectorIndex {
       this.db.setMeta("embedding_model", embeddingKey);
       this.deleteOrphanEmbeddings();
     });
+
+    // rebuild graph context
+    let graph: GraphContext | null = null;
+    try {
+      graph = new GraphContext(this.projectPath);
+      graph.rebuildGraph();
+    } catch (err) {
+      console.error("Failed to rebuild graph database:", err);
+    } finally {
+      graph?.close();
+    }
 
     progress?.(1.0, "Vector pending index ready");
     const st = await this.status();

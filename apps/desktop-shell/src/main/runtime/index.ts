@@ -12,3 +12,4 @@ export * from "./skill-routes.js";
 export * from "./types.js";
 export * from "./vector-routes.js";
 export * from "./website-ai-routes.js";
+export * from "./graph-routes.js";

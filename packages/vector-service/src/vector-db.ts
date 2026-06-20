@@ -105,6 +105,59 @@ export class VectorDb {
         updated_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_pending_files_updated ON pending_files(updated_at);
+
+      CREATE TABLE IF NOT EXISTS graph_entities(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity_id TEXT UNIQUE NOT NULL,
+        name TEXT NOT NULL,
+        type TEXT NOT NULL,
+        description TEXT,
+        source_path TEXT,
+        status TEXT DEFAULT 'confirmed',
+        created_at INTEGER,
+        updated_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_graph_entities_type ON graph_entities(type);
+
+      CREATE TABLE IF NOT EXISTS graph_relations(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        source_entity_id TEXT NOT NULL,
+        predicate TEXT NOT NULL,
+        target_entity_id TEXT NOT NULL,
+        description TEXT,
+        source_path TEXT,
+        status TEXT DEFAULT 'confirmed',
+        created_at INTEGER,
+        updated_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_graph_relations_source ON graph_relations(source_entity_id);
+      CREATE INDEX IF NOT EXISTS idx_graph_relations_target ON graph_relations(target_entity_id);
+
+      CREATE TABLE IF NOT EXISTS graph_claims(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        subject_entity_id TEXT NOT NULL,
+        predicate TEXT NOT NULL,
+        object_text TEXT,
+        object_entity_id TEXT,
+        source_path TEXT NOT NULL,
+        source_type TEXT NOT NULL,
+        chapter_number INTEGER,
+        status TEXT NOT NULL,
+        confidence REAL DEFAULT 1.0,
+        evidence_chunk_id INTEGER,
+        created_at INTEGER,
+        updated_at INTEGER,
+        FOREIGN KEY(evidence_chunk_id) REFERENCES chunks(id) ON DELETE SET NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_graph_claims_subject ON graph_claims(subject_entity_id);
+      CREATE INDEX IF NOT EXISTS idx_graph_claims_status ON graph_claims(status);
+
+      CREATE TABLE IF NOT EXISTS graph_communities(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT UNIQUE NOT NULL,
+        summary TEXT NOT NULL,
+        updated_at INTEGER
+      );
     `);
   }
 
