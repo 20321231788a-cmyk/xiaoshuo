@@ -159,6 +159,40 @@ describe("vector-service", () => {
       expect(getSourceType("其他文档.txt")).toBe("document");
     });
 
+    it("does not refresh pending files when path and action are unchanged", () => {
+      const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+      try {
+        const first = index!.markChanged(["02_正文/第一章.txt"], "upsert");
+        const conn = (index as any).db.db;
+        const firstRow = conn.prepare("SELECT action, updated_at FROM pending_files WHERE path = ?").get("02_正文/第一章.txt") as {
+          action: string;
+          updated_at: number;
+        };
+
+        nowSpy.mockReturnValue(1_005_000);
+        const duplicate = index!.markChanged(["02_正文/第一章.txt"], "upsert");
+        const duplicateRow = conn.prepare("SELECT action, updated_at FROM pending_files WHERE path = ?").get("02_正文/第一章.txt") as {
+          action: string;
+          updated_at: number;
+        };
+
+        const changedAction = index!.markChanged(["02_正文/第一章.txt"], "delete");
+        const changedRow = conn.prepare("SELECT action, updated_at FROM pending_files WHERE path = ?").get("02_正文/第一章.txt") as {
+          action: string;
+          updated_at: number;
+        };
+
+        expect(first).toEqual({ queued: 1, paths: ["02_正文/第一章.txt"], action: "upsert" });
+        expect(firstRow).toEqual({ action: "upsert", updated_at: 1000 });
+        expect(duplicate).toEqual({ queued: 0, paths: [], action: "upsert" });
+        expect(duplicateRow).toEqual(firstRow);
+        expect(changedAction).toEqual({ queued: 1, paths: ["02_正文/第一章.txt"], action: "delete" });
+        expect(changedRow).toEqual({ action: "delete", updated_at: 1005 });
+      } finally {
+        nowSpy.mockRestore();
+      }
+    });
+
     it("can status, rebuild, process pending and search", async () => {
       // Create test files
       fs.writeFileSync(path.join(tempDir, "02_正文", "第一章.txt"), "主角走在繁华的大街上，逆袭人生的故事拉开了序幕。", "utf8");

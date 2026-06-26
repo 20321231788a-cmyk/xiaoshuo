@@ -918,6 +918,45 @@ npm run dist -w @xiaoshuo/desktop-shell
 - `apps/desktop-shell/release/ArcWriter-Setup-0.2.8.exe.blockmap`
 - `apps/desktop-shell/release/latest.yml`
 
+### 15.14 2026-06-26 v0.2.9 发布记录
+
+本次重点优化无变化保存场景下的磁盘写入，降低长期写作时对 SSD 的无意义写盘压力。
+
+主要改动：
+
+- **文档保存去重**：
+  - `DocumentService.saveDocument` 在目标文件已存在且磁盘内容与本次保存内容完全一致时直接返回，不写正文文件，不追加 timeline。
+  - 保存结果新增兼容字段 `changed`，无变化为 `false`，实际创建或修改文件为 `true`。
+  - 若编辑器基准时间已过期但磁盘内容与本次保存内容一致，不再触发保存冲突；内容不同仍保留原有冲突保护。
+- **runtime 后续写盘收敛**：
+  - 文档保存路由在 `changed === false` 时跳过 `rebuildProjectManifest` 和 `VectorIndex.markChanged`。
+  - `changed` 缺失或为 `true` 时保持旧行为，兼容旧响应结构。
+- **manifest 与向量 pending 去重**：
+  - `ProjectManifestService.rebuild` 扫描结果与磁盘 manifest entries 完全一致时不重写 `project_manifest.json`，比较时忽略 `generated_at`。
+  - `VectorIndex.markChanged` 对同一路径、同 action 的 pending 条目不再刷新 `updated_at`；action 改变时仍正常更新。
+- **版本同步**：
+  - 桌面端包版本、窗口标题、工作台 HTML 标题、smoke 页面、更新服务测试桩统一更新为 `0.2.9`。
+
+本轮已验证：
+
+```powershell
+npm test -- packages/document-service
+npm test -- apps/desktop-shell/src/main/runtime/project-document-routes.test.ts
+npm test -- packages/project-manifest
+npm test -- packages/vector-service
+npm run typecheck --workspaces --if-present
+npm run build:workbench
+npm run build:desktop
+npm run smoke:desktop
+npm run dist -w @xiaoshuo/desktop-shell
+```
+
+本地打包产物：
+
+- `apps/desktop-shell/release/ArcWriter-Setup-0.2.9.exe`
+- `apps/desktop-shell/release/ArcWriter-Setup-0.2.9.exe.blockmap`
+- `apps/desktop-shell/release/latest.yml`
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

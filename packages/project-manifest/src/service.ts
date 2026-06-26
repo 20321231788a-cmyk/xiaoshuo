@@ -210,6 +210,11 @@ export class ProjectManifestService {
     });
 
     entries.sort((left, right) => compareManifestEntries(left, right));
+    const loaded = await this.loadFromDisk();
+    if (loaded && manifestEntriesEqual(loaded.entries, entries)) {
+      return entries;
+    }
+
     await writeManifestDisk(this.manifestPath, {
       project_path: this.projectPath,
       version: 1,
@@ -370,6 +375,28 @@ function compareManifestEntries(left: ManifestEntry, right: ManifestEntry): numb
     return groupCompare;
   }
   return left.path.localeCompare(right.path, "zh-CN", { sensitivity: "base" });
+}
+
+function manifestEntriesEqual(left: ManifestEntry[], right: ManifestEntry[]): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  for (let index = 0; index < left.length; index++) {
+    const a = left[index]!;
+    const b = right[index]!;
+    if (
+      a.path !== b.path ||
+      a.name !== b.name ||
+      a.suffix !== b.suffix ||
+      a.group !== b.group ||
+      a.size !== b.size ||
+      a.mtime !== b.mtime ||
+      a.updated_at !== b.updated_at
+    ) {
+      return false;
+    }
+  }
+  return true;
 }
 
 function normalizeRelativePath(relativePath: string): string {

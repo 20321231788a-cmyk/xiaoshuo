@@ -138,10 +138,12 @@ export async function handleProjectDocumentRoutes(
       }
       throw error;
     }
-    await deps.rebuildProjectManifest(currentProject.path);
-    const index = new VectorIndex(currentProject.path);
-    index.markChanged([documentPath], "upsert");
-    index.close();
+    if (saved.changed !== false) {
+      await deps.rebuildProjectManifest(currentProject.path);
+      const index = new VectorIndex(currentProject.path);
+      index.markChanged([documentPath], "upsert");
+      index.close();
+    }
     deps.writeJson(response, 200, saved);
     return true;
   }

@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { DocumentService } from "./service.js";
+import { DocumentSaveConflictError, DocumentService } from "./service.js";
 
 let tempDir = "";
 
@@ -80,6 +80,7 @@ describe("document-service", () => {
 
     expect(saved.path).toBe("01_大纲/大纲.txt");
     expect(saved.content).toBe("新的大纲");
+    expect(saved.changed).toBe(true);
     expect(disk).toBe("新的大纲");
     expect(timeline).toHaveLength(1);
     expect(timeline[0]).toMatchObject({
@@ -104,7 +105,37 @@ describe("document-service", () => {
     const saved = await service.saveDocument("02_正文/第一章.txt", "第一章正文");
 
     expect(saved.path).toBe("02_正文/第一章.txt");
+    expect(saved.changed).toBe(true);
     expect(await fs.readFile(path.join(tempDir, "02_正文", "第一章.txt"), "utf8")).toBe("第一章正文");
+  });
+
+  it("skips disk and timeline writes when saving unchanged content", async () => {
+    const service = new DocumentService({ projectRoot: tempDir });
+    const target = path.join(tempDir, "01_大纲", "大纲.txt");
+    const beforeStats = await fs.stat(target);
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const saved = await service.saveDocument("01_大纲/大纲.txt", "第一章");
+    const afterStats = await fs.stat(target);
+    const timeline = await service.listTimeline();
+
+    expect(saved).toMatchObject({
+      path: "01_大纲/大纲.txt",
+      content: "第一章",
+      changed: false
+    });
+    expect(afterStats.mtimeMs).toBe(beforeStats.mtimeMs);
+    expect(timeline).toHaveLength(0);
+  });
+
+  it("creates a missing empty file even when the requested content is empty", async () => {
+    const service = new DocumentService({ projectRoot: tempDir });
+
+    const saved = await service.saveDocument("02_正文/空章.txt", "");
+
+    expect(saved.changed).toBe(true);
+    expect(await fs.readFile(path.join(tempDir, "02_正文", "空章.txt"), "utf8")).toBe("");
+    expect(await service.listTimeline()).toHaveLength(1);
   });
 
   it("rejects stale editor saves unless overwrite is confirmed", async () => {
@@ -129,6 +160,38 @@ describe("document-service", () => {
 
     expect(forced.content).toBe("本地旧草稿");
     expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("本地旧草稿");
+  });
+
+  it("does not reject stale editor saves when the disk content is unchanged", async () => {
+    const service = new DocumentService({ projectRoot: tempDir });
+    const target = path.join(tempDir, "01_大纲", "大纲.txt");
+    const opened = await service.readDocument("01_大纲/大纲.txt");
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await fs.writeFile(target, "第一章", "utf8");
+
+    const saved = await service.saveDocument("01_大纲/大纲.txt", "第一章", {
+      baseUpdatedAt: opened.updated_at,
+      baseUpdatedAtMs: opened.updated_at_ms
+    });
+
+    expect(saved.changed).toBe(false);
+    expect(await service.listTimeline()).toHaveLength(0);
+  });
+
+  it("still rejects stale editor saves when content differs", async () => {
+    const service = new DocumentService({ projectRoot: tempDir });
+    const opened = await service.readDocument("01_大纲/大纲.txt");
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    await fs.writeFile(path.join(tempDir, "01_大纲", "大纲.txt"), "后台新版", "utf8");
+
+    await expect(
+      service.saveDocument("01_大纲/大纲.txt", "本地旧草稿", {
+        baseUpdatedAt: opened.updated_at,
+        baseUpdatedAtMs: opened.updated_at_ms
+      })
+    ).rejects.toBeInstanceOf(DocumentSaveConflictError);
   });
 
   it("archives a document into the timestamped trash folder and records timeline", async () => {

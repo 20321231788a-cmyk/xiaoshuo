@@ -336,18 +336,25 @@ export class VectorIndex {
     this.db.init();
     const conn = this.db.db;
     const now = Math.floor(Date.now() / 1000);
+    const queuedPaths: string[] = [];
 
     this.db.transaction(() => {
       const stmt = conn.prepare(`
         INSERT OR REPLACE INTO pending_files(path, action, updated_at)
         VALUES (?, ?, ?)
       `);
+      const existingStmt = conn.prepare("SELECT action FROM pending_files WHERE path = ?");
       for (const rel of normalized) {
+        const existing = existingStmt.get(rel) as { action: string } | undefined;
+        if (existing?.action === action) {
+          continue;
+        }
         stmt.run(rel, action, now);
+        queuedPaths.push(rel);
       }
     });
 
-    return { queued: normalized.length, paths: normalized, action };
+    return { queued: queuedPaths.length, paths: queuedPaths, action };
   }
 
   async processPending(

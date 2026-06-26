@@ -8,6 +8,8 @@ const mockArchiveDocument = vi.fn();
 const mockListTimeline = vi.fn();
 const mockSaveDocument = vi.fn();
 const mockProjectChromeSnapshot = vi.fn();
+const mockMarkChanged = vi.fn();
+const mockVectorClose = vi.fn();
 
 vi.mock("@xiaoshuo/document-service", () => ({
   DocumentSaveConflictError: class extends Error {
@@ -36,8 +38,8 @@ vi.mock("@xiaoshuo/project-manifest", () => ({
 
 vi.mock("@xiaoshuo/vector-service", () => ({
   VectorIndex: class {
-    markChanged = vi.fn();
-    close = vi.fn();
+    markChanged = mockMarkChanged;
+    close = mockVectorClose;
   }
 }));
 
@@ -211,5 +213,91 @@ describe("handleProjectDocumentRoutes", () => {
       current_updated_at: "2026-06-01 12:00:00",
       current_updated_at_ms: 123
     });
+  });
+
+  it("skips manifest rebuild and vector pending marker when save returns unchanged", async () => {
+    const deps = createDeps({
+      readJsonBody: vi.fn().mockResolvedValue({ content: "same content" })
+    });
+    mockSaveDocument.mockResolvedValue({
+      path: "chapters/ch1.txt",
+      content: "same content",
+      updated_at: "2026-06-01 12:00:00",
+      updated_at_ms: 123,
+      changed: false
+    });
+
+    const handled = await handleProjectDocumentRoutes(
+      { method: "PUT" } as IncomingMessage,
+      createResponse(),
+      "/api/documents/chapters/ch1.txt",
+      new URLSearchParams(),
+      createContext(),
+      deps
+    );
+
+    expect(handled).toBe(true);
+    expect(deps.rebuildProjectManifest).not.toHaveBeenCalled();
+    expect(mockMarkChanged).not.toHaveBeenCalled();
+    expect(mockVectorClose).not.toHaveBeenCalled();
+    expect(deps.writeJson).toHaveBeenCalledWith(expect.anything(), 200, {
+      path: "chapters/ch1.txt",
+      content: "same content",
+      updated_at: "2026-06-01 12:00:00",
+      updated_at_ms: 123,
+      changed: false
+    });
+  });
+
+  it("keeps manifest rebuild and vector pending marker when save changes content", async () => {
+    const deps = createDeps({
+      readJsonBody: vi.fn().mockResolvedValue({ content: "new content" })
+    });
+    mockSaveDocument.mockResolvedValue({
+      path: "chapters/ch1.txt",
+      content: "new content",
+      updated_at: "2026-06-01 12:00:00",
+      updated_at_ms: 123,
+      changed: true
+    });
+
+    const handled = await handleProjectDocumentRoutes(
+      { method: "PUT" } as IncomingMessage,
+      createResponse(),
+      "/api/documents/chapters/ch1.txt",
+      new URLSearchParams(),
+      createContext(),
+      deps
+    );
+
+    expect(handled).toBe(true);
+    expect(deps.rebuildProjectManifest).toHaveBeenCalledWith("D:\\projects\\novel");
+    expect(mockMarkChanged).toHaveBeenCalledWith(["chapters/ch1.txt"], "upsert");
+    expect(mockVectorClose).toHaveBeenCalled();
+  });
+
+  it("keeps legacy changed-content behavior when save response has no changed field", async () => {
+    const deps = createDeps({
+      readJsonBody: vi.fn().mockResolvedValue({ content: "new content" })
+    });
+    mockSaveDocument.mockResolvedValue({
+      path: "chapters/ch1.txt",
+      content: "new content",
+      updated_at: "2026-06-01 12:00:00",
+      updated_at_ms: 123
+    });
+
+    const handled = await handleProjectDocumentRoutes(
+      { method: "PUT" } as IncomingMessage,
+      createResponse(),
+      "/api/documents/chapters/ch1.txt",
+      new URLSearchParams(),
+      createContext(),
+      deps
+    );
+
+    expect(handled).toBe(true);
+    expect(deps.rebuildProjectManifest).toHaveBeenCalledWith("D:\\projects\\novel");
+    expect(mockMarkChanged).toHaveBeenCalledWith(["chapters/ch1.txt"], "upsert");
   });
 });

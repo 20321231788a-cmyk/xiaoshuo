@@ -142,11 +142,25 @@ export class DocumentService {
   async saveDocument(relativePath: string, content: string, options: SaveDocumentOptions = {}): Promise<DocumentContent> {
     const normalized = this.normalizeRelativePath(relativePath);
     const target = await this.resolveSafePath(normalized, { allowMissing: true });
+    const nextContent = content || "";
+    const currentStats = await fs.stat(target).catch(() => null);
+    if (currentStats?.isFile()) {
+      const currentContent = await fs.readFile(target, "utf8").catch(() => null);
+      if (currentContent === nextContent) {
+        return documentContentSchema.parse({
+          path: normalized,
+          content: currentContent,
+          updated_at: formatTimestamp(currentStats.mtime),
+          updated_at_ms: currentStats.mtimeMs,
+          changed: false
+        });
+      }
+    }
     await this.assertSaveBaseIsCurrent(target, options);
     const beforeChange = await this.snapshotChange(normalized, "save_document");
 
     await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.writeFile(target, content || "", "utf8");
+    await fs.writeFile(target, nextContent, "utf8");
 
     const afterChange = await this.completeChange(beforeChange);
     await this.appendTimelineEvent({
@@ -160,9 +174,10 @@ export class DocumentService {
     const stats = await fs.stat(target);
     return documentContentSchema.parse({
       path: normalized,
-      content: content || "",
+      content: nextContent,
       updated_at: formatTimestamp(stats.mtime),
-      updated_at_ms: stats.mtimeMs
+      updated_at_ms: stats.mtimeMs,
+      changed: true
     });
   }
 

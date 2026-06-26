@@ -54,6 +54,35 @@ describe("project-manifest", () => {
     expect(documents.length).toBeGreaterThan(0);
   });
 
+  it("does not rewrite the manifest when scanned entries are unchanged", async () => {
+    const manifest = new ProjectManifestService(projectPath);
+    const manifestPath = path.join(projectPath, MANIFEST_REL_PATH);
+
+    await manifest.rebuild();
+    const firstStats = await fs.stat(manifestPath);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await manifest.rebuild();
+    const secondStats = await fs.stat(manifestPath);
+
+    expect(secondStats.mtimeMs).toBe(firstStats.mtimeMs);
+  });
+
+  it("rewrites the manifest when a browsable file changes", async () => {
+    const manifest = new ProjectManifestService(projectPath);
+    const manifestPath = path.join(projectPath, MANIFEST_REL_PATH);
+
+    await manifest.rebuild();
+    const firstStats = await fs.stat(manifestPath);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await fs.writeFile(path.join(projectPath, "01_大纲", "细纲.txt"), "outline updated", "utf8");
+    await manifest.rebuild();
+    const secondStats = await fs.stat(manifestPath);
+
+    expect(secondStats.mtimeMs).toBeGreaterThan(firstStats.mtimeMs);
+  });
+
   it("builds tree and subtree views", async () => {
     const manifest = new ProjectManifestService(projectPath);
 

@@ -37,7 +37,8 @@ export const documentContentSchema = z
     path: z.string(),
     content: z.string(),
     updated_at: z.string(),
-    updated_at_ms: z.number().optional()
+    updated_at_ms: z.number().optional(),
+    changed: z.boolean().optional()
   })
   .passthrough();
 
