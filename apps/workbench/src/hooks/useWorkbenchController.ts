@@ -23,6 +23,7 @@ import type {
   TimelineEntry,
   VectorSearchHit,
   VectorIndexStatus,
+  VectorTestRequest,
   WebsiteAiApplyRequest,
   WebsiteAiDashboard,
   WebsiteAiRechargeOrder
@@ -322,6 +323,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [configDraft, setConfigDraft] = useState<AppConfig | null>(null);
   const [configMessage, setConfigMessage] = useState("");
   const [configBusy, setConfigBusy] = useState(false);
+  const [embeddingTestBusy, setEmbeddingTestBusy] = useState(false);
+  const [embeddingTestMessage, setEmbeddingTestMessage] = useState("");
   const [websiteAiDashboard, setWebsiteAiDashboard] = useState<WebsiteAiDashboard | null>(null);
   const [websiteAiBusy, setWebsiteAiBusy] = useState(false);
   const [websiteAiMessage, setWebsiteAiMessage] = useState("");
@@ -876,6 +879,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setVectorSearchBusy(false);
     setVectorSearchMessage("");
     setVectorSearchResults([]);
+    setEmbeddingTestBusy(false);
+    setEmbeddingTestMessage("");
     setPendingCloseRequest(null);
     setPendingReloadRequest(null);
     setPendingSaveConflictRequest(null);
@@ -1785,6 +1790,20 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       setVectorSearchMessage(describeActionableError(nextError, "向量搜索失败", "请确认项目已打开、索引已建立，并检查 Embedding 配置。"));
     } finally {
       setVectorSearchBusy(false);
+    }
+  }
+
+  async function testEmbeddingConnection(payload: VectorTestRequest) {
+    setEmbeddingTestBusy(true);
+    setEmbeddingTestMessage("");
+    try {
+      const result = await client.testVectorEmbedding(payload);
+      const dimensionLabel = result.dimensions > 0 ? `，维度 ${result.dimensions}` : "";
+      setEmbeddingTestMessage(`连接可用：${result.provider} / ${result.model}${dimensionLabel}`);
+    } catch (error) {
+      setEmbeddingTestMessage(describeActionableError(error, "Embedding 检测失败", "请检查 API Key、Base URL、模型名或网络连接。"));
+    } finally {
+      setEmbeddingTestBusy(false);
     }
   }
 
@@ -3708,9 +3727,12 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     patchConfig,
     patchAndSaveConfig,
     saveConfig,
+    testEmbeddingConnection,
     refreshLicense,
     configMessage,
     configBusy,
+    embeddingTestBusy,
+    embeddingTestMessage,
     websiteAiDashboard,
     websiteAiBusy,
     websiteAiMessage,

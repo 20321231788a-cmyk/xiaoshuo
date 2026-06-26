@@ -205,6 +205,59 @@ describe("api-client", () => {
     ]);
   });
 
+  it("posts embedding test requests and parses connection details", async () => {
+    const requests: Array<{ url: string; method: string; body: string }> = [];
+    const client = createApiClient({
+      baseUrl: "http://127.0.0.1:18452",
+      fetchFn: async (input, init) => {
+        requests.push({
+          url: String(input),
+          method: String(init?.method || "GET"),
+          body: String(init?.body || "")
+        });
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            model: "ep-test",
+            configured_model: "ep-test",
+            base_url: "https://ark.cn-beijing.volces.com/api/v3",
+            provider: "doubao_multimodal",
+            dimensions: 1024
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" }
+          }
+        );
+      }
+    });
+
+    const result = await client.testVectorEmbedding({
+      embedding_enabled: true,
+      embedding_api_key: "draft-key",
+      embedding_base_url: "https://ark.cn-beijing.volces.com/api/v3",
+      embedding_model: "ep-test",
+      embedding_timeout: 60,
+      embedding_batch_size: 16
+    });
+
+    expect(result.dimensions).toBe(1024);
+    expect(requests).toEqual([
+      {
+        url: "http://127.0.0.1:18452/api/vector/test",
+        method: "POST",
+        body: JSON.stringify({
+          embedding_enabled: true,
+          embedding_api_key: "draft-key",
+          embedding_base_url: "https://ark.cn-beijing.volces.com/api/v3",
+          embedding_model: "ep-test",
+          embedding_timeout: 60,
+          embedding_batch_size: 16
+        })
+      }
+    ]);
+  });
+
   it("gets generated cache content for recovery", async () => {
     const requests: Array<{ url: string; method: string }> = [];
     const client = createApiClient({

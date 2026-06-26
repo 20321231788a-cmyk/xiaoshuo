@@ -29,6 +29,8 @@ import {
   timelineDeleteResultSchema,
   timelineEntrySchema,
   timelineRollbackResultSchema,
+  vectorTestRequestSchema,
+  vectorTestResponseSchema,
   vectorSearchResponseSchema,
   vectorOperationResultSchema,
   websiteAiApplyRequestSchema,
@@ -261,6 +263,11 @@ export function createApiClient(options: ApiClientOptions) {
     getProjectChrome: (query?: QueryParams) => requestContract("projectChrome", { query }),
     getProjectManifestStatus: () => requestContract("projectManifestStatus"),
     getVectorStatus: () => requestContract("vectorStatus"),
+    testVectorEmbedding: (payload: z.input<typeof vectorTestRequestSchema>) =>
+      requestWithSchema(apiContracts.vectorTest.path, vectorTestResponseSchema, {
+        method: apiContracts.vectorTest.method,
+        body: JSON.stringify(vectorTestRequestSchema.parse(payload))
+      }),
     rebuildVectorIndex: () =>
       requestWithSchema("/api/vector/rebuild", vectorOperationResultSchema, {
         method: "POST"

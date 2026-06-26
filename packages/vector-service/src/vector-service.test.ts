@@ -62,6 +62,35 @@ describe("vector-service", () => {
       const vectors = await client.embed(["test"]);
       expect(vectors).toEqual([[0.9, 0.8]]);
     });
+
+    it("tests the embedding connection with a real embedding request", async () => {
+      const mockFetch = vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            data: [
+              {
+                embedding: [0.1, 0.2, 0.3, 0.4]
+              }
+            ]
+          }),
+          { status: 200 }
+        )
+      );
+
+      const client = new EmbeddingClient(fakeEmbeddingConfig, { fetchFn: mockFetch as typeof fetch });
+      const result = await client.test();
+
+      expect(result).toEqual({
+        ok: true,
+        model: "ep-test-model",
+        configured_model: "ep-test-model",
+        base_url: "https://ark.cn-beijing.volces.com/api/v3",
+        provider: "doubao_multimodal",
+        dimensions: 4
+      });
+      const [, requestInit] = mockFetch.mock.calls[0] as unknown as [string, RequestInit];
+      expect(JSON.parse(String(requestInit.body)).input).toEqual([{ type: "text", text: "test embedding connection" }]);
+    });
   });
 
   describe("splitChunks", () => {

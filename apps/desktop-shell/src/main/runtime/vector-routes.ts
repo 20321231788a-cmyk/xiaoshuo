@@ -1,5 +1,6 @@
-import { vectorSearchRequestSchema, type CurrentProject } from "@xiaoshuo/shared";
-import { VectorIndex } from "@xiaoshuo/vector-service";
+import { loadEmbeddingConfigFromRaw } from "@xiaoshuo/config-service";
+import { vectorSearchRequestSchema, vectorTestRequestSchema, type CurrentProject } from "@xiaoshuo/shared";
+import { EmbeddingClient, VectorIndex } from "@xiaoshuo/vector-service";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { writeAiLicenseRequiredIfNeeded } from "./license-guard.js";
 import type { RuntimeContext } from "./types.js";
@@ -33,8 +34,29 @@ export async function handleVectorRoutes(
 
   const usesAiVectorOperation =
     request.method === "POST" &&
-    (pathname === "/api/vector/rebuild" || pathname === "/api/vector/process-pending" || pathname === "/api/vector/search");
+    (pathname === "/api/vector/rebuild" ||
+      pathname === "/api/vector/process-pending" ||
+      pathname === "/api/vector/search" ||
+      pathname === "/api/vector/test");
   if (usesAiVectorOperation && (await writeAiLicenseRequiredIfNeeded(context, response, deps.writeJson))) {
+    return true;
+  }
+
+  if (request.method === "POST" && pathname === "/api/vector/test") {
+    const payload = vectorTestRequestSchema.parse(await deps.readJsonBody(request));
+    const config = loadEmbeddingConfigFromRaw({
+      ai_config_mode: "manual",
+      manual_profile: {
+        embedding_enabled: payload.embedding_enabled ?? true,
+        embedding_api_key: payload.embedding_api_key ?? "",
+        embedding_base_url: payload.embedding_base_url ?? "",
+        embedding_model: payload.embedding_model ?? ""
+      },
+      embedding_timeout: payload.embedding_timeout,
+      embedding_batch_size: payload.embedding_batch_size
+    });
+    const client = new EmbeddingClient(config);
+    deps.writeJson(response, 200, await client.test());
     return true;
   }
 

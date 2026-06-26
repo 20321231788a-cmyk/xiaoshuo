@@ -19,6 +19,7 @@ import {
   timelineDeleteResultSchema,
   timelineEntrySchema,
   timelineRollbackResultSchema,
+  vectorTestResponseSchema,
   vectorSearchResponseSchema,
   vectorIndexStatusSchema
 } from "./schemas/project.js";
@@ -44,6 +45,7 @@ export const apiContracts = {
   projectChrome: { method: "GET", path: "/api/project/chrome", response: projectChromeSnapshotSchema },
   projectManifestStatus: { method: "GET", path: "/api/project/manifest/status", response: projectManifestStatusSchema },
   vectorStatus: { method: "GET", path: "/api/vector/status", response: vectorIndexStatusSchema },
+  vectorTest: { method: "POST", path: "/api/vector/test", response: vectorTestResponseSchema },
   vectorSearch: { method: "POST", path: "/api/vector/search", response: vectorSearchResponseSchema },
   libraries: { method: "GET", path: "/api/libraries", response: z.array(libraryCardSchema) },
   document: { method: "GET", path: "/api/documents/{rel_path}", response: documentContentSchema },

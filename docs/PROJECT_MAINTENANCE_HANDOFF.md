@@ -957,6 +957,41 @@ npm run dist -w @xiaoshuo/desktop-shell
 - `apps/desktop-shell/release/ArcWriter-Setup-0.2.9.exe.blockmap`
 - `apps/desktop-shell/release/latest.yml`
 
+### 15.15 2026-06-26 v0.3.0 发布记录
+
+本次重点优化右侧任务区的占用高度，并给手动 Embedding 配置增加真实连接检测，方便用户在保存设置前确认向量模型可用。
+
+主要改动：
+
+- **右侧任务区紧凑化**：
+  - `RailResultPreview` 改为只展示任务标题、单行摘要和单条进度条。
+  - 不再在右侧工作框展示长任务详情、生成正文、结果文件列表，避免挤压底部按钮区。
+  - 待保存生成结果仅保留一行最小操作入口，并通过固定高度和单行截断控制卡片尺寸。
+- **统一运行摘要**：
+  - 新增 `apps/workbench/src/lib/railStatus.ts`，把后台任务、技能/对话忙碌态、待保存结果合并成一条当前运行摘要。
+  - 优先级固定为后台任务 > 技能/对话忙碌态 > 待保存结果，避免同时执行两个模块时右栏叠加多个进度条。
+  - 增加 `railStatus.test.ts` 覆盖并发运行、技能运行和待保存结果三类摘要。
+- **Embedding 连接检测**：
+  - 新增 `POST /api/vector/test` 契约、api-client 方法和 desktop runtime 路由。
+  - 后端复用 `EmbeddingClient.test()` 发送一次真实 embedding 请求，仅返回连接状态、模型、Base URL、provider 和维度，不写入索引、不改 pending 队列。
+  - 手动设置页的“Embedding 与向量召回”区新增“检测链接”按钮，使用当前草稿值测试；网站模型页不增加该入口。
+- **版本同步**：
+  - 桌面端包版本、窗口标题、工作台 HTML 标题、smoke 页面、更新服务测试桩统一更新为 `0.3.0`。
+
+本轮已验证：
+
+```powershell
+npm test -- packages/api-client/src/client.test.ts apps/workbench/src/lib/railStatus.test.ts apps/desktop-shell/src/main/runtime/vector-routes.test.ts apps/desktop-shell/src/main/runtime/license-guarded-routes.test.ts packages/vector-service/src/vector-service.test.ts
+npm run typecheck --workspaces --if-present
+npm run build -w @xiaoshuo/workbench
+```
+
+本地打包产物：
+
+- `apps/desktop-shell/release/ArcWriter-Setup-0.3.0.exe`
+- `apps/desktop-shell/release/ArcWriter-Setup-0.3.0.exe.blockmap`
+- `apps/desktop-shell/release/latest.yml`
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

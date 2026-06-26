@@ -59,11 +59,8 @@ import type { CSSProperties, FormEvent as ReactFormEvent, KeyboardEvent as React
 import type { DisassemblyBookSummary, OpenDocumentTab, WorkbenchController } from "./hooks/useWorkbenchController.js";
 import { useWorkbenchController } from "./hooks/useWorkbenchController.js";
 import { readWorkbenchRuntime } from "./lib/runtime.js";
-import {
-  describeGeneratedSaveAction,
-  extractPathsFromUnknownResult,
-  describeJobKind
-} from "./lib/workflow.js";
+import { describeGeneratedSaveAction } from "./lib/workflow.js";
+import { buildRailStatusSummary } from "./lib/railStatus.js";
 import {
   CrawlSourceOption,
   loadInitialCrawlSources,
@@ -77,7 +74,7 @@ const TerminalView = lazy(() => import("./views/TerminalView.js").then((module) 
 
 const runtime = readWorkbenchRuntime();
 const DEFAULT_RIGHT_WIDTH = 440;
-const APP_WINDOW_TITLE = "ArcWriter 0.2.9";
+const APP_WINDOW_TITLE = "ArcWriter 0.3.0";
 const WEBSITE_HOME_URL = "https://matian.online/";
 const WEBSITE_REGISTER_URL = "https://matian.online/?page=api-relay&auth=register";
 
@@ -3412,9 +3409,29 @@ function ManualAiSettings({
       </section>
 
       <section className="xw-settings-section">
-        <div className="xw-settings-section-head">
-          <strong>Embedding 与向量召回</strong>
-          <span>用于项目索引、长期记忆和素材召回</span>
+        <div className="xw-settings-section-head with-action">
+          <div>
+            <strong>Embedding 与向量召回</strong>
+            <span>用于项目索引、长期记忆和素材召回</span>
+          </div>
+          <button
+            className="xw-secondary-button compact"
+            type="button"
+            onClick={() =>
+              void controller.testEmbeddingConnection({
+                embedding_enabled: Boolean(profile.embedding_enabled),
+                embedding_api_key: profile.embedding_api_key || "",
+                embedding_base_url: profile.embedding_base_url || "",
+                embedding_model: profile.embedding_model || "",
+                embedding_timeout: config.embedding_timeout || 60,
+                embedding_batch_size: config.embedding_batch_size || 16
+              })
+            }
+            disabled={controller.embeddingTestBusy || controller.configBusy}
+          >
+            <Cable size={14} />
+            {controller.embeddingTestBusy ? "检测中" : "检测链接"}
+          </button>
         </div>
         <div className="xw-settings-grid">
           <ToggleSettingRow label="启用向量召回" checked={Boolean(profile.embedding_enabled)} onChange={() => onProfileChange({ embedding_enabled: !profile.embedding_enabled })} />
@@ -3426,6 +3443,7 @@ function ManualAiSettings({
           <NumberSettingRow label="召回条数" value={config.vector_top_k || 10} min={1} max={40} onChange={(value) => controller.patchConfig({ vector_top_k: value })} />
           <NumberSettingRow label="召回上下文字符" value={config.vector_context_chars || 9000} min={1000} max={80000} onChange={(value) => controller.patchConfig({ vector_context_chars: value })} />
         </div>
+        {controller.embeddingTestMessage && <p className="xw-setting-inline-message">{controller.embeddingTestMessage}</p>}
       </section>
 
       <section className="xw-settings-section">
@@ -3721,108 +3739,45 @@ function describeSkillId(skillId: string): string {
 }
 
 function RailResultPreview({ controller }: { controller: WorkbenchController }) {
-  const activeJob = [
-    controller.selectedJobDetail,
-    ...(controller.snapshot?.jobs || []).slice().reverse()
-  ].find((job) => job && (job.status === "running" || job.status === "queued") && job.kind !== "summarize_conversation") || null;
+  const summary = buildRailStatusSummary({
+    selectedJobDetail: controller.selectedJobDetail,
+    jobs: controller.snapshot?.jobs || [],
+    operationsBusy: controller.operationsBusy,
+    conversationBusy: controller.conversationBusy,
+    sendingMessage: controller.sendingMessage,
+    operationsMessage: controller.operationsMessage,
+    conversationMessage: controller.conversationMessage,
+    latestSkillResult: controller.latestSkillResult,
+    pendingGeneratedSave: controller.pendingGeneratedSave,
+    describeSkillId,
+    statusLabel: crawlJobStatusLabel
+  });
 
-  const latestJob = [
-    controller.selectedJobDetail,
-    ...(controller.snapshot?.jobs || []).slice().reverse()
-  ].find((job) => job && job.kind !== "summarize_conversation") || null;
-
-  const isSkillRunning = controller.operationsBusy || controller.conversationBusy || controller.sendingMessage;
-  const isJobRunning = activeJob !== null;
-  const isLive = isSkillRunning || isJobRunning;
-
-  const resultText = latestRunResultText(controller);
-
-  if (!isLive && !resultText && !latestJob) {
+  if (!summary) {
     return null;
   }
-
-  let progressPercent = 0;
-  let showProgressBar = false;
-  let isIndeterminate = false;
-  let title = "运行结果";
-  let statusMessage = "";
-
-  if (activeJob) {
-    showProgressBar = true;
-    progressPercent = Math.max(0, Math.min(100, Math.round((activeJob.progress || 0) * 100)));
-    title = describeJobKind(activeJob.kind);
-    statusMessage = activeJob.message || crawlJobStatusLabel(activeJob.status);
-  } else if (isSkillRunning) {
-    showProgressBar = true;
-    isIndeterminate = true;
-    const skillId = controller.latestSkillResult?.data?.skill_id;
-    title = skillId ? `正在执行: ${describeSkillId(String(skillId))}` : "正在执行技能";
-    statusMessage = controller.operationsMessage || controller.conversationMessage || "正在处理中...";
-  } else if (controller.pendingGeneratedSave) {
-    const skillId = controller.pendingGeneratedSave.skillId;
-    title = skillId ? `${describeSkillId(String(skillId))}结果已就绪` : "生成结果已就绪";
-    statusMessage = controller.operationsMessage || "等待选择写入方式";
-  } else if (controller.latestSkillResult) {
-    const skillId = controller.latestSkillResult?.data?.skill_id;
-    title = skillId ? `${describeSkillId(String(skillId))}执行完成` : "执行完成";
-    statusMessage = controller.operationsMessage || "技能执行完成";
-  } else if (latestJob) {
-    title = describeJobKind(latestJob.kind);
-    statusMessage = latestJob.status === "done" 
-      ? "任务已完成" 
-      : latestJob.status === "failed" 
-        ? `任务失败: ${latestJob.message || "未知错误"}` 
-        : crawlJobStatusLabel(latestJob.status);
-  }
-
-  const resultPaths = (latestJob && latestJob.status === "done") 
-    ? extractPathsFromUnknownResult(latestJob.result) 
-    : [];
 
   return (
     <article className="xw-rail-result" aria-live="polite">
       <div className="xw-crawl-progress-head">
-        <strong>{title}</strong>
-        {showProgressBar && !isIndeterminate && <span>{progressPercent}%</span>}
+        <strong>{summary.title}</strong>
+        {summary.showProgress && !summary.indeterminate && <span>{summary.progressPercent}%</span>}
       </div>
 
-      {showProgressBar && (
-        <div className={`xw-crawl-progress-track ${isIndeterminate ? "xw-progress-indeterminate" : ""}`} aria-hidden="true">
-          <span style={isIndeterminate ? undefined : { width: `${progressPercent}%` }} />
+      {summary.showProgress && (
+        <div className={`xw-crawl-progress-track ${summary.indeterminate ? "xw-progress-indeterminate" : ""}`} aria-hidden="true">
+          <span style={summary.indeterminate ? undefined : { width: `${summary.progressPercent}%` }} />
         </div>
       )}
 
-      {statusMessage && <small style={{ color: "var(--xw-muted)", fontSize: "12px", display: "block", marginTop: "4px" }}>{statusMessage}</small>}
+      {summary.message && <p className="xw-rail-result-summary">{summary.message}</p>}
 
-      {resultText && (
-        <p style={{ marginTop: "6px" }}>{resultText}</p>
-      )}
-
-      {controller.pendingGeneratedSave && (
-        <div className="xw-feature-actions" style={{ display: "flex", gap: "8px", marginTop: "8px", flexWrap: "wrap" }}>
+      {summary.hasPendingSave && (
+        <div className="xw-rail-result-actions">
           <button className="xw-secondary-button compact" onClick={() => controller.savePendingGenerated("append")} disabled={controller.operationsBusy}>追加保存</button>
           <button className="xw-primary-button compact" onClick={() => controller.savePendingGenerated("replace")} disabled={controller.operationsBusy}>覆盖保存</button>
           <button className="xw-secondary-button compact" onClick={controller.copyPendingGeneratedContent} disabled={controller.operationsBusy}>复制</button>
           <button className="xw-danger-button compact" onClick={controller.discardPendingGenerated} disabled={controller.operationsBusy}>丢弃</button>
-        </div>
-      )}
-
-      {resultPaths.length > 0 && (
-        <div className="xw-crawl-result-card" style={{ padding: 0, border: "none", background: "none", gap: "6px", marginTop: "8px" }}>
-          <strong style={{ fontSize: "13px" }}>已写入文件</strong>
-          <div style={{ display: "grid", gap: "6px" }}>
-            {resultPaths.map((path) => (
-              <button 
-                key={path} 
-                className="xw-secondary-button compact" 
-                type="button" 
-                onClick={() => void controller.openDocument(path)}
-                style={{ justifyContent: "flex-start", textOverflow: "ellipsis", overflow: "hidden", whiteSpace: "nowrap" }}
-              >
-                {path}
-              </button>
-            ))}
-          </div>
         </div>
       )}
     </article>

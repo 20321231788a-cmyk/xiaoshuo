@@ -69,6 +69,28 @@ export const vectorOperationResultSchema = vectorIndexStatusSchema
   })
   .passthrough();
 
+export const vectorTestRequestSchema = z
+  .object({
+    embedding_enabled: z.boolean().optional(),
+    embedding_api_key: z.string().trim().optional(),
+    embedding_base_url: z.string().trim().optional(),
+    embedding_model: z.string().trim().optional(),
+    embedding_timeout: z.number().int().positive().optional(),
+    embedding_batch_size: z.number().int().positive().optional()
+  })
+  .passthrough();
+
+export const vectorTestResponseSchema = z
+  .object({
+    ok: z.boolean(),
+    model: z.string(),
+    configured_model: z.string(),
+    base_url: z.string(),
+    provider: z.string(),
+    dimensions: z.number().int()
+  })
+  .passthrough();
+
 export const vectorSearchHitSchema = z
   .object({
     path: z.string(),
@@ -161,6 +183,8 @@ export type TimelineDeleteResult = z.infer<typeof timelineDeleteResultSchema>;
 export type ProjectChromeSnapshot = z.infer<typeof projectChromeSnapshotSchema>;
 export type VectorIndexStatus = z.infer<typeof vectorIndexStatusSchema>;
 export type VectorOperationResult = z.infer<typeof vectorOperationResultSchema>;
+export type VectorTestRequest = z.infer<typeof vectorTestRequestSchema>;
+export type VectorTestResponse = z.infer<typeof vectorTestResponseSchema>;
 export type VectorSearchHit = z.infer<typeof vectorSearchHitSchema>;
 export type VectorSearchRequest = z.infer<typeof vectorSearchRequestSchema>;
 export type VectorSearchResponse = z.infer<typeof vectorSearchResponseSchema>;
