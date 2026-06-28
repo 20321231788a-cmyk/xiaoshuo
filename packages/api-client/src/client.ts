@@ -302,6 +302,16 @@ export function createApiClient(options: ApiClientOptions) {
           force: options.force
         })
       }),
+    deleteDocument: (relativePath: string, confirmDelete = true) =>
+      requestWithSchema(
+        "/api/documents/{rel_path}",
+        z.object({ ok: z.boolean(), path: z.string(), archived_path: z.string() }).passthrough(),
+        {
+          method: "DELETE",
+          pathParams: { rel_path: relativePath },
+          body: JSON.stringify({ confirm_delete: confirmDelete })
+        }
+      ),
     getConversations: () => requestContract("conversations"),
     getConversation: (conversationId: string) =>
       requestContract("conversation", {

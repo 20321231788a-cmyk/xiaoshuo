@@ -1031,6 +1031,46 @@ npm run dist -w @xiaoshuo/desktop-shell
 - `apps/desktop-shell/release/ArcWriter-Setup-0.3.1.exe.blockmap`
 - `apps/desktop-shell/release/latest.yml`
 
+### 15.17 2026-06-28 v0.3.2 发布记录
+
+本次重点恢复 AI 输出的可见流式体验，并补齐项目树文件右键操作。
+
+主要改动：
+
+- **可见流式输出恢复**：
+  - `OpenAICompatibleClient.streamCompletion` 增强流式解析，兼容标准 SSE、裸 NDJSON、单个普通 JSON 响应和无尾换行 buffer。
+  - 扩展增量文本提取，支持更多 OpenAI-compatible 返回形态，包括 `delta.content`、`message.content`、`text` 和顶层文本字段。
+  - `agent-runtime` 增加大块文本拆分逻辑，上游一次性返回长文本时也会拆成多个 delta，避免前端看起来像整段跳出。
+  - Humanizer 开启时先显示原始模型流式输出，结束后提示“正在进行去AI味润色...”，最终再替换成润色文本。
+- **附件条四字横排**：
+  - 附件 chip 固定显示去扩展名后的前四个字，完整文件名保留在 hover tooltip。
+  - 发送框内附件条不再开内部滚动栏，文件按上传顺序横向排列并自然换行。
+- **项目树右键文件操作**：
+  - 左侧项目树支持右键文件夹创建文件，右键文件可创建同级文件或删除文件。
+  - 创建文件时可输入文件名，未写扩展名默认补 `.txt`，仅允许 `.txt` / `.md`。
+  - 删除文件复用现有归档删除路由，避免直接物理硬删；若文件有未保存草稿则阻止删除。
+- **版本同步**：
+  - 桌面端包版本、窗口标题、工作台 HTML 标题、smoke 页面、更新服务测试桩统一更新为 `0.3.2`。
+
+本轮已验证：
+
+```powershell
+npm test -- packages/model-client
+npm test -- packages/agent-runtime
+npm test -- apps/workbench/src/lib/attachments.test.ts apps/workbench/src/lib/projectTreeActions.test.ts
+npm run typecheck --workspaces --if-present
+npm run build:workbench
+npm run build:desktop
+npm run smoke:desktop
+npm run dist -w @xiaoshuo/desktop-shell
+```
+
+本地打包产物：
+
+- `apps/desktop-shell/release/ArcWriter-Setup-0.3.2.exe`
+- `apps/desktop-shell/release/ArcWriter-Setup-0.3.2.exe.blockmap`
+- `apps/desktop-shell/release/latest.yml`
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

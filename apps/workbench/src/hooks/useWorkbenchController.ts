@@ -33,6 +33,7 @@ import { normalizeConfigDraft } from "../lib/config.js";
 import type { DashboardSnapshot } from "../lib/dashboard.js";
 import { loadDashboardSnapshot } from "../lib/dashboard.js";
 import { applyDocumentContent, markDocumentStale } from "../lib/editorState.js";
+import { childProjectPath, normalizeNewProjectFileName, treePathExists } from "../lib/projectTreeActions.js";
 import { findStarterDocumentPath } from "../lib/projectWorkspace.js";
 import type { WorkbenchRuntime } from "../lib/runtime.js";
 import {
@@ -2335,6 +2336,99 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
+  async function createProjectTreeFile(directoryPath: string, fileNameInput: string): Promise<boolean> {
+    if (!snapshot?.currentProject.path) {
+      setProjectMessage("先打开一个项目，再在项目树中新建文件。");
+      return false;
+    }
+
+    let targetPath = "";
+    try {
+      targetPath = childProjectPath(directoryPath, normalizeNewProjectFileName(fileNameInput));
+    } catch (nextError) {
+      const message = nextError instanceof Error ? nextError.message : String(nextError);
+      setProjectMessage(message);
+      return false;
+    }
+
+    if (treePathExists(snapshot.projectChrome.tree, targetPath)) {
+      setProjectMessage(`文件已存在：${targetPath}`);
+      return false;
+    }
+    const existingDocument = await client.getDocument(targetPath).catch(() => null);
+    if (existingDocument) {
+      setProjectMessage(`文件已存在：${targetPath}`);
+      return false;
+    }
+
+    setProjectBusy(true);
+    setProjectMessage("");
+    setDocumentMessage("");
+    try {
+      const saved = await client.saveDocument(targetPath, "");
+      await refreshProjectChrome();
+      await openDocument(saved.path, { forceReload: true, discardDirty: true, activate: true });
+      setProjectMessage(`已创建文件：${saved.path}`);
+      setDocumentMessage(`已创建文件：${saved.path}`);
+      return true;
+    } catch (nextError) {
+      const message = describeActionableError(nextError, "创建文件失败", "请确认文件名有效且项目目录允许写入。");
+      setProjectMessage(message);
+      setDocumentMessage(message);
+      return false;
+    } finally {
+      setProjectBusy(false);
+    }
+  }
+
+  async function deleteProjectTreeFile(path: string): Promise<boolean> {
+    if (!snapshot?.currentProject.path) {
+      setProjectMessage("先打开一个项目，再删除项目树文件。");
+      return false;
+    }
+    const targetPath = String(path || "").trim();
+    if (!targetPath) {
+      setProjectMessage("请选择要删除的文件。");
+      return false;
+    }
+    const openTarget = openDocumentsRef.current.find((item) => item.path === targetPath);
+    if (openTarget?.dirty) {
+      setActiveDocumentPath(targetPath);
+      setActiveTab("editor");
+      setDocumentMessage(`${targetPath} 还有未保存修改，请先保存或关闭草稿后再删除。`);
+      return false;
+    }
+
+    setProjectBusy(true);
+    setProjectMessage("");
+    setDocumentMessage("");
+    try {
+      const result = await client.deleteDocument(targetPath, true);
+      await refreshProjectChrome();
+      setPendingCloseRequest((current) => (current?.path === targetPath ? null : current));
+      setPendingReloadRequest((current) => (current?.path === targetPath ? null : current));
+      setPendingSaveConflictRequest((current) => (current?.path === targetPath ? null : current));
+      setOpenDocuments((current) => {
+        const remaining = current.filter((item) => item.path !== targetPath);
+        if (activeDocumentPathRef.current === targetPath) {
+          setActiveDocumentPath(remaining.at(-1)?.path || "");
+        }
+        return remaining;
+      });
+      const message = `已删除文件：${result.path}，已归档到 ${result.archived_path}`;
+      setProjectMessage(message);
+      setDocumentMessage(message);
+      return true;
+    } catch (nextError) {
+      const message = describeActionableError(nextError, "删除文件失败", "请刷新项目树后确认文件仍存在。");
+      setProjectMessage(message);
+      setDocumentMessage(message);
+      return false;
+    } finally {
+      setProjectBusy(false);
+    }
+  }
+
   async function openDocument(path: string, options: OpenDocumentOptions = {}): Promise<boolean> {
     const existing = openDocumentsRef.current.find((item) => item.path === path);
     const shouldActivate = options.activate ?? true;
@@ -3020,6 +3114,13 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
             setConversationMessage(currentSkill ? `正在调用技能：${currentSkill}` : "正在判断当前技能...");
           },
           onDelta: (event) => {
+            if (event.stage === "humanizer_start") {
+              setConversationMessage("正在进行去AI味润色...");
+              return;
+            }
+            if (!event.text) {
+              return;
+            }
             streamedText += event.text;
             upsertLocalMessage(conversationId, { ...assistantMessage, content: streamedText });
           },
@@ -3239,6 +3340,10 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
           setOperationsMessage("开始生成，正在接收流式输出...");
         },
         onDelta: (event) => {
+          if (event.stage === "humanizer_start") {
+            setOperationsMessage("正在进行去AI味润色...");
+            return;
+          }
           streamed += event.text || "";
           setLatestSkillResult({
             status: "done",
@@ -3783,6 +3888,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     uploadConversationAttachment,
     uploadWorkflowAttachment,
     deleteConversationAttachment,
+    createProjectTreeFile,
+    deleteProjectTreeFile,
     sendMessage,
     sendLedgerRecoveryPrompt,
     stopMessage,

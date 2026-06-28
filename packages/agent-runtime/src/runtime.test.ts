@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ModelConfig } from "@xiaoshuo/config-service";
 import { ConversationService } from "@xiaoshuo/conversation-service";
+import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
 import type { ChatCompletionMessage } from "@xiaoshuo/model-client";
 import type { AgentStreamEvent } from "@xiaoshuo/shared";
 import { AgentRuntimeService } from "./runtime.js";
@@ -324,6 +325,81 @@ describe("agent-runtime chat flow", () => {
         { title: "宋代市井参考", url: "https://example.test/song-market" }
       ]);
     }
+  });
+
+  it("splits one large streamed chat chunk into visible deltas", async () => {
+    const longReply = "林默站在雨后的山门前，潮湿的石阶一路延伸到雾里，他没有急着上前，只把那枚黑石戒扣进掌心，等巡山弟子转身。";
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "fallback",
+        async *streamCompletion() {
+          yield longReply;
+        }
+      }
+    });
+
+    const events: AgentStreamEvent[] = [];
+    for await (const event of runtime.streamAgentRun({
+      conversation_id: "",
+      content: "我们继续聊这个项目",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    })) {
+      events.push(event);
+    }
+
+    const deltas = events.filter((event): event is Extract<AgentStreamEvent, { type: "delta" }> => event.type === "delta");
+    expect(deltas.length).toBeGreaterThan(1);
+    expect(deltas.map((event) => event.text).join("")).toBe(longReply);
+    expect(events.at(-1)).toMatchObject({
+      type: "final",
+      payload: {
+        reply: longReply
+      }
+    });
+  });
+
+  it("signals humanizer processing after streamed chat text", async () => {
+    await fs.writeFile(configPath, JSON.stringify({ api_key: "demo-key", model: "demo-model", humanizer_enabled: true }), "utf8");
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "润色后的文本更自然，也保留原本剧情。",
+        async *streamCompletion() {
+          yield "原始流式文本，此外，这一刻标志着命运的关键转折。";
+        }
+      }
+    });
+
+    const events: AgentStreamEvent[] = [];
+    for await (const event of runtime.streamAgentRun({
+      conversation_id: "",
+      content: "写一段剧情",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    })) {
+      events.push(event);
+    }
+
+    expect(
+      events.map((event) => (event.type === "delta" ? event.stage || "delta" : event.type))
+    ).toEqual(["start", "delta", "humanizer_start", "final"]);
+    expect(events[1]).toMatchObject({ type: "delta", text: "原始流式文本，此外，这一刻标志着命运的关键转折。" });
+    expect(events.at(-1)).toMatchObject({
+      type: "final",
+      payload: {
+        reply: "润色后的文本更自然，也保留原本剧情。"
+      }
+    });
   });
 
   it("runs batch replace locally across project documents", async () => {
@@ -874,6 +950,7 @@ describe("agent-runtime chat flow", () => {
       throw new Error("missing delta event");
     }
     expect(delta.cache_id).toBeTruthy();
+    await expect(new GeneratedCacheService({ projectRoot: tempDir }).readContent(delta.cache_id || "")).resolves.toBe("技能流式最终结果");
     expect(events[2]).toMatchObject({
       type: "final",
       payload: {

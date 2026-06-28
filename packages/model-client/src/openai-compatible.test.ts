@@ -43,6 +43,62 @@ describe("model-client", () => {
     expect(chunks).toEqual(["你", "好"]);
   });
 
+  it("streams naked ndjson delta events", async () => {
+    const client = new OpenAICompatibleClient({
+      fetchFn: vi.fn(async () =>
+        new Response(
+          [
+            JSON.stringify({ choices: [{ delta: { content: "裸" } }] }),
+            JSON.stringify({ choices: [{ delta: { content: "流" } }] })
+          ].join("\n"),
+          { status: 200 }
+        )
+      ) as typeof fetch
+    });
+
+    const chunks: string[] = [];
+    for await (const chunk of client.streamCompletion(configuredModel, [{ role: "user", content: "hi" }])) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual(["裸", "流"]);
+  });
+
+  it("extracts text when stream returns one normal json payload", async () => {
+    const client = new OpenAICompatibleClient({
+      fetchFn: vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "一次性返回" } }]
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+      ) as typeof fetch
+    });
+
+    const chunks: string[] = [];
+    for await (const chunk of client.streamCompletion(configuredModel, [{ role: "user", content: "hi" }])) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual(["一次性返回"]);
+  });
+
+  it("parses the final stream buffer without a trailing newline", async () => {
+    const client = new OpenAICompatibleClient({
+      fetchFn: vi.fn(async () =>
+        new Response('data: {"choices":[{"delta":{"content":"尾段"}}]}', { status: 200 })
+      ) as typeof fetch
+    });
+
+    const chunks: string[] = [];
+    for await (const chunk of client.streamCompletion(configuredModel, [{ role: "user", content: "hi" }])) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual(["尾段"]);
+  });
+
   it("falls back to non-stream completion when stream is unsupported", async () => {
     const fetchFn = vi
       .fn()

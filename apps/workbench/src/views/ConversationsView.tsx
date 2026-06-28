@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { Panel } from "../components/Panel.js";
 import { RichText } from "../components/RichText.js";
 import type { OpenDocumentTab } from "../hooks/useWorkbenchController.js";
+import { attachmentDisplayName } from "../lib/attachments.js";
 import { describeGeneratedSaveAction, describeGeneratedSaveReason, describeGeneratedWriteIntent, describePendingGeneratedTarget, pendingGeneratedTargetPaths } from "../lib/workflow.js";
 import type { PendingGeneratedSave } from "../lib/workflow.js";
 
@@ -370,7 +371,7 @@ export function ConversationsView({
                   {conversationDetail.attachments.map((attachment) => (
                     <span key={attachment.id} className="composer-attachment-chip" title={attachment.name}>
                       <Paperclip size={14} />
-                      <span>{attachment.name}</span>
+                      <span>{attachmentDisplayName(attachment.name)}</span>
                       <button
                         type="button"
                         className="composer-attachment-remove"

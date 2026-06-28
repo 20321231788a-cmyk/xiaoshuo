@@ -61,6 +61,8 @@ import { useWorkbenchController } from "./hooks/useWorkbenchController.js";
 import { readWorkbenchRuntime } from "./lib/runtime.js";
 import { describeGeneratedSaveAction } from "./lib/workflow.js";
 import { buildRailStatusSummary } from "./lib/railStatus.js";
+import { attachmentDisplayName } from "./lib/attachments.js";
+import { parentDirectoryPath } from "./lib/projectTreeActions.js";
 import {
   CrawlSourceOption,
   loadInitialCrawlSources,
@@ -74,7 +76,7 @@ const TerminalView = lazy(() => import("./views/TerminalView.js").then((module) 
 
 const runtime = readWorkbenchRuntime();
 const DEFAULT_RIGHT_WIDTH = 440;
-const APP_WINDOW_TITLE = "ArcWriter 0.3.1";
+const APP_WINDOW_TITLE = "ArcWriter 0.3.2";
 const WEBSITE_HOME_URL = "https://matian.online/";
 const WEBSITE_REGISTER_URL = "https://matian.online/?page=api-relay&auth=register";
 
@@ -973,7 +975,15 @@ function ProjectSidebar({
           {leftSidebarTab === "project" ? (
             snapshot?.projectChrome.tree.length ? (
               snapshot.projectChrome.tree.map((node) => (
-                <ProjectTreeNode key={node.path} node={node} activePath={controller.activeDocumentPath} onOpenDocument={onOpenDocument} />
+                <ProjectTreeNode
+                  key={node.path}
+                  node={node}
+                  activePath={controller.activeDocumentPath}
+                  busy={controller.projectBusy || controller.documentBusy}
+                  onOpenDocument={onOpenDocument}
+                  onCreateFile={controller.createProjectTreeFile}
+                  onDeleteFile={controller.deleteProjectTreeFile}
+                />
               ))
             ) : (
               <p className="xw-empty">打开项目后显示全部文本文件。</p>
@@ -1000,19 +1010,82 @@ function ProjectSidebar({
 function ProjectTreeNode({
   node,
   activePath,
-  onOpenDocument
+  busy,
+  onOpenDocument,
+  onCreateFile,
+  onDeleteFile
 }: {
   node: TreeNode;
   activePath: string;
+  busy: boolean;
   onOpenDocument: (path: string) => void | Promise<void>;
+  onCreateFile: (directoryPath: string, fileName: string) => Promise<boolean>;
+  onDeleteFile: (path: string) => Promise<boolean>;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [fileNameDraft, setFileNameDraft] = useState("");
+  const [deleteConfirm, setDeleteConfirm] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
   const isFile = node.kind === "file";
+  const createDirectoryPath = isFile ? parentDirectoryPath(node.path) : node.path;
+
+  useEffect(() => {
+    if (!menuOpen) {
+      return;
+    }
+
+    function closeOnOutsideClick(event: MouseEvent) {
+      if (menuRef.current?.contains(event.target as Node)) {
+        return;
+      }
+      setMenuOpen(false);
+      setDeleteConfirm(false);
+    }
+
+    window.addEventListener("mousedown", closeOnOutsideClick);
+    return () => window.removeEventListener("mousedown", closeOnOutsideClick);
+  }, [menuOpen]);
+
+  async function submitCreateFile(event: ReactFormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const created = await onCreateFile(createDirectoryPath, fileNameDraft);
+    if (!created) {
+      return;
+    }
+    setFileNameDraft("");
+    setMenuOpen(false);
+    setDeleteConfirm(false);
+    if (!isFile) {
+      setExpanded(true);
+    }
+  }
+
+  async function confirmDeleteFile() {
+    if (!isFile) {
+      return;
+    }
+    if (!deleteConfirm) {
+      setDeleteConfirm(true);
+      return;
+    }
+    const deleted = await onDeleteFile(node.path);
+    if (deleted) {
+      setMenuOpen(false);
+      setDeleteConfirm(false);
+    }
+  }
 
   return (
     <div className="xw-tree-node">
       <button
         className={`xw-tree-row ${isFile ? "file" : "dir"} ${activePath === node.path ? "active" : ""}`}
+        onContextMenu={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          setMenuOpen(true);
+          setDeleteConfirm(false);
+        }}
         onClick={() => {
           if (isFile) {
             void onOpenDocument(node.path);
@@ -1025,10 +1098,57 @@ function ProjectTreeNode({
         <span>{node.name}</span>
         {!isFile && <em>{expanded ? "-" : "+"}</em>}
       </button>
+      {menuOpen && (
+        <div
+          ref={menuRef}
+          className="xw-tree-context-menu"
+          role="menu"
+          onClick={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
+        >
+          <div className="xw-tree-context-head">
+            <strong title={node.path}>{node.name}</strong>
+            <span>{isFile ? "文件" : "文件夹"}</span>
+          </div>
+          <form className="xw-tree-create-form" onSubmit={submitCreateFile}>
+            <input
+              value={fileNameDraft}
+              onChange={(event) => setFileNameDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  setMenuOpen(false);
+                  setDeleteConfirm(false);
+                }
+              }}
+              placeholder={isFile ? "同级新文件名" : "新文件名"}
+              disabled={busy}
+              autoFocus
+            />
+            <button type="submit" className="xw-secondary-button compact" disabled={busy || !fileNameDraft.trim()}>
+              <FilePlus2 size={13} />
+              <span>创建</span>
+            </button>
+          </form>
+          {isFile && (
+            <button type="button" className="xw-danger-button compact" onClick={confirmDeleteFile} disabled={busy}>
+              <Trash2 size={13} />
+              <span>{deleteConfirm ? "确认删除" : "删除文件"}</span>
+            </button>
+          )}
+        </div>
+      )}
       {!isFile && expanded && node.children.length > 0 && (
         <div className="xw-tree-children">
           {node.children.map((child) => (
-            <ProjectTreeNode key={child.path} node={child} activePath={activePath} onOpenDocument={onOpenDocument} />
+            <ProjectTreeNode
+              key={child.path}
+              node={child}
+              activePath={activePath}
+              busy={busy}
+              onOpenDocument={onOpenDocument}
+              onCreateFile={onCreateFile}
+              onDeleteFile={onDeleteFile}
+            />
           ))}
         </div>
       )}
@@ -4106,7 +4226,7 @@ function AssistantRail({
                 {composerAttachments.map((attachment) => (
                   <span key={attachment.id} className="composer-attachment-chip" title={attachment.name}>
                     <FileText size={14} />
-                    <span>{attachment.name}</span>
+                    <span>{attachmentDisplayName(attachment.name)}</span>
                     <button
                       type="button"
                       className="composer-attachment-remove"

@@ -1,4 +1,4 @@
-import { loadModelConfig, loadWebSearchConfig, type ConfigServiceOptions, type ModelConfig } from "@xiaoshuo/config-service";
+import { loadModelConfig, loadPublicConfig, loadWebSearchConfig, type ConfigServiceOptions, type ModelConfig } from "@xiaoshuo/config-service";
 import { ConversationService } from "@xiaoshuo/conversation-service";
 import { DocumentService } from "@xiaoshuo/document-service";
 import { canRetryWithoutStream, OpenAICompatibleClient, type ChatCompletionMessage } from "@xiaoshuo/model-client";
@@ -29,6 +29,7 @@ import {
 } from "./web-search.js";
 import { applyHumanizerIfEnabled } from "./humanizer.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
+import { splitVisibleStreamText } from "./stream.js";
 
 const MAX_RUNTIME_CONTEXT_CHARS = 8_000;
 const MAX_USER_INPUT_CHARS = 16_000;
@@ -113,10 +114,12 @@ export class AgentChatRunner {
             continue;
           }
           replyParts.push(chunk);
-          yield {
-            type: "delta",
-            text: chunk
-          };
+          for (const visibleChunk of splitVisibleStreamText(chunk)) {
+            yield {
+              type: "delta",
+              text: visibleChunk
+            };
+          }
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -138,10 +141,12 @@ export class AgentChatRunner {
           }
           if (fallbackReply) {
             replyParts.push(fallbackReply);
-            yield {
-              type: "delta",
-              text: fallbackReply
-            };
+            for (const visibleChunk of splitVisibleStreamText(fallbackReply)) {
+              yield {
+                type: "delta",
+                text: visibleChunk
+              };
+            }
           }
         } catch (fallbackError) {
           yield {
@@ -156,10 +161,12 @@ export class AgentChatRunner {
         const reply = await this.completeOnce(config, baseMessages);
         if (reply) {
           replyParts.push(reply);
-          yield {
-            type: "delta",
-            text: reply
-          };
+          for (const visibleChunk of splitVisibleStreamText(reply)) {
+            yield {
+              type: "delta",
+              text: visibleChunk
+            };
+          }
         }
       } catch (error) {
         try {
@@ -169,10 +176,12 @@ export class AgentChatRunner {
           const reply = await this.completeOnce(config, compactMessages);
           if (reply) {
             replyParts.push(reply);
-            yield {
-              type: "delta",
-              text: reply
-            };
+            for (const visibleChunk of splitVisibleStreamText(reply)) {
+              yield {
+                type: "delta",
+                text: visibleChunk
+              };
+            }
           }
         } catch (fallbackError) {
           yield {
@@ -189,10 +198,12 @@ export class AgentChatRunner {
         const reply = await this.completeOnce(config, baseMessages);
         if (reply) {
           replyParts.push(reply);
-          yield {
-            type: "delta",
-            text: reply
-          };
+          for (const visibleChunk of splitVisibleStreamText(reply)) {
+            yield {
+              type: "delta",
+              text: visibleChunk
+            };
+          }
         }
       } catch (error) {
         yield {
@@ -204,6 +215,13 @@ export class AgentChatRunner {
     }
 
     const reply = replyParts.join("").trim();
+    if (await this.shouldRunConversationHumanizer(state.detail, reply)) {
+      yield {
+        type: "delta",
+        text: "",
+        stage: "humanizer_start"
+      };
+    }
     const humanized = await this.humanizeConversationText(state.detail, reply);
     const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized);
     yield {
@@ -266,6 +284,18 @@ export class AgentChatRunner {
       mode: detail.current_skill ? `会话技能 ${detail.current_skill} 回复` : "会话回复",
       skip: detail.current_skill === "humanizer_zh"
     });
+  }
+
+  private async shouldRunConversationHumanizer(detail: ConversationDetail, reply: string): Promise<boolean> {
+    if (!String(reply || "").trim() || detail.current_skill === "humanizer_zh") {
+      return false;
+    }
+    try {
+      const publicConfig = await loadPublicConfig(this.config);
+      return Boolean(publicConfig.humanizer_enabled);
+    } catch {
+      return false;
+    }
   }
 
   private async persistAssistantReply(

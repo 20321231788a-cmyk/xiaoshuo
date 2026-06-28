@@ -11,6 +11,9 @@ export function encodeNdjsonEvent(event: AgentStreamEvent): string {
 export type StreamingModelClient = Pick<OpenAICompatibleClient, "requestCompletion"> &
   Partial<Pick<OpenAICompatibleClient, "streamCompletion">>;
 
+const MIN_VISIBLE_CHUNK_CHARS = 24;
+const MAX_VISIBLE_CHUNK_CHARS = 48;
+
 export async function* streamModelText({
   modelClient,
   config,
@@ -33,7 +36,9 @@ export async function* streamModelText({
           continue;
         }
         parts.push(chunk);
-        yield chunk;
+        for (const visibleChunk of splitVisibleStreamText(chunk)) {
+          yield visibleChunk;
+        }
       }
       if (parts.join("").trim()) {
         return;
@@ -49,7 +54,9 @@ export async function* streamModelText({
         temperature ?? config.temperature
       );
       if (fallback) {
-        yield fallback;
+        for (const visibleChunk of splitVisibleStreamText(fallback)) {
+          yield visibleChunk;
+        }
       }
       return;
     }
@@ -58,7 +65,9 @@ export async function* streamModelText({
   try {
     const fallback = await modelClient.requestCompletion(config, messages, temperature ?? config.temperature);
     if (fallback) {
-      yield fallback;
+      for (const visibleChunk of splitVisibleStreamText(fallback)) {
+        yield visibleChunk;
+      }
     }
   } catch (error) {
     if (!looksGatewayTimeoutMessage(error instanceof Error ? error.message : String(error)) || !fallbackMessages) {
@@ -66,9 +75,34 @@ export async function* streamModelText({
     }
     const fallback = await modelClient.requestCompletion(config, fallbackMessages, temperature ?? config.temperature);
     if (fallback) {
-      yield fallback;
+      for (const visibleChunk of splitVisibleStreamText(fallback)) {
+        yield visibleChunk;
+      }
     }
   }
+}
+
+export function splitVisibleStreamText(text: string): string[] {
+  const chars = Array.from(String(text || ""));
+  if (chars.length <= MAX_VISIBLE_CHUNK_CHARS) {
+    return text ? [text] : [];
+  }
+
+  const chunks: string[] = [];
+  let current = "";
+  for (const char of chars) {
+    current += char;
+    const length = Array.from(current).length;
+    const canBreak = length >= MIN_VISIBLE_CHUNK_CHARS && /[\s，。！？；：、,.!?;:\n]/u.test(char);
+    if (canBreak || length >= MAX_VISIBLE_CHUNK_CHARS) {
+      chunks.push(current);
+      current = "";
+    }
+  }
+  if (current) {
+    chunks.push(current);
+  }
+  return chunks;
 }
 
 export class StreamingGenerationSession {

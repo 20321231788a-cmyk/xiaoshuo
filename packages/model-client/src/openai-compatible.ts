@@ -83,28 +83,16 @@ export class OpenAICompatibleClient {
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() || "";
       for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed || !trimmed.startsWith("data:")) {
-          continue;
-        }
-        const data = trimmed.slice(5).trim();
-        if (!data || data === "[DONE]") {
-          continue;
-        }
-        let parsed: unknown;
-        try {
-          parsed = JSON.parse(data);
-        } catch {
-          continue;
-        }
-        const chunk = extractDeltaText(parsed);
-        if (chunk) {
+        for (const chunk of extractStreamLineChunks(line)) {
           yield chunk;
         }
       }
       if (done) {
         break;
       }
+    }
+    for (const chunk of extractStreamLineChunks(buffer)) {
+      yield chunk;
     }
   }
 
@@ -155,26 +143,68 @@ function extractMessageText(payload: unknown): string {
   const choices = asArray((payload as { choices?: unknown })?.choices);
   const content = choices
     .flatMap((choice) => {
-      const message = (choice as { message?: unknown })?.message as { content?: unknown } | undefined;
-      return normalizeContent(message?.content);
+      const record = asRecord(choice);
+      const message = asRecord(record?.message);
+      return [...normalizeContent(message?.content), ...normalizeContent(record?.text)];
     })
     .join("");
-  return content;
+  return content || extractTopLevelText(payload);
 }
 
 function extractDeltaText(payload: unknown): string {
   const choices = asArray((payload as { choices?: unknown })?.choices);
-  return choices
+  const content = choices
     .flatMap((choice) => {
-      const delta = (choice as { delta?: unknown })?.delta as { content?: unknown } | undefined;
-      return normalizeContent(delta?.content);
+      const record = asRecord(choice);
+      const delta = asRecord(record?.delta);
+      const message = asRecord(record?.message);
+      return [
+        ...normalizeContent(delta?.content),
+        ...normalizeContent(delta?.text),
+        ...normalizeContent(message?.content),
+        ...normalizeContent(record?.text)
+      ];
     })
     .join("");
+  return content || extractTopLevelText(payload);
+}
+
+function extractStreamLineChunks(line: string): string[] {
+  const payloadText = normalizeStreamPayloadLine(line);
+  if (!payloadText) {
+    return [];
+  }
+  try {
+    const parsed = JSON.parse(payloadText);
+    const chunk = extractDeltaText(parsed);
+    return chunk ? [chunk] : [];
+  } catch {
+    return [];
+  }
+}
+
+function normalizeStreamPayloadLine(line: string): string {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return "";
+  }
+  const data = trimmed.startsWith("data:") ? trimmed.slice(5).trim() : trimmed;
+  if (!data || data === "[DONE]") {
+    return "";
+  }
+  return data;
 }
 
 function normalizeContent(value: unknown): string[] {
   if (typeof value === "string") {
     return [value];
+  }
+  const recordValue = asRecord(value);
+  if (recordValue) {
+    return [
+      ...normalizeContent(recordValue.content),
+      ...normalizeContent(recordValue.text)
+    ];
   }
   if (Array.isArray(value)) {
     return value.flatMap((item) => {
@@ -189,6 +219,22 @@ function normalizeContent(value: unknown): string[] {
     });
   }
   return [];
+}
+
+function extractTopLevelText(payload: unknown): string {
+  const record = asRecord(payload);
+  if (!record) {
+    return "";
+  }
+  return [
+    ...normalizeContent(record.content),
+    ...normalizeContent(record.text),
+    ...normalizeContent(record.delta)
+  ].join("");
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
 
 function asArray(value: unknown): unknown[] {
