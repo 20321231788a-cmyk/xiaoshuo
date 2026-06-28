@@ -2186,8 +2186,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
-  async function uploadConversationAttachment(file: File | null) {
-    if (!file) {
+  async function uploadConversationAttachment(input: File | File[] | FileList | null) {
+    const files = input instanceof File ? [input] : Array.from(input || []);
+    if (!files.length) {
       return;
     }
 
@@ -2195,13 +2196,20 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setConversationMessage("");
     try {
       const conversationId = await ensureConversationId();
-      const attachment = await client.uploadConversationAttachment(conversationId, file, file.name || "attachment.txt");
+      const attachments: ConversationAttachment[] = [];
+      for (const file of files) {
+        attachments.push(await client.uploadConversationAttachment(conversationId, file, file.name || "attachment.txt"));
+      }
       const detail = await client.getConversation(conversationId);
       const conversations = await client.getConversations();
       setConversationDetail(detail);
       setSnapshot((current) => (current ? { ...current, conversations } : current));
       setActiveTab("conversations");
-      setConversationMessage(`已上传附件：${attachment.name}，发送消息时会作为上下文一起使用。`);
+      setConversationMessage(
+        attachments.length === 1
+          ? `已上传附件：${attachments[0]!.name}，发送消息时会作为上下文一起使用。`
+          : `已上传 ${attachments.length} 个附件，发送消息时会作为上下文一起使用。`
+      );
     } catch (nextError) {
       setConversationMessage(describeActionableError(nextError, "上传附件失败", "请确认文件可读取后重新上传。"));
     } finally {

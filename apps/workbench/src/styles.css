@@ -1570,16 +1570,84 @@ button {
   word-break: break-word;
 }
 
-.composer-input {
+.composer-input-shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   width: 100%;
   min-height: 132px;
-  resize: vertical;
   border: 1px solid rgba(27, 43, 41, 0.12);
   border-radius: 8px;
-  padding: 14px 16px;
+  overflow: hidden;
   background: rgba(255, 252, 245, 0.92);
+}
+
+.composer-input {
+  width: 100%;
+  min-height: 104px;
+  resize: vertical;
+  border: 0;
+  outline: none;
+  padding: 14px 16px;
+  background: transparent;
   color: var(--ink);
   line-height: 1.6;
+}
+
+.composer-input-shell:focus-within {
+  border-color: rgba(58, 129, 202, 0.42);
+  box-shadow: 0 0 0 3px rgba(58, 129, 202, 0.08);
+}
+
+.composer-attachment-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  max-height: 74px;
+  overflow: auto;
+  padding: 10px 12px 0;
+  background: transparent;
+}
+
+.composer-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-width: 0;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px solid rgba(27, 43, 41, 0.1);
+  border-radius: 8px;
+  background: var(--panel-strong);
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.composer-attachment-chip > span {
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-attachment-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(27, 43, 41, 0.08);
+  color: inherit;
+  cursor: pointer;
+}
+
+.composer-attachment-remove:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 
 .composer-actions {
@@ -5486,16 +5554,48 @@ body {
   display: none;
 }
 
-.xw-ai-input {
+.xw-ai-input-shell {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   width: 100%;
   min-height: 216px;
-  padding: 16px;
   border: 1px solid var(--xw-line);
   border-radius: 16px;
+  overflow: hidden;
   background: var(--xw-panel-strong);
+}
+
+.xw-ai-input {
+  width: 100%;
+  min-height: 168px;
+  padding: 16px;
+  border: 0;
+  outline: none;
+  background: transparent;
   color: var(--xw-text);
   line-height: 1.65;
   resize: vertical;
+}
+
+.xw-ai-input-shell:focus-within {
+  border-color: rgba(52, 143, 229, 0.5);
+  box-shadow: 0 0 0 3px rgba(52, 143, 229, 0.1);
+}
+
+.xw-composer-attachment-strip {
+  max-height: 66px;
+  padding: 12px 14px 0;
+  background: transparent;
+}
+
+.xw-composer-attachment-strip .composer-attachment-chip {
+  max-width: 100%;
+  background: var(--xw-panel-strong);
+  color: var(--xw-text);
+}
+
+.xw-composer-attachment-strip .composer-attachment-chip > span {
+  max-width: 220px;
 }
 
 .xw-rail-result {

@@ -992,6 +992,45 @@ npm run build -w @xiaoshuo/workbench
 - `apps/desktop-shell/release/ArcWriter-Setup-0.3.0.exe.blockmap`
 - `apps/desktop-shell/release/latest.yml`
 
+### 15.16 2026-06-28 v0.3.1 发布记录
+
+本次重点修复手动 Ark multimodal Embedding 返回体兼容问题，并优化 AI 会话附件上传与发送框展示体验。
+
+主要改动：
+
+- **Ark multimodal Embedding 兼容**：
+  - `EmbeddingClient.extractVectors` 支持 `data.embedding` 对象结构，兼容火山 Ark multimodal 接口返回单条向量的真实响应。
+  - `embedDoubaoMultimodal` 改为对输入逐条请求，每次只发送一个 `{ type: "text", text }` 输入，避免把 `embedding_batch_size` 误当成 Ark multimodal 单次请求内的 input 数量。
+  - 更新向量服务测试，覆盖 `data.embedding` 响应和多输入逐条请求行为。
+- **会话附件多文件上传**：
+  - AI 会话上传入口支持一次选择多个文件，控制器按上传顺序逐个上传，并在上传完成后刷新会话详情。
+  - 发送消息时继续沿用当前会话附件的 `attachment_ids`，确保上传的多个文件会随本次消息一起发送给 AI。
+- **发送框内置附件条**：
+  - 右侧快捷发送框和完整会话页统一改为“输入容器 + 顶部附件条 + textarea”结构。
+  - 附件 chip 移动到发送输入框内部顶部，按上传顺序从左到右排列；长文件名省略显示并保留 tooltip。
+  - 附件区限制最大高度，文件较多时在容器内换行/滚动，不遮挡输入文字和发送/停止按钮。
+- **版本同步**：
+  - 桌面端包版本、窗口标题、工作台 HTML 标题、smoke 页面、更新服务测试桩统一更新为 `0.3.1`。
+
+本轮已验证：
+
+```powershell
+npm test -- packages/vector-service
+npm run typecheck -w @xiaoshuo/workbench
+npm run build -w @xiaoshuo/workbench
+npm run typecheck --workspaces --if-present
+npm run build:workbench
+npm run build:desktop
+npm run smoke:desktop
+npm run dist -w @xiaoshuo/desktop-shell
+```
+
+本地打包产物：
+
+- `apps/desktop-shell/release/ArcWriter-Setup-0.3.1.exe`
+- `apps/desktop-shell/release/ArcWriter-Setup-0.3.1.exe.blockmap`
+- `apps/desktop-shell/release/latest.yml`
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

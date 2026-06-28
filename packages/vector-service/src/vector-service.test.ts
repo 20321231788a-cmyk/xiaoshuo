@@ -63,6 +63,42 @@ describe("vector-service", () => {
       expect(vectors).toEqual([[0.9, 0.8]]);
     });
 
+    it("parses ark multimodal data.embedding object responses", async () => {
+      const mockFetch = vi.fn(async () =>
+        new Response(
+          JSON.stringify({
+            data: {
+              embedding: [0.7, 0.6],
+              object: "embedding"
+            }
+          }),
+          { status: 200 }
+        )
+      );
+
+      const client = new EmbeddingClient(fakeEmbeddingConfig, { fetchFn: mockFetch as typeof fetch });
+      const vectors = await client.embed(["test"]);
+      expect(vectors).toEqual([[0.7, 0.6]]);
+    });
+
+    it("requests doubao multimodal embeddings one input at a time", async () => {
+      const mockFetch = vi
+        .fn()
+        .mockResolvedValueOnce(new Response(JSON.stringify({ data: { embedding: [0.1, 0.2] } }), { status: 200 }))
+        .mockResolvedValueOnce(new Response(JSON.stringify({ data: { embedding: [0.3, 0.4] } }), { status: 200 }));
+
+      const client = new EmbeddingClient(fakeEmbeddingConfig, { fetchFn: mockFetch as typeof fetch });
+      const vectors = await client.embed(["第一段", "第二段"]);
+
+      expect(vectors).toEqual([
+        [0.1, 0.2],
+        [0.3, 0.4]
+      ]);
+      expect(mockFetch).toHaveBeenCalledTimes(2);
+      expect(JSON.parse(String((mockFetch.mock.calls[0]![1] as RequestInit).body)).input).toEqual([{ type: "text", text: "第一段" }]);
+      expect(JSON.parse(String((mockFetch.mock.calls[1]![1] as RequestInit).body)).input).toEqual([{ type: "text", text: "第二段" }]);
+    });
+
     it("tests the embedding connection with a real embedding request", async () => {
       const mockFetch = vi.fn(async () =>
         new Response(
@@ -232,17 +268,18 @@ describe("vector-service", () => {
 
       // Rebuild (using a mock embedding provider or empty since we only test rebuild DB flow)
       // Since EmbeddingClient is internally constructed, let's mock its fetch so that embedding requests don't hit live endpoints
-      const mockFetch = vi.fn().mockImplementation(async () =>
+      let embeddingIndex = 0;
+      const mockFetch = vi.fn().mockImplementation(async () => {
+        embeddingIndex += 1;
+        return (
         new Response(
           JSON.stringify({
-            data: [
-              { embedding: Array(128).fill(0.1) },
-              { embedding: Array(128).fill(0.2) }
-            ]
+            data: { embedding: Array(128).fill(embeddingIndex / 10) }
           }),
           { status: 200 }
         )
-      );
+        );
+      });
       // Inject global fetch mock for tests or mock the EmbeddingClient
       const originalFetch = globalThis.fetch;
       globalThis.fetch = mockFetch as any;

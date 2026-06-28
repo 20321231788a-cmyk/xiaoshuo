@@ -74,7 +74,7 @@ const TerminalView = lazy(() => import("./views/TerminalView.js").then((module) 
 
 const runtime = readWorkbenchRuntime();
 const DEFAULT_RIGHT_WIDTH = 440;
-const APP_WINDOW_TITLE = "ArcWriter 0.3.0";
+const APP_WINDOW_TITLE = "ArcWriter 0.3.1";
 const WEBSITE_HOME_URL = "https://matian.online/";
 const WEBSITE_REGISTER_URL = "https://matian.online/?page=api-relay&auth=register";
 
@@ -3839,6 +3839,7 @@ function AssistantRail({
   const currentSkillStatus = controller.sendingMessage ? "调用中" : currentSkillId ? "已完成" : "待命";
   const conversationItems = controller.snapshot?.conversations || [];
   const activeConversationTitle = activeConversation?.title || (activeConversationId ? "未命名对话" : "未选择会话");
+  const composerAttachments = controller.conversationDetail?.attachments || [];
   const [historyOpen, setHistoryOpen] = useState(false);
   const [renamingConversationId, setRenamingConversationId] = useState("");
   const [conversationTitleDraft, setConversationTitleDraft] = useState("");
@@ -4089,24 +4090,45 @@ function AssistantRail({
               <span>{controller.uploadingAttachment ? "上传中" : "上传文件"}</span>
               <input
                 type="file"
+                multiple
                 disabled={controller.uploadingAttachment || controller.conversationBusy}
                 onChange={(event) => {
-                  const file = event.currentTarget.files?.[0] || null;
-                  controller.uploadConversationAttachment(file);
+                  controller.uploadConversationAttachment(event.currentTarget.files);
                   event.currentTarget.value = "";
                 }}
               />
             </label>
             <button className="xw-secondary-button compact" onClick={() => controller.setMessageInput("")}>清空上下文</button>
           </div>
-          <textarea
-            className="xw-ai-input"
-            value={controller.messageInput}
-            onChange={(event) => controller.setMessageInput(event.target.value)}
-            onKeyDown={handleAiInputKeyDown}
-            placeholder="输入写作目标、修稿要求或拆书要求，系统会按内容自动调用合适的技能。"
-            spellCheck={false}
-          />
+          <div className="composer-input-shell xw-ai-input-shell">
+            {composerAttachments.length > 0 && (
+              <div className="composer-attachment-strip xw-composer-attachment-strip" aria-label="本次发送附件">
+                {composerAttachments.map((attachment) => (
+                  <span key={attachment.id} className="composer-attachment-chip" title={attachment.name}>
+                    <FileText size={14} />
+                    <span>{attachment.name}</span>
+                    <button
+                      type="button"
+                      className="composer-attachment-remove"
+                      onClick={() => controller.deleteConversationAttachment(attachment.id)}
+                      disabled={controller.conversationBusy || controller.sendingMessage}
+                      aria-label={`移除附件 ${attachment.name}`}
+                    >
+                      <X size={12} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+            <textarea
+              className="xw-ai-input"
+              value={controller.messageInput}
+              onChange={(event) => controller.setMessageInput(event.target.value)}
+              onKeyDown={handleAiInputKeyDown}
+              placeholder="输入写作目标、修稿要求或拆书要求，系统会按内容自动调用合适的技能。"
+              spellCheck={false}
+            />
+          </div>
           <div className="xw-send-row">
             <button className="xw-primary-button" onClick={submitAiMessage} disabled={controller.conversationBusy || controller.sendingMessage || !controller.messageInput.trim()}>
               <Send size={15} />

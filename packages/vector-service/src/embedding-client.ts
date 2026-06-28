@@ -30,10 +30,18 @@ export class EmbeddingClient {
   }
 
   private async embedDoubaoMultimodal(inputs: string[]): Promise<number[][]> {
+    const vectors: number[][] = [];
+    for (const input of inputs) {
+      vectors.push(await this.embedDoubaoMultimodalInput(input));
+    }
+    return vectors;
+  }
+
+  private async embedDoubaoMultimodalInput(input: string): Promise<number[]> {
     const endpoint = this.multimodalEndpoint(this.effectiveBaseUrl);
     const payload = {
       model: this.effectiveModel,
-      input: inputs.map((item) => ({ type: "text", text: item }))
+      input: [{ type: "text", text: input }]
     };
 
     const controller = new AbortController();
@@ -58,10 +66,11 @@ export class EmbeddingClient {
 
       const data = await response.json();
       const vectors = this.extractVectors(data);
-      if (vectors.length !== inputs.length) {
-        throw new Error(`Embedding response count mismatch: expected ${inputs.length}, got ${vectors.length}.`);
+      const vector = vectors[0];
+      if (!vector) {
+        throw new Error("Embedding response did not contain vector data.");
       }
-      return vectors;
+      return vector;
     } catch (error) {
       if (controller.signal.aborted) {
         throw new Error("向量请求超时，请检查网络或降低批量大小。");
@@ -77,29 +86,43 @@ export class EmbeddingClient {
       throw new Error("Embedding response is not a JSON object.");
     }
     const rawItems = (data as Record<string, unknown>).data;
-    if (!Array.isArray(rawItems)) {
+    if (Array.isArray(rawItems)) {
+      const vectors = rawItems.map((item) => this.extractVector(item)).filter((vector): vector is number[] => Boolean(vector));
+      if (vectors.length === 0) {
+        throw new Error("Embedding response did not contain vector data.");
+      }
+      return vectors;
+    }
+
+    const directVector = this.extractVector(rawItems);
+    if (directVector) {
+      return [directVector];
+    }
+
+    const topLevelVector = this.extractVector(data);
+    if (topLevelVector) {
+      return [topLevelVector];
+    }
+
+    if (rawItems === undefined) {
       throw new Error("Embedding response missing data array.");
     }
+    throw new Error("Embedding response did not contain vector data.");
+  }
 
-    const vectors: number[][] = [];
-    for (const item of rawItems) {
-      if (!item || typeof item !== "object") {
-        continue;
-      }
-      let vector = (item as Record<string, unknown>).embedding;
-      if (vector && typeof vector === "object" && !Array.isArray(vector)) {
-        const record = vector as Record<string, unknown>;
-        vector = record.dense ?? record.float ?? record.vector;
-      }
-      if (Array.isArray(vector)) {
-        vectors.push(vector.map((val) => Number(val)));
-      }
+  private extractVector(item: unknown): number[] | null {
+    if (!item || typeof item !== "object") {
+      return null;
     }
-
-    if (vectors.length === 0) {
-      throw new Error("Embedding response did not contain vector data.");
+    let vector = (item as Record<string, unknown>).embedding;
+    if (vector && typeof vector === "object" && !Array.isArray(vector)) {
+      const record = vector as Record<string, unknown>;
+      vector = record.dense ?? record.float ?? record.vector;
     }
-    return vectors;
+    if (!Array.isArray(vector)) {
+      return null;
+    }
+    return vector.map((val) => Number(val));
   }
 
   async test(): Promise<{

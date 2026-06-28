@@ -57,7 +57,7 @@ export function ConversationsView({
   onPinText: (content: string) => void;
   onRemovePinnedContext: (itemId: string) => void;
   onMessageInputChange: (value: string) => void;
-  onUploadAttachment: (file: File | null) => void;
+  onUploadAttachment: (files: FileList | null) => void;
   onDeleteAttachment: (attachmentId: string) => void;
   onSendMessage: () => void;
   onStopMessage: () => void;
@@ -244,10 +244,10 @@ export function ConversationsView({
                     <span>{uploadingAttachment ? "上传中" : "上传附件"}</span>
                     <input
                       type="file"
+                      multiple
                       disabled={busy || uploadingAttachment}
                       onChange={(event) => {
-                        const file = event.currentTarget.files?.[0] || null;
-                        onUploadAttachment(file);
+                        onUploadAttachment(event.currentTarget.files);
                         event.currentTarget.value = "";
                       }}
                     />
@@ -364,14 +364,35 @@ export function ConversationsView({
                 <p>固定上下文由后端会话详情接入。</p>
               </div>
             </div>
-            <textarea
-              data-testid="conversation-message-input"
-              className="composer-input"
-              value={messageInput}
-              onChange={(event) => onMessageInputChange(event.target.value)}
-              placeholder="直接告诉 ArcWriter 要做什么，比如读当前文档、整理设定，或者继续这一章。"
-              spellCheck={false}
-            />
+            <div className="composer-input-shell">
+              {conversationDetail?.attachments.length ? (
+                <div className="composer-attachment-strip" aria-label="本次发送附件">
+                  {conversationDetail.attachments.map((attachment) => (
+                    <span key={attachment.id} className="composer-attachment-chip" title={attachment.name}>
+                      <Paperclip size={14} />
+                      <span>{attachment.name}</span>
+                      <button
+                        type="button"
+                        className="composer-attachment-remove"
+                        onClick={() => onDeleteAttachment(attachment.id)}
+                        disabled={busy || sendingMessage}
+                        aria-label={`移除附件 ${attachment.name}`}
+                      >
+                        <Trash2 size={12} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+              <textarea
+                data-testid="conversation-message-input"
+                className="composer-input"
+                value={messageInput}
+                onChange={(event) => onMessageInputChange(event.target.value)}
+                placeholder="直接告诉 ArcWriter 要做什么，比如读当前文档、整理设定，或者继续这一章。"
+                spellCheck={false}
+              />
+            </div>
             <div className="composer-actions">
               <button className="ghost-button" onClick={onCreate} disabled={busy || sendingMessage}>
                 <MessageSquarePlus size={15} />
