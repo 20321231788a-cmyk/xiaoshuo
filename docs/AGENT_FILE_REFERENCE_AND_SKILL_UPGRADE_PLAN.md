@@ -220,6 +220,25 @@
 - Workbench 引用确认和 skill 编辑仍缺 e2e 覆盖。
 - 自然语言 skill 管理的“一键确认”UI 还未消费 `skill_result.data.skill_management`，当前需在技能页确认导入/保存/回滚。
 
+### 2026-07-07 Reference payload test coverage
+
+状态：已完成，提交 `7b3e028`。
+
+落地内容：
+
+- `packages/api-client/src/client.test.ts` 补充流式会话 payload 保真测试。
+- 覆盖 `streamConversationMessage()` 发送时不会丢失 `reference_paths`、`confirmed_reference_paths`、`disable_auto_references`，防止 Workbench 引用确认结果在前端到 runtime 之间被 schema parse 清掉。
+
+已验证：
+
+- `npm run typecheck -w @xiaoshuo/api-client`
+- `npx vitest run packages/api-client/src/client.test.ts`
+
+当前剩余完整验收缺口：
+
+- Workbench 引用确认和 skill 编辑仍缺 Playwright e2e 覆盖；现有 e2e 基建可用，但对应 UI 控件缺少稳定 `data-testid`，直接依赖中文文案会较脆。
+- 自然语言 skill 管理的“一键确认”UI 还未消费 `skill_result.data.skill_management`，当前需在技能页确认导入/保存/回滚。
+
 ## 0. 当前基线
 
 评估时间：2026-07-07。
