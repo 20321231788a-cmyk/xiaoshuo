@@ -17,6 +17,8 @@ import type {
   ProjectChromeSnapshot,
   ProjectManifestStatus,
   SkillDefinition,
+  SkillDraftResponse,
+  SkillDraftSourceKind,
   SkillRunRequest,
   SkillRunResponse,
   StyleDistillationProfile,
@@ -97,6 +99,16 @@ type OpenDocumentOptions = {
   forceReload?: boolean;
   discardDirty?: boolean;
   activate?: boolean;
+};
+
+type SkillDraftPreviewInput = {
+  kind?: SkillDraftSourceKind;
+  instruction?: string;
+  targetName?: string;
+  targetId?: string;
+  url?: string;
+  text?: string;
+  sourceSkillId?: string;
 };
 
 export type PendingCloseRequest = {
@@ -358,6 +370,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [operationsBusy, setOperationsBusy] = useState(false);
   const [operationsMessage, setOperationsMessage] = useState("");
   const [latestSkillResult, setLatestSkillResult] = useState<SkillRunResponse | null>(null);
+  const [pendingSkillDraft, setPendingSkillDraft] = useState<SkillDraftResponse | null>(null);
   const [latestCardDrawResult, setLatestCardDrawResult] = useState<CardDrawResult | null>(null);
   const [pendingGeneratedSave, setPendingGeneratedSave] = useState<PendingGeneratedSave | null>(null);
   const [styleDistillationProfile, setStyleDistillationProfile] = useState<StyleDistillationProfile | null>(null);
@@ -2825,25 +2838,96 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
+  async function draftSkillPreview(input: SkillDraftPreviewInput) {
+    const kind = input.kind || (input.url?.trim() ? "url" : "instruction");
+    const instruction = (input.instruction || "").trim();
+    const targetName = (input.targetName || "").trim();
+    const targetId = (input.targetId || "").trim();
+    const url = (input.url || "").trim();
+    const explicitText = input.text || "";
+    const activeDocument = getActiveDocument();
+
+    if (kind === "url" && !url) {
+      setOperationsMessage("请输入技能链接。");
+      return null;
+    }
+    if (kind === "current_document" && !activeDocument?.path) {
+      const message = "请先打开一个文档，再根据当前文档生成技能草稿。";
+      setOperationsMessage(message);
+      setDocumentMessage(message);
+      setActiveTab("editor");
+      return null;
+    }
+    if (kind !== "url" && kind !== "current_document" && !instruction && !explicitText.trim() && !targetName) {
+      setOperationsMessage("请输入技能说明或技能名。");
+      return null;
+    }
+
+    setOperationsBusy(true);
+    setOperationsMessage("");
+    try {
+      const text = kind === "current_document" ? "" : explicitText;
+      const draft = await client.draftSkill({
+        kind,
+        instruction,
+        text,
+        url,
+        current_path: activeDocument?.path || "",
+        selection: kind === "selection" ? text : "",
+        attachment_ids: [],
+        source_skill_id: input.sourceSkillId || "",
+        target_name: targetName,
+        target_id: targetId
+      });
+      setPendingSkillDraft(draft);
+      setOperationsMessage(`已生成技能草稿：${draft.skill.name}。请预览后导入。`);
+      return draft;
+    } catch (nextError) {
+      setOperationsMessage(describeActionableError(nextError, "生成技能草稿失败", "请确认模型配置可用，或改用更具体的技能说明。"));
+      return null;
+    } finally {
+      setOperationsBusy(false);
+    }
+  }
+
+  async function importPendingSkillDraft() {
+    if (!pendingSkillDraft) {
+      setOperationsMessage("当前没有待导入的技能草稿。");
+      return null;
+    }
+
+    setOperationsBusy(true);
+    setOperationsMessage("");
+    try {
+      const skill = await client.importSkillDraft(pendingSkillDraft);
+      setPendingSkillDraft(null);
+      await refreshSkillCatalog();
+      await selectSkill(skill.id, { activateTab: true });
+      setOperationsMessage(`已导入技能：${skill.name}`);
+      return skill;
+    } catch (nextError) {
+      setOperationsMessage(describeActionableError(nextError, "导入技能草稿失败", "草稿仍保留，可调整后重试。"));
+      return null;
+    } finally {
+      setOperationsBusy(false);
+    }
+  }
+
+  function discardPendingSkillDraft() {
+    if (!pendingSkillDraft) {
+      return;
+    }
+    setPendingSkillDraft(null);
+    setOperationsMessage("已丢弃技能草稿。");
+  }
+
   async function importSkillFromUrl(url: string) {
     const trimmed = url.trim();
     if (!trimmed) {
       setOperationsMessage("请输入技能链接。");
       return;
     }
-    setOperationsBusy(true);
-    setOperationsMessage("");
-    try {
-      const draft = await client.draftSkillFromUrl(trimmed);
-      const skill = await client.importSkillDraft(draft);
-      await refreshSkillCatalog();
-      await selectSkill(skill.id, { activateTab: true });
-      setOperationsMessage(`已从链接导入技能：${skill.name}`);
-    } catch (nextError) {
-      setOperationsMessage(describeActionableError(nextError, "从链接导入技能失败", "请确认链接可访问，且模型配置可用于整理普通网页内容。"));
-    } finally {
-      setOperationsBusy(false);
-    }
+    await draftSkillPreview({ kind: "url", url: trimmed });
   }
 
   async function openSkillFolder() {
@@ -3927,6 +4011,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     operationsBusy,
     operationsMessage,
     latestSkillResult,
+    pendingSkillDraft,
     latestCardDrawResult,
     pendingGeneratedSave,
     styleDistillationProfile,
@@ -3944,6 +4029,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     importSkillFromPath,
     uploadSkillFile,
     importSkillFromUrl,
+    draftSkillPreview,
+    importPendingSkillDraft,
+    discardPendingSkillDraft,
     openSkillFolder,
     deleteOrDisableSelectedSkill,
     restoreSelectedBuiltinSkill,

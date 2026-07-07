@@ -4017,6 +4017,93 @@ body {
   background: rgba(246, 251, 255, 0.78);
 }
 
+.xw-skill-draft-panel {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.9fr) minmax(280px, 1.1fr);
+  gap: 10px;
+  min-width: 0;
+}
+
+.xw-skill-draft-form,
+.xw-skill-draft-preview {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--xw-line);
+  border-radius: 14px;
+  background: rgba(250, 253, 255, 0.84);
+}
+
+.xw-skill-draft-form input,
+.xw-skill-draft-form textarea {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--xw-line);
+  border-radius: 11px;
+  background: rgba(250, 253, 255, 0.94);
+  color: var(--xw-text);
+  font: inherit;
+  outline: none;
+}
+
+.xw-skill-draft-form input {
+  min-height: 36px;
+  padding: 0 12px;
+}
+
+.xw-skill-draft-form textarea {
+  min-height: 82px;
+  resize: vertical;
+  padding: 10px 12px;
+  line-height: 1.55;
+}
+
+.xw-skill-draft-heading {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.xw-skill-draft-heading strong {
+  overflow: hidden;
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.xw-skill-draft-heading small,
+.xw-skill-draft-preview p,
+.xw-skill-draft-preview em {
+  overflow-wrap: anywhere;
+  color: var(--xw-muted);
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.5;
+}
+
+.xw-skill-draft-preview p {
+  margin: 0;
+}
+
+.xw-skill-draft-preview pre {
+  max-height: 210px;
+  min-width: 0;
+  margin: 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.xw-skill-draft-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
 .xw-feature-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -6275,6 +6362,7 @@ select:focus-visible {
   .xw-operation-grid.two,
   .xw-feature-split,
   .xw-trace-layout,
+  .xw-skill-draft-panel,
   .xw-skill-import-row {
     grid-template-columns: 1fr;
   }
