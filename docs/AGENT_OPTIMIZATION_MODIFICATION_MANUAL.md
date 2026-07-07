@@ -1564,3 +1564,31 @@ npm run smoke:desktop
 
 - P1 八个 workflow handler 已全部迁移到 registry：`body_generate`、`batch_generate`、`consistency_check`、`scan_pits`、`book_fusion`、`nuwa_style_distill`、`continue_disassemble`、`disassemble_book`。
 - 下一阶段建议进入 P2 `ContextAssembler`，先统一 chat / skill / workflow 的上下文读取边界，但保持 prompt 内容稳定。
+
+### 16.10 2026-07-07 P2 ContextAssembler 第一刀已完成
+
+状态：已完成 ContextAssembler 基础类型、预算器和 chat-runner 最小接入。
+
+本阶段完成内容：
+
+- 新增 `packages/agent-runtime/src/kernel/context-block.ts`，定义 `ContextBlock`、priority、source 与 assembled block 统计类型。
+- 新增 `packages/agent-runtime/src/kernel/context-assembler.ts`，实现默认场景预算、critical/high/medium/low 优先级裁剪、per-block `maxChars` 和 assembled block 统计。
+- 新增 `packages/agent-runtime/src/kernel/context-assembler.test.ts`，覆盖预算裁剪、critical 保留、low 丢弃、`maxChars` 和 compact retry 预算。
+- `packages/agent-runtime/src/chat-runner.ts` 接入 assembler 到 `buildTurnContext()`、`buildConversationTurnContext()` 和 `buildStableProjectContext()` 的最终上下文预算边界。
+- 本刀刻意保持原有上下文文本结构：先按旧逻辑拼装，再由 assembler 做最终裁剪，为后续 trace/block 细分留接口。
+
+已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/agent-runtime
+npm test -- packages/agent-runtime/src/kernel/context-assembler.test.ts
+npm run typecheck
+npm test
+npm run build:desktop
+npm run smoke:desktop
+```
+
+遗留说明：
+
+- P2 下一刀可把 chat stable / turn context 拆为多个真实 `ContextBlock`，并把 assembled block 统计接入 trace。
+- 再下一步接 `skill-runner.ts` 的 `buildSkillPrompt()`，保持 prompt 文本稳定。

@@ -28,6 +28,7 @@ import {
   type WebSearchSource
 } from "./web-search.js";
 import { applyHumanizerIfEnabled } from "./humanizer.js";
+import { assembleContext } from "./kernel/context-assembler.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import { splitVisibleStreamText } from "./stream.js";
 
@@ -377,7 +378,7 @@ export class AgentChatRunner {
     const runtimeContext = await this.resolveRuntimeContext(payload, compact);
     const limit = compact ? 3_000 : 5_000;
     const webSearchContext = await this.buildWebSearchContext(payload.content || "", runtimeContext, compact, webSearchSources);
-    return [
+    const content = [
       "【本轮动态上下文】",
       "这些内容只用于当前这一轮的回答，优先级低于项目稳定上下文。",
       "",
@@ -387,8 +388,19 @@ export class AgentChatRunner {
       "",
       `【用户输入】\n${clipText(payload.content || "", compact ? 8_000 : MAX_USER_INPUT_CHARS)}`
     ]
-      .join("\n")
-      .slice(0, compact ? MAX_COMPACT_CONTEXT_CHARS : MAX_CONTEXT_CHARS);
+      .join("\n");
+    return assembleContext(
+      [
+        {
+          id: "agent-turn-context",
+          title: "本轮动态上下文",
+          source: "runtime",
+          priority: "critical",
+          content
+        }
+      ],
+      { budget: compact ? MAX_COMPACT_CONTEXT_CHARS : MAX_CONTEXT_CHARS }
+    ).text;
   }
 
   private async resolveRuntimeContext(payload: AgentRunRequest, compact: boolean): Promise<string> {
@@ -855,7 +867,7 @@ export class AgentChatRunner {
     }
     const webSearchContext = await this.buildWebSearchContext(text, rtContext, compact, webSearchSources);
 
-    return [
+    const content = [
       "【本轮动态上下文】",
       "这些内容每轮可能变化，优先级低于前置项目稳定上下文；只在与用户目标相关时使用。",
       "",
@@ -867,6 +879,18 @@ export class AgentChatRunner {
       "",
       `【用户输入】\n${clipText(text, userLimit)}`
     ].join("\n");
+    return assembleContext(
+      [
+        {
+          id: "conversation-turn-context",
+          title: "会话本轮动态上下文",
+          source: "runtime",
+          priority: "critical",
+          content
+        }
+      ],
+      { budget: compact ? MAX_COMPACT_CONTEXT_CHARS : MAX_CONTEXT_CHARS }
+    ).text;
   }
 
   private async buildWebSearchContext(userText: string, runtimeContext: string, compact: boolean, webSearchSources?: WebSearchSource[]): Promise<string> {
@@ -1009,7 +1033,7 @@ function buildStableProjectContext(
 
   const outlineLimit = compact ? 1_600 : 2_200;
   const libraryLimit = compact ? 1_800 : 4_000;
-  return [
+  const content = [
     compact ? "【自动压缩】已压缩项目上下文以避免超时，请优先完成用户当前目标。" : "",
     `【项目状态摘要】\n${clipText(continuity.state_summary || "暂无", compact ? 2_500 : 4_000)}`,
     "",
@@ -1032,8 +1056,19 @@ function buildStableProjectContext(
     `【固定上下文】\n${pinned}`
   ]
     .filter(Boolean)
-    .join("\n")
-    .slice(0, compact ? MAX_COMPACT_CONTEXT_CHARS : MAX_CONTEXT_CHARS);
+    .join("\n");
+  return assembleContext(
+    [
+      {
+        id: "stable-project-context",
+        title: "项目稳定上下文",
+        source: "project",
+        priority: "critical",
+        content
+      }
+    ],
+    { budget: compact ? MAX_COMPACT_CONTEXT_CHARS : MAX_CONTEXT_CHARS }
+  ).text;
 }
 
 function clipText(text: string, limit: number): string {

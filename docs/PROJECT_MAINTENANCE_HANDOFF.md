@@ -1321,6 +1321,34 @@ npm run smoke:desktop
 - P1 Workflow Handler Registry 迁移完成，可进入 P2 `ContextAssembler`。
 - P2 第一刀建议只抽上下文读取/组装边界，先不要调 prompt 语义，避免生成质量和重构混在同一提交里。
 
+### 15.27 2026-07-07 P2 ContextAssembler 第一刀开发记录
+
+本轮进入 P2，先建立 ContextAssembler 基础设施，并用最保守方式接入 chat-runner。
+
+主要改动：
+
+- 新增 `packages/agent-runtime/src/kernel/context-block.ts`，定义 context block priority/source 与 assembled block 统计类型。
+- 新增 `packages/agent-runtime/src/kernel/context-assembler.ts`，实现 chat、compact retry、prompt skill、body_generate、consistency_check 默认预算，以及 priority/maxChars 裁剪。
+- 新增 `packages/agent-runtime/src/kernel/context-assembler.test.ts`，覆盖 critical/high/low 预算行为、critical 裁剪、per-block maxChars 和 compact retry 预算。
+- `packages/agent-runtime/src/chat-runner.ts` 将 `buildTurnContext()`、`buildConversationTurnContext()`、`buildStableProjectContext()` 的最终上下文裁剪交给 assembler。
+- 本刀没有重排 prompt 结构：仍先沿用旧文本拼装，再做 assembler 预算封装，减少生成质量漂移风险。
+
+本轮已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/agent-runtime
+npm test -- packages/agent-runtime/src/kernel/context-assembler.test.ts
+npm run typecheck
+npm test
+npm run build:desktop
+npm run smoke:desktop
+```
+
+下一步建议：
+
+- P2 下一刀把 chat stable context / turn context 拆成多个真实 `ContextBlock`，并把 assembled block 统计写入 agent trace。
+- 后续再接 `skill-runner.ts` 的 prompt skill 上下文，继续保持 prompt 语义稳定。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：
