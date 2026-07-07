@@ -3506,6 +3506,7 @@ body {
 .xw-find-bar {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 8px 10px;
   border: 1px solid var(--xw-line);
@@ -3522,6 +3523,10 @@ body {
   border-radius: 10px;
   outline: none;
   background: var(--xw-panel-strong);
+}
+
+.xw-find-bar button {
+  flex: 0 0 auto;
 }
 
 .xw-find-bar span {

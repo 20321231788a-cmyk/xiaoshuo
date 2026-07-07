@@ -8,6 +8,7 @@ export const ipcChannels = {
   appRequestRefresh: "app:request-refresh",
   appRequestSave: "app:request-save",
   appRequestFind: "app:request-find",
+  appRequestReplace: "app:request-replace",
   shellCapabilities: "shell:capabilities",
   shellPickProjectDirectory: "shell:pick-project-directory",
   shellExportProject: "shell:export-project",
@@ -341,6 +342,7 @@ export type XiaoShuoDesktopApi = {
   onRequestRefresh: (callback: () => void) => () => void;
   onRequestSave: (callback: () => void) => () => void;
   onRequestFind: (callback: () => void) => () => void;
+  onRequestReplace: (callback: () => void) => () => void;
   capabilities: () => Promise<DesktopShellCapabilities>;
   pickProjectDirectory: () => Promise<DesktopProjectPickerResponse>;
   exportProject: (request: DesktopProjectExportRequest) => Promise<DesktopProjectArchiveResponse>;

@@ -158,6 +158,7 @@ export function App() {
   const [fusionBookIds, setFusionBookIds] = useState<string[]>([]);
   const [tutorialOpen, setTutorialOpen] = useState(false);
   const [findRequestTick, setFindRequestTick] = useState(0);
+  const [replaceRequestTick, setReplaceRequestTick] = useState(0);
   const [leftSidebarTab, setLeftSidebarTab] = useState<"project" | "disassembly">("project");
   const [legacyWorkbenchTab, setLegacyWorkbenchTab] = useState<LegacyWorkbenchTab | null>(null);
   const onboardingRef = useRef(false);
@@ -184,11 +185,16 @@ export function App() {
       setCenterFeature("editor");
       setFindRequestTick((value) => value + 1);
     });
+    const unsubscribeReplace = window.xiaoshuoDesktop?.onRequestReplace?.(() => {
+      setCenterFeature("editor");
+      setReplaceRequestTick((value) => value + 1);
+    });
     return () => {
       unsubscribeTutorial?.();
       unsubscribeRefresh?.();
       unsubscribeSave?.();
       unsubscribeFind?.();
+      unsubscribeReplace?.();
     };
   }, [controller]);
 
@@ -207,6 +213,12 @@ export function App() {
         event.preventDefault();
         setCenterFeature("editor");
         setFindRequestTick((value) => value + 1);
+        return;
+      }
+      if (key === "h") {
+        event.preventDefault();
+        setCenterFeature("editor");
+        setReplaceRequestTick((value) => value + 1);
       }
     }
 
@@ -331,6 +343,7 @@ export function App() {
               disassemblyUi={disassemblyUi}
               feature={centerFeature}
               findRequestTick={findRequestTick}
+              replaceRequestTick={replaceRequestTick}
               onSelectFeature={selectCenterFeature}
               onSelectRightMode={selectRightMode}
             />
@@ -480,6 +493,7 @@ function CenterWorkspace({
   controller,
   feature,
   findRequestTick,
+  replaceRequestTick,
   disassemblyUi,
   onSelectFeature,
   onSelectRightMode
@@ -487,6 +501,7 @@ function CenterWorkspace({
   controller: WorkbenchController;
   feature: CenterFeature;
   findRequestTick: number;
+  replaceRequestTick: number;
   disassemblyUi: DisassemblyUiState;
   onSelectFeature: (feature: CenterFeature) => void;
   onSelectRightMode: (mode: RailMode) => void;
@@ -495,13 +510,14 @@ function CenterWorkspace({
     return null;
   }
 
-  return <FeatureWorkbenchPanel controller={controller} feature={feature} findRequestTick={findRequestTick} disassemblyUi={disassemblyUi} onSelectFeature={onSelectFeature} onSelectRightMode={onSelectRightMode} />;
+  return <FeatureWorkbenchPanel controller={controller} feature={feature} findRequestTick={findRequestTick} replaceRequestTick={replaceRequestTick} disassemblyUi={disassemblyUi} onSelectFeature={onSelectFeature} onSelectRightMode={onSelectRightMode} />;
 }
 
 function FeatureWorkbenchPanel({
   controller,
   feature,
   findRequestTick,
+  replaceRequestTick,
   disassemblyUi,
   onSelectFeature,
   onSelectRightMode
@@ -509,6 +525,7 @@ function FeatureWorkbenchPanel({
   controller: WorkbenchController;
   feature: CenterFeature;
   findRequestTick: number;
+  replaceRequestTick: number;
   disassemblyUi: DisassemblyUiState;
   onSelectFeature: (feature: CenterFeature) => void;
   onSelectRightMode: (mode: RailMode) => void;
@@ -517,8 +534,11 @@ function FeatureWorkbenchPanel({
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
   const rightEditorRef = useRef<HTMLTextAreaElement | null>(null);
   const findInputRef = useRef<HTMLInputElement | null>(null);
+  const replaceInputRef = useRef<HTMLInputElement | null>(null);
   const [findOpen, setFindOpen] = useState(false);
+  const [replaceOpen, setReplaceOpen] = useState(false);
   const [findQuery, setFindQuery] = useState("");
+  const [replaceQuery, setReplaceQuery] = useState("");
   const [findMessage, setFindMessage] = useState("");
 
   // 分屏管理状态
@@ -552,9 +572,20 @@ function FeatureWorkbenchPanel({
       return;
     }
     setFindOpen(true);
+    setReplaceOpen(false);
     setFindMessage("");
     requestAnimationFrame(() => findInputRef.current?.focus());
   }, [findRequestTick]);
+
+  useEffect(() => {
+    if (!replaceRequestTick) {
+      return;
+    }
+    setFindOpen(true);
+    setReplaceOpen(true);
+    setFindMessage("");
+    requestAnimationFrame(() => findInputRef.current?.focus());
+  }, [replaceRequestTick]);
 
   function handlePaneFocus(pane: "left" | "right") {
     setActivePane(pane);
@@ -626,6 +657,82 @@ function FeatureWorkbenchPanel({
       ref.current?.focus();
       ref.current?.setSelectionRange(index, index + query.length);
     });
+  }
+
+  function replaceCurrent() {
+    const doc = currentPaneDoc;
+    if (!doc || !findQuery.trim()) {
+      setFindMessage(findQuery.trim() ? "当前没有可替换文档" : "请输入查找内容");
+      return;
+    }
+    const ref = isSplit ? (activePane === "left" ? editorRef : rightEditorRef) : editorRef;
+    const editor = ref.current;
+    const query = findQuery.trim();
+    const selectedStart = Math.max(editor?.selectionStart ?? 0, 0);
+    const selectedEnd = Math.max(editor?.selectionEnd ?? selectedStart, selectedStart);
+    const selectedText = doc.content.slice(selectedStart, selectedEnd);
+    const selectionMatches = selectedText.toLowerCase() === query.toLowerCase();
+    if (!selectionMatches) {
+      findNext();
+      setFindMessage("已定位匹配项，再次替换");
+      return;
+    }
+
+    const next = `${doc.content.slice(0, selectedStart)}${replaceQuery}${doc.content.slice(selectedEnd)}`;
+    controller.updateActiveDocument(next);
+    setFindMessage("已替换 1 处");
+    const nextCursor = selectedStart + replaceQuery.length;
+    requestAnimationFrame(() => {
+      ref.current?.focus();
+      ref.current?.setSelectionRange(nextCursor, nextCursor);
+      findNextInText(next, nextCursor);
+    });
+  }
+
+  function replaceAll() {
+    const doc = currentPaneDoc;
+    const query = findQuery.trim();
+    if (!doc || !query) {
+      setFindMessage(query ? "当前没有可替换文档" : "请输入查找内容");
+      return;
+    }
+    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(escaped, "gi");
+    let count = 0;
+    const next = doc.content.replace(pattern, () => {
+      count += 1;
+      return replaceQuery;
+    });
+    if (!count) {
+      setFindMessage("未找到");
+      return;
+    }
+    controller.updateActiveDocument(next);
+    setFindMessage(`已替换 ${count} 处`);
+    const ref = isSplit ? (activePane === "left" ? editorRef : rightEditorRef) : editorRef;
+    requestAnimationFrame(() => {
+      ref.current?.focus();
+      const cursor = Math.min(next.length, Math.max(0, ref.current?.selectionStart ?? 0));
+      ref.current?.setSelectionRange(cursor, cursor);
+    });
+  }
+
+  function findNextInText(content: string, from: number) {
+    const query = findQuery.trim();
+    if (!query) {
+      return;
+    }
+    const source = content.toLowerCase();
+    const needle = query.toLowerCase();
+    let index = source.indexOf(needle, Math.max(from, 0));
+    if (index < 0 && from > 0) {
+      index = source.indexOf(needle, 0);
+    }
+    if (index < 0) {
+      return;
+    }
+    const ref = isSplit ? (activePane === "left" ? editorRef : rightEditorRef) : editorRef;
+    ref.current?.setSelectionRange(index, index + query.length);
   }
 
   return (
@@ -763,6 +870,7 @@ function FeatureWorkbenchPanel({
                 }
                 if (event.key === "Escape") {
                   setFindOpen(false);
+                  setReplaceOpen(false);
                   setFindMessage("");
                   const ref = isSplit ? (activePane === "left" ? editorRef : rightEditorRef) : editorRef;
                   ref.current?.focus();
@@ -770,13 +878,54 @@ function FeatureWorkbenchPanel({
               }}
               placeholder="查找当前文档"
             />
+            {replaceOpen && (
+              <input
+                ref={replaceInputRef}
+                value={replaceQuery}
+                onChange={(event) => setReplaceQuery(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    replaceCurrent();
+                  }
+                  if (event.key === "Escape") {
+                    setFindOpen(false);
+                    setReplaceOpen(false);
+                    setFindMessage("");
+                    const ref = isSplit ? (activePane === "left" ? editorRef : rightEditorRef) : editorRef;
+                    ref.current?.focus();
+                  }
+                }}
+                placeholder="替换为"
+              />
+            )}
             <button className="xw-secondary-button compact" type="button" onClick={findNext} disabled={!currentPaneDoc}>
               查找
             </button>
-            <button className="xw-secondary-button compact" type="button" onClick={() => setFindOpen(false)}>
+            {replaceOpen ? (
+              <>
+                <button className="xw-secondary-button compact" type="button" onClick={replaceCurrent} disabled={!currentPaneDoc}>
+                  替换
+                </button>
+                <button className="xw-secondary-button compact" type="button" onClick={replaceAll} disabled={!currentPaneDoc}>
+                  全部替换
+                </button>
+              </>
+            ) : (
+              <button className="xw-secondary-button compact" type="button" onClick={() => {
+                setReplaceOpen(true);
+                requestAnimationFrame(() => replaceInputRef.current?.focus());
+              }}>
+                替换
+              </button>
+            )}
+            <button className="xw-secondary-button compact" type="button" onClick={() => {
+              setFindOpen(false);
+              setReplaceOpen(false);
+            }}>
               关闭
             </button>
-            <span>{findMessage || "Enter 查找下一个，Esc 关闭"}</span>
+            <span>{findMessage || (replaceOpen ? "Enter 查找/替换，Esc 关闭" : "Enter 查找下一个，Esc 关闭")}</span>
           </div>
         )}
 

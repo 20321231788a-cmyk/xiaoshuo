@@ -60,6 +60,13 @@ const desktopApi: XiaoShuoDesktopApi = {
     ipcRenderer.on(ipcChannels.appRequestFind, listener);
     return () => ipcRenderer.off(ipcChannels.appRequestFind, listener);
   },
+  onRequestReplace: (callback) => {
+    const listener = () => {
+      callback();
+    };
+    ipcRenderer.on(ipcChannels.appRequestReplace, listener);
+    return () => ipcRenderer.off(ipcChannels.appRequestReplace, listener);
+  },
   capabilities: async () => desktopShellCapabilitiesSchema.parse(await ipcRenderer.invoke(ipcChannels.shellCapabilities)),
   pickProjectDirectory: async () => desktopProjectPickerResponseSchema.parse(await ipcRenderer.invoke(ipcChannels.shellPickProjectDirectory)),
   exportProject: async (request) =>

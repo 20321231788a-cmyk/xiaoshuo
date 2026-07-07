@@ -122,6 +122,11 @@ async function createWindow(): Promise<BrowserWindow> {
       window.webContents.send(ipcChannels.appRequestFind);
       return;
     }
+    if (key === "h") {
+      event.preventDefault();
+      window.webContents.send(ipcChannels.appRequestReplace);
+      return;
+    }
     if (key === "c") {
       event.preventDefault();
       window.webContents.copy();
