@@ -1570,6 +1570,99 @@ button {
   word-break: break-word;
 }
 
+.reference-confirm-panel {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(58, 129, 202, 0.2);
+  border-radius: 8px;
+  background: rgba(238, 247, 255, 0.84);
+}
+
+.reference-confirm-head,
+.reference-confirm-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.reference-confirm-head div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.reference-confirm-head strong {
+  font-size: 14px;
+}
+
+.reference-confirm-head span,
+.reference-confirm-panel p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.reference-chip-row,
+.reference-candidate-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.reference-chip,
+.reference-candidate-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 30px;
+  padding: 5px 8px;
+  border: 1px solid rgba(27, 43, 41, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 252, 245, 0.88);
+  color: var(--ink);
+  font-size: 12px;
+}
+
+.reference-chip > span,
+.reference-candidate-chip > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reference-chip.auto {
+  border-color: rgba(11, 110, 104, 0.22);
+  background: rgba(238, 248, 247, 0.94);
+}
+
+.reference-candidate-chip {
+  cursor: pointer;
+}
+
+.reference-candidate-chip input {
+  flex: 0 0 auto;
+  margin: 0;
+}
+
+.reference-candidate-chip small {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.reference-candidate-chip.selected {
+  border-color: rgba(58, 129, 202, 0.42);
+  background: rgba(226, 241, 255, 0.9);
+}
+
 .composer-input-shell {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);

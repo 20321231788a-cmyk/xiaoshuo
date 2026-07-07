@@ -1,9 +1,9 @@
-import { ArrowUp, Copy, FilePlus2, MessageSquarePlus, Paperclip, Pencil, Pin, RefreshCw, Square, Trash2 } from "lucide-react";
+import { ArrowUp, Check, Copy, FilePlus2, MessageSquarePlus, Paperclip, Pencil, Pin, RefreshCw, Square, Trash2, X } from "lucide-react";
 import type { ConversationDetail, ConversationSummary } from "@xiaoshuo/shared";
 import { useEffect, useRef, useState } from "react";
 import { Panel } from "../components/Panel.js";
 import { RichText } from "../components/RichText.js";
-import type { OpenDocumentTab } from "../hooks/useWorkbenchController.js";
+import type { OpenDocumentTab, PendingReferenceResolution } from "../hooks/useWorkbenchController.js";
 import { attachmentDisplayName } from "../lib/attachments.js";
 import { describeGeneratedSaveAction, describeGeneratedSaveReason, describeGeneratedWriteIntent, describePendingGeneratedTarget, pendingGeneratedTargetPaths } from "../lib/workflow.js";
 import type { PendingGeneratedSave } from "../lib/workflow.js";
@@ -20,6 +20,7 @@ export function ConversationsView({
   activeDocumentPath,
   activeDocument,
   pendingGeneratedSave,
+  pendingReferenceResolution,
   onRefresh,
   onCreate,
   onSelect,
@@ -32,6 +33,10 @@ export function ConversationsView({
   onUploadAttachment,
   onDeleteAttachment,
   onSendMessage,
+  onToggleReferenceCandidate,
+  onConfirmReferenceResolution,
+  onSendWithoutReferenceCandidates,
+  onDiscardReferenceResolution,
   onStopMessage,
   onSavePendingGenerated,
   onSavePendingGeneratedAsDraft,
@@ -49,6 +54,7 @@ export function ConversationsView({
   activeDocumentPath: string;
   activeDocument: OpenDocumentTab | null;
   pendingGeneratedSave: PendingGeneratedSave | null;
+  pendingReferenceResolution: PendingReferenceResolution | null;
   onRefresh: () => void;
   onCreate: () => void;
   onSelect: (conversationId: string) => void;
@@ -61,6 +67,10 @@ export function ConversationsView({
   onUploadAttachment: (files: FileList | null) => void;
   onDeleteAttachment: (attachmentId: string) => void;
   onSendMessage: () => void;
+  onToggleReferenceCandidate: (path: string) => void;
+  onConfirmReferenceResolution: () => void;
+  onSendWithoutReferenceCandidates: () => void;
+  onDiscardReferenceResolution: () => void;
   onStopMessage: () => void;
   onSavePendingGenerated: (mode: "replace" | "append") => void;
   onSavePendingGeneratedAsDraft: () => void;
@@ -70,6 +80,8 @@ export function ConversationsView({
   const pendingTargetPaths = pendingGeneratedSave ? pendingGeneratedTargetPaths(pendingGeneratedSave) : [];
   const activeDocumentExcerptChars = activeDocument?.content.trim() ? Math.min(activeDocument.content.trim().length, 6000) : 0;
   const attachmentCount = conversationDetail?.attachments.length || 0;
+  const autoReferenceCount = pendingReferenceResolution?.references.length || 0;
+  const selectedReferenceCount = pendingReferenceResolution?.selectedPaths.length || 0;
   const [titleDraft, setTitleDraft] = useState(conversationDetail?.title || "");
   const [pinnedTextDraft, setPinnedTextDraft] = useState("");
   const [confirmDiscardGenerated, setConfirmDiscardGenerated] = useState(false);
@@ -365,6 +377,63 @@ export function ConversationsView({
                 <p>固定上下文由后端会话详情接入。</p>
               </div>
             </div>
+            {pendingReferenceResolution && (
+              <div className="reference-confirm-panel">
+                <div className="reference-confirm-head">
+                  <div>
+                    <strong>确认参考文件</strong>
+                    <span>
+                      {autoReferenceCount ? `自动引用 ${autoReferenceCount} 个` : "没有自动引用"}
+                      {pendingReferenceResolution.candidates.length ? `，候选 ${pendingReferenceResolution.candidates.length} 个` : ""}
+                    </span>
+                  </div>
+                  <button className="ghost-button compact" onClick={onDiscardReferenceResolution} disabled={busy || sendingMessage}>
+                    <X size={14} />
+                    <span>取消</span>
+                  </button>
+                </div>
+                {pendingReferenceResolution.references.length > 0 && (
+                  <div className="reference-chip-row" aria-label="自动引用文件">
+                    {pendingReferenceResolution.references.map((candidate) => (
+                      <span key={candidate.path} className="reference-chip auto" title={`${candidate.reason} · ${candidate.path}`}>
+                        <Check size={13} />
+                        <span>{candidate.label || candidate.path}</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div className="reference-candidate-list">
+                  {pendingReferenceResolution.candidates.map((candidate) => {
+                    const selected = pendingReferenceResolution.selectedPaths.includes(candidate.path);
+                    return (
+                      <label key={candidate.path} className={`reference-candidate-chip ${selected ? "selected" : ""}`} title={`${candidate.reason} · ${candidate.path}`}>
+                        <input
+                          type="checkbox"
+                          checked={selected}
+                          onChange={() => onToggleReferenceCandidate(candidate.path)}
+                          disabled={busy || sendingMessage}
+                        />
+                        <span>{candidate.label || candidate.path}</span>
+                        <small>{Math.round(candidate.confidence * 100)}%</small>
+                      </label>
+                    );
+                  })}
+                </div>
+                {pendingReferenceResolution.warnings.length > 0 && <p>{pendingReferenceResolution.warnings.join("；")}</p>}
+                <div className="reference-confirm-actions">
+                  <button
+                    className="refresh-button compact"
+                    onClick={onConfirmReferenceResolution}
+                    disabled={busy || sendingMessage || (!selectedReferenceCount && !autoReferenceCount)}
+                  >
+                    <span>{selectedReferenceCount ? `引用 ${autoReferenceCount + selectedReferenceCount} 个并发送` : "引用自动文件并发送"}</span>
+                  </button>
+                  <button className="ghost-button compact" onClick={onSendWithoutReferenceCandidates} disabled={busy || sendingMessage}>
+                    <span>不引用候选，直接发送</span>
+                  </button>
+                </div>
+              </div>
+            )}
             <div className="composer-input-shell">
               {conversationDetail?.attachments.length ? (
                 <div className="composer-attachment-strip" aria-label="本次发送附件">

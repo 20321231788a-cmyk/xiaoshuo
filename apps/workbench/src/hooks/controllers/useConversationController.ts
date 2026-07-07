@@ -9,6 +9,7 @@ export function useConversationController(core: CoreWorkbenchController) {
     messageInput: core.messageInput,
     setMessageInput: core.setMessageInput,
     sendingMessage: core.sendingMessage,
+    pendingReferenceResolution: core.pendingReferenceResolution,
     loadConversation: core.loadConversation,
     createConversation: core.createConversation,
     updateConversationTitle: core.updateConversationTitle,
@@ -20,6 +21,10 @@ export function useConversationController(core: CoreWorkbenchController) {
     uploadWorkflowAttachment: core.uploadWorkflowAttachment,
     deleteConversationAttachment: core.deleteConversationAttachment,
     sendMessage: core.sendMessage,
+    togglePendingReferenceCandidate: core.togglePendingReferenceCandidate,
+    confirmPendingReferenceResolution: core.confirmPendingReferenceResolution,
+    sendPendingReferenceResolutionWithoutCandidates: core.sendPendingReferenceResolutionWithoutCandidates,
+    discardPendingReferenceResolution: core.discardPendingReferenceResolution,
     sendLedgerRecoveryPrompt: core.sendLedgerRecoveryPrompt,
     stopMessage: core.stopMessage
   };

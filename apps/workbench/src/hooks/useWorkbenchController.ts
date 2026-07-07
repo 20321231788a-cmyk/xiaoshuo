@@ -12,6 +12,7 @@ export type {
   OpenDocumentTab,
   PendingCloseRequest,
   PendingProjectSwitchRequest,
+  PendingReferenceResolution,
   PendingReloadRequest,
   PendingSaveConflictRequest,
   WorkbenchTab

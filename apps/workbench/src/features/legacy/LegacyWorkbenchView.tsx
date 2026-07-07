@@ -153,6 +153,7 @@ function renderLegacyTab(
         activeDocumentPath={controller.activeDocumentPath}
         activeDocument={activeDocument}
         pendingGeneratedSave={controller.pendingGeneratedSave}
+        pendingReferenceResolution={controller.pendingReferenceResolution}
         onRefresh={() => void controller.refreshAll()}
         onCreate={() => void controller.createConversation()}
         onSelect={(conversationId) => void controller.loadConversation(conversationId)}
@@ -165,6 +166,10 @@ function renderLegacyTab(
         onUploadAttachment={controller.uploadConversationAttachment}
         onDeleteAttachment={(attachmentId) => void controller.deleteConversationAttachment(attachmentId)}
         onSendMessage={() => void controller.sendMessage()}
+        onToggleReferenceCandidate={controller.togglePendingReferenceCandidate}
+        onConfirmReferenceResolution={() => void controller.confirmPendingReferenceResolution()}
+        onSendWithoutReferenceCandidates={() => void controller.sendPendingReferenceResolutionWithoutCandidates()}
+        onDiscardReferenceResolution={controller.discardPendingReferenceResolution}
         onStopMessage={controller.stopMessage}
         onSavePendingGenerated={(mode) => void controller.savePendingGenerated(mode)}
         onSavePendingGeneratedAsDraft={() => void controller.savePendingGeneratedAsDraft()}

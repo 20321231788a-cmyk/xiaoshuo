@@ -15,6 +15,7 @@ import type {
   LedgerItem,
   LocalStateGeneratedCache,
   ProjectChromeSnapshot,
+  ProjectFileReferenceCandidate,
   ProjectManifestStatus,
   SkillDefinition,
   SkillDraftResponse,
@@ -63,6 +64,7 @@ export type WorkbenchTab = "overview" | "project" | "editor" | "config" | "conve
 const workbenchTabs = new Set<WorkbenchTab>(["overview", "project", "editor", "config", "conversations", "operations", "terminal"]);
 const outlineGenerationSkillIds = new Set(["outline_generate", "detail_outline_generate", "chapter_outline_generate"]);
 const outlineGeneratedPaths = new Set(["01_大纲/大纲.txt", "01_大纲/细纲.txt", "01_大纲/章纲.txt"]);
+const projectReferenceHintPattern = /@|参考|参照|根据|读取|读一下|对照|结合|当前(?:文档|文件)|这篇|这章|章纲|细纲|大纲|人物|角色|世界观|设定|正文|\.txt|\.md|\.jsonl/i;
 
 export type OpenDocumentTab = {
   path: string;
@@ -111,6 +113,22 @@ type SkillDraftPreviewInput = {
   sourceSkillId?: string;
 };
 
+export type PendingReferenceResolution = {
+  content: string;
+  references: ProjectFileReferenceCandidate[];
+  candidates: ProjectFileReferenceCandidate[];
+  selectedPaths: string[];
+  warnings: string[];
+};
+
+type SendConversationOptions = {
+  checkActiveDocument?: boolean;
+  skipReferenceResolution?: boolean;
+  referencePaths?: string[];
+  confirmedReferencePaths?: string[];
+  disableAutoReferences?: boolean;
+};
+
 export type PendingCloseRequest = {
   path: string;
   title: string;
@@ -156,6 +174,14 @@ function makeLocalMessage(role: ConversationMessage["role"], content: string): C
 
 function uniquePaths(paths: string[]): string[] {
   return [...new Set(paths.map((item) => item.trim()).filter(Boolean))];
+}
+
+function referenceCandidatePaths(candidates: ProjectFileReferenceCandidate[]): string[] {
+  return uniquePaths(candidates.map((candidate) => candidate.path));
+}
+
+function shouldResolveProjectReferences(text: string): boolean {
+  return projectReferenceHintPattern.test(text);
 }
 
 function skillSavedPaths(result: SkillRunResponse | null): string[] {
@@ -355,6 +381,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [messageInput, setMessageInput] = useState("");
   const [sendingMessage, setSendingMessage] = useState(false);
+  const [pendingReferenceResolution, setPendingReferenceResolution] = useState<PendingReferenceResolution | null>(null);
   const [openDocuments, setOpenDocuments] = useState<OpenDocumentTab[]>([]);
   const [activeDocumentPath, setActiveDocumentPath] = useState("");
   const [documentBusy, setDocumentBusy] = useState(false);
@@ -435,6 +462,12 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   useEffect(() => {
     selectedJobIdRef.current = selectedJobId;
   }, [selectedJobId]);
+
+  useEffect(() => {
+    if (pendingReferenceResolution && messageInput.trim() !== pendingReferenceResolution.content) {
+      setPendingReferenceResolution(null);
+    }
+  }, [messageInput, pendingReferenceResolution]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -903,6 +936,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setConversationBusy(false);
     setConversationMessage("");
     setMessageInput("");
+    setPendingReferenceResolution(null);
     setPendingGeneratedSave(null);
     setLatestSkillResult(null);
     setStyleDistillationProfile(null);
@@ -3140,7 +3174,85 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
-  async function sendConversationPrompt(content: string, options: { checkActiveDocument?: boolean } = {}) {
+  async function resolveConversationReferenceIntent(content: string) {
+    if (!shouldResolveProjectReferences(content)) {
+      return null;
+    }
+    try {
+      const activeDocument = getActiveDocument();
+      return await client.resolveProjectFiles({
+        text: content,
+        current_path: activeDocument?.path || "",
+        selection: "",
+        attachment_ids: includedConversationAttachmentIds(),
+        explicit_paths: [],
+        max_candidates: 8
+      });
+    } catch (nextError) {
+      setConversationMessage(describeActionableError(nextError, "文件引用解析失败", "将按普通消息继续发送。"));
+      return null;
+    }
+  }
+
+  function togglePendingReferenceCandidate(path: string) {
+    const normalized = path.trim();
+    if (!normalized) {
+      return;
+    }
+    setPendingReferenceResolution((current) => {
+      if (!current) {
+        return current;
+      }
+      const selected = new Set(current.selectedPaths);
+      if (selected.has(normalized)) {
+        selected.delete(normalized);
+      } else {
+        selected.add(normalized);
+      }
+      return {
+        ...current,
+        selectedPaths: [...selected]
+      };
+    });
+  }
+
+  async function confirmPendingReferenceResolution() {
+    const pending = pendingReferenceResolution;
+    if (!pending) {
+      return;
+    }
+    setPendingReferenceResolution(null);
+    await sendConversationPrompt(pending.content, {
+      checkActiveDocument: false,
+      skipReferenceResolution: true,
+      referencePaths: referenceCandidatePaths(pending.references),
+      confirmedReferencePaths: pending.selectedPaths
+    });
+  }
+
+  async function sendPendingReferenceResolutionWithoutCandidates() {
+    const pending = pendingReferenceResolution;
+    if (!pending) {
+      return;
+    }
+    setPendingReferenceResolution(null);
+    await sendConversationPrompt(pending.content, {
+      checkActiveDocument: false,
+      skipReferenceResolution: true,
+      referencePaths: referenceCandidatePaths(pending.references),
+      disableAutoReferences: true
+    });
+  }
+
+  function discardPendingReferenceResolution() {
+    if (!pendingReferenceResolution) {
+      return;
+    }
+    setPendingReferenceResolution(null);
+    setConversationMessage("已取消本次引用确认。");
+  }
+
+  async function sendConversationPrompt(content: string, options: SendConversationOptions = {}) {
     const trimmed = content.trim();
     if (!trimmed || sendingMessage) {
       return;
@@ -3159,7 +3271,30 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       return;
     }
 
-    setConversationMessage("");
+    let referencePaths = uniquePaths(options.referencePaths || []);
+    const confirmedReferencePaths = uniquePaths(options.confirmedReferencePaths || []);
+    const disableAutoReferences = Boolean(options.disableAutoReferences);
+    if (!options.skipReferenceResolution && !disableAutoReferences) {
+      const resolvedReferences = await resolveConversationReferenceIntent(trimmed);
+      if (resolvedReferences?.ambiguous && resolvedReferences.candidates.length) {
+        setPendingReferenceResolution({
+          content: trimmed,
+          references: resolvedReferences.references,
+          candidates: resolvedReferences.candidates,
+          selectedPaths: [],
+          warnings: resolvedReferences.warnings
+        });
+        setConversationMessage(`找到 ${resolvedReferences.candidates.length} 个可能的参考文件，请确认后发送。`);
+        setActiveTab("conversations");
+        return;
+      }
+      if (resolvedReferences?.references.length) {
+        referencePaths = uniquePaths([...referencePaths, ...referenceCandidatePaths(resolvedReferences.references)]);
+      }
+    }
+
+    setPendingReferenceResolution(null);
+    setConversationMessage(referencePaths.length || confirmedReferencePaths.length ? `本轮将引用 ${referencePaths.length + confirmedReferencePaths.length} 个项目文件。` : "");
     setActiveTab("conversations");
 
     let conversationId = "";
@@ -3189,7 +3324,10 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
           write_target: "",
           insert_mode: "none",
           runtime_context: buildProjectContextHint(),
-          attachment_ids: includedConversationAttachmentIds()
+          attachment_ids: includedConversationAttachmentIds(),
+          reference_paths: referencePaths,
+          confirmed_reference_paths: confirmedReferencePaths,
+          disable_auto_references: disableAutoReferences
         },
         {
           onStart: (event) => {
@@ -3962,6 +4100,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     messageInput,
     setMessageInput,
     sendingMessage,
+    pendingReferenceResolution,
     loadConversation,
     createConversation,
     updateConversationTitle,
@@ -3975,6 +4114,10 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     createProjectTreeFile,
     deleteProjectTreeFile,
     sendMessage,
+    togglePendingReferenceCandidate,
+    confirmPendingReferenceResolution,
+    sendPendingReferenceResolutionWithoutCandidates,
+    discardPendingReferenceResolution,
     sendLedgerRecoveryPrompt,
     stopMessage,
     activeConversationSummary: getActiveConversationSummary(),
