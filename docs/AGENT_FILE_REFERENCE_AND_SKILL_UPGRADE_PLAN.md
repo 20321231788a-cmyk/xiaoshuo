@@ -93,7 +93,7 @@
 
 ### 2026-07-07 P8/P10 generic skill draft API
 
-状态：已完成，本阶段随本次 git commit 提交。
+状态：已完成，提交 `a4ece48`。
 
 落地内容：
 
@@ -109,6 +109,22 @@
 - `npm run typecheck -w @xiaoshuo/desktop-shell`
 - `npm run typecheck -w @xiaoshuo/api-client`
 - `npx vitest run packages/agent-runtime/src/skill-draft-service.test.ts apps/desktop-shell/src/main/runtime/runtime-utils.test.ts packages/api-client/src/client.test.ts apps/desktop-shell/src/main/runtime/skill-routes.test.ts`
+
+### 2026-07-07 P11 Workbench skill draft preview MVP
+
+状态：已完成，提交 `57da799`。
+
+落地内容：
+
+- `useWorkbenchCoreController.ts` 新增 `pendingSkillDraft` 状态和 `draftSkillPreview`、`importPendingSkillDraft`、`discardPendingSkillDraft` 控制器方法。
+- URL skill 入口从“生成后直接导入”改成“先生成草稿，预览后确认导入”，满足保存前预览要求。
+- `useOperationsController.ts` 向 Workbench 页面透出 skill 草稿状态和确认/丢弃动作。
+- `SkillFeaturePage.tsx` 新增自然语言/当前文档 skill 草稿入口、草稿预览、warnings 展示和导入确认按钮。
+- `styles.css` 补充 skill 草稿面板和移动端布局样式。
+
+已验证：
+
+- `npm run typecheck -w @xiaoshuo/workbench`
 
 ## 0. 当前基线
 
