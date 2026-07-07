@@ -1164,6 +1164,30 @@ npm test -- packages/agent-runtime/src/workflows/body-generate.test.ts packages/
 - 迁移 `batch_generate` 为独立 handler，改为直接调用 `getWorkflowHandler("body_generate")`。
 - 迁移前补一条 batch handler 直跑测试，确保章节范围、联网素材聚合和 saved paths 不漂移。
 
+### 15.21 2026-07-07 batch_generate Handler 迁移记录
+
+本轮继续拆 workflow registry，把批量正文生成从 runtime legacy 分支迁移到独立 handler。
+
+主要改动：
+
+- 新增 `packages/agent-runtime/src/workflows/batch-generate.ts`，承接章节范围解析、逐章正文生成、saved paths 聚合、联网来源去重和会话记录。
+- `BatchGenerateWorkflow` 构造时注入 `BodyGenerateWorkflow`，逐章直接调用 body handler，不再递归调 runtime legacy 方法。
+- `packages/agent-runtime/src/workflows/registry.ts` 注册 `BatchGenerateWorkflow`。
+- `AgentRuntimeService.runLocalWorkflowSkill()` 删除 `batch_generate` 分支，并清理不再使用的 `resolveBatchChapterRange()`。
+- 新增 `packages/agent-runtime/src/workflows/batch-generate.test.ts`，覆盖章节范围、逐章请求构造、saved paths 和 web sources 聚合。
+
+本轮已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/agent-runtime
+npm test -- packages/agent-runtime/src/workflows/batch-generate.test.ts packages/agent-runtime/src/workflows/body-generate.test.ts packages/agent-runtime/src/runtime.test.ts -t "batch_generate|BatchGenerateWorkflow|body_generate"
+```
+
+下一步建议：
+
+- 若继续 P1，优先迁移 `scan_pits`，它依赖少、风险较低。
+- 若转入 P2 ContextAssembler，先接 chat/read_context，再接 prompt skill，避免正文 prompt 大幅波动。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

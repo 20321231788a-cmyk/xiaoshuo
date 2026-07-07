@@ -1,3 +1,4 @@
+import { BatchGenerateWorkflow } from "./batch-generate.js";
 import { BodyGenerateWorkflow } from "./body-generate.js";
 import { ConsistencyCheckWorkflow } from "./consistency-check.js";
 import type { WorkflowHandler } from "./types.js";
@@ -30,5 +31,8 @@ export function isWorkflowSkillId(skillId: string): boolean {
   return workflowSkillIds.has(skillId);
 }
 
+const bodyGenerateWorkflow = new BodyGenerateWorkflow();
+
 registerWorkflow(new ConsistencyCheckWorkflow());
-registerWorkflow(new BodyGenerateWorkflow());
+registerWorkflow(bodyGenerateWorkflow);
+registerWorkflow(new BatchGenerateWorkflow(bodyGenerateWorkflow));

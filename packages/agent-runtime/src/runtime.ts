@@ -1125,66 +1125,6 @@ export class AgentRuntimeService {
       };
     }
 
-    if (skillId === "batch_generate") {
-      const [startChapter, endChapter] = this.resolveBatchChapterRange(request);
-      if (startChapter > endChapter) {
-        throw new Error("起始章节不能大于结束章节");
-      }
-      const results: Array<Record<string, unknown>> = [];
-      const savedPaths: string[] = [];
-      const webSearchSources: WebSearchSource[] = [];
-
-      for (let chapter = startChapter; chapter <= endChapter; chapter += 1) {
-        const originalInstruction = (request.content || "").trim();
-        const chapterInstruction = this.shouldWriteSkillResult(originalInstruction)
-          ? `生成第${chapter}章正文并写入文件`
-          : `生成第${chapter}章正文`;
-        const chapterRequest: AgentRunRequest = {
-          ...request,
-          content: originalInstruction ? `${chapterInstruction}。原始批量指令：${originalInstruction}` : chapterInstruction,
-          skill_id: "body_generate",
-          selection: ""
-        };
-        const result = await this.runLocalWorkflowSkill("body_generate", chapterRequest);
-        savedPaths.push(...result.saved_paths);
-        webSearchSources.push(...(result.web_search_sources || []));
-        results.push({
-          ...(result.skill_result?.data || {}),
-          saved_paths: result.saved_paths
-        });
-      }
-
-      const reply = savedPaths.length
-        ? `已写入 ${savedPaths.length} 个文件：\n${savedPaths.join("\n")}`
-        : `已生成 ${results.length} 章正文，等待保存确认。`;
-      const batchWebSearchSources = uniqueWebSearchSources(webSearchSources);
-      const conversation = await this.recordSkillExchange(
-        request,
-        reply,
-        batchWebSearchSources.length ? { web_search_sources: batchWebSearchSources } : {}
-      );
-      return {
-        intent: "skill",
-        reply,
-        conversation,
-        results: [],
-        skill_result: {
-          status: "done",
-          result: "",
-          saved_path: savedPaths[0] || "",
-          data: {
-            skill_id: skillId,
-            chapters: Array.from({ length: endChapter - startChapter + 1 }, (_, index) => startChapter + index),
-            results,
-            web_search_sources: batchWebSearchSources
-          }
-        },
-        saved_paths: savedPaths,
-        requires_confirmation: false,
-        web_search_sources: batchWebSearchSources
-      };
-    }
-
     if (skillId === "scan_pits") {
       const source = await this.resolveWorkflowSourceText(request);
       if (!source.trim()) {
@@ -2087,15 +2027,6 @@ export class AgentRuntimeService {
       return "02_正文/正文.txt";
     }
     return "";
-  }
-
-  private resolveBatchChapterRange(request: AgentRunRequest): [number, number] {
-    const [startChapter, endChapter] = this.resolveChapterRange(request.content || "");
-    if (startChapter > 0) {
-      return [startChapter, endChapter];
-    }
-    const chapter = this.resolveSkillChapter("batch_generate", request);
-    return [Math.max(1, chapter || 1), Math.max(1, this.resolveSkillEndChapter("batch_generate", request, chapter || 1) || chapter || 1)];
   }
 
   private async resolveBodyChapterOutline(request: AgentRunRequest, chapter: number): Promise<string> {

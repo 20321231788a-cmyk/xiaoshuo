@@ -1407,3 +1407,27 @@ npm test -- packages/agent-runtime/src/workflows/body-generate.test.ts packages/
 
 - `batch_generate` 仍在 legacy runtime 分支中；下一步应新增 `BatchGenerateWorkflow`，直接调用 `BodyGenerateWorkflow` handler。
 - 抽卡正文候选仍在 runtime 中复用部分正文 helper，后续拆 `card-draw` 或抽共享 body helper 时再处理。
+
+### 16.4 2026-07-07 batch_generate 已完成
+
+状态：已完成批量正文生成 handler 迁移。
+
+本阶段完成内容：
+
+- 新增 `packages/agent-runtime/src/workflows/batch-generate.ts`，把 `batch_generate` 从 runtime 大分支迁移为独立 handler。
+- `BatchGenerateWorkflow` 通过构造注入的 `BodyGenerateWorkflow` handler 逐章执行，不再递归调用 runtime legacy 方法。
+- `packages/agent-runtime/src/workflows/registry.ts` 注册 `BatchGenerateWorkflow`。
+- `AgentRuntimeService.runLocalWorkflowSkill()` 删除 `batch_generate` 分支，并清理不再使用的 `resolveBatchChapterRange()`。
+- 新增 `packages/agent-runtime/src/workflows/batch-generate.test.ts`，覆盖章节范围、逐章请求构造、saved paths 聚合和联网来源去重。
+
+已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/agent-runtime
+npm test -- packages/agent-runtime/src/workflows/batch-generate.test.ts packages/agent-runtime/src/workflows/body-generate.test.ts packages/agent-runtime/src/runtime.test.ts -t "batch_generate|BatchGenerateWorkflow|body_generate"
+```
+
+遗留说明：
+
+- `disassemble_book`、`continue_disassemble`、`scan_pits`、`book_fusion`、`nuwa_style_distill` 仍在 runtime legacy 分支。
+- 下一步可继续迁移 `scan_pits` 或进入 P2 ContextAssembler；若追求 runtime 瘦身，建议先迁移剩余 workflow。
