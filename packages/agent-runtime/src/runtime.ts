@@ -15,8 +15,7 @@ import type {
   CardDrawSelectRequest,
   CardDrawCandidate,
   SkillDraftFromUrlRequest,
-  SkillDraftResponse,
-  StyleDistillationProfile
+  SkillDraftResponse
 } from "@xiaoshuo/shared";
 import { AgentChatRunner } from "./chat-runner.js";
 import { classifyAgentIntent, hasSkillAction, isReadContextIntent, rankSkillRoutes } from "./intent-router.js";
@@ -26,15 +25,10 @@ import { SkillService } from "@xiaoshuo/skill-service";
 import { AgentFileOperationRunner } from "./file-operation-runner.js";
 import { ConversationService } from "@xiaoshuo/conversation-service";
 import { DocumentService } from "@xiaoshuo/document-service";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { loadModelConfig, loadWebSearchConfig, type ConfigServiceOptions } from "@xiaoshuo/config-service";
 import { OpenAICompatibleClient, type ChatCompletionMessage } from "@xiaoshuo/model-client";
-import {
-  buildProjectContinuityContext,
-  deleteProjectStyleDistillation,
-  readProjectStyleDistillation,
-  writeProjectStyleDistillation
-} from "@xiaoshuo/project-session";
+import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
 import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
 import { DefaultWebSearchClient, formatWebSearchContext, shouldUseWebSearch, summarizeWebSearchSources, type WebSearchClient, type WebSearchSource } from "./web-search.js";
 import fs from "node:fs/promises";
@@ -173,8 +167,9 @@ export class AgentRuntimeService {
     if (skill?.disabled) {
       throw new Error(`默认技能已禁用：${skill.name || skillId}。请先恢复后再执行。`);
     }
-    if (skillId === "nuwa_style_distill") {
-      return this.runNuwaStyleDistillSkill(request);
+    const workflowHandler = getWorkflowHandler(skillId);
+    if (workflowHandler?.runSkill) {
+      return workflowHandler.runSkill(request, this.buildWorkflowContext());
     }
     if (isWorkflowSkillId(skillId)) {
       let content = request.instruction || request.text || "";
@@ -1084,31 +1079,6 @@ export class AgentRuntimeService {
       throw new Error(`TS runtime 尚未接管该 workflow skill: ${skillId}`);
     }
 
-    if (skillId === "nuwa_style_distill") {
-      const result = await this.runNuwaStyleDistillSkill({
-        text: request.selection || "",
-        chapter: 0,
-        end_chapter: 0,
-        target_words: 2500,
-        instruction: request.content || "蒸馏当前拆书文风",
-        target_path: "",
-        conversation_id: request.conversation_id || "",
-        source_path: request.current_path || "",
-        write_result: true,
-        attachment_ids: request.attachment_ids || []
-      });
-      const reply = result.result || (result.data?.profile ? "蒸馏完成。" : "Nuwa 蒸馏档案已更新。");
-      return {
-        intent: "skill",
-        reply,
-        conversation: await this.recordSkillExchange(request, reply),
-        results: [],
-        skill_result: result,
-        saved_paths: result.saved_path ? [result.saved_path] : [],
-        requires_confirmation: false
-      };
-    }
-
     if (skillId === "disassemble_book") {
       const action = String((request as any).action || "").trim();
       if (action === "list_library") {
@@ -1329,125 +1299,6 @@ export class AgentRuntimeService {
     };
   }
 
-  private async runNuwaStyleDistillSkill(payload: SkillRunRequest): Promise<SkillRunResponse> {
-    const action = String((payload as any).action || "distill").trim();
-    if (action === "status") {
-      return {
-        status: "done",
-        result: "",
-        saved_path: "",
-        data: {
-          skill_id: "nuwa_style_distill",
-          profile: await readProjectStyleDistillation(this.documents.projectRoot)
-        }
-      };
-    }
-
-    if (action === "delete") {
-      await deleteProjectStyleDistillation(this.documents.projectRoot);
-      return {
-        status: "done",
-        result: "已删除当前蒸馏书籍，后续生成将恢复使用普通风格库。",
-        saved_path: "",
-        data: {
-          skill_id: "nuwa_style_distill",
-          profile: null,
-          deleted: true
-        }
-      };
-    }
-
-    if (action === "toggle") {
-      const current = await readProjectStyleDistillation(this.documents.projectRoot);
-      if (!current) {
-        throw new Error("当前项目还没有蒸馏书籍");
-      }
-      const enabled = Boolean((payload as any).enabled);
-      const profile = await writeProjectStyleDistillation(this.documents.projectRoot, {
-        ...current,
-        enabled
-      });
-      return {
-        status: "done",
-        result: enabled ? "已启用蒸馏文风，生成内容将强制使用该档案。" : "已停用蒸馏文风，生成内容将恢复使用普通风格库。",
-        saved_path: "",
-        data: {
-          skill_id: "nuwa_style_distill",
-          profile
-        }
-      };
-    }
-
-    const source = await this.resolveNuwaDistillationSource(payload);
-    if (!source.text.trim()) {
-      throw new Error("蒸馏需要当前文档、附件、拆书原文或已有拆书产物");
-    }
-
-    const config = await loadModelConfig(this.config, "primary");
-    if (!config.configured) {
-      throw new Error("未配置主线路 API Key 或模型名，无法执行 Nuwa 蒸馏。");
-    }
-
-    const systemPrompt = [
-      "你是 Nuwa 小说文风蒸馏器。任务不是模仿具体句子，而是把一本书的写作方式提炼成可复用的创作规则。",
-      "你需要蒸馏表达 DNA、叙事心智模型、场景决策启发式、常用描写手法、对白习惯、节奏控制、反模式和诚实边界。",
-      "输出必须服务于后续小说生成：清楚、可执行、可约束，不复述剧情，不抄写原文长句。",
-      "只输出中文文风档案正文，不要免责声明。"
-    ].join("\n");
-    const userPrompt = [
-      `【书籍名称】${source.bookTitle}`,
-      `【来源】${source.sourcePath || "当前输入"}`,
-      "",
-      "请按以下结构输出：",
-      "1. 表达DNA：句长、词性偏好、感官密度、语气温度、叙述视角。",
-      "2. 叙事心智模型：如何开场、推进冲突、安排转折、处理信息差。",
-      "3. 描写手法：人物、动作、环境、心理、战斗或日常场景的写法。",
-      "4. 对白规则：角色说话方式、潜台词、停顿、冲突对白的处理。",
-      "5. 节奏启发式：什么时候加速、什么时候留白、章节钩子如何落点。",
-      "6. 反模式：后续生成时要避免哪些套话、腔调、过度解释和不属于这本文风的写法。",
-      "7. 可操作规则：给后续生成模型的硬性文风指令，必须具体可执行。",
-      "",
-      "要求：不要输出原文大段摘录；不要泛泛而谈；每条规则都要能直接约束大纲、章纲和正文生成。",
-      "",
-      `【待蒸馏文本】\n${source.text.slice(0, 60_000)}`
-    ].join("\n");
-
-    const raw = String(
-      await this.modelClient.requestCompletion(
-        config,
-        [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt }
-        ] satisfies ChatCompletionMessage[],
-        Math.max(0.2, Math.min(0.65, config.temperature))
-      )
-    ).trim();
-    if (!raw) {
-      throw new Error("模型未返回蒸馏档案");
-    }
-
-    const profile: StyleDistillationProfile = await writeProjectStyleDistillation(this.documents.projectRoot, {
-      book_title: source.bookTitle,
-      source_summary: source.summary,
-      source_path: source.sourcePath,
-      source_hash: createHash("sha256").update(source.text).digest("hex").slice(0, 16),
-      distilled_at: new Date().toISOString(),
-      enabled: true,
-      profile_text: raw
-    });
-
-    return {
-      status: "done",
-      result: `已蒸馏：${profile.book_title}`,
-      saved_path: "00_设定集/.agent/style_distillation/current.json",
-      data: {
-        skill_id: "nuwa_style_distill",
-        profile,
-        saved_paths: ["00_设定集/.agent/style_distillation/current.json"]
-      }
-    };
-  }
-
   private async createDisassembleBook(input: { title: string; sourceText: string; sourcePath: string; origin: string }): Promise<DisassembleBookManifest> {
     const createdAt = new Date().toISOString();
     const bookId = `${sanitizeBookId(input.title)}-${formatBookTimestamp(new Date())}-${randomUUID().replace(/-/g, "").slice(0, 8)}`;
@@ -1640,75 +1491,6 @@ export class AgentRuntimeService {
     const content = String(source || request.content || "").trim();
     const firstLine = content.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "";
     return inferBookTitle(firstLine, "当前拆书书籍");
-  }
-
-  private async resolveNuwaDistillationSource(payload: SkillRunRequest): Promise<{ text: string; bookTitle: string; sourcePath: string; summary: string }> {
-    const direct = String(payload.text || "").trim();
-    const explicitTitle = String((payload as any).book_title || "").trim();
-    if (direct) {
-      const sourcePath = String(payload.source_path || "").trim();
-      return {
-        text: direct,
-        bookTitle: explicitTitle || inferBookTitle(sourcePath, "当前文档"),
-        sourcePath,
-        summary: summarizeSource(direct)
-      };
-    }
-
-    if (payload.conversation_id && (payload.attachment_ids || []).length) {
-      const attachments = await this.conversations.getAttachmentTexts(payload.conversation_id, payload.attachment_ids, {
-        limit: DISASSEMBLE_SOURCE_IMPORT_CHARS,
-        preserveWhitespace: true
-      });
-      const parts = attachments
-        .map(([attachment, body]) => {
-          const content = String(body || "").trim();
-          return content ? { name: attachment.name, content } : null;
-        })
-        .filter((item): item is { name: string; content: string } => Boolean(item));
-      if (parts.length) {
-        const text = parts.map((item) => `【${item.name}】\n${item.content}`).join("\n\n");
-        return {
-          text,
-          bookTitle: explicitTitle || parts[0]!.name.replace(/\.[^.]+$/, ""),
-          sourcePath: parts.map((item) => item.name).join(", "),
-          summary: summarizeSource(text)
-        };
-      }
-    }
-
-    const sourcePath = String(payload.source_path || "").trim();
-    if (sourcePath) {
-      try {
-        const text = (await this.documents.readRawText(sourcePath, DISASSEMBLE_SOURCE_IMPORT_CHARS)).trim();
-        if (text) {
-          return {
-            text,
-            bookTitle: explicitTitle || inferBookTitle(sourcePath, "当前文档"),
-            sourcePath,
-            summary: summarizeSource(text)
-          };
-        }
-      } catch {}
-    }
-
-    const fallbackPaths = ["01_大纲/反向细纲.txt", "00_设定集/设定集/拆书设定提取.txt", "01_大纲/拆书细纲.txt"];
-    const fallbackParts: string[] = [];
-    for (const relPath of fallbackPaths) {
-      try {
-        const text = (await this.documents.readRawText(relPath, 30_000)).trim();
-        if (text) {
-          fallbackParts.push(`【${relPath}】\n${text}`);
-        }
-      } catch {}
-    }
-    const text = fallbackParts.join("\n\n").trim();
-    return {
-      text,
-      bookTitle: explicitTitle || "当前拆书书籍",
-      sourcePath: fallbackPaths.join(", "),
-      summary: summarizeSource(text)
-    };
   }
 
   private buildSkillRequest(skillId: string, request: AgentRunRequest): SkillRunRequest {

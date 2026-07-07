@@ -2,6 +2,7 @@ import { BatchGenerateWorkflow } from "./batch-generate.js";
 import { BookFusionWorkflow } from "./book-fusion.js";
 import { BodyGenerateWorkflow } from "./body-generate.js";
 import { ConsistencyCheckWorkflow } from "./consistency-check.js";
+import { NuwaStyleDistillWorkflow } from "./nuwa-style-distill.js";
 import { ScanPitsWorkflow } from "./scan-pits.js";
 import type { WorkflowHandler } from "./types.js";
 
@@ -40,3 +41,4 @@ registerWorkflow(bodyGenerateWorkflow);
 registerWorkflow(new BatchGenerateWorkflow(bodyGenerateWorkflow));
 registerWorkflow(new ScanPitsWorkflow());
 registerWorkflow(new BookFusionWorkflow());
+registerWorkflow(new NuwaStyleDistillWorkflow());

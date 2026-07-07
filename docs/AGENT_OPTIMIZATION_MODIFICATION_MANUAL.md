@@ -1479,3 +1479,28 @@ npm test -- packages/agent-runtime/src/workflows/book-fusion.test.ts packages/ag
 
 - P1 剩余 legacy workflow：`disassemble_book`、`continue_disassemble`、`nuwa_style_distill`。
 - `book_fusion` 与拆书 workflow 仍各自保留拆书库读取逻辑；等 `disassemble_book` / `continue_disassemble` 迁移后再统一抽公共库 helper。
+
+### 16.7 2026-07-07 nuwa_style_distill 已完成
+
+状态：已完成 Nuwa 文风蒸馏 handler 迁移。
+
+本阶段完成内容：
+
+- 新增 `packages/agent-runtime/src/workflows/nuwa-style-distill.ts`，把 `nuwa_style_distill` 从 runtime 特判和 workflow 分支迁移为独立 handler。
+- `NuwaStyleDistillWorkflow` 同时实现 `runAgent()` 和 `runSkill()`，覆盖蒸馏、status、delete、toggle 等直调 skill 行为。
+- `AgentRuntimeService.runSkill()` 对带 `runSkill()` 的 workflow handler 优先直接分发，避免 Nuwa 继续留在 runtime 特判。
+- `packages/agent-runtime/src/workflows/registry.ts` 注册 `NuwaStyleDistillWorkflow`。
+- `AgentRuntimeService.runLocalWorkflowSkill()` 删除 `nuwa_style_distill` 分支，并清理旧 Nuwa source resolver。
+- 新增 `packages/agent-runtime/src/workflows/nuwa-style-distill.test.ts`，覆盖蒸馏写入、status、toggle，以及 runtime `runSkill("nuwa_style_distill")` 直调。
+
+已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/agent-runtime
+npm test -- packages/agent-runtime/src/workflows/nuwa-style-distill.test.ts -t "NuwaStyleDistillWorkflow"
+```
+
+遗留说明：
+
+- P1 剩余 legacy workflow：`disassemble_book`、`continue_disassemble`。
+- runtime 当前约 2567 行；继续拆拆书主流程前，建议先抽 `workflows/disassemble-library.ts`。
