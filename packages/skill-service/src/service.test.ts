@@ -185,4 +185,115 @@ describe("skill-service", () => {
 
     vi.unstubAllGlobals();
   });
+
+  it("patches imported skills with dry-run diff and version history", async () => {
+    const service = new SkillService({ projectRoot: tempDir, now: () => "2026-07-07 10:00:00" });
+    await service.importSkillDraft({
+      skill: {
+        id: "review_skill",
+        name: "Review Skill",
+        description: "old description",
+        input_mode: "text",
+        context_requirements: ["project_state"],
+        handler_type: "prompt",
+        linked_targets: [],
+        prompt: "old prompt",
+        imported_from: "",
+        writable: false
+      },
+      source_url: "",
+      source_name: "",
+      source_text: ""
+    });
+
+    const dryRun = await service.patchSkill("review_skill", {
+      description: "new description",
+      prompt: "new prompt",
+      change_reason: "",
+      expected_version: "",
+      dry_run: true
+    });
+
+    expect(dryRun.dry_run).toBe(true);
+    expect(dryRun.diff).toContain("new prompt");
+    expect((await service.getSkill("review_skill"))?.prompt).toBe("old prompt");
+
+    const committed = await service.patchSkill("review_skill", {
+      description: "new description",
+      prompt: "new prompt",
+      change_reason: "tighten review",
+      expected_version: "",
+      dry_run: false
+    });
+
+    expect(committed.version_id).toContain("v1_");
+    expect(committed.skill.prompt).toBe("new prompt");
+    expect(committed.skill.version).toBe("1.0.1");
+    const versions = await service.listSkillVersions("review_skill");
+    expect(versions.versions).toHaveLength(1);
+    expect(versions.versions[0]?.snapshot.prompt).toBe("old prompt");
+    expect(versions.versions[0]?.change_reason).toBe("tighten review");
+  });
+
+  it("rejects builtin patch and clones builtin skills into imported skills", async () => {
+    const service = new SkillService({ projectRoot: tempDir, now: () => "2026-07-07 10:00:00" });
+
+    await expect(service.patchSkill("outline_generate", { description: "x", change_reason: "", expected_version: "", dry_run: false })).rejects.toThrow("默认技能不能直接修改");
+
+    const cloned = await service.cloneSkill("outline_generate", {
+      target_id: "custom_outline",
+      target_name: "自定义大纲",
+      instruction: "clone for edit"
+    });
+
+    expect(cloned).toMatchObject({
+      id: "custom_outline",
+      name: "自定义大纲",
+      builtin: false,
+      imported_from: "clone:outline_generate",
+      handler_type: "prompt"
+    });
+    expect((await service.getSkill("custom_outline"))?.id).toBe("custom_outline");
+    const versions = await service.listSkillVersions("custom_outline");
+    expect(versions.versions).toHaveLength(1);
+    expect(versions.versions[0]?.snapshot.id).toBe("custom_outline");
+  });
+
+  it("rolls imported skills back to a stored version", async () => {
+    const service = new SkillService({ projectRoot: tempDir, now: () => "2026-07-07 10:00:00" });
+    await service.importSkillDraft({
+      skill: {
+        id: "rollback_skill",
+        name: "Rollback Skill",
+        description: "desc",
+        input_mode: "text",
+        context_requirements: [],
+        handler_type: "prompt",
+        linked_targets: [],
+        prompt: "v1 prompt",
+        imported_from: "",
+        writable: false
+      },
+      source_url: "",
+      source_name: "",
+      source_text: ""
+    });
+    const patched = await service.patchSkill("rollback_skill", {
+      prompt: "v2 prompt",
+      change_reason: "v2",
+      expected_version: "",
+      dry_run: false
+    });
+
+    const rolledBack = await service.rollbackSkill("rollback_skill", {
+      version_id: patched.version_id,
+      change_reason: "restore v1"
+    });
+
+    expect(rolledBack.skill.prompt).toBe("v1 prompt");
+    expect(rolledBack.diff).toContain("v1 prompt");
+    expect((await service.getSkill("rollback_skill"))?.prompt).toBe("v1 prompt");
+    const versions = await service.listSkillVersions("rollback_skill");
+    expect(versions.versions.map((version) => version.change_reason)).toEqual(["v2", "restore v1"]);
+  });
 });

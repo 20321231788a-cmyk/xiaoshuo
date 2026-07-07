@@ -40,7 +40,7 @@
 
 ### 2026-07-07 P4/P5 reference context + project reference API
 
-状态：已完成，本阶段随本次 git commit 提交。
+状态：已完成，提交 `398ad2a`。
 
 落地内容：
 
@@ -56,6 +56,23 @@
 - `npm run typecheck -w @xiaoshuo/agent-runtime`
 - `npm run typecheck -w @xiaoshuo/desktop-shell`
 - `npx vitest run packages/agent-runtime/src/kernel/reference-context.test.ts packages/agent-runtime/src/kernel/project-file-manifest.test.ts packages/agent-runtime/src/kernel/project-file-resolver.test.ts packages/agent-runtime/src/skill-runner.test.ts apps/desktop-shell/src/main/runtime/project-reference-routes.test.ts packages/api-client/src/client.test.ts`
+
+### 2026-07-07 P9 SkillService patch/clone/version/rollback
+
+状态：已完成，本阶段随本次 git commit 提交。
+
+落地内容：
+
+- 新增 `packages/skill-service/src/skill-version-store.ts`，版本历史写入 `{AGENT_DIR}/skills/versions/{skill_id}.jsonl`。
+- 新增 `packages/skill-service/src/skill-diff.ts`，为 dry-run patch 和 rollback 返回简单文本 diff。
+- `SkillService` 新增 `patchSkill`、`cloneSkill`、`listSkillVersions`、`rollbackSkill`；builtin skill 仍禁止原地 patch，clone 后以 imported skill 保存。
+- patch 限制白名单字段，支持 `dry_run`、`expected_version` 和 patch 前版本快照；rollback 前保存当前版本。
+- 补充 service 单测覆盖 dry-run、实际 patch 写版本、builtin patch 拒绝、clone builtin、rollback。
+
+已验证：
+
+- `npm run typecheck -w @xiaoshuo/skill-service`
+- `npx vitest run packages/skill-service/src/service.test.ts`
 
 ## 0. 当前基线
 

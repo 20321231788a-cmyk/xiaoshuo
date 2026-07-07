@@ -3,12 +3,22 @@ import path from "node:path";
 import AdmZip from "adm-zip";
 import * as cheerio from "cheerio";
 import {
+  skillDefinitionSchema,
   skillManifestSchema,
+  skillModelPolicySchema,
+  skillSavePolicySchema,
+  type SkillCloneRequest,
   type SkillDefinition,
   type SkillImportDraftRequest,
   type SkillImportRequest,
-  type SkillManifest
+  type SkillManifest,
+  type SkillPatchRequest,
+  type SkillPatchResponse,
+  type SkillRollbackRequest,
+  type SkillVersionsResponse
 } from "@xiaoshuo/shared";
+import { createSkillDiff } from "./skill-diff.js";
+import { SkillVersionStore } from "./skill-version-store.js";
 
 const AGENT_DIR = "00_设定集/.agent";
 const MAX_SKILL_UPLOAD_BYTES = 5 * 1024 * 1024;
@@ -17,6 +27,17 @@ const MAX_SKILL_ZIP_FILES = 40;
 const STORY_DESLOP_SOURCE = "builtin:story-deslop";
 const HUMANIZER_ZH_SOURCE = "builtin:humanizer-zh";
 const DISABLED_BUILTINS_FILE = "disabled-builtins.json";
+const BUILTIN_PATCH_ERROR = "默认技能不能直接修改，请先复制为自定义技能";
+const PATCHABLE_SKILL_FIELDS = new Set([
+  "description",
+  "prompt",
+  "context_requirements",
+  "linked_targets",
+  "model_policy",
+  "save_policy",
+  "writable"
+]);
+const PATCH_CONTROL_FIELDS = new Set(["change_reason", "expected_version", "dry_run"]);
 
 const BUILTIN_SKILLS: SkillDefinition[] = [
   {
@@ -290,11 +311,13 @@ export type SkillServiceOptions = {
 export class SkillService {
   private readonly projectRoot: string;
   private readonly now: () => string;
+  private readonly versionStore: SkillVersionStore;
   private readonly builtins = new Map(BUILTIN_SKILLS.map((skill) => [skill.id, { ...skill }]));
 
   constructor(options: SkillServiceOptions) {
     this.projectRoot = path.resolve(options.projectRoot);
     this.now = options.now ?? (() => formatNow(new Date()));
+    this.versionStore = new SkillVersionStore(this.projectRoot, AGENT_DIR, this.now);
   }
 
   async listSkills(): Promise<SkillDefinition[]> {
@@ -445,6 +468,161 @@ export class SkillService {
     return { ...nextSkill, builtin: false, disabled: false };
   }
 
+  async patchSkill(skillId: string, payload: SkillPatchRequest): Promise<SkillPatchResponse> {
+    const id = normalizeSkillId(skillId);
+    if (!id) {
+      throw new Error("skill id 不能为空");
+    }
+    assertAllowedPatchFields(payload);
+    const imported = await this.loadImportedSkills();
+    const index = imported.findIndex((skill) => skill.id === id);
+    if (index < 0) {
+      if (this.builtins.has(id)) {
+        throw new Error(BUILTIN_PATCH_ERROR);
+      }
+      throw new Error("导入技能不存在");
+    }
+    const current = this.asImportedSkill(imported[index]);
+    const expectedVersion = String(payload.expected_version || "").trim();
+    if (expectedVersion && expectedVersion !== (current.version || current.manifest?.version || "")) {
+      throw new Error("skill 版本已变化，请刷新后重试");
+    }
+    const nextSkill = this.applySkillPatch(current, payload);
+    const diff = createSkillDiff(current, nextSkill);
+    if (payload.dry_run) {
+      return {
+        skill: nextSkill,
+        previous_skill: current,
+        diff,
+        version_id: "",
+        dry_run: true,
+        warnings: []
+      };
+    }
+    if (!diff) {
+      return {
+        skill: current,
+        previous_skill: current,
+        diff: "",
+        version_id: "",
+        dry_run: false,
+        warnings: []
+      };
+    }
+    const version = await this.versionStore.append(id, current, payload.change_reason || "patch");
+    imported[index] = nextSkill;
+    await this.saveImportedSkills(imported);
+    return {
+      skill: nextSkill,
+      previous_skill: current,
+      diff,
+      version_id: version.version_id,
+      dry_run: false,
+      warnings: []
+    };
+  }
+
+  async cloneSkill(skillId: string, payload: SkillCloneRequest): Promise<SkillDefinition> {
+    const sourceId = normalizeSkillId(skillId);
+    if (!sourceId) {
+      throw new Error("skill id 不能为空");
+    }
+    const source = await this.getSkill(sourceId);
+    if (!source) {
+      throw new Error("skill 不存在");
+    }
+    const existingIds = new Set((await this.listSkills()).map((skill) => skill.id));
+    const requestedId = normalizeSkillId(payload.target_id || "");
+    const targetId = nextAvailableSkillId(requestedId || `custom_${source.id}`, existingIds);
+    const targetName = (payload.target_name || "").trim().slice(0, 80) || `${source.name}（自定义）`;
+    const prompt = (source.prompt || source.description || source.name).trim();
+    const cloned = this.normalizeSkill({
+      ...source,
+      id: targetId,
+      version: "1.0.0",
+      name: targetName,
+      prompt,
+      imported_from: `clone:${source.id}`,
+      builtin: false,
+      disabled: false,
+      manifest: buildSkillManifest({
+        ...source.manifest,
+        id: targetId,
+        version: "1.0.0",
+        name: targetName,
+        description: source.description,
+        handler_type: "prompt"
+      })
+    }, `clone:${source.id}`);
+    const imported = await this.loadImportedSkills();
+    imported.push(cloned);
+    await this.saveImportedSkills(imported);
+    await this.versionStore.append(targetId, cloned, payload.instruction || `clone:${source.id}`);
+    return cloned;
+  }
+
+  async listSkillVersions(skillId: string): Promise<SkillVersionsResponse> {
+    const id = normalizeSkillId(skillId);
+    if (!id) {
+      throw new Error("skill id 不能为空");
+    }
+    return {
+      skill_id: id,
+      versions: await this.versionStore.list(id)
+    };
+  }
+
+  async rollbackSkill(skillId: string, payload: SkillRollbackRequest): Promise<SkillPatchResponse> {
+    const id = normalizeSkillId(skillId);
+    if (!id) {
+      throw new Error("skill id 不能为空");
+    }
+    const imported = await this.loadImportedSkills();
+    const index = imported.findIndex((skill) => skill.id === id);
+    if (index < 0) {
+      if (this.builtins.has(id)) {
+        throw new Error(BUILTIN_PATCH_ERROR);
+      }
+      throw new Error("导入技能不存在");
+    }
+    const versions = await this.versionStore.list(id);
+    const targetVersionId = String(payload.version_id || "").trim();
+    const targetVersion = versions.find((version) => version.version_id === targetVersionId);
+    if (!targetVersion) {
+      throw new Error("skill 版本不存在");
+    }
+    const current = this.asImportedSkill(imported[index]);
+    const restored = this.normalizeSkill({
+      ...targetVersion.snapshot,
+      id,
+      imported_from: targetVersion.snapshot.imported_from || current.imported_from,
+      builtin: false,
+      disabled: false
+    }, targetVersion.snapshot.imported_from || current.imported_from);
+    const diff = createSkillDiff(current, restored);
+    if (!diff) {
+      return {
+        skill: current,
+        previous_skill: current,
+        diff: "",
+        version_id: "",
+        dry_run: false,
+        warnings: []
+      };
+    }
+    const version = await this.versionStore.append(id, current, payload.change_reason || `rollback:${targetVersionId}`);
+    imported[index] = restored;
+    await this.saveImportedSkills(imported);
+    return {
+      skill: restored,
+      previous_skill: current,
+      diff,
+      version_id: version.version_id,
+      dry_run: false,
+      warnings: []
+    };
+  }
+
   private async importedSkillsPath(): Promise<string> {
     const filePath = path.join(this.projectRoot, AGENT_DIR, "skills", "imported.json");
     await fs.mkdir(path.dirname(filePath), { recursive: true });
@@ -544,6 +722,56 @@ export class SkillService {
       await this.saveSkillSourceSnapshot(normalized, options.sourceName, options.sourceText);
     }
     return normalized;
+  }
+
+  private asImportedSkill(skill: SkillDefinition | undefined): SkillDefinition {
+    if (!skill) {
+      throw new Error("导入技能不存在");
+    }
+    return this.withManifest({ ...skill, builtin: false, disabled: false }, { forcePrompt: true });
+  }
+
+  private applySkillPatch(current: SkillDefinition, payload: SkillPatchRequest): SkillDefinition {
+    const next: SkillDefinition = {
+      ...current,
+      manifest: current.manifest ? { ...current.manifest } : undefined,
+      builtin: false,
+      disabled: false
+    };
+    if (hasOwn(payload, "description")) {
+      next.description = normalizeSkillDescription(payload.description || "") || "导入的外部 skill";
+    }
+    if (hasOwn(payload, "prompt")) {
+      next.prompt = String(payload.prompt || "").trim().slice(0, 12000);
+    }
+    if (hasOwn(payload, "context_requirements")) {
+      next.context_requirements = [...(payload.context_requirements || [])];
+    }
+    if (hasOwn(payload, "linked_targets")) {
+      next.linked_targets = [...(payload.linked_targets || [])];
+    }
+    if (hasOwn(payload, "model_policy")) {
+      next.model_policy = skillModelPolicySchema.parse(payload.model_policy || {});
+    }
+    if (hasOwn(payload, "save_policy")) {
+      next.save_policy = skillSavePolicySchema.parse(payload.save_policy || {});
+    }
+    if (hasOwn(payload, "writable")) {
+      next.writable = Boolean(payload.writable);
+    }
+    const normalized = this.normalizeSkill(next, current.imported_from || "");
+    if (!createSkillDiff(current, normalized)) {
+      return current;
+    }
+    const nextVersion = bumpSkillVersion(current.version || current.manifest?.version || "1.0.0");
+    return this.withManifest(skillDefinitionSchema.parse({
+      ...normalized,
+      version: nextVersion,
+      manifest: {
+        ...normalized.manifest,
+        version: nextVersion
+      }
+    }), { forcePrompt: true });
   }
 
   public normalizeSkill(skill: SkillDefinition, importedFrom: string): SkillDefinition {
@@ -860,6 +1088,43 @@ function normalizeSkillId(value: string): string {
 function normalizeHandlerType(value: unknown, fallback: SkillDefinition["handler_type"]): SkillDefinition["handler_type"] {
   const normalized = stringField(value).toLowerCase();
   return normalized === "prompt" || normalized === "workflow" || normalized === "job" || normalized === "external" ? normalized : fallback;
+}
+
+function assertAllowedPatchFields(payload: SkillPatchRequest): void {
+  for (const key of Object.keys(payload)) {
+    if (PATCHABLE_SKILL_FIELDS.has(key) || PATCH_CONTROL_FIELDS.has(key)) {
+      continue;
+    }
+    throw new Error(`不允许修改 skill 字段: ${key}`);
+  }
+}
+
+function hasOwn<T extends object>(value: T, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function nextAvailableSkillId(baseId: string, existingIds: Set<string>): string {
+  const normalized = normalizeSkillId(baseId) || "custom_skill";
+  if (!existingIds.has(normalized)) {
+    return normalized;
+  }
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${normalized}_${index}`;
+    if (!existingIds.has(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error("无法生成唯一 skill id");
+}
+
+function bumpSkillVersion(version: string): string {
+  const parts = String(version || "1.0.0")
+    .split(".")
+    .map((part) => Number.parseInt(part, 10));
+  const major = Number.isFinite(parts[0]) ? parts[0]! : 1;
+  const minor = Number.isFinite(parts[1]) ? parts[1]! : 0;
+  const patch = Number.isFinite(parts[2]) ? parts[2]! : 0;
+  return `${major}.${minor}.${patch + 1}`;
 }
 
 function parseFrontmatterValue(value: string): unknown {
