@@ -76,7 +76,7 @@
 
 ### 2026-07-07 P10 skill patch/clone/version/rollback routes + client
 
-状态：已完成，本阶段随本次 git commit 提交。
+状态：已完成，提交 `e7d09e9`。
 
 落地内容：
 
@@ -90,6 +90,25 @@
 - `npm run typecheck -w @xiaoshuo/desktop-shell`
 - `npm run typecheck -w @xiaoshuo/api-client`
 - `npx vitest run apps/desktop-shell/src/main/runtime/skill-routes.test.ts apps/desktop-shell/src/main/runtime/runtime-utils.test.ts packages/api-client/src/client.test.ts packages/skill-service/src/service.test.ts`
+
+### 2026-07-07 P8/P10 generic skill draft API
+
+状态：已完成，本阶段随本次 git commit 提交。
+
+落地内容：
+
+- 新增 `packages/agent-runtime/src/skill-draft-service.ts`，支持 instruction、current_document、selection、attachment、markdown、existing_skill、url 的 prompt-only skill draft。
+- URL draft 继续复用已有 `draftSkillFromUrl`；非 URL 来源在无模型配置时生成安全 prompt 模板，不自动导入。
+- `AgentRuntimeService` 新增 `draftSkill(payload)`，`POST /api/skills/draft` 新增通用草拟入口。
+- `packages/api-client/src/client.ts` 新增 `draftSkill(payload)`。
+- 补充 draft service、route matcher 和 api-client 测试。
+
+已验证：
+
+- `npm run typecheck -w @xiaoshuo/agent-runtime`
+- `npm run typecheck -w @xiaoshuo/desktop-shell`
+- `npm run typecheck -w @xiaoshuo/api-client`
+- `npx vitest run packages/agent-runtime/src/skill-draft-service.test.ts apps/desktop-shell/src/main/runtime/runtime-utils.test.ts packages/api-client/src/client.test.ts apps/desktop-shell/src/main/runtime/skill-routes.test.ts`
 
 ## 0. 当前基线
 

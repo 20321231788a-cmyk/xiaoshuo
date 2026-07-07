@@ -436,6 +436,71 @@ describe("api-client", () => {
     ]);
   });
 
+  it("calls the generic skill draft endpoint", async () => {
+    const requests: Array<{ url: string; method: string; body: string }> = [];
+    const client = createApiClient({
+      baseUrl: "http://127.0.0.1:18452",
+      fetchFn: async (input, init) => {
+        requests.push({
+          url: String(input),
+          method: String(init?.method || "GET"),
+          body: String(init?.body || "")
+        });
+        return new Response(
+          JSON.stringify({
+            skill: {
+              id: "short_review",
+              version: "1.0.0",
+              name: "短篇审稿",
+              description: "desc",
+              input_mode: "text",
+              context_requirements: [],
+              handler_type: "prompt",
+              linked_targets: [],
+              prompt: "prompt",
+              imported_from: "draft:selection",
+              writable: false
+            },
+            source_url: "",
+            source_name: "selection.md",
+            source_excerpt: "选区",
+            source_text: "选区",
+            warnings: []
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    });
+
+    const draft = await client.draftSkill({
+      kind: "selection",
+      instruction: "生成短篇审稿技能",
+      selection: "选区",
+      target_name: "短篇审稿",
+      target_id: "short_review"
+    });
+
+    expect(draft.skill.id).toBe("short_review");
+    expect(requests).toEqual([
+      {
+        url: "http://127.0.0.1:18452/api/skills/draft",
+        method: "POST",
+        body: JSON.stringify({
+          kind: "selection",
+          instruction: "生成短篇审稿技能",
+          text: "",
+          url: "",
+          current_path: "",
+          selection: "选区",
+          attachment_ids: [],
+          source_skill_id: "",
+          target_name: "短篇审稿",
+          target_id: "short_review"
+        })
+      }
+    ]);
+  });
+
   it("posts embedding test requests and parses connection details", async () => {
     const requests: Array<{ url: string; method: string; body: string }> = [];
     const client = createApiClient({

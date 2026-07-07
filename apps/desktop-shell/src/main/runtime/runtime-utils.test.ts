@@ -38,6 +38,7 @@ describe("runtime route matchers", () => {
 
     expect(matchSkillRoute("/api/skills")).toEqual({});
     expect(matchSkillRoute("/api/skills/import")).toEqual({ action: "import" });
+    expect(matchSkillRoute("/api/skills/draft")).toEqual({ action: "draft" });
     expect(matchSkillRoute("/api/skills/outline_generate/run")).toEqual({ id: "outline_generate", action: "run" });
     expect(matchSkillRoute("/api/skills/outline_generate/clone")).toEqual({ id: "outline_generate", action: "clone" });
     expect(matchSkillRoute("/api/skills/custom_review/versions")).toEqual({ id: "custom_review", action: "versions" });

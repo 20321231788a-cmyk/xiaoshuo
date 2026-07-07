@@ -63,7 +63,7 @@ export function matchSkillRoute(pathname: string):
   }
   if (segments.length === 3) {
     const value = decodeURIComponent(segments[2] || "");
-    if (value === "import" || value === "open-folder" || value === "upload" || value === "draft-from-url" || value === "import-draft") {
+    if (value === "import" || value === "open-folder" || value === "upload" || value === "draft" || value === "draft-from-url" || value === "import-draft") {
       return { action: value };
     }
     return { id: value };

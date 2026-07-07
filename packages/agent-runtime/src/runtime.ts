@@ -15,12 +15,14 @@ import type {
   CardDrawSelectRequest,
   CardDrawCandidate,
   SkillDraftFromUrlRequest,
+  SkillDraftRequest,
   SkillDraftResponse
 } from "@xiaoshuo/shared";
 import { AgentChatRunner, type ChatContextAssemblyObserver } from "./chat-runner.js";
 import { classifyAgentIntent, hasSkillAction, isReadContextIntent, rankSkillRoutes } from "./intent-router.js";
 import { AgentPlanner, type AgentPlannerOptions } from "./planner.js";
 import { PromptSkillRunner } from "./skill-runner.js";
+import { SkillDraftService } from "./skill-draft-service.js";
 import { SkillService } from "@xiaoshuo/skill-service";
 import { AgentFileOperationRunner } from "./file-operation-runner.js";
 import { ConversationService } from "@xiaoshuo/conversation-service";
@@ -54,6 +56,7 @@ const TARGET_WORD_SKILL_IDS = new Set([
 export class AgentRuntimeService {
   private readonly planner: AgentPlanner;
   private readonly skillRunner: PromptSkillRunner;
+  private readonly skillDrafts: SkillDraftService;
   private readonly chatRunner: AgentChatRunner;
   private readonly fileOperationRunner: AgentFileOperationRunner;
   private readonly skills: SkillService;
@@ -72,6 +75,7 @@ export class AgentRuntimeService {
     this.webSearchClient = options.webSearchClient ?? new DefaultWebSearchClient();
     this.planner = new AgentPlanner(options);
     this.skillRunner = new PromptSkillRunner(options);
+    this.skillDrafts = new SkillDraftService(options);
     this.chatRunner = new AgentChatRunner(options);
     this.fileOperationRunner = new AgentFileOperationRunner({ planner: this.planner, projectRoot: options.projectRoot });
     this.skills = new SkillService({ projectRoot: options.projectRoot });
@@ -1665,6 +1669,10 @@ export class AgentRuntimeService {
 
   async draftSkillFromUrl(payload: SkillDraftFromUrlRequest, options: AgentRunOptions = {}): Promise<SkillDraftResponse> {
     return this.skillRunner.draftSkillFromUrl(payload, options);
+  }
+
+  async draftSkill(payload: SkillDraftRequest, options: AgentRunOptions = {}): Promise<SkillDraftResponse> {
+    return this.skillDrafts.draftSkill(payload, options);
   }
 
   async generateCardDraw(payload: CardDrawRequest, progress: (v: number, m: string) => void, options: AgentRunOptions = {}): Promise<CardDrawResult> {

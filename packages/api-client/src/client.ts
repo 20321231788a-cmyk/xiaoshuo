@@ -28,6 +28,7 @@ import {
   skillRunRequestSchema,
   skillRunResponseSchema,
   skillDefinitionSchema,
+  skillDraftRequestSchema,
   skillCloneRequestSchema,
   skillPatchRequestSchema,
   skillPatchResponseSchema,
@@ -543,6 +544,11 @@ export function createApiClient(options: ApiClientOptions) {
       requestWithSchema("/api/skills/draft-from-url", skillDraftResponseSchema, {
         method: "POST",
         body: JSON.stringify({ url, instruction })
+      }),
+    draftSkill: (payload: z.input<typeof skillDraftRequestSchema>) =>
+      requestWithSchema("/api/skills/draft", skillDraftResponseSchema, {
+        method: "POST",
+        body: JSON.stringify(skillDraftRequestSchema.parse(payload))
       }),
     importSkillDraft: (payload: {
       skill: z.infer<typeof skillDefinitionSchema>;

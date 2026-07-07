@@ -6,6 +6,7 @@ export * from "./agent-trace.js";
 export * from "./cancellation.js";
 export * from "./smart-skill-orchestrator.js";
 export * from "./stream.js";
+export * from "./skill-draft-service.js";
 export * from "./skill-runner.js";
 export * from "./web-search.js";
 export * from "./kernel/project-file-manifest.js";

@@ -2,6 +2,7 @@ import { AgentRuntimeService } from "@xiaoshuo/agent-runtime";
 import { SkillService } from "@xiaoshuo/skill-service";
 import {
   skillDraftFromUrlRequestSchema,
+  skillDraftRequestSchema,
   skillCloneRequestSchema,
   skillImportDraftRequestSchema,
   skillImportRequestSchema,
@@ -186,6 +187,24 @@ export async function handleSkillRoutes(
     });
     try {
       deps.writeJson(response, 200, await runtime.draftSkillFromUrl(payload));
+    } catch (error) {
+      deps.writeJson(response, 400, { detail: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
+  if (!skillRoute.id && skillRoute.action === "draft" && request.method === "POST") {
+    if (await writeAiLicenseRequiredIfNeeded(context, response, deps.writeJson)) {
+      return true;
+    }
+    const rawBody = await deps.readRawBody(request);
+    const payload = skillDraftRequestSchema.parse(deps.parseJsonRecord(rawBody));
+    const runtime = new AgentRuntimeService({
+      projectRoot: currentProject.path,
+      config: { rootDir: context.projectRoot, env: process.env }
+    });
+    try {
+      deps.writeJson(response, 200, await runtime.draftSkill(payload));
     } catch (error) {
       deps.writeJson(response, 400, { detail: error instanceof Error ? error.message : String(error) });
     }
