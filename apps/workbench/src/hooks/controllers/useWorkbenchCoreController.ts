@@ -20,8 +20,11 @@ import type {
   SkillDefinition,
   SkillDraftResponse,
   SkillDraftSourceKind,
+  SkillPatchRequest,
+  SkillPatchResponse,
   SkillRunRequest,
   SkillRunResponse,
+  SkillVersionEntry,
   StyleDistillationProfile,
   TimelineEntry,
   VectorSearchHit,
@@ -119,6 +122,12 @@ export type PendingReferenceResolution = {
   candidates: ProjectFileReferenceCandidate[];
   selectedPaths: string[];
   warnings: string[];
+};
+
+export type PendingSkillPatchPreview = {
+  skillId: string;
+  request: SkillPatchRequest;
+  response: SkillPatchResponse;
 };
 
 type SendConversationOptions = {
@@ -398,6 +407,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [operationsMessage, setOperationsMessage] = useState("");
   const [latestSkillResult, setLatestSkillResult] = useState<SkillRunResponse | null>(null);
   const [pendingSkillDraft, setPendingSkillDraft] = useState<SkillDraftResponse | null>(null);
+  const [pendingSkillPatchPreview, setPendingSkillPatchPreview] = useState<PendingSkillPatchPreview | null>(null);
+  const [selectedSkillVersions, setSelectedSkillVersions] = useState<SkillVersionEntry[]>([]);
   const [latestCardDrawResult, setLatestCardDrawResult] = useState<CardDrawResult | null>(null);
   const [pendingGeneratedSave, setPendingGeneratedSave] = useState<PendingGeneratedSave | null>(null);
   const [styleDistillationProfile, setStyleDistillationProfile] = useState<StyleDistillationProfile | null>(null);
@@ -939,6 +950,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setPendingReferenceResolution(null);
     setPendingGeneratedSave(null);
     setLatestSkillResult(null);
+    setPendingSkillPatchPreview(null);
+    setSelectedSkillVersions([]);
     setStyleDistillationProfile(null);
     setSelectedJobId("");
     setSelectedJobDetail(null);
@@ -2824,6 +2837,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       setSelectedSkillId(skillId);
       setSelectedSkillDetail(skill);
       setLatestSkillResult(null);
+      setPendingSkillPatchPreview(null);
+      setSelectedSkillVersions([]);
       if (options.activateTab ?? true) {
         setActiveTab("operations");
       }
@@ -3052,6 +3067,147 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       return skill;
     } catch (nextError) {
       setOperationsMessage(describeActionableError(nextError, "保存技能简介失败", "默认技能不可编辑简介，导入技能可直接修改。"));
+      return null;
+    } finally {
+      setOperationsBusy(false);
+    }
+  }
+
+  async function cloneSelectedSkill(input: { targetName?: string; targetId?: string; instruction?: string } = {}) {
+    if (!selectedSkillDetail) {
+      setOperationsMessage("请先选择一个技能。");
+      return null;
+    }
+    setOperationsBusy(true);
+    setOperationsMessage("");
+    try {
+      const skill = await client.cloneSkill(selectedSkillDetail.id, {
+        target_name: input.targetName || "",
+        target_id: input.targetId || "",
+        instruction: input.instruction || ""
+      });
+      setPendingSkillPatchPreview(null);
+      setSelectedSkillVersions([]);
+      await refreshSkillCatalog();
+      await selectSkill(skill.id, { activateTab: true });
+      setOperationsMessage(`已复制为自定义技能：${skill.name}`);
+      return skill;
+    } catch (nextError) {
+      setOperationsMessage(describeActionableError(nextError, "复制技能失败", "默认技能可复制为自定义技能后再编辑。"));
+      return null;
+    } finally {
+      setOperationsBusy(false);
+    }
+  }
+
+  async function previewSelectedSkillPatch(patch: Partial<SkillPatchRequest>) {
+    if (!selectedSkillDetail) {
+      setOperationsMessage("请先选择一个技能。");
+      return null;
+    }
+    setOperationsBusy(true);
+    setOperationsMessage("");
+    try {
+      const expectedVersion = selectedSkillDetail.version || selectedSkillDetail.manifest?.version || "";
+      const request: SkillPatchRequest = {
+        ...patch,
+        change_reason: patch.change_reason || "",
+        expected_version: patch.expected_version || expectedVersion,
+        dry_run: true
+      };
+      const response = await client.patchSkill(selectedSkillDetail.id, request);
+      setPendingSkillPatchPreview({ skillId: selectedSkillDetail.id, request, response });
+      setOperationsMessage(response.diff ? `已生成修改预览：${selectedSkillDetail.name}` : "没有检测到可保存的修改。");
+      return response;
+    } catch (nextError) {
+      setOperationsMessage(describeActionableError(nextError, "生成技能修改预览失败", "默认技能不可原地编辑，请先复制为自定义技能。"));
+      return null;
+    } finally {
+      setOperationsBusy(false);
+    }
+  }
+
+  async function commitPendingSkillPatch() {
+    if (!pendingSkillPatchPreview) {
+      setOperationsMessage("当前没有待确认的技能修改。");
+      return null;
+    }
+    setOperationsBusy(true);
+    setOperationsMessage("");
+    try {
+      const request: SkillPatchRequest = {
+        ...pendingSkillPatchPreview.request,
+        dry_run: false
+      };
+      const response = await client.patchSkill(pendingSkillPatchPreview.skillId, request);
+      setPendingSkillPatchPreview(null);
+      await refreshSkillCatalog();
+      await selectSkill(response.skill.id, { activateTab: true });
+      await loadSkillVersions(response.skill.id);
+      setOperationsMessage(response.diff ? `技能修改已保存：${response.skill.name}` : "技能没有变化，不需要保存。");
+      return response;
+    } catch (nextError) {
+      setOperationsMessage(describeActionableError(nextError, "保存技能修改失败", "请刷新技能详情后重新预览修改。"));
+      return null;
+    } finally {
+      setOperationsBusy(false);
+    }
+  }
+
+  function discardPendingSkillPatch() {
+    if (!pendingSkillPatchPreview) {
+      return;
+    }
+    setPendingSkillPatchPreview(null);
+    setOperationsMessage("已丢弃技能修改预览。");
+  }
+
+  async function loadSkillVersions(skillId = selectedSkillId) {
+    const id = skillId.trim();
+    if (!id) {
+      setSelectedSkillVersions([]);
+      return [];
+    }
+    setOperationsBusy(true);
+    setOperationsMessage("");
+    try {
+      const response = await client.getSkillVersions(id);
+      setSelectedSkillVersions(response.versions);
+      setOperationsMessage(response.versions.length ? `已读取 ${response.versions.length} 个历史版本。` : "这个技能还没有历史版本。");
+      return response.versions;
+    } catch (nextError) {
+      setOperationsMessage(describeActionableError(nextError, "读取技能版本失败"));
+      return [];
+    } finally {
+      setOperationsBusy(false);
+    }
+  }
+
+  async function rollbackSelectedSkill(versionId: string) {
+    if (!selectedSkillDetail) {
+      setOperationsMessage("请先选择一个技能。");
+      return null;
+    }
+    const id = versionId.trim();
+    if (!id) {
+      setOperationsMessage("请选择要回滚的版本。");
+      return null;
+    }
+    setOperationsBusy(true);
+    setOperationsMessage("");
+    try {
+      const response = await client.rollbackSkill(selectedSkillDetail.id, {
+        version_id: id,
+        change_reason: "workbench rollback"
+      });
+      setPendingSkillPatchPreview(null);
+      await refreshSkillCatalog();
+      await selectSkill(response.skill.id, { activateTab: true });
+      await loadSkillVersions(response.skill.id);
+      setOperationsMessage(`已回滚技能：${response.skill.name}`);
+      return response;
+    } catch (nextError) {
+      setOperationsMessage(describeActionableError(nextError, "回滚技能失败", "默认技能不可回滚，导入技能需先有版本历史。"));
       return null;
     } finally {
       setOperationsBusy(false);
@@ -4155,6 +4311,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     operationsMessage,
     latestSkillResult,
     pendingSkillDraft,
+    pendingSkillPatchPreview,
+    selectedSkillVersions,
     latestCardDrawResult,
     pendingGeneratedSave,
     styleDistillationProfile,
@@ -4179,6 +4337,12 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     deleteOrDisableSelectedSkill,
     restoreSelectedBuiltinSkill,
     updateSkillDescription,
+    cloneSelectedSkill,
+    previewSelectedSkillPatch,
+    commitPendingSkillPatch,
+    discardPendingSkillPatch,
+    loadSkillVersions,
+    rollbackSelectedSkill,
     runNuwaStyleDistillation,
     toggleNuwaStyleDistillation,
     deleteNuwaStyleDistillation,

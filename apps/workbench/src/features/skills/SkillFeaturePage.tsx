@@ -2,11 +2,28 @@ import type { SkillDefinition } from "@xiaoshuo/shared";
 import { useEffect, useRef, useState } from "react";
 import type { WorkbenchController } from "../../hooks/useWorkbenchController.js";
 
+function listDraft(items: string[] | undefined): string {
+  return (items || []).join(", ");
+}
+
+function parseListDraft(value: string): string[] {
+  return value
+    .split(/[,，\n]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
 export function SkillFeaturePage({ controller }: { controller: WorkbenchController }) {
   const [pathInput, setPathInput] = useState("");
   const [urlInput, setUrlInput] = useState("");
   const [draftNameInput, setDraftNameInput] = useState("");
   const [draftInstructionInput, setDraftInstructionInput] = useState("");
+  const [cloneNameInput, setCloneNameInput] = useState("");
+  const [editDescriptionInput, setEditDescriptionInput] = useState("");
+  const [editPromptInput, setEditPromptInput] = useState("");
+  const [editContextInput, setEditContextInput] = useState("");
+  const [editTargetsInput, setEditTargetsInput] = useState("");
+  const [editReasonInput, setEditReasonInput] = useState("");
   const [skillPage, setSkillPage] = useState(0);
   const [skillDescriptionDrafts, setSkillDescriptionDrafts] = useState<Record<string, string>>({});
   const [pendingSkillAction, setPendingSkillAction] = useState<{ skillId: string; action: "run" | "delete-disable" | "restore" } | null>(null);
@@ -20,6 +37,17 @@ export function SkillFeaturePage({ controller }: { controller: WorkbenchControll
   const pageSkills = skills.slice(currentPage * skillsPerPage, currentPage * skillsPerPage + skillsPerPage);
   const pendingDraft = controller.pendingSkillDraft;
   const pendingDraftPrompt = pendingDraft?.skill.prompt.trim() || "";
+  const selectedSkill = controller.selectedSkillDetail;
+  const pendingPatch = selectedSkill && controller.pendingSkillPatchPreview?.skillId === selectedSkill.id
+    ? controller.pendingSkillPatchPreview
+    : null;
+  const editChanged = selectedSkill ? (
+    editDescriptionInput !== selectedSkill.description ||
+    editPromptInput !== (selectedSkill.prompt || "") ||
+    editContextInput !== listDraft(selectedSkill.context_requirements) ||
+    editTargetsInput !== listDraft(selectedSkill.linked_targets) ||
+    editReasonInput.trim().length > 0
+  ) : false;
 
   async function refreshSkills() {
     setSkillRefreshError("");
@@ -64,6 +92,32 @@ export function SkillFeaturePage({ controller }: { controller: WorkbenchControll
     void controller.deleteOrDisableSelectedSkill();
   }, [controller, pendingSkillAction]);
 
+  useEffect(() => {
+    if (!selectedSkill) {
+      setCloneNameInput("");
+      setEditDescriptionInput("");
+      setEditPromptInput("");
+      setEditContextInput("");
+      setEditTargetsInput("");
+      setEditReasonInput("");
+      return;
+    }
+    setCloneNameInput(`${selectedSkill.name}（自定义）`);
+    setEditDescriptionInput(selectedSkill.description || "");
+    setEditPromptInput(selectedSkill.prompt || "");
+    setEditContextInput(listDraft(selectedSkill.context_requirements));
+    setEditTargetsInput(listDraft(selectedSkill.linked_targets));
+    setEditReasonInput("");
+  }, [
+    selectedSkill?.id,
+    selectedSkill?.description,
+    selectedSkill?.prompt,
+    selectedSkill?.context_requirements,
+    selectedSkill?.linked_targets,
+    selectedSkill?.version,
+    selectedSkill?.manifest?.version
+  ]);
+
   function queueSkillAction(skillId: string, action: "run" | "delete-disable" | "restore") {
     setPendingSkillAction({ skillId, action });
     void controller.selectSkill(skillId, { activateTab: false });
@@ -83,6 +137,19 @@ export function SkillFeaturePage({ controller }: { controller: WorkbenchControll
       kind,
       instruction: draftInstructionInput,
       targetName: draftNameInput
+    });
+  }
+
+  function previewSkillPatch() {
+    if (!selectedSkill) {
+      return;
+    }
+    void controller.previewSelectedSkillPatch({
+      description: editDescriptionInput,
+      prompt: editPromptInput,
+      context_requirements: parseListDraft(editContextInput),
+      linked_targets: parseListDraft(editTargetsInput),
+      change_reason: editReasonInput.trim() || "workbench edit"
     });
   }
 
@@ -168,6 +235,100 @@ export function SkillFeaturePage({ controller }: { controller: WorkbenchControll
           </article>
         )}
       </div>
+      {selectedSkill && (
+        <section className="xw-skill-edit-panel">
+          <div className="xw-skill-edit-head">
+            <div>
+              <strong>{selectedSkill.name}</strong>
+              <span>{selectedSkill.builtin ? "默认技能需复制后编辑" : `自定义技能 · v${selectedSkill.version || selectedSkill.manifest?.version || "1.0.0"}`}</span>
+            </div>
+            <button
+              className="xw-secondary-button compact"
+              onClick={() => void controller.loadSkillVersions(selectedSkill.id)}
+              disabled={controller.operationsBusy || Boolean(selectedSkill.builtin)}
+            >
+              版本历史
+            </button>
+          </div>
+          {selectedSkill.builtin ? (
+            <div className="xw-skill-clone-row">
+              <input value={cloneNameInput} onChange={(event) => setCloneNameInput(event.target.value)} placeholder="复制后的技能名" />
+              <button
+                className="xw-primary-button compact"
+                onClick={() => void controller.cloneSelectedSkill({ targetName: cloneNameInput })}
+                disabled={controller.operationsBusy}
+              >
+                复制为自定义技能
+              </button>
+            </div>
+          ) : (
+            <div className="xw-skill-edit-grid">
+              <label>
+                <span>简介</span>
+                <input value={editDescriptionInput} onChange={(event) => setEditDescriptionInput(event.target.value)} />
+              </label>
+              <label>
+                <span>上下文要求</span>
+                <input value={editContextInput} onChange={(event) => setEditContextInput(event.target.value)} placeholder="project_state, conversation" />
+              </label>
+              <label>
+                <span>关联目标</span>
+                <input value={editTargetsInput} onChange={(event) => setEditTargetsInput(event.target.value)} placeholder="可空，逗号分隔" />
+              </label>
+              <label>
+                <span>修改原因</span>
+                <input value={editReasonInput} onChange={(event) => setEditReasonInput(event.target.value)} placeholder="例如：强化输出格式" />
+              </label>
+              <label className="xw-skill-prompt-editor">
+                <span>Prompt</span>
+                <textarea value={editPromptInput} onChange={(event) => setEditPromptInput(event.target.value)} />
+              </label>
+              <div className="xw-skill-edit-actions">
+                <button className="xw-primary-button compact" onClick={previewSkillPatch} disabled={controller.operationsBusy || !editChanged}>
+                  预览修改
+                </button>
+                <button className="xw-secondary-button compact" onClick={controller.discardPendingSkillPatch} disabled={controller.operationsBusy || !pendingPatch}>
+                  丢弃预览
+                </button>
+              </div>
+            </div>
+          )}
+          {pendingPatch && (
+            <div className="xw-skill-diff-preview">
+              <strong>{pendingPatch.response.diff ? "修改差异" : "没有差异"}</strong>
+              {pendingPatch.response.diff ? <pre>{pendingPatch.response.diff}</pre> : <p>当前草稿与已保存技能一致。</p>}
+              {pendingPatch.response.warnings.length > 0 && <em>{pendingPatch.response.warnings.join("；")}</em>}
+              <div className="xw-skill-edit-actions">
+                <button className="xw-primary-button compact" onClick={() => void controller.commitPendingSkillPatch()} disabled={controller.operationsBusy || !pendingPatch.response.diff}>
+                  确认保存
+                </button>
+                <button className="xw-secondary-button compact" onClick={controller.discardPendingSkillPatch} disabled={controller.operationsBusy}>
+                  取消
+                </button>
+              </div>
+            </div>
+          )}
+          {controller.selectedSkillVersions.length > 0 && (
+            <div className="xw-skill-version-list">
+              {controller.selectedSkillVersions.slice(0, 8).map((version) => (
+                <article key={version.version_id}>
+                  <div>
+                    <strong>{version.snapshot.name}</strong>
+                    <span>{version.created_at} · {version.change_reason || "patch"}</span>
+                  </div>
+                  <button
+                    className="xw-secondary-button compact"
+                    onClick={() => void controller.rollbackSelectedSkill(version.version_id)}
+                    disabled={controller.operationsBusy || Boolean(selectedSkill.builtin)}
+                  >
+                    回滚
+                  </button>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
       <div className="xw-skill-grid">
         {pageSkills.map((skill) => {
           const selected = skill.id === controller.selectedSkillId;

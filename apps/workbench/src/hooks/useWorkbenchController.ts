@@ -13,6 +13,7 @@ export type {
   PendingCloseRequest,
   PendingProjectSwitchRequest,
   PendingReferenceResolution,
+  PendingSkillPatchPreview,
   PendingReloadRequest,
   PendingSaveConflictRequest,
   WorkbenchTab
