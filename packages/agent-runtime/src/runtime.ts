@@ -49,7 +49,6 @@ import { getWorkflowHandler, isWorkflowSkillId } from "./workflows/registry.js";
 import type { WorkflowRunContext } from "./workflows/types.js";
 
 const DISASSEMBLE_LIBRARY_DIR = "00_设定集/拆书库";
-const FUSION_LIBRARY_DIR = "00_设定集/融梗方案";
 const LEGACY_DISASSEMBLE_LORE_PATH = "00_设定集/设定集/拆书设定提取.txt";
 const LEGACY_REVERSE_OUTLINE_PATH = "01_大纲/反向细纲.txt";
 const LEGACY_DISASSEMBLE_DETAIL_PATH = "01_大纲/拆书细纲.txt";
@@ -1110,21 +1109,6 @@ export class AgentRuntimeService {
       };
     }
 
-    if (skillId === "book_fusion") {
-      const result = await this.runBookFusionSkill(request);
-      const savedPaths = this.resolveSavedPaths(result);
-      const reply = savedPaths.length ? `融梗方案已生成：\n${savedPaths.join("\n")}` : result.result || "融梗方案已生成。";
-      return {
-        intent: "skill",
-        reply,
-        conversation: await this.recordSkillExchange(request, reply),
-        results: [],
-        skill_result: result,
-        saved_paths: savedPaths,
-        requires_confirmation: false
-      };
-    }
-
     if (skillId === "disassemble_book") {
       const action = String((request as any).action || "").trim();
       if (action === "list_library") {
@@ -1464,138 +1448,6 @@ export class AgentRuntimeService {
     };
   }
 
-  private async runBookFusionSkill(request: AgentRunRequest): Promise<SkillRunResponse> {
-    const sourceBookIds = uniquePaths(stringListFromUnknown((request as any).source_book_ids));
-    if (sourceBookIds.length < 3) {
-      throw new Error("融梗至少需要选择三本已拆书籍");
-    }
-    const customPrompt = String((request as any).custom_prompt || request.content || "").trim();
-    const genreHint = String((request as any).genre_hint || "").trim();
-    const outputMode = String((request as any).output_mode || "candidate").trim();
-    const books = await this.loadBooksForFusion(sourceBookIds);
-    if (books.length < 3) {
-      throw new Error("融梗只能选择已经完成拆书的文件夹，且至少需要三本");
-    }
-
-    const continuity = await buildProjectContinuityContext(this.documents.projectRoot);
-    const config = await loadModelConfig(this.config, "primary");
-    if (!config.configured) {
-      throw new Error("未配置主线路 API Key 或模型名，无法执行融梗。");
-    }
-
-    const fusionId = `${formatBookTimestamp(new Date())}-${createHash("sha1").update(sourceBookIds.join("|") + customPrompt + genreHint).digest("hex").slice(0, 8)}`;
-    const fusionDir = `${FUSION_LIBRARY_DIR}/${fusionId}`;
-    const sourceBooksText = books
-      .map((book, index) => [
-        `【书籍 ${index + 1}】${book.title}`,
-        `【来源】${book.source_path || book.dir || "已拆书籍"}`,
-        `【拆书设定】\n${book.lore || "无"}`,
-        `【反向细纲】\n${book.reverseOutline || "无"}`,
-        `【拆书细纲】\n${book.detailOutline || "无"}`
-      ].join("\n"))
-      .join("\n\n");
-
-    const systemPrompt = [
-      "你是小说融梗编辑器。任务是参考多本书的核心设定和剧情结构，抽象融合出一个新的原创方案。",
-      "必须避免原文句式、专有名词、可识别桥段和人物关系的直接复写，只能提炼共性结构、冲突机制、人物驱动力与题材骨架。",
-      "融合时要优先保留高层逻辑、冲突张力、题材魅力和可持续展开性，不能做简单拼接。",
-      "输出必须可直接用于后续大纲或设定生成，且只输出中文正文，不要免责声明。"
-    ].join("\n");
-    const userPrompt = [
-      `【输出模式】${outputMode}`,
-      `【用户提示词】${customPrompt || "无"}`,
-      `【题材提示】${genreHint || "无"}`,
-      "",
-      `【当前题材库】\n${clipForConsistency(JSON.stringify(continuity.genre), 12000) || "暂无题材库"}`,
-      "",
-      "请按以下结构输出融合候选方案：",
-      "1. 融合后核心设定：世界基调、能力/规则、人物群像、冲突底层逻辑。",
-      "2. 融合后剧情骨架：开局、升级/推进路径、关键反转、阶段性目标、收束方向。",
-      "3. 可复用题材匹配点：哪些题材元素被吸收，哪些被主动舍弃。",
-      "4. 原创化约束：明确列出哪些东西不能直接照抄，哪些必须重写。",
-      "5. 后续可展开方向：适合继续拆成大纲/细纲/章纲的切入点。",
-      "",
-      "要求：至少综合三本书的优点，但不能出现“把 A+B+C 拼起来”的痕迹；必须像一个全新项目的起点。",
-      "",
-      "【待融合书籍资料】",
-      sourceBooksText
-    ].join("\n");
-
-    const raw = String(
-      await this.modelClient.requestCompletion(
-        config,
-        [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt }
-        ] satisfies ChatCompletionMessage[],
-        Math.max(0.2, Math.min(0.55, config.temperature))
-      )
-    ).trim();
-
-    if (!raw) {
-      throw new Error("模型未返回融梗候选方案");
-    }
-
-    await fs.mkdir(path.join(this.documents.projectRoot, FUSION_LIBRARY_DIR, fusionId), { recursive: true });
-    const fusionManifest: Record<string, unknown> = {
-      id: fusionId,
-      dir: fusionDir,
-      source_book_ids: sourceBookIds,
-      source_books: books.map((book) => ({
-        id: book.id,
-        title: book.title,
-        dir: book.dir,
-        source_path: book.source_path,
-        source_summary: book.source_summary
-      })),
-      custom_prompt: customPrompt,
-      genre_hint: genreHint,
-      output_mode: outputMode,
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-      result_path: `${fusionDir}/融梗候选.txt`
-    };
-
-    await this.documents.saveDocument(`${fusionDir}/融梗候选.txt`, raw, {
-      source: "skill",
-      summary: "融梗候选方案"
-    });
-    await this.documents.saveDocument(`${fusionDir}/融梗提示词.txt`, customPrompt || "无", {
-      source: "skill",
-      summary: "融梗提示词"
-    });
-    await this.documents.saveDocument(`${fusionDir}/来源书籍.jsonl`, `${JSON.stringify(fusionManifest.source_books || [])}\n`, {
-      source: "skill",
-      summary: "融梗来源书籍"
-    });
-    await this.documents.saveDocument(`${fusionDir}/${BOOK_MANIFEST_PATH}`, `${JSON.stringify(fusionManifest)}\n`, {
-      source: "skill",
-      summary: "融梗 manifest"
-    });
-
-    return {
-      status: "done",
-      result: raw,
-      saved_path: `${fusionDir}/融梗候选.txt`,
-      data: {
-        skill_id: "book_fusion",
-        fusion_id: fusionId,
-        fusion_dir: fusionDir,
-        source_book_ids: sourceBookIds,
-        source_books: fusionManifest.source_books,
-        custom_prompt: customPrompt,
-        genre_hint: genreHint,
-        output_mode: outputMode,
-        saved_paths: [
-          `${fusionDir}/融梗候选.txt`,
-          `${fusionDir}/融梗提示词.txt`,
-          `${fusionDir}/来源书籍.jsonl`,
-          `${fusionDir}/${BOOK_MANIFEST_PATH}`
-        ]
-      }
-    };
-  }
-
   private async createDisassembleBook(input: { title: string; sourceText: string; sourcePath: string; origin: string }): Promise<DisassembleBookManifest> {
     const createdAt = new Date().toISOString();
     const bookId = `${sanitizeBookId(input.title)}-${formatBookTimestamp(new Date())}-${randomUUID().replace(/-/g, "").slice(0, 8)}`;
@@ -1736,31 +1588,6 @@ export class AgentRuntimeService {
 
     const books = await this.listDisassembleBooks({ includeLegacy: true });
     return books[0] || null;
-  }
-
-  private async loadBooksForFusion(sourceBookIds: string[]): Promise<Array<DisassembleBookManifest & { legacy?: boolean; lore?: string; reverseOutline?: string; detailOutline?: string }>> {
-    const books = await this.listDisassembleBooks({ includeLegacy: true });
-    const selected: Array<DisassembleBookManifest & { legacy?: boolean; lore?: string; reverseOutline?: string; detailOutline?: string }> = [];
-    for (const id of sourceBookIds) {
-      const book = books.find((item) => item.id === id);
-      if (!book) {
-        continue;
-      }
-      if (!this.isDisassembleBookReadyForFusion(book)) {
-        continue;
-      }
-      selected.push({
-        ...book,
-        lore: await this.readDisassembleBookText(book, "lore", 24_000),
-        reverseOutline: await this.readDisassembleBookText(book, "reverse_outline", 24_000),
-        detailOutline: await this.readDisassembleBookText(book, "detail_outline", 24_000)
-      });
-    }
-    return selected;
-  }
-
-  private isDisassembleBookReadyForFusion(book: DisassembleBookManifest & { legacy?: boolean }): boolean {
-    return Boolean(book.paths.lore || book.paths.reverse_outline || book.paths.detail_outline);
   }
 
   private async readDisassembleBookText(

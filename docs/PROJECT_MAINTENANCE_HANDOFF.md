@@ -1211,6 +1211,30 @@ npm test -- packages/agent-runtime/src/workflows/scan-pits.test.ts packages/agen
 - P1 若继续瘦 runtime，可迁移 `book_fusion` 或拆 `disassemble_book` / `continue_disassemble`。
 - 多个 handler 已重复 `recordSkillExchange()` 和来源解析逻辑，下一刀前可抽 `workflows/helpers.ts`。
 
+### 15.23 2026-07-07 book_fusion Handler 迁移记录
+
+本轮继续拆 workflow registry，把融梗从 runtime legacy 分支迁移到独立 handler。
+
+主要改动：
+
+- 新增 `packages/agent-runtime/src/workflows/book-fusion.ts`，承接 source book 校验、拆书库读取、融梗 prompt、模型调用、融梗库写盘和技能会话记录。
+- `packages/agent-runtime/src/workflows/registry.ts` 注册 `BookFusionWorkflow`。
+- `AgentRuntimeService.runLocalWorkflowSkill()` 删除 `book_fusion` 分支，并清理只服务融梗的旧 helper。
+- 新增 `packages/agent-runtime/src/workflows/book-fusion.test.ts`，覆盖少于三本拒绝和三本已拆书籍写入融梗库。
+- `runtime.ts` 当前约 2785 行。
+
+本轮已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/agent-runtime
+npm test -- packages/agent-runtime/src/workflows/book-fusion.test.ts packages/agent-runtime/src/runtime.test.ts -t "book fusion|BookFusionWorkflow|book_fusion"
+```
+
+下一步建议：
+
+- P1 剩余 legacy workflow 为 `disassemble_book`、`continue_disassemble`、`nuwa_style_distill`。
+- 拆 `disassemble_book` / `continue_disassemble` 前，建议先抽 `workflows/disassemble-library.ts`，统一 manifest、legacy 和 source text helper。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

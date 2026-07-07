@@ -1455,3 +1455,27 @@ npm test -- packages/agent-runtime/src/workflows/scan-pits.test.ts packages/agen
 
 - P1 剩余 legacy workflow：`disassemble_book`、`continue_disassemble`、`book_fusion`、`nuwa_style_distill`。
 - `resolveWorkflowSourceText()` 和 `recordSkillExchange()` 已在多个 handler 中重复，后续可抽入 `workflows/helpers.ts`，但本轮先避免额外重构。
+
+### 16.6 2026-07-07 book_fusion 已完成
+
+状态：已完成融梗 handler 迁移。
+
+本阶段完成内容：
+
+- 新增 `packages/agent-runtime/src/workflows/book-fusion.ts`，把 `book_fusion` 从 runtime 大分支迁移为独立 handler。
+- `BookFusionWorkflow` 保持原行为：校验至少三本已拆书籍、读取拆书库/legacy 产物、组装融梗 prompt、写入 `00_设定集/融梗方案/<id>/` 下的候选、提示词、来源书籍和 manifest。
+- `packages/agent-runtime/src/workflows/registry.ts` 注册 `BookFusionWorkflow`。
+- `AgentRuntimeService.runLocalWorkflowSkill()` 删除 `book_fusion` 分支，并清理只服务融梗的旧 helper。
+- 新增 `packages/agent-runtime/src/workflows/book-fusion.test.ts`，覆盖少于三本拒绝和三本已拆书籍写入融梗库。
+
+已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/agent-runtime
+npm test -- packages/agent-runtime/src/workflows/book-fusion.test.ts packages/agent-runtime/src/runtime.test.ts -t "book fusion|BookFusionWorkflow|book_fusion"
+```
+
+遗留说明：
+
+- P1 剩余 legacy workflow：`disassemble_book`、`continue_disassemble`、`nuwa_style_distill`。
+- `book_fusion` 与拆书 workflow 仍各自保留拆书库读取逻辑；等 `disassemble_book` / `continue_disassemble` 迁移后再统一抽公共库 helper。
