@@ -1513,6 +1513,46 @@ npm run smoke:desktop
 - 可继续把 `App.tsx` 内剩余 workflow glue 迁入 feature page / feature hooks。
 - 下一大块可进入 P6 Agent 运行检查器 UI。
 
+### 15.33 2026-07-07 P6 Agent 运行检查器 UI 记录
+
+本轮完成 P6，补齐 trace 查询 API，并在 Workbench 中加入 Agent 运行检查器。
+
+主要改动：
+
+- `packages/agent-runtime/src/agent-trace.ts` 新增 `getAgentTraceDirPath()`，避免 trace writer 和 reader 重复维护目录规则。
+- `packages/shared/src/api.ts` 新增 `agentTraces` / `agentTrace` contract。
+- `packages/api-client/src/client.ts` 新增 `getAgentTraces(limit)` / `getAgentTrace(runId)`。
+- 新增 `apps/desktop-shell/src/main/runtime/agent-trace-routes.ts`，读取项目内 `00_设定集/.agent/runs/*.jsonl`。
+- `apps/desktop-shell/src/main/runtime-server.ts` 挂载 trace route，`runtime/index.ts` 导出 route。
+- 新增 `apps/workbench/src/views/AgentTraceView.tsx`，展示 trace 的输入摘要、intent、技能选择、上下文块、模型调用、联网来源、保存决策、保存路径和错误。
+- `apps/workbench/src/layout/RightRail.tsx` 新增“运行”入口，`App.tsx` 新增 `traces` center feature。
+- `apps/workbench/src/styles.css` 新增 trace inspector 布局与响应式样式。
+- 新增 `apps/desktop-shell/src/main/runtime/agent-trace-routes.test.ts`，并扩展 `packages/api-client/src/client.test.ts`。
+
+本轮已验证：
+
+```powershell
+npm test -- apps/desktop-shell/src/main/runtime/agent-trace-routes.test.ts packages/agent-runtime/src/agent-trace.test.ts packages/api-client/src/client.test.ts
+npm run typecheck
+npm test
+npm run build:workbench
+npm run build:desktop
+npm run smoke:desktop
+npx playwright test tests/e2e/project-entry.spec.ts --workers=1 --reporter=list
+```
+
+验收结果：
+
+- trace list/detail API 可用，未打开项目返回 400，缺失单条返回 404，坏 JSONL 行不会影响其他记录。
+- Workbench 可从右侧栏“运行”进入 Agent Trace 检查器。
+- 完整测试集当前为 60 个文件、389 个用例通过。
+- 关键 E2E `project-entry.spec.ts` 6/6 通过。
+
+下一步建议：
+
+- P6 后续可加 trace 过滤、搜索、失败-only 视图，以及从会话消息跳转到对应 run。
+- 下一大块可进入 P7 Skill 平台化，先从 manifest schema 和内置 skill manifest 兼容层开始。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

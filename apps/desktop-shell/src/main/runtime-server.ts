@@ -22,6 +22,7 @@ import {
   ensureDocumentSession,
   ensureProjectSessionCurrent,
   handleAgentRoutes,
+  handleAgentTraceRoutes,
   handleBaseRuntimeRoutes,
   handleConversationRoutes,
   handleGeneratedCacheRoutes,
@@ -168,6 +169,13 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
     writeJson,
     writeNdjsonEvent,
     addCorsHeaders
+  })) {
+    return;
+  }
+
+  if (await handleAgentTraceRoutes(request, response, pathname, url.searchParams, context, {
+    ensureProjectSessionCurrent,
+    writeJson
   })) {
     return;
   }

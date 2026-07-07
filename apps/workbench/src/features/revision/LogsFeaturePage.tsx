@@ -13,6 +13,7 @@ type CenterFeature =
   | "ledger"
   | "revision"
   | "skills"
+  | "traces"
   | "consistency"
   | "settings"
   | "terminal";

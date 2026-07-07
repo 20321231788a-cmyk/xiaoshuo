@@ -4130,6 +4130,182 @@ body {
   min-height: 0;
 }
 
+.xw-trace-page {
+  min-height: 0;
+}
+
+.xw-trace-layout {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.42fr) minmax(0, 1fr);
+  gap: 12px;
+  min-height: 0;
+}
+
+.xw-trace-list,
+.xw-trace-detail,
+.xw-trace-stack,
+.xw-trace-link-list,
+.xw-trace-paths {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+}
+
+.xw-trace-list {
+  max-height: min(68vh, 760px);
+  gap: 10px;
+  overflow: auto;
+}
+
+.xw-trace-run {
+  width: 100%;
+}
+
+.xw-trace-run.error {
+  border-color: rgba(184, 87, 47, 0.28);
+  background: rgba(255, 245, 232, 0.9);
+}
+
+.xw-trace-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.xw-trace-badges small,
+.xw-trace-metric,
+.xw-trace-paths code {
+  border: 1px solid var(--xw-line);
+  border-radius: 10px;
+  background: rgba(238, 247, 255, 0.72);
+}
+
+.xw-trace-badges small {
+  padding: 4px 7px;
+}
+
+.xw-trace-badges small.danger,
+.xw-trace-warning,
+.xw-trace-error {
+  color: var(--warning);
+}
+
+.xw-trace-detail {
+  gap: 12px;
+  max-height: min(68vh, 760px);
+  overflow: auto;
+  padding: 14px;
+  border: 1px solid var(--xw-line);
+  border-radius: 14px;
+  background: rgba(250, 253, 255, 0.86);
+}
+
+.xw-trace-detail-head,
+.xw-trace-row,
+.xw-trace-summary-grid {
+  min-width: 0;
+}
+
+.xw-trace-detail-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.xw-trace-detail-head > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.xw-trace-detail-head strong,
+.xw-trace-row strong,
+.xw-trace-metric strong {
+  overflow-wrap: anywhere;
+}
+
+.xw-trace-detail-head span,
+.xw-trace-detail-head small,
+.xw-trace-row small,
+.xw-trace-row span,
+.xw-trace-section p,
+.xw-trace-link-list a {
+  color: var(--xw-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.xw-trace-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.xw-trace-metric {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 9px;
+}
+
+.xw-trace-metric span {
+  color: var(--xw-muted);
+  font-size: 12px;
+}
+
+.xw-trace-section {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 10px;
+  border-top: 1px solid var(--xw-line);
+}
+
+.xw-trace-section h3 {
+  margin: 0;
+  color: var(--xw-text);
+  font-size: 14px;
+}
+
+.xw-trace-stack,
+.xw-trace-link-list,
+.xw-trace-paths {
+  gap: 7px;
+}
+
+.xw-trace-row {
+  display: grid;
+  gap: 3px;
+  padding: 9px;
+  border: 1px solid rgba(160, 190, 215, 0.38);
+  border-radius: 10px;
+  background: rgba(246, 251, 255, 0.76);
+}
+
+.xw-trace-row.muted {
+  opacity: 0.66;
+}
+
+.xw-trace-link-list a {
+  color: var(--xw-primary);
+  text-decoration: none;
+}
+
+.xw-trace-paths {
+  margin-top: 2px;
+}
+
+.xw-trace-paths code {
+  padding: 6px 8px;
+  color: #315d7e;
+  font-size: 12px;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .xw-skill-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -6098,8 +6274,14 @@ select:focus-visible {
   .xw-operation-grid,
   .xw-operation-grid.two,
   .xw-feature-split,
+  .xw-trace-layout,
   .xw-skill-import-row {
     grid-template-columns: 1fr;
+  }
+
+  .xw-trace-list,
+  .xw-trace-detail {
+    max-height: none;
   }
 
   .xw-disassembly-book {
@@ -6151,6 +6333,10 @@ select:focus-visible {
 
   .xw-segmented-control button {
     flex: 1;
+  }
+
+  .xw-trace-summary-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 

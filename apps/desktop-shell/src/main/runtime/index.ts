@@ -1,4 +1,5 @@
 export * from "./agent-routes.js";
+export * from "./agent-trace-routes.js";
 export * from "./base-routes.js";
 export * from "./conversation-routes.js";
 export * from "./generated-cache-routes.js";

@@ -205,6 +205,54 @@ describe("api-client", () => {
     ]);
   });
 
+  it("gets agent trace list and detail endpoints", async () => {
+    const requests: Array<{ url: string; method: string }> = [];
+    const client = createApiClient({
+      baseUrl: "http://127.0.0.1:18452",
+      fetchFn: async (input, init) => {
+        requests.push({
+          url: String(input),
+          method: String(init?.method || "GET")
+        });
+        const body = String(input).endsWith("/api/agent/traces/run-one")
+          ? {
+              run_id: "run-one",
+              started_at: "2026-07-07T08:00:00.000Z",
+              input_excerpt: "写第 1 章",
+              selected_skill_id: "body_generate"
+            }
+          : [
+              {
+                run_id: "run-one",
+                started_at: "2026-07-07T08:00:00.000Z",
+                input_excerpt: "写第 1 章",
+                selected_skill_id: "body_generate"
+              }
+            ];
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    });
+
+    const traces = await client.getAgentTraces(25);
+    const detail = await client.getAgentTrace("run-one");
+
+    expect(traces[0]?.run_id).toBe("run-one");
+    expect(detail.selected_skill_id).toBe("body_generate");
+    expect(requests).toEqual([
+      {
+        url: "http://127.0.0.1:18452/api/agent/traces?limit=25",
+        method: "GET"
+      },
+      {
+        url: "http://127.0.0.1:18452/api/agent/traces/run-one",
+        method: "GET"
+      }
+    ]);
+  });
+
   it("posts embedding test requests and parses connection details", async () => {
     const requests: Array<{ url: string; method: string; body: string }> = [];
     const client = createApiClient({

@@ -44,7 +44,11 @@ export function createAgentTraceRecorder(options: AgentTraceRecorderOptions): Ag
 }
 
 export function getAgentTraceFilePath(projectRoot: string, date = new Date()): string {
-  return path.join(path.resolve(projectRoot), TRACE_DIR, `${formatTraceDate(date)}.jsonl`);
+  return path.join(getAgentTraceDirPath(projectRoot), `${formatTraceDate(date)}.jsonl`);
+}
+
+export function getAgentTraceDirPath(projectRoot: string): string {
+  return path.join(path.resolve(projectRoot), TRACE_DIR);
 }
 
 class JsonlAgentTraceRecorder implements AgentTraceRecorder {

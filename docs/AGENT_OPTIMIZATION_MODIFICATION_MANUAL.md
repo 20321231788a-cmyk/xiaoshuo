@@ -1757,3 +1757,47 @@ npm run smoke:desktop
 - P5 当前是保守 facade / shell 拆分，后续可逐步把 `useWorkbenchCoreController.ts` 继续按真实状态所有权拆小。
 - `App.tsx` 仍保留部分 workflow UI glue；下一步可继续迁移到 feature page 或专用 hooks。
 - 下一阶段可进入 P6 Agent 运行检查器 UI，或先继续瘦身 Workbench core controller。
+
+### 16.16 2026-07-07 P6 Agent 运行检查器 UI 已完成
+
+状态：已补齐 trace 查询 API、api-client 方法和 Workbench Agent 运行检查器 UI。
+
+本阶段完成内容：
+
+- `packages/agent-runtime/src/agent-trace.ts` 新增 `getAgentTraceDirPath()`，让 trace writer 和 reader 共用目录解析。
+- `packages/shared/src/api.ts` 新增 `agentTraces` / `agentTrace` API contract，响应沿用 `agentRunTraceSchema`。
+- `packages/api-client/src/client.ts` 新增 `getAgentTraces(limit)` 与 `getAgentTrace(runId)`。
+- 新增 `apps/desktop-shell/src/main/runtime/agent-trace-routes.ts`，实现：
+  - `GET /api/agent/traces?limit=50`
+  - `GET /api/agent/traces/{run_id}`
+- trace route 只读取项目内 `00_设定集/.agent/runs/*.jsonl`，坏 JSONL 行会被忽略，未打开项目返回 400，找不到单条 trace 返回 404。
+- 新增 `apps/workbench/src/views/AgentTraceView.tsx`，展示运行时间、输入摘要、intent、selected skill、selected reason、context blocks、model calls、web sources、save decision、saved paths 和 error。
+- `apps/workbench/src/layout/RightRail.tsx` 新增“运行”入口，中心区域新增 `traces` feature。
+- `apps/workbench/src/styles.css` 新增 trace inspector 两栏布局和响应式样式，长 run id、路径、URL 均可换行。
+- 新增 `apps/desktop-shell/src/main/runtime/agent-trace-routes.test.ts`，扩展 `packages/api-client/src/client.test.ts`。
+
+已验证：
+
+```powershell
+npm test -- apps/desktop-shell/src/main/runtime/agent-trace-routes.test.ts packages/agent-runtime/src/agent-trace.test.ts packages/api-client/src/client.test.ts
+npm run typecheck
+npm test
+npm run build:workbench
+npm run build:desktop
+npm run smoke:desktop
+npx playwright test tests/e2e/project-entry.spec.ts --workers=1 --reporter=list
+```
+
+验收结果：
+
+- P6 要求的 trace list/detail API 已可用。
+- Workbench 已有 Agent 运行检查器页面。
+- UI 只展示 trace 中已经 sanitizied 的摘要、路径、来源和结构化统计，不读取 prompt 全文、附件全文或网页全文。
+- 完整测试集当前为 60 个文件、389 个用例通过。
+- 关键 E2E `project-entry.spec.ts` 6/6 通过。
+
+遗留说明：
+
+- P6 目前只读项目本地 JSONL；后续可加时间范围、失败运行筛选和 trace 搜索。
+- 后续可把运行检查器和具体会话消息互相跳转，但应继续避免展示 prompt / 附件 / 网页全文。
+- 下一阶段可进入 P7 Skill 平台化。

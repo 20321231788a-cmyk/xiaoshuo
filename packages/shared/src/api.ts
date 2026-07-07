@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { agentPlanResponseSchema, generatedCacheDetailSchema } from "./schemas/agent.js";
+import { agentPlanResponseSchema, agentRunTraceSchema, generatedCacheDetailSchema } from "./schemas/agent.js";
 import {
   appConfigSchema,
   licenseAccountKeyResponseSchema,
@@ -53,6 +53,8 @@ export const apiContracts = {
   conversation: { method: "GET", path: "/api/conversations/{conversation_id}", response: conversationDetailSchema },
   skills: { method: "GET", path: "/api/skills", response: z.array(skillDefinitionSchema) },
   agentPlan: { method: "POST", path: "/api/agent/plan", response: agentPlanResponseSchema },
+  agentTraces: { method: "GET", path: "/api/agent/traces", response: z.array(agentRunTraceSchema) },
+  agentTrace: { method: "GET", path: "/api/agent/traces/{run_id}", response: agentRunTraceSchema },
   generatedCache: { method: "GET", path: "/api/agent/generated/cache/{cache_id}", response: generatedCacheDetailSchema },
   jobs: { method: "GET", path: "/api/jobs", response: z.array(jobInfoSchema) },
   job: { method: "GET", path: "/api/jobs/{job_id}", response: jobInfoSchema },

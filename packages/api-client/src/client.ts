@@ -2,6 +2,7 @@ import {
   type AgentStreamEvent,
   agentStreamEventSchema,
   agentPlanResponseSchema,
+  agentRunTraceSchema,
   apiContracts,
   appConfigSchema,
   conversationMessageRequestSchema,
@@ -445,6 +446,16 @@ export function createApiClient(options: ApiClientOptions) {
       requestWithSchema("/api/agent/plan", agentPlanResponseSchema, {
         method: "POST",
         body: JSON.stringify(payload)
+      }),
+    getAgentTraces: (limit = 50) =>
+      requestWithSchema(apiContracts.agentTraces.path, apiContracts.agentTraces.response, {
+        method: apiContracts.agentTraces.method,
+        query: { limit }
+      }),
+    getAgentTrace: (runId: string) =>
+      requestWithSchema(apiContracts.agentTrace.path, agentRunTraceSchema, {
+        method: apiContracts.agentTrace.method,
+        pathParams: { run_id: runId }
       }),
     getSkills: () => requestContract("skills"),
     getSkill: (skillId: string) =>

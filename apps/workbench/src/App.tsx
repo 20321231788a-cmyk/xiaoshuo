@@ -69,6 +69,7 @@ import { LedgerFeaturePage } from "./features/ledger/LedgerFeaturePage.js";
 import { LegacyWorkbenchView, type LegacyWorkbenchTab } from "./features/legacy/LegacyWorkbenchView.js";
 import { LogsFeaturePage } from "./features/revision/LogsFeaturePage.js";
 import { AutoReviewGeneratedToggle, ProjectFileSelect } from "./features/workflow/WorkflowControls.js";
+import { AgentTraceView } from "./views/AgentTraceView.js";
 import { readWorkbenchRuntime } from "./lib/runtime.js";
 import { describeGeneratedSaveAction } from "./lib/workflow.js";
 import { buildRailStatusSummary } from "./lib/railStatus.js";
@@ -106,6 +107,7 @@ type CenterFeature =
   | "ledger"
   | "revision"
   | "skills"
+  | "traces"
   | "consistency"
   | "settings"
   | "terminal";
@@ -267,7 +269,7 @@ export function App() {
       controller.setActiveTab("config");
       return;
     }
-    if (feature === "timeline" || feature === "ledger" || feature === "revision") {
+    if (feature === "timeline" || feature === "ledger" || feature === "revision" || feature === "traces") {
       controller.setActiveTab("overview");
       return;
     }
@@ -893,6 +895,7 @@ function featureTitle(feature: CenterFeature, activeDocument: OpenDocumentTab | 
     ledger: "伏笔",
     revision: "日志",
     skills: "技能",
+    traces: "Agent 运行",
     consistency: "一致性检查",
     settings: "设置",
     terminal: "终端"
@@ -988,6 +991,9 @@ function FeatureContentSurface({
   }
   if (feature === "skills") {
     return <SkillFeaturePage controller={controller} />;
+  }
+  if (feature === "traces") {
+    return <AgentTraceView runtime={controller.runtime} />;
   }
   if (feature === "settings") {
     return <SettingsFeaturePage controller={controller} />;
