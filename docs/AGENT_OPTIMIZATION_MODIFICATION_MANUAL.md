@@ -1684,3 +1684,36 @@ npm run smoke:desktop
 
 - P3 后续可把 graph risks 写入 agent trace，并将 `updatePaths()` 优化为按保存路径增量更新。
 - 下一阶段可进入 P4 Agent Eval，或继续做 P2 workflow context block 更细分接入。
+
+### 16.14 2026-07-07 P4 Agent Eval 已完成
+
+状态：已建立 agent-runtime 的 JSONL 驱动 eval 最小闭环，并把 eval 中暴露的路由/联网/上下文统计问题一并修正。
+
+本阶段完成内容：
+
+- 新增 `packages/agent-runtime/evals/routing-cases.jsonl`，覆盖 intent、skill、联网搜索触发与普通文件操作/聊天边界。
+- 新增 `packages/agent-runtime/evals/save-policy-cases.jsonl`，覆盖生成内容是否自动写入、保存目标、保存模式、确认策略和归档类操作确认。
+- 新增 `packages/agent-runtime/evals/context-cases.jsonl`，覆盖 context priority、budget、`maxChars` 与低优先级丢弃行为。
+- 新增 `packages/agent-runtime/src/routing-eval.test.ts`，用 Vitest 读取 JSONL，要求 routing accuracy >= 90%、skill selection accuracy >= 90%，并校验联网搜索只在明确素材/资料搜索时触发。
+- 新增 `packages/agent-runtime/src/save-policy-eval.test.ts`，用 Vitest 读取 JSONL，要求 write decision accuracy >= 95%、destructive action confirmation accuracy = 100%，并通过空配置与 mock model client 保证 eval 不意外调用模型。
+- `packages/agent-runtime/src/intent-router.ts` 补齐 `scan_pits`、`story_deslop`、`continue_disassemble`、批量章节正文和继续对白等 eval 暴露的语义信号/打分。
+- `packages/agent-runtime/src/web-search.ts` 收紧 `查一下` 触发条件，避免项目内一致性检查误触联网。
+- `packages/agent-runtime/src/kernel/context-assembler.ts` 让 `truncated` 同时反映 `maxChars` 裁剪，而不只反映全局预算溢出。
+- 本阶段曾尝试并行子智能体处理 save-policy eval；Hume 因 503 失败，Feynman 返回后补充了确定性保护，最终由主线程整合收口。
+
+已验证：
+
+```powershell
+npm test -- packages/agent-runtime/src/routing-eval.test.ts packages/agent-runtime/src/intent-router.test.ts packages/agent-runtime/src/web-search.test.ts packages/agent-runtime/src/kernel/context-assembler.test.ts
+npm test -- packages/agent-runtime/src/routing-eval.test.ts packages/agent-runtime/src/save-policy-eval.test.ts packages/agent-runtime/src/generated-save-planner.test.ts
+npm run typecheck
+npm test
+npm run build:desktop
+npm run smoke:desktop
+```
+
+遗留说明：
+
+- P4 后续可把 eval runner 从 Vitest 内联 helper 抽到 `src/evals/` 或 scripts，便于 CI 单独跑 `eval:routing`。
+- 可继续扩充 context eval，加入真实 `body_generate` / `consistency_check` workflow prompt block fixture。
+- 下一阶段可进入 P5 前端 Controller 拆分。

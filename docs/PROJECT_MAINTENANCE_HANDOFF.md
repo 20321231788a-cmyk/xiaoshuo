@@ -1441,6 +1441,39 @@ npm run smoke:desktop
 - `GraphMemory.updatePaths()` 当前仍全量 rebuild，后续可增量化。
 - 若切到 P4，优先建立 body_generate / consistency_check 的 eval fixture，覆盖 graph advisory 不误伤。
 
+### 15.31 2026-07-07 P4 Agent Eval 开发记录
+
+本轮建立 agent-runtime 的 P4 Agent Eval 最小体系，并修复 eval 暴露的若干路由/联网/上下文统计问题。
+
+主要改动：
+
+- 新增 `packages/agent-runtime/evals/routing-cases.jsonl`，覆盖 intent、skill、file operation、chat 与 web-search 触发边界。
+- 新增 `packages/agent-runtime/evals/save-policy-cases.jsonl`，覆盖生成内容写入决策、保存目标/模式、确认策略和归档类操作确认。
+- 新增 `packages/agent-runtime/evals/context-cases.jsonl`，覆盖 ContextAssembler priority、budget、`maxChars` 与低优先级丢弃。
+- 新增 `packages/agent-runtime/src/routing-eval.test.ts`，从 JSONL 读取 eval，检查 routing accuracy >= 90%、skill selection accuracy >= 90%，并确保联网搜索只在明确素材/资料搜索时触发。
+- 新增 `packages/agent-runtime/src/save-policy-eval.test.ts`，检查 write decision accuracy >= 95%、destructive action confirmation accuracy = 100%，并通过空配置与 mock model client 保证 eval 不意外调用模型。
+- `packages/agent-runtime/src/intent-router.ts` 补齐 `scan_pits`、去 AI 味、继续拆书、批量章节和继续对白等语义信号，避免被普通 read_context 或 generic body route 抢走。
+- `packages/agent-runtime/src/web-search.ts` 收紧 `查一下` 触发条件，避免“查一下这章有没有设定矛盾”这类本地检查触发联网。
+- `packages/agent-runtime/src/kernel/context-assembler.ts` 的 `truncated` 现在会反映 per-block `maxChars` 裁剪。
+- 子智能体 Hume 因 503 失败；替代 worker Feynman 返回后补充了确定性保护，save-policy eval 最终由主线程整合收口。
+
+本轮已验证：
+
+```powershell
+npm test -- packages/agent-runtime/src/routing-eval.test.ts packages/agent-runtime/src/intent-router.test.ts packages/agent-runtime/src/web-search.test.ts packages/agent-runtime/src/kernel/context-assembler.test.ts
+npm test -- packages/agent-runtime/src/routing-eval.test.ts packages/agent-runtime/src/save-policy-eval.test.ts packages/agent-runtime/src/generated-save-planner.test.ts
+npm run typecheck
+npm test
+npm run build:desktop
+npm run smoke:desktop
+```
+
+下一步建议：
+
+- 若继续 P4，可把 Vitest 内联 JSONL runner 抽成 `src/evals/` 或 scripts，并加 npm script 方便 CI 单独跑。
+- P4 eval 数据可继续扩充真实 `body_generate` / `consistency_check` workflow context fixture，覆盖 graph advisory 不误伤。
+- 下一大块可进入 P5 前端 Controller 拆分，先拆 hook/controller 边界，保持 UI 行为不变。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

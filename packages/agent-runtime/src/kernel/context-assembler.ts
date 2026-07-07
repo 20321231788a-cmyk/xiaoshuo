@@ -64,7 +64,7 @@ export function assembleContext(blocks: ContextBlock[], options: AssembleContext
     blocks: resultBlocks,
     totalBudget,
     usedChars: text.length,
-    truncated: resultBlocks.some((block, index) => block.includedChars < assembled[index]!.cappedChars)
+    truncated: resultBlocks.some((block, index) => block.includedChars < assembled[index]!.originalChars)
   };
 }
 

@@ -10,7 +10,7 @@ const FILE_OPERATION_WORDS =
   "新建|创建文件|建立文件|写入|保存|保存到|保存为|存到|写进|写到|同步到|追加|插入|替换|改成|改为|覆盖|移动|挪到|归档|重命名|改名|文件名|删除|删掉|移除";
 const READ_CONTEXT_WORDS =
   "总结|分析|查看|看看|读取|读一下|读下|看一下|看下|梳理|对比|当前文档|当前文件|这章|这段|选中|选区|人物设定|章纲|细纲|风格库|题材库|整个项目|前文|最近章节|上下文";
-const SKILL_ACTION_WORDS = `${GENERATION_VERBS}|拆|提取|抽取|分析|润色|润一下|续写|接着写|继续写|继续来一段|仿写|模仿|检查|扫描|配置|设置|设定|建立|创建|对白|对话|片段|正文`;
+const SKILL_ACTION_WORDS = `${GENERATION_VERBS}|拆|提取|抽取|分析|润色|润一下|续写|接着写|继续写|继续来一段|仿写|模仿|检查|扫描|配置|设置|设定|建立|创建|对白|对话|片段|正文|去\\s*AI\\s*味|去AI味|去味|太AI|改写|精修|修文|打磨`;
 
 const MIN_ROUTE_SCORE = 24;
 const STRONG_ROUTE_SCORE = 42;
@@ -440,8 +440,14 @@ function scoreProductFit(
       reasons.push("用户明确要求正文。");
       signals.push("product:body");
     } else if (id === "batch_generate") {
-      score += 48;
-      signals.push("product:body_batch");
+      if (isBatchBodyRequest(routeSignals.normalized)) {
+        score += 120;
+        reasons.push("用户明确要求连续/范围章节正文。");
+        signals.push("product:body_batch_range");
+      } else {
+        score += 48;
+        signals.push("product:body_batch");
+      }
     } else if (/正文|章节正文|成文|body|chapter|写作|续写/.test(haystack)) {
       score += importedPrompt ? 54 : 38;
       signals.push("product:body_related");
@@ -510,9 +516,13 @@ function scoreProductFit(
 
   if (routeSignals.continuation) {
     if (id === "continue_text") {
-      score += 66;
+      score += 92;
       reasons.push("用户要求续写/继续。");
       signals.push("product:continue");
+    } else if (id === "continue_disassemble" && /拆书|拆细纲/.test(routeSignals.normalized)) {
+      score += 96;
+      reasons.push("用户要求继续拆书。");
+      signals.push("product:continue_disassemble");
     } else if (importedPrompt && /写作|风格|文风|对白|对话|正文|片段|续写/.test(haystack)) {
       score += 34;
       signals.push("product:continue_with_prompt_skill");
@@ -520,6 +530,13 @@ function scoreProductFit(
   }
 
   return score;
+}
+
+function isBatchBodyRequest(normalized: string): boolean {
+  return (
+    /(批量|连续|连写|多章|一口气).{0,24}(生成|写|续写|创作).{0,24}(正文|章节|第\s*\d{1,4}\s*章)/.test(normalized) ||
+    /(生成|写|续写|创作).{0,24}第\s*\d{1,4}\s*(?:章)?\s*(?:到|至|[-~－—])\s*(?:第\s*)?\d{1,4}\s*章/.test(normalized)
+  );
 }
 
 function detectRouteSignals(text: string): RouteSignals {
@@ -547,10 +564,11 @@ function detectRouteSignals(text: string): RouteSignals {
   const polish = /(润色|润一下|润一润|精修|修文|优化表达|打磨|去\s*AI\s*味|去AI味|去味|太AI|改写)/i.test(normalized);
   const styleExtract = /(提取|抽取|分析|总结|整理).{0,24}(风格|文风|写法|样文风格)|风格提取|文风分析/.test(normalized);
   const loreExtract = /(提取|抽取|同步|自动提取|整理|归纳).{0,24}(设定|人设|人物|世界观|体系|地图|道具)|整理人设|提取人设/.test(normalized);
-  const extract = styleExtract || loreExtract || /提取|抽取|extract/i.test(normalized);
+  const pitScan = /(扫描|提取|抽取|整理|梳理|追踪).{0,24}(伏笔|坑点|线索)|伏笔|坑点|线索|填坑|埋坑/.test(normalized);
+  const extract = styleExtract || loreExtract || pitScan || /提取|抽取|extract/i.test(normalized);
   const consistency = /一致性|冲突|检查冲突|审稿|设定矛盾|前后矛盾|连续性检查|矛盾检查/.test(normalized);
   const readContext = isReadContextIntent(normalized);
-  const continuation = /续写|接着写|继续写|往下写|续上|补后续|接上文|沿着上文|继续来一段|再来一段/.test(normalized);
+  const continuation = /续写|接着写|继续写|往下写|续上|补后续|接上文|沿着上文|继续来一段|再来一段|继续拆|继续拆书|扩展拆书/.test(normalized);
   const actionableProduct = outlinePlanning || bodyWriting || dialogueOrScene || styleRewrite || polish || extract || consistency || continuation;
   const pureReadContext = readContext && !actionableProduct && !generation && !fileOperation;
   const intent = resolveRouteIntent({

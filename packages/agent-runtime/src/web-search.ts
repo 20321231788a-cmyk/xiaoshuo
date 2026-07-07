@@ -121,7 +121,9 @@ export function parseBingHtml(html: string): WebSearchResult[] {
 
 export function shouldUseWebSearch(text: string): boolean {
   const normalized = String(text || "").toLowerCase();
-  return /联网|网上搜|网络搜索|搜索素材|找素材|查一下|查资料|参考资料|现实资料|资料来源|web\s*search|search\s+the\s+web/.test(normalized);
+  return /联网|网上搜|网络搜索|搜索素材|找素材|查资料|参考资料|现实资料|资料来源|查一下.{0,16}(素材|资料|来源|现实|历史|百科)|web\s*search|search\s+the\s+web/.test(
+    normalized
+  );
 }
 
 export function formatWebSearchContext(results: WebSearchResult[], maxChars: number): string {
