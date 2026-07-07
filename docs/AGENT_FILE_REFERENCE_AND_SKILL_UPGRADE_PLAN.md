@@ -147,7 +147,7 @@
 当前剩余完整验收缺口：
 
 - Workbench skill patch/clone/version/rollback 的 diff 与版本 UI 已进入下一阶段，仍需 e2e 覆盖。
-- trace 尚未完整展示 reference metadata 和 skill 管理事件。
+- trace 尚未完整展示 skill 管理事件。
 - P12 自然语言 skill 管理路由尚未接入。
 - Workbench 引用确认和 skill 编辑仍缺 e2e 覆盖。
 
@@ -172,7 +172,32 @@
 
 当前剩余完整验收缺口：
 
-- trace 尚未完整展示 reference metadata 和 skill 管理事件。
+- trace 尚未完整展示 skill 管理事件。
+- P12 自然语言 skill 管理路由尚未接入。
+- Workbench 引用确认和 skill 编辑仍缺 e2e 覆盖。
+
+### 2026-07-07 Trace reference metadata
+
+状态：已完成，提交 `dfe9dbe`。
+
+落地内容：
+
+- `agentContextBlockTraceSchema` 显式支持 `metadata`，继续保留 passthrough 兼容旧 trace 和扩展字段。
+- `runtime.ts` 在 `context_assembled` trace 记录中透传 reference block 的 `role/path/label/kind/confidence/matched_text/reason`，并把常用字段拍平到顶层，方便 UI 和调试工具读取。
+- `reference-context.ts` 补充 `matched_text` metadata，让 trace 能说明引用从哪个用户文本触发。
+- `AgentTraceView.tsx` 在上下文块列表中展示参考文件路径、类型、置信度和匹配文本。
+- `runtime.test.ts` 新增自动引用“章纲”后 trace metadata 保留测试。
+
+已验证：
+
+- `npm run typecheck -w @xiaoshuo/shared`
+- `npm run typecheck -w @xiaoshuo/agent-runtime`
+- `npm run typecheck -w @xiaoshuo/workbench`
+- `npx vitest run packages/agent-runtime/src/runtime.test.ts packages/agent-runtime/src/kernel/reference-context.test.ts`
+
+当前剩余完整验收缺口：
+
+- skill 管理事件 trace 尚未接入。
 - P12 自然语言 skill 管理路由尚未接入。
 - Workbench 引用确认和 skill 编辑仍缺 e2e 覆盖。
 
