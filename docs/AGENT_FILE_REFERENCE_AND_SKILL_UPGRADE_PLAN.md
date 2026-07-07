@@ -126,6 +126,31 @@
 
 - `npm run typecheck -w @xiaoshuo/workbench`
 
+### 2026-07-07 P6 Workbench project reference confirmation MVP
+
+状态：已完成，提交 `f648ad1`。
+
+落地内容：
+
+- `useWorkbenchCoreController.ts` 在普通对话发送前调用 `client.resolveProjectFiles()`，仅在消息出现 `@`、明确路径、章纲/细纲/大纲/人物/世界观等引用意图时触发。
+- 高置信引用自动透传为 `reference_paths`；中置信候选写入 `pendingReferenceResolution` 并暂停发送，等待用户确认。
+- 新增 `togglePendingReferenceCandidate`、`confirmPendingReferenceResolution`、`sendPendingReferenceResolutionWithoutCandidates`、`discardPendingReferenceResolution` 控制器动作。
+- `ConversationsView.tsx` 新增参考文件确认面板，展示自动引用 chip、候选 checkbox chip、warnings，以及“确认引用发送 / 不引用候选直接发送 / 取消”动作。
+- `LegacyWorkbenchView.tsx` 和 `useConversationController.ts` 透出引用确认状态与动作；右侧栏发送会切到会话页后显示确认面板。
+- `styles.css` 补充引用确认面板和候选 chip 样式，避免长路径撑破布局。
+
+已验证：
+
+- `npm run typecheck -w @xiaoshuo/workbench`
+- `npm run build -w @xiaoshuo/workbench`（通过；Vite 仍提示现有 chunk size warning）
+
+当前剩余完整验收缺口：
+
+- Workbench 还缺 skill patch/clone/version/rollback 的 diff 与版本 UI。
+- trace 尚未完整展示 reference metadata 和 skill 管理事件。
+- P12 自然语言 skill 管理路由尚未接入。
+- Workbench 引用确认和 skill 编辑仍缺 e2e 覆盖。
+
 ## 0. 当前基线
 
 评估时间：2026-07-07。
