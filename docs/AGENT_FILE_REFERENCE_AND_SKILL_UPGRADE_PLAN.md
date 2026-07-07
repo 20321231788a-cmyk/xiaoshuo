@@ -147,8 +147,6 @@
 当前剩余完整验收缺口：
 
 - Workbench skill patch/clone/version/rollback 的 diff 与版本 UI 已进入下一阶段，仍需 e2e 覆盖。
-- trace 尚未完整展示 skill 管理事件。
-- P12 自然语言 skill 管理路由尚未接入。
 - Workbench 引用确认和 skill 编辑仍缺 e2e 覆盖。
 
 ### 2026-07-07 P11 Workbench skill edit/version UI MVP
@@ -172,8 +170,6 @@
 
 当前剩余完整验收缺口：
 
-- trace 尚未完整展示 skill 管理事件。
-- P12 自然语言 skill 管理路由尚未接入。
 - Workbench 引用确认和 skill 编辑仍缺 e2e 覆盖。
 
 ### 2026-07-07 Trace reference metadata
@@ -197,9 +193,32 @@
 
 当前剩余完整验收缺口：
 
-- skill 管理事件 trace 尚未接入。
-- P12 自然语言 skill 管理路由尚未接入。
 - Workbench 引用确认和 skill 编辑仍缺 e2e 覆盖。
+
+### 2026-07-07 P12 natural language skill management preview
+
+状态：已完成，提交 `1c05d4c`。
+
+落地内容：
+
+- `intent-router.ts` 新增 `classifySkillManagementIntent()`，识别创建/生成/做成 skill、修改/编辑 skill、复制/回滚/禁用/恢复 skill 等自然语言请求。
+- `runtime.ts` 在 smart skill orchestration 之前截获 skill 管理请求，避免“修改去AI味技能”被误当作普通去AI味执行。
+- 创建技能会调用 `SkillDraftService.draftSkill()` 返回草稿预览，不自动导入。
+- 修改 imported skill 会先基于 existing skill 生成草稿，再调用 `SkillService.patchSkill(... dry_run: true)` 返回 diff，不自动保存。
+- 修改 builtin skill 返回 `clone_then_patch` 预览，提示先复制为自定义技能；复制、回滚、禁用、恢复均只返回确认所需结构化 payload，不直接执行状态变更。
+- skill 管理预览写入 trace context block，metadata 标记 `role: "skill_management"`、action、target skill 和确认状态。
+- `intent-router.test.ts` 和 `runtime.test.ts` 覆盖触发词分类、创建草稿、builtin 修改保护、imported dry-run patch 不落盘。
+
+已验证：
+
+- `git diff --check`
+- `npm run typecheck -w @xiaoshuo/agent-runtime`
+- `npx vitest run packages/agent-runtime/src/intent-router.test.ts packages/agent-runtime/src/runtime.test.ts`
+
+当前剩余完整验收缺口：
+
+- Workbench 引用确认和 skill 编辑仍缺 e2e 覆盖。
+- 自然语言 skill 管理的“一键确认”UI 还未消费 `skill_result.data.skill_management`，当前需在技能页确认导入/保存/回滚。
 
 ## 0. 当前基线
 
@@ -207,23 +226,20 @@
 
 当前项目已经具备以下基础：
 
-- `packages/agent-runtime/src/chat-runner.ts` 已支持读取 `current_path`、`selection`、附件、项目连续性上下文和向量召回。
-- `packages/agent-runtime/src/skill-runner.ts` 已支持 prompt skill 从 `text`、附件、`source_path` 和固定 fallback 文件读取输入。
-- `packages/agent-runtime/src/runtime.ts` 已有部分中文文件别名路由，例如“章纲 / 细纲 / 大纲 / 正文”。
+- `packages/agent-runtime/src/chat-runner.ts` 已支持读取 `current_path`、`selection`、附件、项目连续性上下文、向量召回和项目文件 reference blocks。
+- `packages/agent-runtime/src/skill-runner.ts` 已支持 prompt skill 从 `text`、附件、`source_path`、`reference_paths` 和固定 fallback 文件读取输入。
+- `packages/agent-runtime/src/runtime.ts` 已透传结构化引用字段，并已接入自然语言 skill 管理预览路由。
+- `packages/agent-runtime/src/kernel/project-file-resolver.ts` / `reference-context.ts` 已提供“用户引用 -> 项目文件路径 -> 上下文块”的统一解析层。
 - `packages/agent-runtime/src/kernel/context-assembler.ts` 已有统一上下文预算装配器。
-- `packages/agent-runtime/src/agent-trace.ts` 和 `packages/shared/src/schemas/agent.ts` 已有 agent trace schema。
-- `apps/desktop-shell/src/main/runtime/skill-routes.ts` 已有 skill 列表、详情、运行、导入、上传、URL 草拟、导入草稿、删除、禁用/恢复、打开导入目录等接口。
-- `packages/skill-service/src/service.ts` 已有导入 skill、保存 imported skill、删除 imported skill、禁用 builtin skill、更新 imported skill description 的能力。
+- `packages/agent-runtime/src/agent-trace.ts` 和 `packages/shared/src/schemas/agent.ts` 已有 agent trace schema，reference metadata 和 skill management metadata 可进入 trace。
+- `apps/desktop-shell/src/main/runtime/skill-routes.ts` 已有 skill 列表、详情、运行、导入、上传、通用草拟、导入草稿、patch/clone/version/rollback、删除、禁用/恢复、打开导入目录等接口。
+- `packages/skill-service/src/service.ts` 已有导入 skill、保存 imported skill、删除 imported skill、禁用 builtin skill、patch/clone/version/rollback 能力。
+- Workbench 已有项目文件引用确认、skill 草稿预览、skill diff/version/rollback 基础 UI。
 
 当前主要缺口：
 
-- 文件引用能力分散在 `chat-runner.ts`、`skill-runner.ts`、`runtime.ts`，没有统一的“用户引用 -> 项目文件路径 -> 上下文块”解析层。
-- 用户提到任意自定义文件名时，无法稳定从项目文件中定位。
-- 上下文 trace 只能看到 block 级信息，无法完整说明“为什么读了这个文件”。
-- skill 只能从 URL/上传/草稿导入，缺少“根据自然语言 / 当前文档 / 当前选区 / 附件生成 skill 草稿”的通用入口。
-- skill 编辑 API 目前只允许修改 imported skill 的 `description`，不能安全修改 `prompt`、`context_requirements`、`linked_targets`、`save_policy` 等核心字段。
-- builtin skill 不能复制为自定义 skill 后再编辑。
-- skill 修改没有版本历史、diff 预览和回滚能力。
+- Workbench 引用确认和 skill 编辑/回滚仍缺 e2e 覆盖。
+- 自然语言 skill 管理已能生成 preview payload，但 Workbench 尚未提供从聊天消息一键确认导入、patch、clone 或 rollback 的 UI。
 
 ## 1. 升级目标
 
