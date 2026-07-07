@@ -9,7 +9,7 @@ export const LEGACY_DISASSEMBLE_LORE_PATH = "00_设定集/设定集/拆书设定
 export const LEGACY_REVERSE_OUTLINE_PATH = "01_大纲/反向细纲.txt";
 export const LEGACY_DISASSEMBLE_DETAIL_PATH = "01_大纲/拆书细纲.txt";
 export const BOOK_MANIFEST_PATH = "manifest.jsonl";
-export const DISASSEMBLE_SOURCE_IMPORT_CHARS = 60_000;
+export const DISASSEMBLE_SOURCE_IMPORT_CHARS = 200_000;
 
 export type DisassembleBookManifest = {
   id: string;

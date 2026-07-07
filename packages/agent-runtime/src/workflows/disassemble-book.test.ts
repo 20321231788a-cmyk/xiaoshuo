@@ -49,6 +49,7 @@ function createWorkflowContext(modelClient: WorkflowRunContext["modelClient"]): 
 describe("DisassembleBookWorkflow", () => {
   it("writes lore and reverse outline files into a new book directory", async () => {
     const responses = ["【人物设定】\n林默：主角，出身寒门。", "第一章：林默入宗门。"];
+    const prompts: string[] = [];
     const workflow = new DisassembleBookWorkflow();
     const result = await workflow.runAgent(
       {
@@ -61,10 +62,16 @@ describe("DisassembleBookWorkflow", () => {
         attachment_ids: []
       },
       createWorkflowContext({
-        requestCompletion: async () => responses.shift() || ""
+        requestCompletion: async (_config, messages) => {
+          prompts.push(messages.map((message) => message.content).join("\n"));
+          return responses.shift() || "";
+        }
       })
     );
-    const book = result.skill_result?.data?.book as { dir?: string; paths?: { lore?: string; reverse_outline?: string } } | undefined;
+    const book = result.skill_result?.data?.book as { dir?: string; title?: string; paths?: { lore?: string; reverse_outline?: string } } | undefined;
+    const title = book?.title || "当前拆书书籍";
+    const loreText = await fs.readFile(path.join(tempDir, book?.dir || "", "拆书设定提取.txt"), "utf8");
+    const reverseText = await fs.readFile(path.join(tempDir, book?.dir || "", "反向细纲.txt"), "utf8");
 
     expect(result.intent).toBe("skill");
     expect(book?.dir).toContain("00_设定集/拆书库/");
@@ -73,6 +80,42 @@ describe("DisassembleBookWorkflow", () => {
     expect(book?.paths?.reverse_outline).toBe(`${book?.dir}/反向细纲.txt`);
     expect(await fs.readFile(path.join(tempDir, "00_设定集", "设定集", "拆书设定提取.txt"), "utf8")).toContain("林默");
     expect(await fs.readFile(path.join(tempDir, "01_大纲", "反向细纲.txt"), "utf8")).toContain("第一章");
+    expect(loreText).toContain(`# 《${title}》拆书设定提取`);
+    expect(loreText).toContain("## 人物设定");
+    expect(loreText).toContain("## 伏笔与可复用素材");
+    expect(reverseText).toContain(`# 《${title}》详细剧情发展`);
+    expect(reverseText).toContain("## 逐章速览");
+    expect(reverseText).toContain("## 大事件拆解");
+    expect(prompts[0]).toContain(`文件首行必须是：# 《${title}》拆书设定提取`);
+    expect(prompts[1]).toContain(`文件首行必须是：# 《${title}》详细剧情发展`);
+  });
+
+  it("imports long disassemble source text beyond the previous 60000 character cap", async () => {
+    const longSource = `${"甲".repeat(90_000)}超过旧上限标记${"乙".repeat(30_000)}`;
+    const sourcePath = path.join(tempDir, "02_正文", "长原文.txt");
+    await fs.mkdir(path.dirname(sourcePath), { recursive: true });
+    await fs.writeFile(sourcePath, longSource, "utf8");
+
+    const workflow = new DisassembleBookWorkflow();
+    const result = await workflow.runAgent(
+      {
+        conversation_id: "",
+        content: "请拆书",
+        current_path: "02_正文/长原文.txt",
+        selection: "",
+        project_context_hint: "",
+        skill_id: "disassemble_book",
+        attachment_ids: []
+      },
+      createWorkflowContext({
+        requestCompletion: async () => "原文未明确。"
+      })
+    );
+    const book = result.skill_result?.data?.book as { dir?: string } | undefined;
+    const archived = await fs.readFile(path.join(tempDir, book?.dir || "", "原文.txt"), "utf8");
+
+    expect(archived).toContain("超过旧上限标记");
+    expect(archived.length).toBeGreaterThan(100_000);
   });
 
   it("lists existing disassemble books", async () => {

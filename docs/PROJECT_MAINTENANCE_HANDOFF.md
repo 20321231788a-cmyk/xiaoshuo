@@ -1669,6 +1669,38 @@ git diff --check
 - Workbench 引用确认和 skill 编辑/回滚仍建议补专门 Playwright e2e；优先给引用 chip、候选确认面板、skill diff/rollback 按钮补稳定 `data-testid`。
 - 若后续支持 workflow/job/external skill 的用户自定义，必须先设计 manifest 白名单、来源签名、handler registry 和隔离执行策略，不要复用 prompt clone/import 通道。
 
+### 15.37 2026-07-07 拆书格式与 20 万字导入记录
+
+本轮按拆书样例文件的“逐章速览 + 大事件拆解”形态，收紧一键拆书落盘格式，并把拆书导入/爬取默认字数从 6 万扩到 20 万。
+
+主要改动：
+
+- `disassemble_book` workflow 为 `拆书设定提取.txt` 和 `反向细纲.txt` 注入硬格式指令，不再只给泛泛的“提取设定 / 提取剧情推进”。
+- `拆书设定提取.txt` 固定以 `# 《书名》拆书设定提取` 开头，并保留 `人物设定`、`体系设定`、`地图设定`、`道具设定`、`势力与关系`、`伏笔与可复用素材` 六个二级标题。
+- `反向细纲.txt` 固定以 `# 《书名》详细剧情发展` 开头，并保留 `逐章速览`、`大事件拆解`、`全书结构总览` 三个二级标题；大事件要求包含章节范围、高潮和小事件 `起 / 承 / 转 / 合`。
+- 落盘前新增拆书输出归一化：去除 Markdown 代码块，兼容旧式 `【人物设定】` 标题，缺失必需标题时自动补齐，避免生成结果破坏文件结构。
+- `DISASSEMBLE_SOURCE_IMPORT_CHARS` 从 `60_000` 提升到 `200_000`；上传附件、按项目文件读取拆书源、从已归档拆书库重新一键拆书，统一使用 20 万字上限。
+- 联网拆书爬虫默认 `min_chars` 从 `60_000` 提升到 `200_000`；shared job schema 默认值和 Workbench “最少字数”输入默认值同步为 `200000`。
+- 本轮只扩大拆书源导入和爬取默认值；Nuwa 蒸馏、一致性检查、扫伏笔等非拆书主流程仍保留各自原有上限，避免无关长上下文任务超时。
+- 补充 `DisassembleBookWorkflow` 回归测试：校验格式指令进入模型 prompt、落盘文件包含固定标题骨架，以及超过旧 6/8 万位置的原文会进入新的拆书归档。
+
+本轮已验证：
+
+```powershell
+npx vitest run packages/agent-runtime/src/workflows/disassemble-book.test.ts packages/crawler-service/src/crawler.test.ts
+npx vitest run packages/agent-runtime/src/runtime.test.ts
+npm run typecheck -w @xiaoshuo/agent-runtime
+npm run typecheck -w @xiaoshuo/crawler-service
+npm run typecheck -w @xiaoshuo/shared
+npm run typecheck -w @xiaoshuo/workbench
+```
+
+验收结果：
+
+- 一键拆书的两个产物现在都有固定 Markdown 文件骨架，适配“详细剧情发展”类拆书文件。
+- 拆书上传/项目文件读取/已归档源书重跑不再卡在旧 6 万或 8 万上限。
+- 相关 workflow、crawler 和 runtime 回归测试通过。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

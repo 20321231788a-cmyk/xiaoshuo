@@ -105,7 +105,7 @@ const SOURCES: Record<string, SourceConfig> = {
 
 const SEARCH_SOURCE = "bing";
 const CUSTOM_SOURCE = "custom";
-const DEFAULT_MIN_IMPORT_CHARS = 60_000;
+const DEFAULT_MIN_IMPORT_CHARS = 200_000;
 
 export function normalizeNovelDirectoryUrl(rawUrl: string, sourceHint = ""): NovelSourceResolverResult | null {
   try {

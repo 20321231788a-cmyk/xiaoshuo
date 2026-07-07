@@ -72,7 +72,7 @@ export function DisassembleFeaturePage({ controller, disassemblyUi }: { controll
   const [crawlSourceMessage, setCrawlSourceMessage] = useState("");
   const [crawlStartChapter, setCrawlStartChapter] = useState(1);
   const [crawlMaxChapters, setCrawlMaxChapters] = useState(30);
-  const [crawlMinChars, setCrawlMinChars] = useState(60000);
+  const [crawlMinChars, setCrawlMinChars] = useState(200000);
   const [instruction, setInstruction] = useState("");
   const [fusionEnabled, setFusionEnabled] = useState(true);
   const [fusionPrompt, setFusionPrompt] = useState("请抽象融合所选拆书的核心设定、剧情骨架、人物驱动力与题材氛围，输出一个去同质化、可继续展开的原创候选方案。禁止复写原文句式、专有名词、可识别桥段和固定角色关系。");
