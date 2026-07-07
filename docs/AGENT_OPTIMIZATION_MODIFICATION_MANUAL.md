@@ -1801,3 +1801,43 @@ npx playwright test tests/e2e/project-entry.spec.ts --workers=1 --reporter=list
 - P6 目前只读项目本地 JSONL；后续可加时间范围、失败运行筛选和 trace 搜索。
 - 后续可把运行检查器和具体会话消息互相跳转，但应继续避免展示 prompt / 附件 / 网页全文。
 - 下一阶段可进入 P7 Skill 平台化。
+
+### 16.17 2026-07-07 P7 Skill 平台化第一刀已完成
+
+状态：已完成版本化 skill manifest schema、导入兼容层和 Workbench 基础展示/导出，不改变现有 prompt / workflow / job 执行路径。
+
+本阶段完成内容：
+
+- `packages/shared/src/schemas/skill.ts` 新增 `skillManifestSchema`、`skillModelPolicySchema`、`skillSavePolicySchema` 以及对应类型导出。
+- `skillDefinitionSchema` 保留旧字段，同时允许 `version`、`input_schema`、`output_schema`、`tools`、`model_policy`、`save_policy`、`eval_cases`、`manifest` 等 manifest 兼容字段。
+- `packages/skill-service/src/service.ts` 增加 `withManifest()` 归一化层；内置技能和导入技能在 list / save 时都会带 top-level 字段与 nested `manifest` 镜像。
+- 外部 `SKILL.md` / markdown / zip 导入继续兼容旧 frontmatter；无 manifest 的导入默认 `version = "1.0.0"`，`save_policy.requires_confirmation = true`，并继续强制为 prompt skill。
+- `SKILL.md` frontmatter 现在可解析 `version`、schema、`tools`、`model_policy`、`save_policy`、`eval_cases` 等简单 manifest 元数据。
+- Workbench 技能卡片展示版本号，技能导出的 `SKILL.md` 会写出 version、tools、schema、model/save policy 和 eval cases，便于再次导入时 round-trip。
+- 新增 shared schema 测试和 skill-service 导入测试，覆盖 manifest 默认值、旧 `SKILL.md` 兼容和带 manifest 元数据的导入。
+
+已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/skill-service
+npm run typecheck -w @xiaoshuo/workbench
+npm test -- packages/shared/src/schemas.test.ts packages/skill-service/src/service.test.ts
+npm run typecheck
+npm test
+npm run build:desktop
+npm run smoke:desktop
+npm run build -w @xiaoshuo/workbench
+```
+
+验收结果：
+
+- `skillManifestSchema` 已作为跨边界契约进入 `@xiaoshuo/shared`。
+- 旧 `SKILL.md` 仍可导入，默认版本和保存确认策略符合 P7 要求。
+- 完整测试集当前为 60 个文件、391 个用例通过。
+
+遗留说明：
+
+- 本阶段只做 manifest 存储、导入和展示兼容；`model_policy`、`save_policy`、`tools`、`input_schema`、`output_schema` 尚未被 runtime 执行。
+- 外部导入仍保守强制为 prompt skill，尚不允许导入真正的 workflow / job / external handler。
+- frontmatter 解析仍是浅解析，复杂嵌套建议继续使用 JSON 单行字段。
+- 后续 P7 可继续把内置技能拆成独立 manifest 文件，并逐步让 runtime 消费 `model_policy` 与 `save_policy`。

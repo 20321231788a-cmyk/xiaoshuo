@@ -44,12 +44,55 @@ describe("skill-service", () => {
 
     expect(skill.id).toBe("fancy_skill");
     expect(skill.name).toBe("Fancy Skill");
+    expect(skill.version).toBe("1.0.0");
+    expect(skill.manifest?.save_policy.requires_confirmation).toBe(true);
     const importedPath = path.join(tempDir, "00_设定集", ".agent", "skills", "imported.json");
     const saved = JSON.parse(await fs.readFile(importedPath, "utf8"));
     expect(saved).toHaveLength(1);
     expect(saved[0].id).toBe("fancy_skill");
+    expect(saved[0].manifest.version).toBe("1.0.0");
     const sourceText = await fs.readFile(path.join(tempDir, "00_设定集", ".agent", "skills", "sources", "fancy_skill", "source.md"), "utf8");
     expect(sourceText).toContain("Prompt body");
+  });
+
+  it("imports versioned manifest metadata from SKILL.md frontmatter", async () => {
+    const skillDir = path.join(tempDir, "manifest-skill");
+    await fs.mkdir(skillDir, { recursive: true });
+    await fs.writeFile(
+      path.join(skillDir, "SKILL.md"),
+      [
+        "---",
+        "id: manifest_skill",
+        "name: Manifest Skill",
+        "description: manifest description",
+        "version: 2.3.0",
+        "context_requirements: [project_state, style]",
+        "linked_targets: [\"02_正文/manifest.txt\"]",
+        "tools: [web_search]",
+        "model_policy: {\"line\":\"secondary\",\"temperature\":0.2,\"max_input_chars\":12000}",
+        "save_policy: {\"default_mode\":\"append\",\"auto_commit\":true,\"requires_confirmation\":false}",
+        "eval_cases: [routing-cases.jsonl]",
+        "---",
+        "",
+        "Manifest prompt"
+      ].join("\n"),
+      "utf8"
+    );
+    const service = new SkillService({ projectRoot: tempDir });
+
+    const skill = await service.importSkill({ path: skillDir });
+
+    expect(skill).toMatchObject({
+      id: "manifest_skill",
+      version: "2.3.0",
+      handler_type: "prompt",
+      context_requirements: ["project_state", "style"],
+      linked_targets: ["02_正文/manifest.txt"],
+      tools: ["web_search"],
+      eval_cases: ["routing-cases.jsonl"]
+    });
+    expect(skill.manifest?.model_policy).toMatchObject({ line: "secondary", temperature: 0.2, max_input_chars: 12000 });
+    expect(skill.manifest?.save_policy).toMatchObject({ default_mode: "append", auto_commit: true, requires_confirmation: false });
   });
 
   it("imports uploaded markdown and zip skills safely", async () => {

@@ -149,7 +149,7 @@ export function SkillFeaturePage({ controller }: { controller: WorkbenchControll
                     disabled={controller.operationsBusy}
                   />
                 )}
-                <small>{skill.builtin ? "默认技能" : "导入技能"} · {skill.input_mode} · {skill.handler_type} · {skill.id}</small>
+                <small>{skill.builtin ? "默认技能" : "导入技能"} · v{skill.version || skill.manifest?.version || "1.0.0"} · {skill.input_mode} · {skill.handler_type} · {skill.id}</small>
                 {skill.disabled && <em>AI 自动判断时会跳过它，尝试调用相近可用技能。</em>}
               </div>
               <div className="xw-skill-actions">

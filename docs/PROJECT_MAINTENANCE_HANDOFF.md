@@ -1553,6 +1553,45 @@ npx playwright test tests/e2e/project-entry.spec.ts --workers=1 --reporter=list
 - P6 后续可加 trace 过滤、搜索、失败-only 视图，以及从会话消息跳转到对应 run。
 - 下一大块可进入 P7 Skill 平台化，先从 manifest schema 和内置 skill manifest 兼容层开始。
 
+### 15.34 2026-07-07 P7 Skill 平台化第一刀记录
+
+本轮完成 P7 的保守第一刀：先把 skill manifest 变成共享契约和导入/展示兼容层，保持现有运行路径不变。
+
+主要改动：
+
+- `packages/shared/src/schemas/skill.ts` 新增 `skillManifestSchema`、`skillModelPolicySchema`、`skillSavePolicySchema` 和对应类型。
+- `skillDefinitionSchema` 继续兼容旧 flat skill，同时新增 `version`、schema、tools、model/save policy、eval cases 与 nested `manifest` 字段。
+- `packages/skill-service/src/service.ts` 新增 manifest 归一化，内置技能与导入技能都会补齐 `version = "1.0.0"`、默认 `model_policy` 和默认 `save_policy.requires_confirmation = true`。
+- 导入外部 `SKILL.md` 继续走 prompt skill 安全路径，但可读取 version、tools、input/output schema、model/save policy、eval cases 等简单 frontmatter 字段。
+- 保存导入技能前重新归一化，`00_设定集/.agent/skills/imported.json` 会持久化 manifest。
+- Workbench 技能卡片显示版本号；导出 `SKILL.md` 时写入 manifest 相关 frontmatter，便于再导入。
+- 扩展 shared schema 测试与 skill-service 导入测试，覆盖旧 `SKILL.md` 默认值和带 manifest 元数据的导入。
+
+本轮已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/skill-service
+npm run typecheck -w @xiaoshuo/workbench
+npm test -- packages/shared/src/schemas.test.ts packages/skill-service/src/service.test.ts
+npm run typecheck
+npm test
+npm run build:desktop
+npm run smoke:desktop
+npm run build -w @xiaoshuo/workbench
+```
+
+验收结果：
+
+- P7 要求的版本化 manifest schema 已进入 shared contract。
+- 无 manifest 的 `SKILL.md` 导入保持兼容，并默认需要保存确认。
+- 完整测试集当前为 60 个文件、391 个用例通过。
+
+下一步建议：
+
+- P7 后续可将内置技能迁出 `BUILTIN_SKILLS` 内联数组，拆成独立 manifest / prompt 文件。
+- 让 `PromptSkillRunner` 或 runtime 逐步消费 `model_policy`、`save_policy` 和 `tools`，但每一步都要有 trace/eval 覆盖。
+- 若继续平台化 workflow/job/external skill 导入，仍应先设计白名单和签名/来源校验，避免直接执行外部 handler。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

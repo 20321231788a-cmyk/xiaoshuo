@@ -1,15 +1,59 @@
 import { z } from "zod";
 
 import { jobInfoSchema } from "./job.js";
+
+export const skillModelPolicySchema = z
+  .object({
+    line: z.enum(["primary", "secondary", "auto"]).default("primary"),
+    temperature: z.number().optional(),
+    max_input_chars: z.number().optional()
+  })
+  .passthrough();
+
+export const skillSavePolicySchema = z
+  .object({
+    default_mode: z.enum(["replace", "append"]).default("replace"),
+    auto_commit: z.boolean().default(false),
+    requires_confirmation: z.boolean().default(true)
+  })
+  .passthrough();
+
+export const skillManifestSchema = z
+  .object({
+    id: z.string(),
+    version: z.string().default("1.0.0"),
+    name: z.string(),
+    description: z.string(),
+    handler_type: z.enum(["prompt", "workflow", "job", "external"]),
+    input_mode: z.string().default("text"),
+    input_schema: z.record(z.unknown()).default({}),
+    output_schema: z.record(z.unknown()).default({}),
+    context_requirements: z.array(z.string()).default([]),
+    linked_targets: z.array(z.string()).default([]),
+    tools: z.array(z.string()).default([]),
+    model_policy: skillModelPolicySchema.default({}),
+    save_policy: skillSavePolicySchema.default({}),
+    eval_cases: z.array(z.string()).default([])
+  })
+  .passthrough();
+
 export const skillDefinitionSchema = z
   .object({
     id: z.string(),
+    version: z.string().optional(),
     name: z.string(),
     description: z.string(),
     input_mode: z.string(),
+    input_schema: z.record(z.unknown()).optional(),
+    output_schema: z.record(z.unknown()).optional(),
     context_requirements: z.array(z.string()),
     handler_type: z.enum(["prompt", "workflow", "job", "external"]),
     linked_targets: z.array(z.string()).default([]),
+    tools: z.array(z.string()).optional(),
+    model_policy: skillModelPolicySchema.optional(),
+    save_policy: skillSavePolicySchema.optional(),
+    eval_cases: z.array(z.string()).optional(),
+    manifest: skillManifestSchema.optional(),
     prompt: z.string().default(""),
     imported_from: z.string().default(""),
     writable: z.boolean().default(false),
@@ -92,6 +136,9 @@ export const skillRunResponseSchema = z
   .passthrough();
 
 export type SkillDefinition = z.infer<typeof skillDefinitionSchema>;
+export type SkillManifest = z.infer<typeof skillManifestSchema>;
+export type SkillModelPolicy = z.infer<typeof skillModelPolicySchema>;
+export type SkillSavePolicy = z.infer<typeof skillSavePolicySchema>;
 export type SkillImportRequest = z.infer<typeof skillImportRequestSchema>;
 export type SkillUpdateRequest = z.infer<typeof skillUpdateRequestSchema>;
 export type SkillDraftFromUrlRequest = z.infer<typeof skillDraftFromUrlRequestSchema>;

@@ -582,16 +582,24 @@ export function formatSkillResultData(value: unknown): string {
 }
 
 function formatSkillMarkdown(skill: SkillDefinition): string {
+  const manifest = skill.manifest;
   const metadata = [
     "---",
     `name: ${yamlString(skill.name || skill.id || "skill")}`,
     `description: ${yamlString(skill.description || "导出的 ArcWriter 技能")}`,
     `id: ${yamlString(skill.id || "")}`,
+    `version: ${yamlString(skill.version || manifest?.version || "1.0.0")}`,
     `input_mode: ${yamlString(skill.input_mode || "text")}`,
     `handler_type: ${yamlString(skill.handler_type || "prompt")}`,
     `writable: ${skill.writable ? "true" : "false"}`,
     `context_requirements: [${(skill.context_requirements || []).map(yamlString).join(", ")}]`,
     `linked_targets: [${(skill.linked_targets || []).map(yamlString).join(", ")}]`,
+    `tools: [${(skill.tools || manifest?.tools || []).map(yamlString).join(", ")}]`,
+    `input_schema: ${JSON.stringify(skill.input_schema || manifest?.input_schema || {})}`,
+    `output_schema: ${JSON.stringify(skill.output_schema || manifest?.output_schema || {})}`,
+    `model_policy: ${JSON.stringify(skill.model_policy || manifest?.model_policy || { line: "primary" })}`,
+    `save_policy: ${JSON.stringify(skill.save_policy || manifest?.save_policy || { default_mode: "replace", auto_commit: false, requires_confirmation: true })}`,
+    `eval_cases: [${(skill.eval_cases || manifest?.eval_cases || []).map(yamlString).join(", ")}]`,
     `imported_from: ${yamlString(skill.imported_from || "arcwriter-export")}`,
     "---"
   ].join("\n");

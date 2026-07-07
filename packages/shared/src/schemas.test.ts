@@ -10,6 +10,8 @@ import {
   projectChromeSnapshotSchema,
   projectOpenRequestSchema,
   projectRenameRequestSchema,
+  skillDefinitionSchema,
+  skillManifestSchema,
   terminalCreateRequestSchema
 } from "./index.js";
 
@@ -113,6 +115,29 @@ describe("shared schemas", () => {
 
     expect(request.cols).toBe(100);
     expect(request.rows).toBe(30);
+  });
+
+  it("accepts versioned skill manifests with policy defaults", () => {
+    const manifest = skillManifestSchema.parse({
+      id: "outline_generate",
+      name: "大纲",
+      description: "生成大纲",
+      handler_type: "prompt"
+    });
+
+    expect(manifest.version).toBe("1.0.0");
+    expect(manifest.input_mode).toBe("text");
+    expect(manifest.model_policy.line).toBe("primary");
+    expect(manifest.save_policy.requires_confirmation).toBe(true);
+    expect(
+      skillDefinitionSchema.parse({
+        ...manifest,
+        context_requirements: [],
+        linked_targets: [],
+        prompt: "Prompt",
+        manifest
+      }).manifest?.version
+    ).toBe("1.0.0");
   });
 
   it("accepts desktop local state snapshots", () => {

@@ -3,9 +3,11 @@ import path from "node:path";
 import AdmZip from "adm-zip";
 import * as cheerio from "cheerio";
 import {
+  skillManifestSchema,
   type SkillDefinition,
   type SkillImportDraftRequest,
-  type SkillImportRequest
+  type SkillImportRequest,
+  type SkillManifest
 } from "@xiaoshuo/shared";
 
 const AGENT_DIR = "00_设定集/.agent";
@@ -301,15 +303,15 @@ export class SkillService {
     const merged = new Map<string, SkillDefinition>(
       [...this.builtins.entries()].map(([id, skill]) => [
         id,
-        {
+        this.withManifest({
           ...skill,
           builtin: true,
           disabled: disabledBuiltins.has(id)
-        }
+        })
       ])
     );
     for (const skill of imported) {
-      merged.set(skill.id, { ...skill, builtin: false, disabled: false });
+      merged.set(skill.id, this.withManifest({ ...skill, builtin: false, disabled: false }, { forcePrompt: true }));
     }
     return [...merged.values()].sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
   }
@@ -534,13 +536,14 @@ export class SkillService {
       sourceText: string;
     }
   ): Promise<SkillDefinition> {
+    const normalized = this.normalizeSkill(skill, skill.imported_from || options.sourceName);
     const current = new Map((await this.loadImportedSkills()).map((item) => [item.id, item]));
-    current.set(skill.id, skill);
+    current.set(normalized.id, normalized);
     await this.saveImportedSkills([...current.values()]);
     if (options.sourceText.trim()) {
-      await this.saveSkillSourceSnapshot(skill, options.sourceName, options.sourceText);
+      await this.saveSkillSourceSnapshot(normalized, options.sourceName, options.sourceText);
     }
-    return skill;
+    return normalized;
   }
 
   public normalizeSkill(skill: SkillDefinition, importedFrom: string): SkillDefinition {
@@ -549,19 +552,68 @@ export class SkillService {
     if (!prompt) {
       throw new Error("skill prompt 不能为空");
     }
-    return {
+    return this.withManifest({
       id: skillId || "imported_skill",
       name: (skill.name || skillId || "imported_skill").trim().slice(0, 80),
       description: normalizeSkillDescription(skill.description || "导入的外部 skill"),
       input_mode: skill.input_mode || "text",
+      input_schema: skill.input_schema,
+      output_schema: skill.output_schema,
       context_requirements: normalizeStringArray(skill.context_requirements, 12, ["project_state", "conversation"]),
       handler_type: "prompt",
       linked_targets: normalizeStringArray(skill.linked_targets, 8, []),
+      tools: normalizeStringArray(skill.tools, 12, []),
+      model_policy: skill.model_policy,
+      save_policy: skill.save_policy,
+      eval_cases: normalizeStringArray(skill.eval_cases, 20, []),
+      manifest: skill.manifest,
       prompt,
       imported_from: (importedFrom || skill.imported_from || "").trim().slice(0, 500),
       writable: Boolean(skill.writable),
       builtin: false,
       disabled: false
+    }, { forcePrompt: true });
+  }
+
+  private withManifest(skill: SkillDefinition, options: { forcePrompt?: boolean } = {}): SkillDefinition {
+    const handlerType = options.forcePrompt ? "prompt" : normalizeHandlerType(skill.handler_type, "prompt");
+    const manifest = buildSkillManifest({
+      ...skill.manifest,
+      id: skill.id || skill.manifest?.id || skill.name || "imported_skill",
+      version: skill.version || skill.manifest?.version || "1.0.0",
+      name: skill.name || skill.manifest?.name || skill.id || "imported_skill",
+      description: skill.description || skill.manifest?.description || "导入的外部 skill",
+      input_mode: skill.input_mode || skill.manifest?.input_mode || "text",
+      input_schema: recordField(skill.input_schema ?? skill.manifest?.input_schema),
+      output_schema: recordField(skill.output_schema ?? skill.manifest?.output_schema),
+      context_requirements: normalizeStringArray(skill.context_requirements ?? skill.manifest?.context_requirements, 12, ["project_state", "conversation"]),
+      handler_type: handlerType,
+      linked_targets: normalizeStringArray(skill.linked_targets ?? skill.manifest?.linked_targets, 12, []),
+      tools: normalizeStringArray(skill.tools ?? skill.manifest?.tools, 12, []),
+      model_policy: recordField(skill.model_policy ?? skill.manifest?.model_policy),
+      save_policy: recordField(skill.save_policy ?? skill.manifest?.save_policy),
+      eval_cases: normalizeStringArray(skill.eval_cases ?? skill.manifest?.eval_cases, 20, [])
+    });
+    return {
+      ...skill,
+      id: manifest.id,
+      version: manifest.version,
+      name: manifest.name,
+      description: manifest.description,
+      input_mode: manifest.input_mode,
+      input_schema: manifest.input_schema,
+      output_schema: manifest.output_schema,
+      context_requirements: manifest.context_requirements,
+      handler_type: handlerType,
+      linked_targets: manifest.linked_targets,
+      tools: manifest.tools,
+      model_policy: manifest.model_policy,
+      save_policy: manifest.save_policy,
+      eval_cases: manifest.eval_cases,
+      manifest: {
+        ...manifest,
+        handler_type: handlerType
+      }
     };
   }
 
@@ -649,7 +701,7 @@ export class SkillService {
   }
 
   public parseExternalSkill(source: string, raw: string): SkillDefinition {
-    const metadata: Record<string, string> = {};
+    const metadata: Record<string, unknown> = {};
     let body = raw;
     const frontmatter = raw.match(/^---\s*\n(.*?)\n---\s*\n(.*)$/s);
     if (frontmatter) {
@@ -660,24 +712,52 @@ export class SkillService {
           continue;
         }
         const key = line.slice(0, index).trim();
-        const value = line.slice(index + 1).trim().replace(/^"|"$/g, "");
-        metadata[key] = value;
+        metadata[key] = parseFrontmatterValue(line.slice(index + 1).trim());
       }
     }
-    const baseName = metadata.name || path.basename(source);
-    const skillId = normalizeSkillId(baseName) || `imported_${Math.abs(hashString(source))}`;
-    return {
+    const manifestMetadata = isRecord(metadata.manifest) ? metadata.manifest : {};
+    const baseName = stringField(manifestMetadata.name ?? metadata.name) || path.basename(source);
+    const skillId = normalizeSkillId(stringField(manifestMetadata.id ?? metadata.id) || baseName) || `imported_${Math.abs(hashString(source))}`;
+    const savePolicy = recordField(manifestMetadata.save_policy ?? metadata.save_policy);
+    const manifest = buildSkillManifest({
       id: skillId,
-      name: metadata.name || path.basename(source),
-      description: metadata.description || "导入的外部 skill",
-      input_mode: "text",
-      context_requirements: ["project_state", "conversation"],
+      version: stringField(manifestMetadata.version ?? metadata.version) || "1.0.0",
+      name: baseName,
+      description: normalizeSkillDescription(stringField(manifestMetadata.description ?? metadata.description) || "导入的外部 skill"),
+      input_mode: stringField(manifestMetadata.input_mode ?? metadata.input_mode) || "text",
+      input_schema: recordField(manifestMetadata.input_schema ?? metadata.input_schema),
+      output_schema: recordField(manifestMetadata.output_schema ?? metadata.output_schema),
+      context_requirements: normalizeStringArray(manifestMetadata.context_requirements ?? metadata.context_requirements, 12, ["project_state", "conversation"]),
       handler_type: "prompt",
-      linked_targets: [],
+      linked_targets: normalizeStringArray(manifestMetadata.linked_targets ?? metadata.linked_targets, 8, []),
+      tools: normalizeStringArray(manifestMetadata.tools ?? metadata.tools, 12, []),
+      model_policy: recordField(manifestMetadata.model_policy ?? metadata.model_policy),
+      save_policy: {
+        ...savePolicy,
+        requires_confirmation: booleanField(savePolicy.requires_confirmation ?? metadata.requires_confirmation, true)
+      },
+      eval_cases: normalizeStringArray(manifestMetadata.eval_cases ?? metadata.eval_cases, 20, [])
+    });
+    return this.withManifest({
+      id: manifest.id,
+      version: manifest.version,
+      name: manifest.name,
+      description: manifest.description,
+      input_mode: manifest.input_mode,
+      input_schema: manifest.input_schema,
+      output_schema: manifest.output_schema,
+      context_requirements: manifest.context_requirements,
+      handler_type: "prompt",
+      linked_targets: manifest.linked_targets,
+      tools: manifest.tools,
+      model_policy: manifest.model_policy,
+      save_policy: manifest.save_policy,
+      eval_cases: manifest.eval_cases,
+      manifest,
       prompt: body.trim().slice(0, 12000),
       imported_from: source,
       writable: false
-    };
+    }, { forcePrompt: true });
   }
 
   public async fetchUrlText(url: string): Promise<{ text: string; sourceName: string }> {
@@ -728,8 +808,35 @@ export class SkillService {
   }
 }
 
-function normalizeStringArray(values: readonly string[] | undefined, limit: number, fallback: string[]): string[] {
-  const list = (values || []).map((item) => String(item).trim()).filter(Boolean).slice(0, limit);
+function buildSkillManifest(input: Record<string, unknown> & { id: unknown; name: unknown; description: unknown; handler_type: unknown }): SkillManifest {
+  return skillManifestSchema.parse({
+    id: normalizeSkillId(stringField(input.id)) || "imported_skill",
+    version: stringField(input.version) || "1.0.0",
+    name: stringField(input.name).slice(0, 80) || "imported_skill",
+    description: normalizeSkillDescription(stringField(input.description) || "导入的外部 skill"),
+    handler_type: normalizeHandlerType(input.handler_type, "prompt"),
+    input_mode: stringField(input.input_mode) || "text",
+    input_schema: recordField(input.input_schema),
+    output_schema: recordField(input.output_schema),
+    context_requirements: normalizeStringArray(input.context_requirements, 12, ["project_state", "conversation"]),
+    linked_targets: normalizeStringArray(input.linked_targets, 12, []),
+    tools: normalizeStringArray(input.tools, 12, []),
+    model_policy: recordField(input.model_policy),
+    save_policy: {
+      ...recordField(input.save_policy),
+      requires_confirmation: booleanField(recordField(input.save_policy).requires_confirmation, true)
+    },
+    eval_cases: normalizeStringArray(input.eval_cases, 20, [])
+  });
+}
+
+function normalizeStringArray(values: unknown, limit: number, fallback: string[]): string[] {
+  const source = Array.isArray(values)
+    ? values
+    : typeof values === "string"
+      ? values.split(",")
+      : [];
+  const list = source.map((item) => String(item).trim().replace(/^"|"$/g, "")).filter(Boolean).slice(0, limit);
   return list.length ? list : [...fallback];
 }
 
@@ -748,6 +855,58 @@ function normalizeSkillId(value: string): string {
     .replace(/-/g, "_")
     .replace(/[^a-z0-9_]+/g, "_")
     .replace(/^_+|_+$/g, "");
+}
+
+function normalizeHandlerType(value: unknown, fallback: SkillDefinition["handler_type"]): SkillDefinition["handler_type"] {
+  const normalized = stringField(value).toLowerCase();
+  return normalized === "prompt" || normalized === "workflow" || normalized === "job" || normalized === "external" ? normalized : fallback;
+}
+
+function parseFrontmatterValue(value: string): unknown {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+    try {
+      return JSON.parse(trimmed) as unknown;
+    } catch {
+      if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+        return trimmed.slice(1, -1).split(",").map((item) => item.trim().replace(/^"|"$/g, "")).filter(Boolean);
+      }
+    }
+  }
+  const unquoted = trimmed.replace(/^"|"$/g, "");
+  if (/^(true|false)$/i.test(unquoted)) {
+    return unquoted.toLowerCase() === "true";
+  }
+  return unquoted;
+}
+
+function stringField(value: unknown): string {
+  return value === undefined || value === null ? "" : String(value).trim();
+}
+
+function recordField(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? { ...value } : {};
+}
+
+function booleanField(value: unknown, fallback: boolean): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  const normalized = stringField(value).toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  return fallback;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function hashString(value: string): number {
