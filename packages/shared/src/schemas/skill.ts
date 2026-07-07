@@ -74,6 +74,31 @@ export const skillUpdateRequestSchema = z
   })
   .passthrough();
 
+export const skillDraftSourceKindSchema = z.enum([
+  "instruction",
+  "current_document",
+  "selection",
+  "attachment",
+  "url",
+  "markdown",
+  "existing_skill"
+]);
+
+export const skillDraftRequestSchema = z
+  .object({
+    kind: skillDraftSourceKindSchema.default("instruction"),
+    instruction: z.string().max(12000).default(""),
+    text: z.string().max(120000).default(""),
+    url: z.string().max(2000).default(""),
+    current_path: z.string().default(""),
+    selection: z.string().default(""),
+    attachment_ids: z.array(z.string()).default([]),
+    source_skill_id: z.string().default(""),
+    target_name: z.string().max(100).default(""),
+    target_id: z.string().max(100).default("")
+  })
+  .passthrough();
+
 export const skillDraftFromUrlRequestSchema = z
   .object({
     url: z.string().trim().max(2000).default(""),
@@ -89,6 +114,65 @@ export const skillDraftResponseSchema = z
     source_excerpt: z.string().default(""),
     source_text: z.string().default(""),
     warnings: z.array(z.string()).default([])
+  })
+  .passthrough();
+
+export const skillPatchRequestSchema = z
+  .object({
+    description: z.string().max(1000).optional(),
+    prompt: z.string().max(120000).optional(),
+    context_requirements: z.array(z.string()).optional(),
+    linked_targets: z.array(z.string()).optional(),
+    model_policy: skillModelPolicySchema.optional(),
+    save_policy: skillSavePolicySchema.optional(),
+    writable: z.boolean().optional(),
+    change_reason: z.string().max(2000).default(""),
+    expected_version: z.string().default(""),
+    dry_run: z.boolean().default(false)
+  })
+  .passthrough();
+
+export const skillPatchResponseSchema = z
+  .object({
+    skill: skillDefinitionSchema,
+    previous_skill: skillDefinitionSchema.optional(),
+    diff: z.string().default(""),
+    version_id: z.string().default(""),
+    dry_run: z.boolean().default(false),
+    warnings: z.array(z.string()).default([])
+  })
+  .passthrough();
+
+export const skillCloneRequestSchema = z
+  .object({
+    target_id: z.string().max(100).default(""),
+    target_name: z.string().max(100).default(""),
+    instruction: z.string().max(4000).default("")
+  })
+  .passthrough();
+
+export const skillVersionEntrySchema = z
+  .object({
+    version_id: z.string(),
+    skill_id: z.string(),
+    created_at: z.string(),
+    change_reason: z.string().default(""),
+    author: z.string().default("agent"),
+    snapshot: skillDefinitionSchema
+  })
+  .passthrough();
+
+export const skillVersionsResponseSchema = z
+  .object({
+    skill_id: z.string(),
+    versions: z.array(skillVersionEntrySchema).default([])
+  })
+  .passthrough();
+
+export const skillRollbackRequestSchema = z
+  .object({
+    version_id: z.string(),
+    change_reason: z.string().max(2000).default("rollback")
   })
   .passthrough();
 
@@ -119,7 +203,10 @@ export const skillRunRequestSchema = z
     conversation_id: z.string().default(""),
     source_path: z.string().default(""),
     write_result: z.boolean().default(false),
-    attachment_ids: z.array(z.string()).default([])
+    attachment_ids: z.array(z.string()).default([]),
+    reference_paths: z.array(z.string()).default([]),
+    confirmed_reference_paths: z.array(z.string()).default([]),
+    disable_auto_references: z.boolean().default(false)
   })
   .passthrough();
 
@@ -141,8 +228,16 @@ export type SkillModelPolicy = z.infer<typeof skillModelPolicySchema>;
 export type SkillSavePolicy = z.infer<typeof skillSavePolicySchema>;
 export type SkillImportRequest = z.infer<typeof skillImportRequestSchema>;
 export type SkillUpdateRequest = z.infer<typeof skillUpdateRequestSchema>;
+export type SkillDraftSourceKind = z.infer<typeof skillDraftSourceKindSchema>;
+export type SkillDraftRequest = z.infer<typeof skillDraftRequestSchema>;
 export type SkillDraftFromUrlRequest = z.infer<typeof skillDraftFromUrlRequestSchema>;
 export type SkillDraftResponse = z.infer<typeof skillDraftResponseSchema>;
+export type SkillPatchRequest = z.infer<typeof skillPatchRequestSchema>;
+export type SkillPatchResponse = z.infer<typeof skillPatchResponseSchema>;
+export type SkillCloneRequest = z.infer<typeof skillCloneRequestSchema>;
+export type SkillVersionEntry = z.infer<typeof skillVersionEntrySchema>;
+export type SkillVersionsResponse = z.infer<typeof skillVersionsResponseSchema>;
+export type SkillRollbackRequest = z.infer<typeof skillRollbackRequestSchema>;
 export type SkillImportDraftRequest = z.infer<typeof skillImportDraftRequestSchema>;
 export type SkillOpenFolderResponse = z.infer<typeof skillOpenFolderResponseSchema>;
 export type SkillRunRequest = z.infer<typeof skillRunRequestSchema>;

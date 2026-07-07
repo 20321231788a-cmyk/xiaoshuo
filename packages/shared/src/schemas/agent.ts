@@ -74,6 +74,77 @@ export const skillPlanSchema = z
   })
   .passthrough();
 
+export const projectFileReferenceKindSchema = z.enum([
+  "explicit_path",
+  "at_path",
+  "alias",
+  "current_document",
+  "selection",
+  "attachment",
+  "manifest_match",
+  "vector_hint"
+]);
+
+export const projectFileReferenceCandidateSchema = z
+  .object({
+    label: z.string().default(""),
+    path: z.string().default(""),
+    kind: projectFileReferenceKindSchema,
+    confidence: z.number().min(0).max(1).default(0),
+    reason: z.string().default(""),
+    matched_text: z.string().default(""),
+    exists: z.boolean().default(false),
+    readable: z.boolean().default(false),
+    chars: z.number().int().min(0).default(0),
+    updated_at: z.string().default("")
+  })
+  .passthrough();
+
+export const projectFileResolveRequestSchema = z
+  .object({
+    text: z.string().default(""),
+    current_path: z.string().default(""),
+    selection: z.string().default(""),
+    attachment_ids: z.array(z.string()).default([]),
+    explicit_paths: z.array(z.string()).default([]),
+    max_candidates: z.number().int().min(1).max(20).default(8)
+  })
+  .passthrough();
+
+export const projectFileResolveResponseSchema = z
+  .object({
+    references: z.array(projectFileReferenceCandidateSchema).default([]),
+    candidates: z.array(projectFileReferenceCandidateSchema).default([]),
+    ambiguous: z.boolean().default(false),
+    warnings: z.array(z.string()).default([])
+  })
+  .passthrough();
+
+export const projectFileReadRequestSchema = z
+  .object({
+    paths: z.array(z.string()).default([]),
+    max_chars_per_file: z.number().int().min(500).max(50000).default(12000),
+    max_total_chars: z.number().int().min(1000).max(120000).default(36000)
+  })
+  .passthrough();
+
+export const projectFileReadBlockSchema = z
+  .object({
+    path: z.string(),
+    title: z.string().default(""),
+    content: z.string().default(""),
+    chars: z.number().int().min(0).default(0),
+    truncated: z.boolean().default(false)
+  })
+  .passthrough();
+
+export const projectFileReadResponseSchema = z
+  .object({
+    blocks: z.array(projectFileReadBlockSchema).default([]),
+    warnings: z.array(z.string()).default([])
+  })
+  .passthrough();
+
 export const agentTraceStageSchema = z.enum([
   "received",
   "classified",
@@ -167,7 +238,10 @@ export const agentRunRequestSchema = z
     selection: z.string().default(""),
     project_context_hint: z.string().default(""),
     skill_id: z.string().default(""),
-    attachment_ids: z.array(z.string()).default([])
+    attachment_ids: z.array(z.string()).default([]),
+    reference_paths: z.array(z.string()).default([]),
+    confirmed_reference_paths: z.array(z.string()).default([]),
+    disable_auto_references: z.boolean().default(false)
   })
   .passthrough();
 
@@ -309,6 +383,13 @@ export type ExecutePlanResponse = z.infer<typeof executePlanResponseSchema>;
 export type AgentIntent = z.infer<typeof agentIntentSchema>;
 export type SkillPlanStep = z.infer<typeof skillPlanStepSchema>;
 export type SkillPlan = z.infer<typeof skillPlanSchema>;
+export type ProjectFileReferenceKind = z.infer<typeof projectFileReferenceKindSchema>;
+export type ProjectFileReferenceCandidate = z.infer<typeof projectFileReferenceCandidateSchema>;
+export type ProjectFileResolveRequest = z.infer<typeof projectFileResolveRequestSchema>;
+export type ProjectFileResolveResponse = z.infer<typeof projectFileResolveResponseSchema>;
+export type ProjectFileReadRequest = z.infer<typeof projectFileReadRequestSchema>;
+export type ProjectFileReadBlock = z.infer<typeof projectFileReadBlockSchema>;
+export type ProjectFileReadResponse = z.infer<typeof projectFileReadResponseSchema>;
 export type AgentTraceStage = z.infer<typeof agentTraceStageSchema>;
 export type AgentRouteCandidateTrace = z.infer<typeof agentRouteCandidateTraceSchema>;
 export type AgentContextBlockTrace = z.infer<typeof agentContextBlockTraceSchema>;
