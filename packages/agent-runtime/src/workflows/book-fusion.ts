@@ -6,32 +6,16 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { clipForConsistency } from "../prompts/consistency.js";
+import {
+  BOOK_MANIFEST_PATH,
+  formatBookTimestamp,
+  listDisassembleBooks,
+  readDisassembleBookText,
+  type DisassembleBookManifest
+} from "./disassemble-library.js";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
 
-const DISASSEMBLE_LIBRARY_DIR = "00_设定集/拆书库";
 const FUSION_LIBRARY_DIR = "00_设定集/融梗方案";
-const LEGACY_DISASSEMBLE_LORE_PATH = "00_设定集/设定集/拆书设定提取.txt";
-const LEGACY_REVERSE_OUTLINE_PATH = "01_大纲/反向细纲.txt";
-const LEGACY_DISASSEMBLE_DETAIL_PATH = "01_大纲/拆书细纲.txt";
-const BOOK_MANIFEST_PATH = "manifest.jsonl";
-
-type DisassembleBookManifest = {
-  id: string;
-  title: string;
-  dir: string;
-  created_at: string;
-  updated_at: string;
-  origin: string;
-  source_path: string;
-  source_summary: string;
-  chars: number;
-  paths: {
-    source?: string;
-    lore?: string;
-    reverse_outline?: string;
-    detail_outline?: string;
-  };
-};
 
 type FusionSourceBook = DisassembleBookManifest & {
   legacy?: boolean;
@@ -214,129 +198,8 @@ async function loadBooksForFusion(sourceBookIds: string[], context: WorkflowRunC
   return selected;
 }
 
-async function listDisassembleBooks(
-  context: WorkflowRunContext,
-  options: { includeLegacy?: boolean } = {}
-): Promise<Array<DisassembleBookManifest & { legacy?: boolean }>> {
-  const root = path.join(context.projectRoot, DISASSEMBLE_LIBRARY_DIR);
-  const books: Array<DisassembleBookManifest & { legacy?: boolean }> = [];
-  const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
-  for (const entry of entries) {
-    if (!entry.isDirectory()) {
-      continue;
-    }
-    const dir = `${DISASSEMBLE_LIBRARY_DIR}/${entry.name}`;
-    const manifest = await readDisassembleBookManifest(dir, context).catch(() => null);
-    if (manifest) {
-      books.push(manifest);
-    }
-  }
-
-  if (options.includeLegacy) {
-    const legacy = await readLegacyDisassembleBookManifest(context);
-    if (legacy) {
-      books.push({ ...legacy, legacy: true });
-    }
-  }
-
-  return books.sort((left, right) => {
-    const leftAt = Date.parse(left.updated_at || left.created_at || "");
-    const rightAt = Date.parse(right.updated_at || right.created_at || "");
-    return rightAt - leftAt;
-  });
-}
-
-async function readDisassembleBookManifest(bookDir: string, context: WorkflowRunContext): Promise<DisassembleBookManifest> {
-  const manifestPath = `${bookDir}/${BOOK_MANIFEST_PATH}`;
-  const raw = String(await context.documents.readRawText(manifestPath, 50_000)).trim();
-  if (!raw) {
-    throw new Error("缺少拆书 manifest");
-  }
-  const parsed = JSON.parse(raw.split(/\r?\n/)[0] || "{}") as Partial<DisassembleBookManifest>;
-  if (!parsed.id || !parsed.title) {
-    throw new Error("拆书 manifest 不完整");
-  }
-  return {
-    id: parsed.id,
-    title: parsed.title,
-    dir: parsed.dir || bookDir,
-    created_at: parsed.created_at || new Date().toISOString(),
-    updated_at: parsed.updated_at || parsed.created_at || new Date().toISOString(),
-    origin: parsed.origin || "unknown",
-    source_path: parsed.source_path || "",
-    source_summary: parsed.source_summary || "",
-    chars: Number(parsed.chars || 0),
-    paths: parsed.paths || {}
-  };
-}
-
-async function readLegacyDisassembleBookManifest(context: WorkflowRunContext): Promise<DisassembleBookManifest | null> {
-  const lore = await readLegacyText(LEGACY_DISASSEMBLE_LORE_PATH, context);
-  const reverseOutline = await readLegacyText(LEGACY_REVERSE_OUTLINE_PATH, context);
-  const detailOutline = await readLegacyText(LEGACY_DISASSEMBLE_DETAIL_PATH, context);
-  if (!lore && !reverseOutline && !detailOutline) {
-    return null;
-  }
-  const title = "历史拆书产物";
-  return {
-    id: "legacy",
-    title,
-    dir: "",
-    created_at: new Date(0).toISOString(),
-    updated_at: new Date().toISOString(),
-    origin: "legacy",
-    source_path: "",
-    source_summary: summarizeSource([lore, reverseOutline, detailOutline].filter(Boolean).join("\n")),
-    chars: [lore, reverseOutline, detailOutline].join("\n").length,
-    paths: {
-      lore: lore ? LEGACY_DISASSEMBLE_LORE_PATH : "",
-      reverse_outline: reverseOutline ? LEGACY_REVERSE_OUTLINE_PATH : "",
-      detail_outline: detailOutline ? LEGACY_DISASSEMBLE_DETAIL_PATH : ""
-    }
-  };
-}
-
 function isDisassembleBookReadyForFusion(book: DisassembleBookManifest & { legacy?: boolean }): boolean {
   return Boolean(book.paths.lore || book.paths.reverse_outline || book.paths.detail_outline);
-}
-
-async function readDisassembleBookText(
-  book: DisassembleBookManifest & { legacy?: boolean },
-  kind: "source" | "lore" | "reverse_outline" | "detail_outline",
-  context: WorkflowRunContext,
-  limit = 24_000
-): Promise<string> {
-  const legacyPath =
-    kind === "lore"
-      ? LEGACY_DISASSEMBLE_LORE_PATH
-      : kind === "reverse_outline"
-        ? LEGACY_REVERSE_OUTLINE_PATH
-        : kind === "detail_outline"
-          ? LEGACY_DISASSEMBLE_DETAIL_PATH
-          : "";
-  if (book.legacy || book.id === "legacy") {
-    return readLegacyText(legacyPath, context, limit);
-  }
-  const relPath =
-    kind === "source"
-      ? book.paths.source || `${book.dir}/原文.txt`
-      : kind === "lore"
-        ? book.paths.lore || `${book.dir}/拆书设定提取.txt`
-        : kind === "reverse_outline"
-          ? book.paths.reverse_outline || `${book.dir}/反向细纲.txt`
-          : book.paths.detail_outline || `${book.dir}/拆书细纲.txt`;
-  return readLegacyText(relPath, context, limit);
-}
-
-async function readLegacyText(relativePath: string, context: WorkflowRunContext, limit = 24_000): Promise<string> {
-  if (!relativePath) {
-    return "";
-  }
-  try {
-    return (await context.documents.readRawText(relativePath, limit)).trim();
-  } catch {
-    return "";
-  }
 }
 
 async function recordSkillExchange(
@@ -424,16 +287,4 @@ function stringListFromUnknown(value: unknown): string[] {
 
 function uniquePaths(paths: string[]): string[] {
   return [...new Set(paths.map((item) => item.trim()).filter(Boolean))];
-}
-
-function summarizeSource(text: string): string {
-  const compact = String(text || "").replace(/\s+/g, " ").trim();
-  if (!compact) {
-    return "";
-  }
-  return compact.length <= 240 ? compact : `${compact.slice(0, 240).trimEnd()}...`;
-}
-
-function formatBookTimestamp(date: Date): string {
-  return date.toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
 }

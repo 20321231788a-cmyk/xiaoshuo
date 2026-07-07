@@ -1261,6 +1261,37 @@ npm test -- packages/agent-runtime/src/workflows/nuwa-style-distill.test.ts -t "
 - P1 剩余 legacy workflow 为 `disassemble_book` 和 `continue_disassemble`。
 - 先抽拆书库 helper，再迁移两个拆书 workflow，能减少重复和行为漂移。
 
+### 15.25 2026-07-07 continue_disassemble Handler 迁移记录
+
+本轮继续拆 workflow registry，先抽公共拆书库 helper，再把继续拆细纲迁移到独立 handler。
+
+主要改动：
+
+- 新增 `packages/agent-runtime/src/workflows/disassemble-library.ts`，统一拆书库 manifest、legacy 产物、书籍创建、来源读取和标题推断 helper。
+- 新增 `packages/agent-runtime/src/workflows/continue-disassemble.ts`，承接 `continue_disassemble` 的反向细纲读取、outline_generate 调用、拆书细纲写入和 legacy 同步。
+- `packages/agent-runtime/src/workflows/registry.ts` 注册 `ContinueDisassembleWorkflow`。
+- `packages/agent-runtime/src/workflows/book-fusion.ts` 改用共享拆书库读取 helper，删除重复的 manifest / legacy 读取实现。
+- `AgentRuntimeService.runLocalWorkflowSkill()` 删除 `continue_disassemble` 分支；`disassemble_book` legacy 分支暂留，但已改用共享 helper。
+- 新增 `packages/agent-runtime/src/workflows/continue-disassemble.test.ts`，覆盖 handler 直跑和 runtime registry 路由。
+- `runtime.ts` 当前约 2224 行。
+
+本轮已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/agent-runtime
+npm test -- packages/agent-runtime/src/workflows/continue-disassemble.test.ts packages/agent-runtime/src/workflows/book-fusion.test.ts
+npm test -- packages/agent-runtime/src/runtime.test.ts -t "disassemble"
+npm run typecheck
+npm test
+npm run build:desktop
+npm run smoke:desktop
+```
+
+下一步建议：
+
+- P1 剩余 legacy workflow 为 `disassemble_book`。
+- 迁移 `disassemble_book` 时直接复用 `workflows/disassemble-library.ts`，覆盖 `list_library`、`archive_source` 和完整拆书生成路径。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

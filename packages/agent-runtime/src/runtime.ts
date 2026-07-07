@@ -39,15 +39,20 @@ import { SmartSkillOrchestrator } from "./smart-skill-orchestrator.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import type { StreamingModelClient } from "./stream.js";
 import { createAgentTraceRecorder, type AgentTraceRecorder } from "./agent-trace.js";
+import {
+  createDisassembleBook,
+  inferDisassembleBookTitle,
+  LEGACY_DISASSEMBLE_LORE_PATH,
+  LEGACY_REVERSE_OUTLINE_PATH,
+  listDisassembleBooks,
+  readDisassembleBookText,
+  resolveDisassembleBookForRequest,
+  resolveWorkflowSourceText,
+  writeDisassembleBookManifest
+} from "./workflows/disassemble-library.js";
 import { getWorkflowHandler, isWorkflowSkillId } from "./workflows/registry.js";
 import type { WorkflowRunContext } from "./workflows/types.js";
 
-const DISASSEMBLE_LIBRARY_DIR = "00_设定集/拆书库";
-const LEGACY_DISASSEMBLE_LORE_PATH = "00_设定集/设定集/拆书设定提取.txt";
-const LEGACY_REVERSE_OUTLINE_PATH = "01_大纲/反向细纲.txt";
-const LEGACY_DISASSEMBLE_DETAIL_PATH = "01_大纲/拆书细纲.txt";
-const BOOK_MANIFEST_PATH = "manifest.jsonl";
-const DISASSEMBLE_SOURCE_IMPORT_CHARS = 60_000;
 const TARGET_WORD_SKILL_IDS = new Set([
   "body_generate",
   "batch_generate",
@@ -55,24 +60,6 @@ const TARGET_WORD_SKILL_IDS = new Set([
   "detail_outline_generate",
   "chapter_outline_generate"
 ]);
-
-type DisassembleBookManifest = {
-  id: string;
-  title: string;
-  dir: string;
-  created_at: string;
-  updated_at: string;
-  origin: string;
-  source_path: string;
-  source_summary: string;
-  chars: number;
-  paths: {
-    source?: string;
-    lore?: string;
-    reverse_outline?: string;
-    detail_outline?: string;
-  };
-};
 
 export class AgentRuntimeService {
   private readonly planner: AgentPlanner;
@@ -1071,9 +1058,10 @@ export class AgentRuntimeService {
 
   private async runLocalWorkflowSkill(skillId: string, request: AgentRunRequest, trace?: AgentTraceRecorder): Promise<AgentRunResponse> {
     request = { ...request, skill_id: skillId };
+    const context = this.buildWorkflowContext(trace);
     const handler = getWorkflowHandler(skillId);
     if (handler) {
-      return handler.runAgent(request, this.buildWorkflowContext(trace));
+      return handler.runAgent(request, context);
     }
     if (!isWorkflowSkillId(skillId)) {
       throw new Error(`TS runtime 尚未接管该 workflow skill: ${skillId}`);
@@ -1082,7 +1070,7 @@ export class AgentRuntimeService {
     if (skillId === "disassemble_book") {
       const action = String((request as any).action || "").trim();
       if (action === "list_library") {
-        const books = await this.listDisassembleBooks({ includeLegacy: true });
+        const books = await listDisassembleBooks(context, { includeLegacy: true });
         return {
           intent: "skill",
           reply: `拆书库共有 ${books.length} 本书。`,
@@ -1102,17 +1090,20 @@ export class AgentRuntimeService {
         };
       }
       if (action === "archive_source") {
-        const source = await this.resolveWorkflowSourceText(request);
+        const source = await resolveWorkflowSourceText(request, context);
         if (!source.trim()) {
           throw new Error("缺少可归档的拆书原文");
         }
-        const book = await this.createDisassembleBook({
-          title: await this.inferDisassembleBookTitle(request, source),
-          sourceText: source,
-          sourcePath: request.current_path || "",
-          origin: request.attachment_ids?.length ? "upload" : request.current_path ? "document" : "input"
-        });
-        const books = await this.listDisassembleBooks({ includeLegacy: true });
+        const book = await createDisassembleBook(
+          {
+            title: await inferDisassembleBookTitle(request, source),
+            sourceText: source,
+            sourcePath: request.current_path || "",
+            origin: request.attachment_ids?.length ? "upload" : request.current_path ? "document" : "input"
+          },
+          context
+        );
+        const books = await listDisassembleBooks(context, { includeLegacy: true });
         const reply = `已归档拆书原文：${book.title}`;
         return {
           intent: "skill",
@@ -1136,88 +1127,21 @@ export class AgentRuntimeService {
       }
     }
 
-    if (skillId === "continue_disassemble") {
-      const sourceBook = await this.resolveDisassembleBookForRequest(request);
-      const source = sourceBook ? await this.readDisassembleBookText(sourceBook, "reverse_outline", 30_000) : await this.resolveContinueDisassembleSource(request);
-      if (!source.trim()) {
-        throw new Error("缺少可继续拆解的反向细纲");
-      }
-
-      const result = await this.skillRunner.runSkill("outline_generate", {
-        text: source,
-        chapter: 0,
-        end_chapter: 0,
-        target_words: 2500,
-        instruction: request.content || request.selection || "把反向细纲扩展为更完整的拆书细纲，按章节推进，保留关键冲突、转折、伏笔和人物关系变化。",
-        target_path: "",
-        conversation_id: request.conversation_id || "",
-        source_path: "",
-        write_result: false,
-        attachment_ids: []
-      });
-
-      const book = await this.createDisassembleBook({
-        title: String((request as any).book_title || sourceBook?.title || "").trim() || (await this.inferDisassembleBookTitle(request, source)),
-        sourceText: source,
-        sourcePath: sourceBook?.source_path || request.current_path || "",
-        origin: sourceBook?.legacy ? "continue_disassemble:legacy" : "continue_disassemble"
-      });
-      const detailPath = `${book.dir}/拆书细纲.txt`;
-      await this.documents.saveDocument(detailPath, result.result || "", {
-        source: "skill",
-        summary: "继续拆细纲"
-      });
-      await this.documents.saveDocument(LEGACY_DISASSEMBLE_DETAIL_PATH, result.result || "", {
-        source: "skill",
-        summary: "继续拆细纲 legacy 同步"
-      });
-      const updatedBook = await this.writeDisassembleBookManifest({
-        ...book,
-        updated_at: new Date().toISOString(),
-        paths: {
-          ...book.paths,
-          detail_outline: detailPath
-        }
-      });
-
-      const savedPaths = [detailPath];
-      const reply = `已写入 ${savedPaths.length} 个文件：\n${savedPaths.join("\n")}`;
-      const conversation = await this.recordSkillExchange(request, reply);
-
-      return {
-        intent: "skill",
-        reply,
-        conversation,
-        results: [],
-        skill_result: {
-          status: "done",
-          result: result.result || "",
-          saved_path: savedPaths[0] || "",
-          data: {
-            skill_id: skillId,
-            saved_paths: savedPaths,
-            path: savedPaths[0],
-            book: updatedBook,
-            legacy_saved_paths: [LEGACY_DISASSEMBLE_DETAIL_PATH]
-          }
-        },
-        saved_paths: savedPaths,
-        requires_confirmation: false
-      };
-    }
-
-    const existingBook = await this.resolveDisassembleBookForRequest(request);
-    const directSource = await this.resolveWorkflowSourceText(request);
-    const source = directSource.trim() || (existingBook ? await this.readDisassembleBookText(existingBook, "source", 80_000) : "");
+    const existingBook = await resolveDisassembleBookForRequest(request, context);
+    const directSource = await resolveWorkflowSourceText(request, context);
+    const source = directSource.trim() || (existingBook ? await readDisassembleBookText(existingBook, "source", context, 80_000) : "");
     if (!source.trim()) {
       throw new Error("拆书需要上传文件、来源文件或直接输入文本");
     }
-    const book = await this.createDisassembleBook({
-      title: String((request as any).book_title || existingBook?.title || "").trim() || (await this.inferDisassembleBookTitle(request, source)),
-      sourceText: source,
-      sourcePath: existingBook?.source_path || request.current_path || "",
-      origin: request.attachment_ids?.length ? "upload" : request.current_path ? "document" : existingBook?.origin || "input"
-    });
+    const book = await createDisassembleBook(
+      {
+        title: String((request as any).book_title || existingBook?.title || "").trim() || (await inferDisassembleBookTitle(request, source)),
+        sourceText: source,
+        sourcePath: existingBook?.source_path || request.current_path || "",
+        origin: request.attachment_ids?.length ? "upload" : request.current_path ? "document" : existingBook?.origin || "input"
+      },
+      context
+    );
 
     const lore = await this.skillRunner.runSkill("lore_extract", {
       text: source,
@@ -1262,15 +1186,18 @@ export class AgentRuntimeService {
       source: "skill",
       summary: "拆书写入反向细纲 legacy 同步"
     });
-    const updatedBook = await this.writeDisassembleBookManifest({
-      ...book,
-      updated_at: new Date().toISOString(),
-      paths: {
-        ...book.paths,
-        lore: lorePath,
-        reverse_outline: reversePath
-      }
-    });
+    const updatedBook = await writeDisassembleBookManifest(
+      {
+        ...book,
+        updated_at: new Date().toISOString(),
+        paths: {
+          ...book.paths,
+          lore: lorePath,
+          reverse_outline: reversePath
+        }
+      },
+      context
+    );
 
     const savedPaths = [lorePath, reversePath];
     const reply = `已写入 ${savedPaths.length} 个文件：\n${savedPaths.join("\n")}`;
@@ -1297,200 +1224,6 @@ export class AgentRuntimeService {
       saved_paths: savedPaths,
       requires_confirmation: false
     };
-  }
-
-  private async createDisassembleBook(input: { title: string; sourceText: string; sourcePath: string; origin: string }): Promise<DisassembleBookManifest> {
-    const createdAt = new Date().toISOString();
-    const bookId = `${sanitizeBookId(input.title)}-${formatBookTimestamp(new Date())}-${randomUUID().replace(/-/g, "").slice(0, 8)}`;
-    const dir = `${DISASSEMBLE_LIBRARY_DIR}/${bookId}`;
-    const manifest: DisassembleBookManifest = {
-      id: bookId,
-      title: input.title || "当前拆书书籍",
-      dir,
-      created_at: createdAt,
-      updated_at: createdAt,
-      origin: input.origin,
-      source_path: input.sourcePath || "",
-      source_summary: summarizeSource(input.sourceText),
-      chars: input.sourceText.length,
-      paths: {
-        source: input.sourceText.trim() ? `${dir}/原文.txt` : ""
-      }
-    };
-    if (input.sourceText.trim()) {
-      await this.documents.saveDocument(`${dir}/原文.txt`, input.sourceText, {
-        source: "skill",
-        summary: `拆书原文：${manifest.title}`
-      });
-    }
-    await this.writeDisassembleBookManifest(manifest);
-    return manifest;
-  }
-
-  private async writeDisassembleBookManifest(book: DisassembleBookManifest): Promise<DisassembleBookManifest> {
-    const next: DisassembleBookManifest = {
-      ...book,
-      updated_at: new Date().toISOString()
-    };
-    await this.documents.saveDocument(`${next.dir}/${BOOK_MANIFEST_PATH}`, `${JSON.stringify(next)}\n`, {
-      source: "skill",
-      summary: `拆书书籍 manifest：${next.title}`
-    });
-    return next;
-  }
-
-  private async listDisassembleBooks(options: { includeLegacy?: boolean } = {}): Promise<Array<DisassembleBookManifest & { legacy?: boolean }>> {
-    const root = path.join(this.documents.projectRoot, DISASSEMBLE_LIBRARY_DIR);
-    const books: Array<DisassembleBookManifest & { legacy?: boolean }> = [];
-    const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
-    for (const entry of entries) {
-      if (!entry.isDirectory()) {
-        continue;
-      }
-      const dir = `${DISASSEMBLE_LIBRARY_DIR}/${entry.name}`;
-      const manifest = await this.readDisassembleBookManifest(dir).catch(() => null);
-      if (manifest) {
-        books.push(manifest);
-      }
-    }
-
-    if (options.includeLegacy) {
-      const legacy = await this.readLegacyDisassembleBookManifest();
-      if (legacy) {
-        books.push({ ...legacy, legacy: true });
-      }
-    }
-
-    return books.sort((left, right) => {
-      const leftAt = Date.parse(left.updated_at || left.created_at || "");
-      const rightAt = Date.parse(right.updated_at || right.created_at || "");
-      return rightAt - leftAt;
-    });
-  }
-
-  private async readDisassembleBookManifest(bookDir: string): Promise<DisassembleBookManifest> {
-    const manifestPath = `${bookDir}/${BOOK_MANIFEST_PATH}`;
-    const raw = String(await this.documents.readRawText(manifestPath, 50_000)).trim();
-    if (!raw) {
-      throw new Error("缺少拆书 manifest");
-    }
-    const parsed = JSON.parse(raw.split(/\r?\n/)[0] || "{}") as Partial<DisassembleBookManifest>;
-    if (!parsed.id || !parsed.title) {
-      throw new Error("拆书 manifest 不完整");
-    }
-    return {
-      id: parsed.id,
-      title: parsed.title,
-      dir: parsed.dir || bookDir,
-      created_at: parsed.created_at || new Date().toISOString(),
-      updated_at: parsed.updated_at || parsed.created_at || new Date().toISOString(),
-      origin: parsed.origin || "unknown",
-      source_path: parsed.source_path || "",
-      source_summary: parsed.source_summary || "",
-      chars: Number(parsed.chars || 0),
-      paths: parsed.paths || {}
-    };
-  }
-
-  private async readLegacyDisassembleBookManifest(): Promise<DisassembleBookManifest | null> {
-    const lore = await this.readLegacyText(LEGACY_DISASSEMBLE_LORE_PATH);
-    const reverseOutline = await this.readLegacyText(LEGACY_REVERSE_OUTLINE_PATH);
-    const detailOutline = await this.readLegacyText(LEGACY_DISASSEMBLE_DETAIL_PATH);
-    if (!lore && !reverseOutline && !detailOutline) {
-      return null;
-    }
-    const title = "历史拆书产物";
-    return {
-      id: "legacy",
-      title,
-      dir: "",
-      created_at: new Date(0).toISOString(),
-      updated_at: new Date().toISOString(),
-      origin: "legacy",
-      source_path: "",
-      source_summary: summarizeSource([lore, reverseOutline, detailOutline].filter(Boolean).join("\n")),
-      chars: [lore, reverseOutline, detailOutline].join("\n").length,
-      paths: {
-        lore: lore ? LEGACY_DISASSEMBLE_LORE_PATH : "",
-        reverse_outline: reverseOutline ? LEGACY_REVERSE_OUTLINE_PATH : "",
-        detail_outline: detailOutline ? LEGACY_DISASSEMBLE_DETAIL_PATH : ""
-      }
-    };
-  }
-
-  private async resolveDisassembleBookForRequest(request: AgentRunRequest): Promise<(DisassembleBookManifest & { legacy?: boolean }) | null> {
-    const explicitId = String((request as any).source_book_id || "").trim();
-    if (explicitId) {
-      if (explicitId === "legacy") {
-        return this.readLegacyDisassembleBookManifest();
-      }
-      return (await this.listDisassembleBooks({ includeLegacy: false })).find((book) => book.id === explicitId) || null;
-    }
-
-    const currentPath = String(request.current_path || "").replace(/\\/g, "/").trim();
-    const matched = currentPath.match(new RegExp(`^${DISASSEMBLE_LIBRARY_DIR.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/([^/]+)/`));
-    if (matched?.[1]) {
-      const books = await this.listDisassembleBooks({ includeLegacy: false });
-      const found = books.find((book) => book.id === matched[1]);
-      if (found) {
-        return found;
-      }
-    }
-
-    const books = await this.listDisassembleBooks({ includeLegacy: true });
-    return books[0] || null;
-  }
-
-  private async readDisassembleBookText(
-    book: DisassembleBookManifest & { legacy?: boolean },
-    kind: "source" | "lore" | "reverse_outline" | "detail_outline",
-    limit = 24_000
-  ): Promise<string> {
-    const legacyPath =
-      kind === "lore"
-        ? LEGACY_DISASSEMBLE_LORE_PATH
-        : kind === "reverse_outline"
-          ? LEGACY_REVERSE_OUTLINE_PATH
-          : kind === "detail_outline"
-            ? LEGACY_DISASSEMBLE_DETAIL_PATH
-            : "";
-    if (book.legacy || book.id === "legacy") {
-      return this.readLegacyText(legacyPath, limit);
-    }
-    const relPath =
-      kind === "source"
-        ? book.paths.source || `${book.dir}/原文.txt`
-        : kind === "lore"
-          ? book.paths.lore || `${book.dir}/拆书设定提取.txt`
-          : kind === "reverse_outline"
-            ? book.paths.reverse_outline || `${book.dir}/反向细纲.txt`
-            : book.paths.detail_outline || `${book.dir}/拆书细纲.txt`;
-    return this.readLegacyText(relPath, limit);
-  }
-
-  private async readLegacyText(relativePath: string, limit = 24_000): Promise<string> {
-    if (!relativePath) {
-      return "";
-    }
-    try {
-      return (await this.documents.readRawText(relativePath, limit)).trim();
-    } catch {
-      return "";
-    }
-  }
-
-  private async inferDisassembleBookTitle(request: AgentRunRequest, source: string): Promise<string> {
-    const explicit = String((request as any).book_title || "").trim();
-    if (explicit) {
-      return explicit;
-    }
-    const sourcePath = String(request.current_path || request.source_path || "").trim();
-    if (sourcePath) {
-      return inferBookTitle(sourcePath, "当前拆书书籍");
-    }
-    const content = String(source || request.content || "").trim();
-    const firstLine = content.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "";
-    return inferBookTitle(firstLine, "当前拆书书籍");
   }
 
   private buildSkillRequest(skillId: string, request: AgentRunRequest): SkillRunRequest {
@@ -1709,18 +1442,6 @@ export class AgentRuntimeService {
     return "";
   }
 
-  private async resolveContinueDisassembleSource(request: AgentRunRequest): Promise<string> {
-    const direct = String(request.selection || "").trim();
-    if (direct) {
-      return direct;
-    }
-    try {
-      return (await this.documents.readRawText("01_大纲/反向细纲.txt", 20_000)).trim();
-    } catch {
-      return "";
-    }
-  }
-
   private resolveSkillChapter(skillId: string, request: AgentRunRequest): number {
     const chapter = this.resolveChapterNumber(request.content || "") || this.resolveChapterNumber(request.current_path || "");
     if (skillId === "body_generate" && chapter <= 0) {
@@ -1787,39 +1508,6 @@ export class AgentRuntimeService {
       return fromData;
     }
     return result.saved_path ? [result.saved_path] : [];
-  }
-
-  private async resolveWorkflowSourceText(request: AgentRunRequest): Promise<string> {
-    const direct = String(request.selection || "").trim();
-    if (direct) {
-      return direct;
-    }
-    if (request.conversation_id && (request.attachment_ids || []).length) {
-      const attachments = await this.conversations.getAttachmentTexts(request.conversation_id, request.attachment_ids, {
-        limit: DISASSEMBLE_SOURCE_IMPORT_CHARS,
-        preserveWhitespace: true
-      });
-      const text = attachments
-        .map(([attachment, body]) => {
-          const content = String(body || "").trim();
-          return content ? `【${attachment.name}】\n${content}` : "";
-        })
-        .filter(Boolean)
-        .join("\n\n")
-        .trim();
-      if (text) {
-        return text;
-      }
-    }
-    const sourcePath = this.resolveSkillSourcePath("lore_extract", request);
-    if (sourcePath) {
-      try {
-        return (await this.documents.readRawText(sourcePath, DISASSEMBLE_SOURCE_IMPORT_CHARS)).trim();
-      } catch {
-        return "";
-      }
-    }
-    return "";
   }
 
   private async recordSkillExchange(
@@ -2374,29 +2062,6 @@ export class AgentRuntimeService {
   }
 }
 
-function inferBookTitle(sourcePath: string, fallback: string): string {
-  const normalized = String(sourcePath || "").replace(/\\/g, "/").trim();
-  const filename = normalized.split("/").filter(Boolean).at(-1) || "";
-  const stem = filename.replace(/\.[^.]+$/, "").trim();
-  return stem || fallback;
-}
-
-function sanitizeBookId(value: string): string {
-  const sanitized = String(value || "")
-    .replace(/[\\/:*?"<>|]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/[^0-9A-Za-z\u4e00-\u9fa5_-]+/g, "_")
-    .replace(/_+/g, "_")
-    .replace(/^_+|_+$/g, "")
-    .slice(0, 42);
-  return sanitized || "book";
-}
-
-function formatBookTimestamp(date: Date): string {
-  return date.toISOString().replace(/[-:.TZ]/g, "").slice(0, 14);
-}
-
 function stringListFromUnknown(value: unknown): string[] {
   if (!Array.isArray(value)) {
     return [];
@@ -2443,14 +2108,6 @@ function skillRequestInputChars(request: SkillRunRequest): number {
 
 function uniquePaths(paths: string[]): string[] {
   return [...new Set(paths.map((item) => item.trim()).filter(Boolean))];
-}
-
-function summarizeSource(text: string): string {
-  const compact = String(text || "").replace(/\s+/g, " ").trim();
-  if (!compact) {
-    return "";
-  }
-  return compact.length <= 240 ? compact : `${compact.slice(0, 240).trimEnd()}...`;
 }
 
 function clipForConsistency(text: string, limit: number): string {
