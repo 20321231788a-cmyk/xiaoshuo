@@ -28,6 +28,11 @@ import {
   skillRunRequestSchema,
   skillRunResponseSchema,
   skillDefinitionSchema,
+  skillCloneRequestSchema,
+  skillPatchRequestSchema,
+  skillPatchResponseSchema,
+  skillRollbackRequestSchema,
+  skillVersionsResponseSchema,
   skillUpdateRequestSchema,
   skillDraftResponseSchema,
   skillOpenFolderResponseSchema,
@@ -497,6 +502,29 @@ export function createApiClient(options: ApiClientOptions) {
         method: "PATCH",
         pathParams: { skill_id: skillId },
         body: JSON.stringify(skillUpdateRequestSchema.parse(payload))
+      }),
+    patchSkill: (skillId: string, payload: z.input<typeof skillPatchRequestSchema>) =>
+      requestWithSchema("/api/skills/{skill_id}", skillPatchResponseSchema, {
+        method: "PATCH",
+        pathParams: { skill_id: skillId },
+        body: JSON.stringify(skillPatchRequestSchema.parse(payload))
+      }),
+    cloneSkill: (skillId: string, payload: z.input<typeof skillCloneRequestSchema>) =>
+      requestWithSchema("/api/skills/{skill_id}/clone", skillDefinitionSchema, {
+        method: "POST",
+        pathParams: { skill_id: skillId },
+        body: JSON.stringify(skillCloneRequestSchema.parse(payload))
+      }),
+    getSkillVersions: (skillId: string) =>
+      requestWithSchema("/api/skills/{skill_id}/versions", skillVersionsResponseSchema, {
+        method: "GET",
+        pathParams: { skill_id: skillId }
+      }),
+    rollbackSkill: (skillId: string, payload: z.input<typeof skillRollbackRequestSchema>) =>
+      requestWithSchema("/api/skills/{skill_id}/rollback", skillPatchResponseSchema, {
+        method: "POST",
+        pathParams: { skill_id: skillId },
+        body: JSON.stringify(skillRollbackRequestSchema.parse(payload))
       }),
     importSkill: (skillPath: string) =>
       requestWithSchema("/api/skills/import", skillDefinitionSchema, {

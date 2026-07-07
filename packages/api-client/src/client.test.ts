@@ -348,6 +348,94 @@ describe("api-client", () => {
     ]);
   });
 
+  it("calls skill patch clone version and rollback endpoints", async () => {
+    const requests: Array<{ url: string; method: string; body: string }> = [];
+    const skill = {
+      id: "custom_review",
+      version: "1.0.1",
+      name: "Custom Review",
+      description: "desc",
+      input_mode: "text",
+      context_requirements: [],
+      handler_type: "prompt",
+      linked_targets: [],
+      prompt: "prompt",
+      imported_from: "clone:review",
+      writable: false
+    };
+    const client = createApiClient({
+      baseUrl: "http://127.0.0.1:18452",
+      fetchFn: async (input, init) => {
+        requests.push({
+          url: String(input),
+          method: String(init?.method || "GET"),
+          body: String(init?.body || "")
+        });
+        const url = String(input);
+        if (url.endsWith("/clone")) {
+          return new Response(JSON.stringify(skill), { status: 200, headers: { "Content-Type": "application/json" } });
+        }
+        if (url.endsWith("/versions")) {
+          return new Response(
+            JSON.stringify({
+              skill_id: "custom_review",
+              versions: [
+                {
+                  version_id: "v1",
+                  skill_id: "custom_review",
+                  created_at: "2026-07-07 10:00:00",
+                  change_reason: "patch",
+                  author: "agent",
+                  snapshot: skill
+                }
+              ]
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response(
+          JSON.stringify({
+            skill,
+            previous_skill: skill,
+            diff: "--- before\n+++ after",
+            version_id: "v1",
+            dry_run: url.endsWith("/rollback") ? false : true,
+            warnings: []
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      }
+    });
+
+    await client.patchSkill("custom_review", { prompt: "prompt", dry_run: true });
+    await client.cloneSkill("outline_generate", { target_id: "custom_review", target_name: "Custom Review" });
+    await client.getSkillVersions("custom_review");
+    await client.rollbackSkill("custom_review", { version_id: "v1" });
+
+    expect(requests).toEqual([
+      {
+        url: "http://127.0.0.1:18452/api/skills/custom_review",
+        method: "PATCH",
+        body: JSON.stringify({ prompt: "prompt", change_reason: "", expected_version: "", dry_run: true })
+      },
+      {
+        url: "http://127.0.0.1:18452/api/skills/outline_generate/clone",
+        method: "POST",
+        body: JSON.stringify({ target_id: "custom_review", target_name: "Custom Review", instruction: "" })
+      },
+      {
+        url: "http://127.0.0.1:18452/api/skills/custom_review/versions",
+        method: "GET",
+        body: ""
+      },
+      {
+        url: "http://127.0.0.1:18452/api/skills/custom_review/rollback",
+        method: "POST",
+        body: JSON.stringify({ version_id: "v1", change_reason: "rollback" })
+      }
+    ]);
+  });
+
   it("posts embedding test requests and parses connection details", async () => {
     const requests: Array<{ url: string; method: string; body: string }> = [];
     const client = createApiClient({

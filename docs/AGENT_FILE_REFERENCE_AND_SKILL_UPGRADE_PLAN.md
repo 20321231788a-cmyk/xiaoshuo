@@ -59,7 +59,7 @@
 
 ### 2026-07-07 P9 SkillService patch/clone/version/rollback
 
-状态：已完成，本阶段随本次 git commit 提交。
+状态：已完成，提交 `a89a1ad`。
 
 落地内容：
 
@@ -73,6 +73,23 @@
 
 - `npm run typecheck -w @xiaoshuo/skill-service`
 - `npx vitest run packages/skill-service/src/service.test.ts`
+
+### 2026-07-07 P10 skill patch/clone/version/rollback routes + client
+
+状态：已完成，本阶段随本次 git commit 提交。
+
+落地内容：
+
+- `PATCH /api/skills/{id}` 支持新 `skillPatchRequestSchema`；仅 description 字段时保留旧响应 `SkillDefinition` 兼容前端。
+- 新增 `POST /api/skills/{id}/clone`、`GET /api/skills/{id}/versions`、`POST /api/skills/{id}/rollback`。
+- `packages/api-client/src/client.ts` 新增 `patchSkill`、`cloneSkill`、`getSkillVersions`、`rollbackSkill`。
+- 补充 route matcher、skill routes 和 api-client 测试。
+
+已验证：
+
+- `npm run typecheck -w @xiaoshuo/desktop-shell`
+- `npm run typecheck -w @xiaoshuo/api-client`
+- `npx vitest run apps/desktop-shell/src/main/runtime/skill-routes.test.ts apps/desktop-shell/src/main/runtime/runtime-utils.test.ts packages/api-client/src/client.test.ts packages/skill-service/src/service.test.ts`
 
 ## 0. 当前基线
 

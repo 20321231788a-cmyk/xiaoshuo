@@ -2,8 +2,11 @@ import { AgentRuntimeService } from "@xiaoshuo/agent-runtime";
 import { SkillService } from "@xiaoshuo/skill-service";
 import {
   skillDraftFromUrlRequestSchema,
+  skillCloneRequestSchema,
   skillImportDraftRequestSchema,
   skillImportRequestSchema,
+  skillPatchRequestSchema,
+  skillRollbackRequestSchema,
   skillUpdateRequestSchema,
   skillRunRequestSchema,
   type CurrentProject
@@ -79,8 +82,13 @@ export async function handleSkillRoutes(
 
   if (skillRoute.id && !skillRoute.action && request.method === "PATCH") {
     try {
-      const payload = skillUpdateRequestSchema.parse(await deps.readJsonBody(request));
-      deps.writeJson(response, 200, await skills.updateSkillDescription(skillRoute.id, payload.description));
+      const rawPayload = await deps.readJsonBody(request);
+      if (isLegacyDescriptionUpdate(rawPayload)) {
+        const payload = skillUpdateRequestSchema.parse(rawPayload);
+        deps.writeJson(response, 200, await skills.updateSkillDescription(skillRoute.id, payload.description));
+      } else {
+        deps.writeJson(response, 200, await skills.patchSkill(skillRoute.id, skillPatchRequestSchema.parse(rawPayload)));
+      }
     } catch (error) {
       deps.writeJson(response, 400, { detail: error instanceof Error ? error.message : String(error) });
     }
@@ -92,6 +100,33 @@ export async function handleSkillRoutes(
       const payload = await deps.readJsonBody(request);
       const hasDisabled = Object.prototype.hasOwnProperty.call(payload, "disabled");
       deps.writeJson(response, 200, await skills.toggleBuiltinSkill(skillRoute.id, hasDisabled ? Boolean(payload.disabled) : undefined));
+    } catch (error) {
+      deps.writeJson(response, 400, { detail: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
+  if (skillRoute.id && skillRoute.action === "clone" && request.method === "POST") {
+    try {
+      deps.writeJson(response, 200, await skills.cloneSkill(skillRoute.id, skillCloneRequestSchema.parse(await deps.readJsonBody(request))));
+    } catch (error) {
+      deps.writeJson(response, 400, { detail: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
+  if (skillRoute.id && skillRoute.action === "versions" && request.method === "GET") {
+    try {
+      deps.writeJson(response, 200, await skills.listSkillVersions(skillRoute.id));
+    } catch (error) {
+      deps.writeJson(response, 400, { detail: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
+  if (skillRoute.id && skillRoute.action === "rollback" && request.method === "POST") {
+    try {
+      deps.writeJson(response, 200, await skills.rollbackSkill(skillRoute.id, skillRollbackRequestSchema.parse(await deps.readJsonBody(request))));
     } catch (error) {
       deps.writeJson(response, 400, { detail: error instanceof Error ? error.message : String(error) });
     }
@@ -184,4 +219,9 @@ export async function handleSkillRoutes(
   }
 
   return false;
+}
+
+function isLegacyDescriptionUpdate(payload: JsonRecord): boolean {
+  const keys = Object.keys(payload);
+  return keys.length === 1 && keys[0] === "description";
 }

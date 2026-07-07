@@ -68,7 +68,7 @@ export function matchSkillRoute(pathname: string):
     }
     return { id: value };
   }
-  if (segments.length === 4 && (segments[3] === "run" || segments[3] === "toggle")) {
+  if (segments.length === 4 && (segments[3] === "run" || segments[3] === "toggle" || segments[3] === "clone" || segments[3] === "versions" || segments[3] === "rollback")) {
     return {
       id: decodeURIComponent(segments[2] || ""),
       action: segments[3]
