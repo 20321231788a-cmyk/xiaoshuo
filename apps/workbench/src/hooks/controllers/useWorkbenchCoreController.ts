@@ -3419,7 +3419,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       return;
     }
 
-    if ((options.checkActiveDocument ?? true) && messageRequiresActiveDocument(trimmed) && !getActiveDocument()) {
+    const activeDocument = getActiveDocument();
+    if ((options.checkActiveDocument ?? true) && messageRequiresActiveDocument(trimmed) && !activeDocument) {
       const nextMessage = "这条请求看起来需要当前文档。请先到编辑页打开正文、章纲或设定文件，再发送。";
       setConversationMessage(nextMessage);
       setDocumentMessage(nextMessage);
@@ -3479,6 +3480,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
           agent_name: "",
           write_target: "",
           insert_mode: "none",
+          current_path: activeDocument?.path || "",
           runtime_context: buildProjectContextHint(),
           attachment_ids: includedConversationAttachmentIds(),
           reference_paths: referencePaths,

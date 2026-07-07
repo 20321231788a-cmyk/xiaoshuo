@@ -70,6 +70,7 @@ export const conversationMessageRequestSchema = z
     write_target: z.string().default(""),
     insert_mode: z.enum(["none", "append", "replace"]).default("none"),
     confirm_write: z.boolean().optional(),
+    current_path: z.string().optional(),
     runtime_context: z.string().default(""),
     attachment_ids: z.array(z.string()).default([])
   })

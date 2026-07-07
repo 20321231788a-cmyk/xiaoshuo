@@ -1631,6 +1631,44 @@ npm run smoke:desktop
 - Agent Trace 检查器可增加 cancelled/stopped 筛选。
 - web search / graph memory 底层 I/O 目前主要依赖调用前后检查；若服务层未来支持 AbortSignal，可继续向下传递。
 
+### 15.36 2026-07-07 Agent 文件引用与 Skill 管理复审加固记录
+
+本轮对“项目文件引用”和“skill 生成/编辑”升级做了一次专业 agent 工程复审，并补齐会影响用户真实体验的三处缺口。
+
+主要改动：
+
+- Workbench 普通会话发送 payload 现在会带上 `current_path`，会话中提到“当前文档/这章/本文”时，后端可通过 `ProjectFileResolver` 解析并读取当前打开文件。
+- `conversationMessageRequestSchema` 显式允许可选 `current_path`，保持旧调用兼容。
+- `AgentRuntimeService.conversationPayloadToAgentRequest()` 不再把会话 `current_path` 清空，会透传到 `AgentRunRequest`。
+- `AgentChatRunner.buildConversationTurnContext()` 改为接收完整会话 payload，并把 `reference_paths`、`confirmed_reference_paths`、`disable_auto_references`、`current_path` 统一解析成 reference context blocks。
+- `SkillService.importSkillDraft()` 导入重复 ID 草稿时使用 `nextAvailableSkillId()` 分配新 ID，避免中文/重复 skill ID 归一化后静默覆盖旧导入技能。
+- `SkillService.cloneSkill()` 只允许复制 `prompt` 型 skill；`workflow/job/external` skill 会明确拒绝，避免把复杂执行型内置技能伪装成 prompt-only 副本。
+- 补充 runtime 和 skill-service 回归测试，覆盖显式项目文件引用、当前文档引用、重复 draft ID 不覆盖、非 prompt 内置 skill 拒绝 clone。
+
+本轮已验证：
+
+```powershell
+npx vitest run packages/agent-runtime/src/runtime.test.ts packages/skill-service/src/service.test.ts
+npm run typecheck
+npm test
+npm run build:workbench
+npm run build:desktop
+npm run smoke:desktop
+git diff --check
+```
+
+验收结果：
+
+- 普通会话消息已能把用户显式/确认引用的项目文件内容送入模型上下文。
+- 普通会话消息已能在用户提到当前文档时读取 `current_path` 对应文件内容。
+- 完整测试集当前为 68 个文件、456 个用例通过。
+- `npm run typecheck`、Workbench build、Desktop build、Desktop smoke 均通过；Workbench build 仍只有既有 Vite chunk size warning。
+
+下一步建议：
+
+- Workbench 引用确认和 skill 编辑/回滚仍建议补专门 Playwright e2e；优先给引用 chip、候选确认面板、skill diff/rollback 按钮补稳定 `data-testid`。
+- 若后续支持 workflow/job/external skill 的用户自定义，必须先设计 manifest 白名单、来源签名、handler registry 和隔离执行策略，不要复用 prompt clone/import 通道。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

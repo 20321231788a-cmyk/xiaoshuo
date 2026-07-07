@@ -46,6 +46,13 @@ type ChatModelClient = Pick<OpenAICompatibleClient, "requestCompletion"> &
 
 export type ChatContextAssemblyObserver = (event: { scope: string; context: AssembledContext }) => void;
 
+type ConversationReferencePayload = ConversationMessageRequest & {
+  current_path?: string;
+  reference_paths?: string[];
+  confirmed_reference_paths?: string[];
+  disable_auto_references?: boolean;
+};
+
 export type AgentChatRunnerOptions = {
   projectRoot: string;
   config?: ConfigServiceOptions;
@@ -1009,7 +1016,7 @@ export class AgentChatRunner {
     messages.push(...recentMessages);
     messages.push({
       role: "user",
-      content: await this.buildConversationTurnContext(detail, payload.content, payload.runtime_context || "", compact, webSearchSources)
+      content: await this.buildConversationTurnContext(detail, payload, compact, webSearchSources)
     });
 
     return messages;
@@ -1044,16 +1051,18 @@ export class AgentChatRunner {
 
   private async buildConversationTurnContext(
     detail: ConversationDetail,
-    userText: string,
-    runtimeContext: string,
+    payload: ConversationMessageRequest,
     compact: boolean,
     webSearchSources?: WebSearchSource[]
   ): Promise<string> {
+    const userText = payload.content || "";
+    const runtimeContext = payload.runtime_context || "";
     const text = (userText || "").trim();
     const rtContext = (runtimeContext || "").trim();
     const runtimeLimit = compact ? 2500 : 5000;
     const vectorLimit = compact ? 1800 : 4000;
     const userLimit = compact ? 8000 : 16000;
+    const referenceBlocks = await this.resolveConversationReferenceBlocks(payload, compact);
 
     let vectorContext = "None";
     const vectorIndex = new VectorIndex(this.projectRoot);
@@ -1089,6 +1098,7 @@ export class AgentChatRunner {
           priority: "high",
           content: `【当前文档/选区/前端读取上下文】\n${clipText(rtContext, runtimeLimit) || "暂无"}`
         },
+        ...referenceBlocks,
         {
           id: "vector_context",
           title: "长期记忆召回",
@@ -1114,6 +1124,28 @@ export class AgentChatRunner {
       { budget: compact ? MAX_COMPACT_CONTEXT_CHARS : MAX_CONTEXT_CHARS }
     );
     return assembled.text;
+  }
+
+  private async resolveConversationReferenceBlocks(payload: ConversationMessageRequest, compact: boolean): Promise<ContextBlock[]> {
+    const referencePayload = payload as ConversationReferencePayload;
+    try {
+      const resolution = await this.fileResolver.resolve({
+        text: payload.content || "",
+        currentPath: referencePayload.current_path || "",
+        attachmentIds: payload.attachment_ids || [],
+        explicitPaths: referencePayload.reference_paths || [],
+        confirmedPaths: referencePayload.confirmed_reference_paths || [],
+        disableAutoReferences: referencePayload.disable_auto_references,
+        maxCandidates: 8
+      });
+      return buildReferenceContextBlocks({
+        documents: this.documents,
+        references: resolution.references,
+        maxCharsPerFile: compact ? 4000 : 12000
+      });
+    } catch {
+      return [];
+    }
   }
 
   private async buildWebSearchContext(userText: string, runtimeContext: string, compact: boolean, webSearchSources?: WebSearchSource[]): Promise<string> {

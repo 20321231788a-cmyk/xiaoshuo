@@ -764,6 +764,76 @@ describe("agent-runtime chat flow", () => {
     expect(fileContent).toBe("助理回复内容");
   });
 
+  it("sendMessage includes explicit project reference files in conversation context", async () => {
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const conversation = await conversations.createConversation({ title: "引用文件会话" });
+
+    let capturedMessages: ChatCompletionMessage[] = [];
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          capturedMessages = messages;
+          return "已参考章纲";
+        }
+      }
+    });
+
+    await runtime.sendMessage(conversation.id, {
+      content: "参考章纲总结下一章",
+      skill_id: "",
+      agent_name: "",
+      write_target: "",
+      insert_mode: "none" as const,
+      current_path: "",
+      runtime_context: "",
+      attachment_ids: [],
+      reference_paths: ["01_大纲/章纲.txt"],
+      confirmed_reference_paths: [],
+      disable_auto_references: true
+    } as any);
+
+    const userContext = capturedMessages.at(-1)?.content || "";
+    expect(userContext).toContain("【参考文件：01_大纲/章纲.txt】");
+    expect(userContext).toContain("这是测试章纲");
+  });
+
+  it("sendMessage resolves current document references in conversation context", async () => {
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const conversation = await conversations.createConversation({ title: "当前文档会话" });
+
+    let capturedMessages: ChatCompletionMessage[] = [];
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          capturedMessages = messages;
+          return "已总结当前文档";
+        }
+      }
+    });
+
+    await runtime.sendMessage(conversation.id, {
+      content: "请总结当前文档",
+      skill_id: "",
+      agent_name: "",
+      write_target: "",
+      insert_mode: "none" as const,
+      current_path: "01_大纲/大纲.txt",
+      runtime_context: "",
+      attachment_ids: [],
+      reference_paths: [],
+      confirmed_reference_paths: [],
+      disable_auto_references: false
+    } as any);
+
+    const userContext = capturedMessages.at(-1)?.content || "";
+    expect(userContext).toContain("【参考文件：01_大纲/大纲.txt】");
+    expect(userContext).toContain("这是测试大纲");
+  });
+
   it("does not call web search when the feature is disabled", async () => {
     const conversations = new ConversationService({ projectRoot: tempDir });
     const conversation = await conversations.createConversation({ title: "联网测试" });

@@ -398,7 +398,19 @@ export class SkillService {
 
   async importSkillDraft(payload: SkillImportDraftRequest): Promise<SkillDefinition> {
     const normalized = this.normalizeSkill(payload.skill, payload.source_url || payload.source_name || "draft");
-    return this.saveImportedSkill(normalized, {
+    const existingIds = new Set((await this.listSkills()).map((skill) => skill.id));
+    const targetId = nextAvailableSkillId(normalized.id, existingIds);
+    const draftSkill = targetId === normalized.id
+      ? normalized
+      : this.withManifest(skillDefinitionSchema.parse({
+          ...normalized,
+          id: targetId,
+          manifest: {
+            ...normalized.manifest,
+            id: targetId
+          }
+        }), { forcePrompt: true });
+    return this.saveImportedSkill(draftSkill, {
       sourceName: payload.source_name || payload.source_url || normalized.name,
       sourceText: payload.source_text || normalized.prompt
     });
@@ -530,6 +542,9 @@ export class SkillService {
     const source = await this.getSkill(sourceId);
     if (!source) {
       throw new Error("skill 不存在");
+    }
+    if (source.handler_type !== "prompt") {
+      throw new Error("只能复制 prompt 型技能；workflow/job 技能请通过专门模板或源码升级");
     }
     const existingIds = new Set((await this.listSkills()).map((skill) => skill.id));
     const requestedId = normalizeSkillId(payload.target_id || "");

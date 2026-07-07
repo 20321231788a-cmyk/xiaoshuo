@@ -1891,7 +1891,7 @@ export class AgentRuntimeService {
     return {
       conversation_id: conversationId,
       content: payload.content || "",
-      current_path: "",
+      current_path: payload.current_path || "",
       selection: "",
       project_context_hint: payload.runtime_context || "",
       skill_id: payload.skill_id || "",

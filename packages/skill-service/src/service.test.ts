@@ -142,6 +142,35 @@ describe("skill-service", () => {
     });
   });
 
+  it("keeps duplicate imported draft ids instead of overwriting existing skills", async () => {
+    const service = new SkillService({ projectRoot: tempDir });
+    const makeDraft = (prompt: string) => ({
+      skill: {
+        id: "custom_skill",
+        name: "自定义技能",
+        description: "draft description",
+        input_mode: "text" as const,
+        context_requirements: [],
+        handler_type: "prompt" as const,
+        linked_targets: [],
+        prompt,
+        imported_from: "",
+        writable: true
+      },
+      source_url: "",
+      source_name: "",
+      source_text: prompt
+    });
+
+    const first = await service.importSkillDraft(makeDraft("first prompt"));
+    const second = await service.importSkillDraft(makeDraft("second prompt"));
+
+    expect(first.id).toBe("custom_skill");
+    expect(second.id).toBe("custom_skill_2");
+    expect((await service.getSkill("custom_skill"))?.prompt).toBe("first prompt");
+    expect((await service.getSkill("custom_skill_2"))?.prompt).toBe("second prompt");
+  });
+
   it("ignores broken imported skill records when listing", async () => {
     const skillsDir = path.join(tempDir, "00_设定集", ".agent", "skills");
     await fs.mkdir(skillsDir, { recursive: true });
@@ -257,6 +286,16 @@ describe("skill-service", () => {
     const versions = await service.listSkillVersions("custom_outline");
     expect(versions.versions).toHaveLength(1);
     expect(versions.versions[0]?.snapshot.id).toBe("custom_outline");
+  });
+
+  it("rejects cloning non-prompt builtin workflow or job skills", async () => {
+    const service = new SkillService({ projectRoot: tempDir, now: () => "2026-07-07 10:00:00" });
+
+    await expect(service.cloneSkill("body_generate", {
+      target_id: "custom_body",
+      target_name: "自定义正文",
+      instruction: "clone for edit"
+    })).rejects.toThrow("只能复制 prompt 型技能");
   });
 
   it("rolls imported skills back to a stored version", async () => {

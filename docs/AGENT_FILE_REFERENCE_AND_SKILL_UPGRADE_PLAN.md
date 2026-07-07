@@ -255,6 +255,34 @@
 - 首次运行 `npm run test:e2e` 时本机缺少 Playwright Chromium，报 `chrome-headless-shell.exe` 不存在；执行 `npx playwright install chromium` 后重跑通过。
 - 当前 e2e 覆盖的是既有项目/会话/终端链路；Workbench 引用确认和 skill 编辑/回滚的专门 e2e 用例仍建议后续在补稳定 `data-testid` 后添加。
 
+### 2026-07-07 Post-review hardening
+
+状态：已完成，本次提交记录。
+
+复审发现并修复：
+
+- Workbench 已把 `reference_paths`、`confirmed_reference_paths`、`disable_auto_references` 发给普通会话，但 `AgentChatRunner.buildConversationMessages()` 原先没有把这些字段作为 reference blocks 注入普通会话上下文；现在普通会话和 `/api/agent/run` 的引用文件读取路径保持一致。
+- 普通会话 payload 原先没有稳定透传 `current_path`，导致“当前文档/这章/本文”类请求无法在会话路径中自动读取当前打开文件；现在 Workbench、shared schema、runtime request 转换和 chat runner 均已接上。
+- `SkillService.importSkillDraft()` 原先按 ID Map 保存，重复/中文归一化 ID 可能覆盖旧导入技能；现在导入 draft 会对全部现有 skill ID 做冲突检测并分配 `_2` 后缀。
+- `SkillService.cloneSkill()` 原先可复制 `job/workflow` 型内置 skill 并强制转成 `prompt`，容易生成看似可编辑但丢失执行逻辑的技能副本；现在只允许复制 `prompt` 型 skill。
+
+已验证：
+
+- `npx vitest run packages/agent-runtime/src/runtime.test.ts packages/skill-service/src/service.test.ts`
+- `npm run typecheck`
+- `npm test`（68 个 test files，456 个 tests 通过）
+- `npm run build:workbench`（通过；Vite 仍提示现有 chunk size warning）
+- `npm run build:desktop`
+- `npm run smoke:desktop`
+- `git diff --check`
+
+新增回归覆盖：
+
+- 普通会话显式 `reference_paths` 会把 `【参考文件：...】` 和文件正文注入模型消息。
+- 普通会话 `current_path` + “当前文档”语义会自动读取当前文件。
+- 重复 draft ID 导入不会覆盖旧技能，会生成 `custom_skill_2`。
+- `body_generate` 等非 prompt 内置 skill clone 会被拒绝。
+
 ## 0. 当前基线
 
 评估时间：2026-07-07。
