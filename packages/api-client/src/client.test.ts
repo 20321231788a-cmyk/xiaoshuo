@@ -916,4 +916,76 @@ describe("api-client", () => {
 
     expect(events).toEqual(["start:chat", "delta:你好", "final:你好，世界"]);
   });
+
+  it("preserves confirmed reference fields in streamed conversation payloads", async () => {
+    const requests: Array<{ url: string; method: string; body: string }> = [];
+    const client = createApiClient({
+      baseUrl: "http://127.0.0.1:18452",
+      fetchFn: async (input, init) => {
+        requests.push({
+          url: String(input),
+          method: String(init?.method || "GET"),
+          body: String(init?.body || "")
+        });
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(
+                new TextEncoder().encode(
+                  JSON.stringify({
+                    type: "final",
+                    payload: {
+                      intent: "chat",
+                      reply: "ok",
+                      results: [],
+                      saved_paths: [],
+                      requires_confirmation: false
+                    }
+                  })
+                )
+              );
+              controller.close();
+            }
+          }),
+          { status: 200, headers: { "Content-Type": "application/x-ndjson" } }
+        );
+      }
+    });
+
+    await client.streamConversationMessage(
+      "conv_1",
+      {
+        content: "参考章纲继续写",
+        skill_id: "",
+        agent_name: "",
+        write_target: "",
+        insert_mode: "none",
+        runtime_context: "",
+        attachment_ids: [],
+        reference_paths: ["01_大纲/章纲.txt"],
+        confirmed_reference_paths: ["00_设定集/人物设定.txt"],
+        disable_auto_references: true
+      },
+      {}
+    );
+
+    expect(requests).toEqual([
+      {
+        url: "http://127.0.0.1:18452/api/conversations/conv_1/messages",
+        method: "POST",
+        body: JSON.stringify({
+          content: "参考章纲继续写",
+          skill_id: "",
+          agent_name: "",
+          write_target: "",
+          insert_mode: "none",
+          runtime_context: "",
+          attachment_ids: [],
+          reference_paths: ["01_大纲/章纲.txt"],
+          confirmed_reference_paths: ["00_设定集/人物设定.txt"],
+          disable_auto_references: true
+        })
+      }
+    ]);
+  });
 });
