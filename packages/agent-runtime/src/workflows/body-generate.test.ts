@@ -1,6 +1,7 @@
 import { ConversationService } from "@xiaoshuo/conversation-service";
 import { DocumentService } from "@xiaoshuo/document-service";
 import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
+import { GraphMemory, VectorDb } from "@xiaoshuo/vector-service";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -53,6 +54,25 @@ function createWorkflowContext(responses: string[]): WorkflowRunContext {
     savePlanner: new GeneratedSavePlanner({ projectRoot: tempDir, config, modelClient }),
     skillRunner: new PromptSkillRunner({ projectRoot: tempDir, config, modelClient })
   };
+}
+
+function seedLoreGraph(pathName: string, text: string): void {
+  const db = new VectorDb(tempDir);
+  db.init();
+  try {
+    db.db.prepare(`
+      INSERT INTO chunks(path, source_type, title, chunk_index, start_char, end_char, text, text_hash, mtime)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(pathName, "lore", "角色设定", 0, 0, text.length, text, `${pathName}:${text.length}`, Date.now());
+  } finally {
+    db.close();
+  }
+  const memory = new GraphMemory(tempDir);
+  try {
+    memory.rebuild();
+  } finally {
+    memory.close();
+  }
 }
 
 describe("BodyGenerateWorkflow", () => {
@@ -117,5 +137,42 @@ describe("BodyGenerateWorkflow", () => {
       deslopped: true
     });
     expect(await fs.readFile(path.join(tempDir, "02_正文", "第001章.txt"), "utf8")).toContain("林默沿着石阶一步步向上");
+  });
+
+  it("revises when GraphMemory reports blocking claims", async () => {
+    seedLoreGraph("00_设定集/设定库/角色设定.md", "### 林默\n青云宗弟子，沉默寡言。");
+
+    const workflow = new BodyGenerateWorkflow();
+    const context = createWorkflowContext([
+      "林默不是青云宗弟子，只是路过山门的散修。",
+      JSON.stringify({ score: 95, risks: [], reason: "模型审稿通过" }),
+      "【修正后正文】\n林默作为青云宗弟子推开山门。\n【修正原因日志】\n保留已确认图谱事实。",
+      "林默作为青云宗弟子推开山门。"
+    ]);
+
+    const result = await workflow.runAgent(
+      {
+        conversation_id: "",
+        content: "生成第1章正文，约2500字",
+        current_path: "",
+        selection: "",
+        project_context_hint: "",
+        skill_id: "body_generate",
+        attachment_ids: []
+      },
+      context
+    );
+
+    expect(result.skill_result?.data).toMatchObject({
+      revised: true,
+      graph_score: 75
+    });
+    expect(result.skill_result?.data?.risks).toEqual(expect.arrayContaining([expect.stringContaining("Graph blocking claim")]));
+    expect(result.skill_result?.data?.graph_blocking_claims).toEqual([
+      expect.objectContaining({
+        source_path: "00_设定集/设定库/角色设定.md"
+      })
+    ]);
+    expect(result.reply).toContain("林默作为青云宗弟子");
   });
 });

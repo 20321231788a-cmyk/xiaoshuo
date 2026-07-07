@@ -2,11 +2,25 @@ import { loadModelConfig, readRawConfig, type ModelConfig } from "@xiaoshuo/conf
 import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
 import type { ChatCompletionMessage } from "@xiaoshuo/model-client";
 import type { AgentRunRequest, AgentRunResponse, ConversationDetail } from "@xiaoshuo/shared";
+import { GraphMemory, type CheckGraphDraftConsistencyResult } from "@xiaoshuo/vector-service";
 import { randomUUID } from "node:crypto";
 import { buildConsistencyCheckPrompt, parseConsistencyCheckResult } from "../prompts/consistency.js";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
 
 const SOURCE_IMPORT_CHARS = 60_000;
+
+type GraphAdvisoryResult =
+  | { status: "ok"; result: CheckGraphDraftConsistencyResult }
+  | { status: "unavailable"; error: string };
+
+type ConsistencyCheckResult = ReturnType<typeof parseConsistencyCheckResult> & {
+  graph_score?: number;
+  graph_risks?: string[];
+  blocking_claims?: CheckGraphDraftConsistencyResult["blocking_claims"];
+  graph_suggested_fix?: string;
+  graph_status?: "ok" | "unavailable";
+  graph_error?: string;
+};
 
 export class ConsistencyCheckWorkflow implements WorkflowHandler {
   id = "consistency_check";
@@ -21,6 +35,7 @@ export class ConsistencyCheckWorkflow implements WorkflowHandler {
     const assistantConfig = await loadAssistantModelConfig(context);
     const chapterOutline = await resolveConsistencyChapterOutline(request, context);
     const recent = continuity.previous_chapters.map((item) => item.content).join("\n");
+    const graphAdvisoryPromise = checkGraphDraftConsistency(text, chapterOutline, context);
     const prompt = buildConsistencyCheckPrompt({
       chapterOutline,
       continuityContext: JSON.stringify({
@@ -41,7 +56,8 @@ export class ConsistencyCheckWorkflow implements WorkflowHandler {
       ] satisfies ChatCompletionMessage[],
       0.1
     );
-    const result = parseConsistencyCheckResult(raw, assistantConfig.line);
+    const graphAdvisory = await graphAdvisoryPromise;
+    const result = attachGraphAdvisory(parseConsistencyCheckResult(raw, assistantConfig.line), graphAdvisory);
     const reply = JSON.stringify(result, null, 2);
     const conversation = await recordSkillExchange(request, reply, context);
 
@@ -60,6 +76,52 @@ export class ConsistencyCheckWorkflow implements WorkflowHandler {
       requires_confirmation: false
     };
   }
+}
+
+async function checkGraphDraftConsistency(
+  draftText: string,
+  chapterOutline: string,
+  context: WorkflowRunContext
+): Promise<GraphAdvisoryResult> {
+  let memory: GraphMemory | null = null;
+  try {
+    memory = new GraphMemory(context.projectRoot);
+    const result = await memory.checkDraftConsistency(draftText, { chapterOutline });
+    return { status: "ok", result };
+  } catch (err) {
+    return {
+      status: "unavailable",
+      error: err instanceof Error ? err.message : String(err)
+    };
+  } finally {
+    try {
+      memory?.close();
+    } catch {
+      // Graph advisory cleanup must not affect the consistency workflow.
+    }
+  }
+}
+
+function attachGraphAdvisory(
+  result: ReturnType<typeof parseConsistencyCheckResult>,
+  advisory: GraphAdvisoryResult
+): ConsistencyCheckResult {
+  if (advisory.status === "unavailable") {
+    return {
+      ...result,
+      graph_status: "unavailable",
+      graph_error: advisory.error.slice(0, 500)
+    };
+  }
+
+  return {
+    ...result,
+    graph_status: "ok",
+    graph_score: advisory.result.score,
+    graph_risks: advisory.result.risks,
+    blocking_claims: advisory.result.blocking_claims,
+    graph_suggested_fix: advisory.result.suggested_fix
+  };
 }
 
 async function loadAssistantModelConfig(context: WorkflowRunContext): Promise<{ config: ModelConfig; line: "secondary" | "primary-fallback" }> {

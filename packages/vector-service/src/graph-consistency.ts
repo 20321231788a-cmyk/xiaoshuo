@@ -120,10 +120,6 @@ export class GraphConsistency {
     if (blockingClaims.length > 0) {
       risks.push(`Found ${blockingClaims.length} draft statement(s) that conflict with confirmed graph claims.`);
     }
-    if (options.chapterOutline && options.chapterOutline.trim().length > 0 && options.chapter && !text.includes(String(options.chapter))) {
-      risks.push("Chapter outline was provided; outline-vs-draft matching is advisory in this minimal implementation.");
-    }
-
     return {
       score: clampScore(100 - blockingClaims.length * 25),
       risks,

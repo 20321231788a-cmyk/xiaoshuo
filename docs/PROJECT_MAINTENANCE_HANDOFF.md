@@ -1407,6 +1407,40 @@ npm run smoke:desktop
 - 将 `GraphMemory.checkDraftConsistency()` 接入 `consistency_check`，先作为 advisory，不阻断保存。
 - 后续再把 `updatePaths()` 从全量 rebuild 优化为按变更路径增量更新。
 
+### 15.30 2026-07-07 P3 GraphMemory runtime 集成记录
+
+本轮完成 GraphMemory 到 agent-runtime 的第一轮集成，保持 advisory / fail-soft 策略。
+
+主要改动：
+
+- `packages/agent-runtime/src/workflows/body-generate.ts` 使用 `GraphMemory.buildWritingContext()` 注入正文生成和一致性回炉 prompt 的图谱上下文。
+- `body_generate` 生成后执行 `GraphMemory.checkDraftConsistency()`，blocking claims 会合并到 risks 并进入既有 revision 流程。
+- `body_generate` 保存后调用 `GraphMemory.updatePaths(savedPaths)`，失败只写 metadata，不影响保存。
+- `packages/agent-runtime/src/workflows/consistency-check.ts` 并行执行 GraphMemory advisory，保留模型结果并附加 graph metadata。
+- `packages/vector-service/src/graph-consistency.ts` 去除章节数字占位 advisory，减少误报。
+- 扩展 `body-generate.test.ts` 与 `consistency-check.test.ts`，覆盖 graph blocking claim、graph unavailable 和正文回炉。
+- 本轮由主线程 + 子智能体 Meitner 并行完成；Meitner 负责 consistency-check，主线程负责 body-generate。
+
+本轮已验证：
+
+```powershell
+npm test -- packages/agent-runtime/src/workflows/body-generate.test.ts -t "BodyGenerateWorkflow"
+npm test -- packages/agent-runtime/src/workflows/consistency-check.test.ts
+npm run typecheck -w @xiaoshuo/agent-runtime
+npm run typecheck -w @xiaoshuo/vector-service
+npx vitest run packages/vector-service/src/graph-memory.test.ts packages/vector-service/src/graph-context.test.ts
+npm run typecheck
+npm test
+npm run build:desktop
+npm run smoke:desktop
+```
+
+下一步建议：
+
+- P3 后续可将 graph advisory 写入 agent trace，方便检查 blocking claim 来源。
+- `GraphMemory.updatePaths()` 当前仍全量 rebuild，后续可增量化。
+- 若切到 P4，优先建立 body_generate / consistency_check 的 eval fixture，覆盖 graph advisory 不误伤。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

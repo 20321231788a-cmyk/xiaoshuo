@@ -2,7 +2,7 @@ import { loadModelConfig, loadWebSearchConfig, readRawConfig, type ModelConfig }
 import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
 import type { ChatCompletionMessage } from "@xiaoshuo/model-client";
 import type { AgentRunRequest, AgentRunResponse } from "@xiaoshuo/shared";
-import { GraphContext } from "@xiaoshuo/vector-service";
+import { GraphMemory, type CheckGraphDraftConsistencyResult } from "@xiaoshuo/vector-service";
 import { randomUUID } from "node:crypto";
 import { applyHumanizerIfEnabled } from "../humanizer.js";
 import {
@@ -16,6 +16,17 @@ import { clipForConsistency } from "../prompts/consistency.js";
 import { buildStyleGenreConstraintBlock } from "../style-genre-context.js";
 import { formatWebSearchContext, shouldUseWebSearch, summarizeWebSearchSources, type WebSearchSource } from "../web-search.js";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
+
+type BodyConsistencyCheck = {
+  score: number;
+  risks: string[];
+  reason: string;
+  graph_score?: number;
+  graph_risks?: string[];
+  graph_blocking_claims?: CheckGraphDraftConsistencyResult["blocking_claims"];
+  graph_suggested_fix?: string;
+  graph_error?: string;
+};
 
 export class BodyGenerateWorkflow implements WorkflowHandler {
   id = "body_generate";
@@ -31,12 +42,13 @@ export class BodyGenerateWorkflow implements WorkflowHandler {
     const autoRevision = (request as any).auto_revision !== false;
     const scoreThreshold = Number((request as any).score_threshold || 80);
 
-    let check = { score: 0, risks: [] as string[], reason: "未进行一致性检查" };
+    let check: BodyConsistencyCheck = { score: 0, risks: [], reason: "未进行一致性检查" };
     let revised = false;
     let finalRawText = generated.text;
 
     if (autoRevision) {
       check = await runConsistencyCheckForText(generated.text, chapterOutline, context);
+      check = mergeGraphCheck(check, await runGraphDraftConsistency(generated.text, chapter, chapterOutline, context));
       if (check.score < scoreThreshold || check.risks.length > 0) {
         const continuity = await buildProjectContinuityContext(context.projectRoot);
         const revision = await runBodyChapterRevision(
@@ -101,6 +113,8 @@ export class BodyGenerateWorkflow implements WorkflowHandler {
       ...(humanized.error ? { humanizer_error: humanized.error } : {}),
       score: check.score,
       risks: check.risks,
+      ...graphCheckData(check),
+      ...(generated.graph_error ? { graph_context_error: generated.graph_error } : {}),
       target_paths: savePlan.target_paths.length ? savePlan.target_paths : [outputPath],
       target_path: savePlan.target_paths[0] || outputPath,
       result: text,
@@ -135,6 +149,7 @@ export class BodyGenerateWorkflow implements WorkflowHandler {
     }
 
     const savedPaths = await context.cache.commitSavePlan(entry.cache_id, savePlan, { cleanupContent: true });
+    const graphUpdateError = await updateGraphMemoryForSavedPaths(savedPaths, context);
     if (savedPaths.includes(outputPath)) {
       await appendHandoff(chapter, outputPath, text, chapterOutline, check, context);
     }
@@ -162,6 +177,9 @@ export class BodyGenerateWorkflow implements WorkflowHandler {
           ...(humanized.error ? { humanizer_error: humanized.error } : {}),
           score: check.score,
           risks: check.risks,
+          ...graphCheckData(check),
+          ...(generated.graph_error ? { graph_context_error: generated.graph_error } : {}),
+          ...(graphUpdateError ? { graph_update_error: graphUpdateError } : { graph_updated_paths: savedPaths }),
           target_paths: savePlan.target_paths,
           saved_paths: savedPaths,
           save_plan: savePlan,
@@ -180,7 +198,7 @@ async function generateBodyChapter(
   chapter: number,
   chapterOutline: string,
   context: WorkflowRunContext
-): Promise<{ text: string; sources: WebSearchSource[] }> {
+): Promise<{ text: string; sources: WebSearchSource[]; graph_error?: string }> {
   const config = await loadModelConfig(context.config, "primary");
   if (!config.configured) {
     throw new Error("未配置主线路 API Key 或模型名。");
@@ -201,16 +219,7 @@ async function generateBodyChapter(
     context
   );
 
-  let graphContext = "无";
-  let graph: GraphContext | null = null;
-  try {
-    graph = new GraphContext(context.projectRoot);
-    graphContext = await graph.buildWritingContext([chapterOutline, request.content || ""].join("\n"), { topK: 6 });
-  } catch (err) {
-    console.error("Failed to build graph writing context:", err);
-  } finally {
-    graph?.close();
-  }
+  const graph = await buildGraphWritingContext([chapterOutline, request.content || ""].join("\n"), context, { topK: 6, chapter });
 
   const text = String(
     await context.modelClient.requestCompletion(
@@ -223,7 +232,7 @@ async function generateBodyChapter(
             chapter,
             instruction: request.content || "",
             chapterOutline,
-            graphContext,
+            graphContext: graph.context,
             loreContext: JSON.stringify(continuity.lore),
             styleGenreBlock: buildStyleGenreConstraintBlock(continuity.style, continuity.genre, { bodyPhase: true }),
             webSearchContext: webSearch.context,
@@ -236,7 +245,7 @@ async function generateBodyChapter(
       config.temperature
     )
   ).trim();
-  return { text, sources: webSearch.sources };
+  return { text, sources: webSearch.sources, graph_error: graph.error };
 }
 
 async function buildWorkflowWebSearchContext(
@@ -270,7 +279,7 @@ async function runConsistencyCheckForText(
   text: string,
   chapterOutline: string,
   context: WorkflowRunContext
-): Promise<{ score: number; risks: string[]; reason: string }> {
+): Promise<BodyConsistencyCheck> {
   const continuity = await buildProjectContinuityContext(context.projectRoot);
   const assistantConfig = await loadAssistantModelConfig(context).catch(() => null);
   if (!assistantConfig) {
@@ -278,23 +287,14 @@ async function runConsistencyCheckForText(
   }
   const recent = continuity.previous_chapters.map((item) => item.content).join("\n");
 
-  let graphContext = "无";
-  let graph: GraphContext | null = null;
-  try {
-    graph = new GraphContext(context.projectRoot);
-    graphContext = await graph.buildWritingContext(text, { topK: 5 });
-  } catch (err) {
-    console.error("Failed to build graph consistency check context:", err);
-  } finally {
-    graph?.close();
-  }
+  const graph = await buildGraphWritingContext(text, context, { topK: 5 });
 
   const prompt = [
     "请检查正文是否违背章纲、人物设定、体系设定、地图设定、道具设定、风格库、题材库和上一章承接。",
     '输出 JSON：{"score": 0-100, "risks": ["问题"], "reason": "简短说明"}。',
     "低于 80 分代表必须回炉。",
     "",
-    `【图谱设定与计划事实】\n${graphContext}`,
+    `【图谱设定与计划事实】\n${graph.context}`,
     "",
     `【章纲】\n${clipForConsistency(chapterOutline, 5000)}`,
     "",
@@ -319,8 +319,102 @@ async function runConsistencyCheckForText(
     reason:
       assistantConfig.line === "primary-fallback"
         ? `副线路未配置，已由主线路辅助代理完成评分。${String(parsed.reason || String(raw || "").slice(0, 1000))}`
-        : String(parsed.reason || String(raw || "").slice(0, 1000))
+        : String(parsed.reason || String(raw || "").slice(0, 1000)),
+    ...(graph.error ? { graph_error: graph.error } : {})
   };
+}
+
+async function buildGraphWritingContext(
+  query: string,
+  context: WorkflowRunContext,
+  options: { topK?: number; chapter?: number } = {}
+): Promise<{ context: string; error?: string }> {
+  let graph: GraphMemory | null = null;
+  try {
+    graph = new GraphMemory(context.projectRoot);
+    const graphContext = await graph.buildWritingContext(query, {
+      topK: options.topK,
+      chapter: options.chapter,
+      maxChars: 12_000
+    });
+    return { context: graphContext || "无" };
+  } catch (err) {
+    return { context: "无", error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    graph?.close();
+  }
+}
+
+async function runGraphDraftConsistency(
+  text: string,
+  chapter: number,
+  chapterOutline: string,
+  context: WorkflowRunContext
+): Promise<Partial<BodyConsistencyCheck>> {
+  let graph: GraphMemory | null = null;
+  try {
+    graph = new GraphMemory(context.projectRoot);
+    const result = await graph.checkDraftConsistency(text, { chapter, chapterOutline });
+    const blockingRisks = result.blocking_claims.map((claim) => `Graph blocking claim: ${claim.reason} (${claim.source_path})`);
+    return {
+      graph_score: result.score,
+      graph_risks: result.risks,
+      graph_blocking_claims: result.blocking_claims,
+      graph_suggested_fix: result.suggested_fix,
+      score: result.score,
+      risks: [...result.risks, ...blockingRisks]
+    };
+  } catch (err) {
+    return { graph_error: err instanceof Error ? err.message : String(err) };
+  } finally {
+    graph?.close();
+  }
+}
+
+function mergeGraphCheck(check: BodyConsistencyCheck, graph: Partial<BodyConsistencyCheck>): BodyConsistencyCheck {
+  if (graph.graph_error) {
+    return { ...check, graph_error: graph.graph_error };
+  }
+  const graphRisks = graph.risks || [];
+  return {
+    ...check,
+    score: graph.score !== undefined ? Math.min(check.score, graph.score) : check.score,
+    risks: uniqueStrings([...check.risks, ...graphRisks]),
+    ...(graph.graph_score !== undefined ? { graph_score: graph.graph_score } : {}),
+    ...(graph.graph_risks ? { graph_risks: graph.graph_risks } : {}),
+    ...(graph.graph_blocking_claims ? { graph_blocking_claims: graph.graph_blocking_claims } : {}),
+    ...(graph.graph_suggested_fix ? { graph_suggested_fix: graph.graph_suggested_fix } : {})
+  };
+}
+
+async function updateGraphMemoryForSavedPaths(savedPaths: string[], context: WorkflowRunContext): Promise<string> {
+  if (!savedPaths.length) {
+    return "";
+  }
+  let graph: GraphMemory | null = null;
+  try {
+    graph = new GraphMemory(context.projectRoot);
+    graph.updatePaths(savedPaths);
+    return "";
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  } finally {
+    graph?.close();
+  }
+}
+
+function graphCheckData(check: BodyConsistencyCheck): Record<string, unknown> {
+  return {
+    ...(check.graph_score !== undefined ? { graph_score: check.graph_score } : {}),
+    ...(check.graph_risks ? { graph_risks: check.graph_risks } : {}),
+    ...(check.graph_blocking_claims ? { graph_blocking_claims: check.graph_blocking_claims } : {}),
+    ...(check.graph_suggested_fix ? { graph_suggested_fix: check.graph_suggested_fix } : {}),
+    ...(check.graph_error ? { graph_error: check.graph_error } : {})
+  };
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.map((item) => String(item || "").trim()).filter(Boolean))];
 }
 
 async function loadAssistantModelConfig(context: WorkflowRunContext): Promise<{ config: ModelConfig; line: "secondary" | "primary-fallback" }> {

@@ -1651,3 +1651,36 @@ npm run smoke:desktop
 
 - P3 下一步把 `GraphMemory.buildWritingContext()` 与 `checkDraftConsistency()` 接入 `body_generate` / `consistency_check` workflow。
 - `GraphMemory.updatePaths()` 当前保守调用全量 rebuild；后续可改为增量更新。
+
+### 16.13 2026-07-07 P3 GraphMemory runtime 集成已完成
+
+状态：已把 GraphMemory 接入正文生成和一致性检查，均为 fail-soft advisory。
+
+本阶段完成内容：
+
+- `packages/agent-runtime/src/workflows/body-generate.ts` 改用 `GraphMemory.buildWritingContext()` 获取图谱写作上下文，替代直接依赖 `GraphContext`。
+- `body_generate` 生成后调用 `GraphMemory.checkDraftConsistency()`；若出现 blocking claims，会合并 graph risks 并触发既有 revision 流程。
+- `body_generate` 保存成功后调用 `GraphMemory.updatePaths(savedPaths)`，当前仍保守全量 rebuild，失败只写入 `graph_update_error` metadata。
+- `packages/agent-runtime/src/workflows/consistency-check.ts` 并行调用 `GraphMemory.checkDraftConsistency()`，在保留模型 `score/risks/reason` 的同时附加 `graph_status`、`graph_score`、`graph_risks`、`blocking_claims`、`graph_suggested_fix`。
+- `packages/vector-service/src/graph-consistency.ts` 去除章节数字占位 advisory，避免无 blocking claim 时误触发正文回炉。
+- 新增/扩展 `body-generate.test.ts` 与 `consistency-check.test.ts` 的 graph conflict / graph unavailable 覆盖。
+- 本阶段由主线程与子智能体 Meitner 并行完成；Meitner 负责 `consistency_check` 接入，主线程负责 `body_generate` 接入和整体验证。
+
+已验证：
+
+```powershell
+npm test -- packages/agent-runtime/src/workflows/body-generate.test.ts -t "BodyGenerateWorkflow"
+npm test -- packages/agent-runtime/src/workflows/consistency-check.test.ts
+npm run typecheck -w @xiaoshuo/agent-runtime
+npm run typecheck -w @xiaoshuo/vector-service
+npx vitest run packages/vector-service/src/graph-memory.test.ts packages/vector-service/src/graph-context.test.ts
+npm run typecheck
+npm test
+npm run build:desktop
+npm run smoke:desktop
+```
+
+遗留说明：
+
+- P3 后续可把 graph risks 写入 agent trace，并将 `updatePaths()` 优化为按保存路径增量更新。
+- 下一阶段可进入 P4 Agent Eval，或继续做 P2 workflow context block 更细分接入。

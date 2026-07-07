@@ -2,6 +2,7 @@ import { ConversationService } from "@xiaoshuo/conversation-service";
 import { DocumentService } from "@xiaoshuo/document-service";
 import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
 import type { ChatCompletionMessage } from "@xiaoshuo/model-client";
+import { VectorDb } from "@xiaoshuo/vector-service";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -54,6 +55,25 @@ function createWorkflowContext(modelClient: WorkflowRunContext["modelClient"]): 
   };
 }
 
+function seedConfirmedGraphClaim(input: { entityName: string; objectText: string; sourcePath: string }): void {
+  const db = new VectorDb(tempDir);
+  try {
+    db.init();
+    const now = Date.now();
+    const entityId = `character:${input.entityName}`;
+    db.db.prepare(`
+      INSERT INTO graph_entities(entity_id, name, type, description, source_path, status, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(entityId, input.entityName, "character", input.objectText, input.sourcePath, "confirmed", now, now);
+    db.db.prepare(`
+      INSERT INTO graph_claims(subject_entity_id, predicate, object_text, source_path, source_type, chapter_number, status, confidence, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(entityId, "profile", input.objectText, input.sourcePath, "lore", null, "confirmed", 1, now, now);
+  } finally {
+    db.close();
+  }
+}
+
 describe("ConsistencyCheckWorkflow", () => {
   it("checks draft consistency and records a skill exchange", async () => {
     let capturedMessages: ChatCompletionMessage[] = [];
@@ -88,6 +108,77 @@ describe("ConsistencyCheckWorkflow", () => {
       model_line: "primary-fallback"
     });
     expect(result.conversation?.messages.at(-1)?.metadata.intent).toBe("skill");
+  });
+
+  it("adds GraphMemory advisory fields without changing the model score", async () => {
+    seedConfirmedGraphClaim({
+      entityName: "林默",
+      objectText: "青云宗大弟子",
+      sourcePath: "00_设定集/设定库/角色设定.md"
+    });
+    const workflow = new ConsistencyCheckWorkflow();
+    const context = createWorkflowContext({
+      requestCompletion: async () => JSON.stringify({ score: 91, risks: ["模型风险"], reason: "模型检查通过" })
+    });
+
+    const result = await workflow.runAgent(
+      {
+        conversation_id: "",
+        content: "做一次一致性检查",
+        current_path: "",
+        selection: "林默不是青云宗大弟子，他另有身份。",
+        project_context_hint: "",
+        skill_id: "consistency_check",
+        attachment_ids: []
+      },
+      context
+    );
+
+    expect(result.skill_result?.data).toMatchObject({
+      score: 91,
+      risks: ["模型风险"],
+      reason: "模型检查通过",
+      graph_status: "ok",
+      graph_score: 75,
+      graph_risks: ["Found 1 draft statement(s) that conflict with confirmed graph claims."],
+      blocking_claims: [
+        expect.objectContaining({
+          claim: expect.stringContaining("青云宗大弟子"),
+          source_path: "00_设定集/设定库/角色设定.md"
+        })
+      ]
+    });
+    expect(result.skill_result?.result).toContain('"graph_score": 75');
+  });
+
+  it("keeps consistency_check successful when GraphMemory is unavailable", async () => {
+    await fs.writeFile(path.join(tempDir, "00_设定集", ".agent"), "not a directory", "utf8");
+    const workflow = new ConsistencyCheckWorkflow();
+    const context = createWorkflowContext({
+      requestCompletion: async () => JSON.stringify({ score: 88, risks: [], reason: "模型检查通过" })
+    });
+
+    const result = await workflow.runAgent(
+      {
+        conversation_id: "",
+        content: "做一次一致性检查",
+        current_path: "",
+        selection: "林默在宗门大比前突然改变了原定策略。",
+        project_context_hint: "",
+        skill_id: "consistency_check",
+        attachment_ids: [],
+        suppress_conversation_record: true
+      } as any,
+      context
+    );
+
+    expect(result.skill_result?.data).toMatchObject({
+      score: 88,
+      risks: [],
+      reason: "模型检查通过",
+      graph_status: "unavailable"
+    });
+    expect(String((result.skill_result?.data as any).graph_error || "")).not.toHaveLength(0);
   });
 
   it("falls back safely when model output is not JSON", () => {
