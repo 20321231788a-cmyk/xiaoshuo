@@ -1076,6 +1076,139 @@ describe("agent-runtime chat flow", () => {
     expect(result.saved_paths).toEqual([]);
   });
 
+  it("creates a skill draft preview from natural language without importing it", async () => {
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () =>
+          JSON.stringify({
+            id: "short_review",
+            name: "短篇审稿",
+            description: "检查短篇情绪张力和结构问题。",
+            context_requirements: ["project_state", "conversation"],
+            linked_targets: [],
+            prompt: "请严格审稿，并输出问题等级。",
+            writable: false
+          })
+      }
+    });
+
+    const request = {
+      conversation_id: "",
+      content: "把当前选区做成一个“短篇审稿”技能",
+      current_path: "",
+      selection: "审稿时要关注情绪张力、反转和结尾余味。",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    };
+
+    expect(await runtime.canRunAgentLocally(request)).toBe(true);
+    const result = await runtime.runAgent(request);
+    const management = result.skill_result?.data?.skill_management as Record<string, unknown> | undefined;
+
+    expect(result.intent).toBe("skill");
+    expect(result.requires_confirmation).toBe(true);
+    expect(result.reply).toContain("已生成技能草稿");
+    expect(management).toMatchObject({
+      action: "draft",
+      confirm_action: "import_skill_draft"
+    });
+    expect((management?.draft as { skill?: { id?: string } } | undefined)?.skill?.id).toBe("short_review");
+    await expect(fs.readFile(path.join(tempDir, "00_设定集", ".agent", "skills", "imported.json"), "utf8")).rejects.toThrow();
+  });
+
+  it("requires cloning before modifying a builtin skill from natural language", async () => {
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => {
+          throw new Error("builtin patch preview should not call model");
+        }
+      }
+    });
+
+    const result = await runtime.runAgent({
+      conversation_id: "",
+      content: "修改去AI味技能，让它更适合男频网文",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    });
+    const management = result.skill_result?.data?.skill_management as Record<string, unknown> | undefined;
+
+    expect(result.intent).toBe("skill");
+    expect(result.requires_confirmation).toBe(true);
+    expect(result.reply).toContain("不能直接修改");
+    expect(management).toMatchObject({
+      action: "clone_then_patch",
+      confirm_action: "clone_skill"
+    });
+  });
+
+  it("previews a dry-run patch for imported skills without saving it", async () => {
+    await writeImportedSkills([
+      {
+        id: "short_review",
+        version: "1.0.0",
+        name: "短篇审稿",
+        description: "检查短篇问题。",
+        input_mode: "text",
+        context_requirements: ["project_state"],
+        handler_type: "prompt",
+        linked_targets: [],
+        prompt: "旧审稿 prompt",
+        imported_from: "test",
+        writable: false
+      }
+    ]);
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () =>
+          JSON.stringify({
+            id: "short_review",
+            name: "短篇审稿",
+            description: "更严格地检查短篇问题。",
+            context_requirements: ["project_state"],
+            linked_targets: [],
+            prompt: "新审稿 prompt，必须包含问题等级。",
+            writable: false
+          })
+      }
+    });
+
+    const result = await runtime.runAgent({
+      conversation_id: "",
+      content: "修改我导入的 short_review 技能，让它输出更严格",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    });
+    const management = result.skill_result?.data?.skill_management as Record<string, unknown> | undefined;
+    const patch = management?.patch_preview as { diff?: string } | undefined;
+    const importedRaw = await fs.readFile(path.join(tempDir, "00_设定集", ".agent", "skills", "imported.json"), "utf8");
+
+    expect(result.intent).toBe("skill");
+    expect(result.requires_confirmation).toBe(true);
+    expect(result.reply).toContain("修改差异");
+    expect(management).toMatchObject({
+      action: "patch",
+      confirm_action: "patch_skill",
+      target_skill_id: "short_review"
+    });
+    expect(patch?.diff).toContain("新审稿 prompt");
+    expect(importedRaw).toContain("旧审稿 prompt");
+    expect(importedRaw).not.toContain("新审稿 prompt");
+  });
+
   it("directly saves local prompt skill overwrite when the instruction asks to write", async () => {
     const runtime = new AgentRuntimeService({
       projectRoot: tempDir,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { SkillDefinition } from "@xiaoshuo/shared";
-import { classifyAgentIntent, rankSkillRoutes, resolveSkillRoute } from "./intent-router.js";
+import { classifyAgentIntent, classifySkillManagementIntent, rankSkillRoutes, resolveSkillRoute } from "./intent-router.js";
 
 function skill(input: Partial<SkillDefinition> & Pick<SkillDefinition, "id" | "name" | "description">): SkillDefinition {
   return {
@@ -36,6 +36,14 @@ const bodySkill = skill({
 });
 
 describe("intent-router semantic ranking", () => {
+  it("classifies natural-language skill management requests before normal skill routing", () => {
+    expect(classifySkillManagementIntent("把当前选区做成一个“短篇审稿”技能")?.action).toBe("draft");
+    expect(classifySkillManagementIntent("修改我导入的 short_review 技能，让它输出更严格")?.action).toBe("patch");
+    expect(classifySkillManagementIntent("把去AI味技能复制一份，改成更适合男频网文")?.action).toBe("clone");
+    expect(classifySkillManagementIntent("回滚 short_review 技能到上一个版本")?.action).toBe("rollback");
+    expect(classifySkillManagementIntent("请润色当前文档")).toBeNull();
+  });
+
   it("prefers an imported style-dialogue skill over generic outline generation", () => {
     const baiyeStyle = skill({
       id: "baiye_dialogue",

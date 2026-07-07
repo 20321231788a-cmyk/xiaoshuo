@@ -16,10 +16,12 @@ import type {
   CardDrawCandidate,
   SkillDraftFromUrlRequest,
   SkillDraftRequest,
-  SkillDraftResponse
+  SkillDraftResponse,
+  SkillDefinition,
+  SkillPatchResponse
 } from "@xiaoshuo/shared";
 import { AgentChatRunner, type ChatContextAssemblyObserver } from "./chat-runner.js";
-import { classifyAgentIntent, hasSkillAction, isReadContextIntent, rankSkillRoutes } from "./intent-router.js";
+import { classifyAgentIntent, classifySkillManagementIntent, hasSkillAction, isReadContextIntent, rankSkillRoutes, type SkillManagementIntent } from "./intent-router.js";
 import { AgentPlanner, type AgentPlannerOptions } from "./planner.js";
 import { PromptSkillRunner } from "./skill-runner.js";
 import { SkillDraftService } from "./skill-draft-service.js";
@@ -215,6 +217,9 @@ export class AgentRuntimeService {
   }
 
   async canRunAgentLocally(request: AgentRunRequest): Promise<boolean> {
+    if (classifySkillManagementIntent(request.content || "")) {
+      return true;
+    }
     if (this.shouldUseSmartSkillOrchestration(request)) {
       const skillPlan = await this.planSkillExecution(request).catch(() => null);
       if (skillPlan?.should_call_skill && skillPlan.steps.length) {
@@ -274,6 +279,14 @@ export class AgentRuntimeService {
 
   private async runAgentInternal(request: AgentRunRequest, trace?: AgentTraceRecorder, options: AgentRunOptions = {}): Promise<AgentRunResponse> {
     throwIfAborted(options.signal);
+    const skillManagementIntent = classifySkillManagementIntent(request.content || "");
+    if (skillManagementIntent) {
+      trace?.mark("planned", {
+        intent: "skill",
+        selected_reason: `skill_management:${skillManagementIntent.action} - ${skillManagementIntent.reason}`
+      });
+      return this.runSkillManagementPreview(skillManagementIntent, request, trace, options);
+    }
     if (this.shouldUseSmartSkillOrchestration(request)) {
       const skillPlan = await this.planSkillExecution(request, options);
       if (skillPlan.should_call_skill && skillPlan.steps.length) {
@@ -363,6 +376,15 @@ export class AgentRuntimeService {
 
   private async *streamAgentRunInternal(request: AgentRunRequest, trace?: AgentTraceRecorder, options: AgentRunOptions = {}): AsyncGenerator<AgentStreamEvent> {
     throwIfAborted(options.signal);
+    const skillManagementIntent = classifySkillManagementIntent(request.content || "");
+    if (skillManagementIntent) {
+      trace?.mark("planned", {
+        intent: "skill",
+        selected_reason: `skill_management:${skillManagementIntent.action} - ${skillManagementIntent.reason}`
+      });
+      yield* this.streamSkillManagementPreview(skillManagementIntent, request, trace, options);
+      return;
+    }
     if (this.shouldUseSmartSkillOrchestration(request)) {
       const skillPlan = await this.planSkillExecution(request, options);
       if (skillPlan.should_call_skill && skillPlan.steps.length) {
@@ -763,6 +785,299 @@ export class AgentRuntimeService {
   private async planSkillExecution(request: AgentRunRequest, options: AgentRunOptions = {}): Promise<SkillPlan> {
     const skills = await this.skills.listSkills().catch(() => []);
     return this.skillOrchestrator.plan(request, skills, options);
+  }
+
+  private async runSkillManagementPreview(
+    management: SkillManagementIntent,
+    request: AgentRunRequest,
+    trace?: AgentTraceRecorder,
+    options: AgentRunOptions = {}
+  ): Promise<AgentRunResponse> {
+    throwIfAborted(options.signal);
+    const preview = await this.buildSkillManagementPreview(management, request, options);
+    trace?.addContextBlock({
+      name: `skill_management:${management.action}`,
+      source: "runtime",
+      chars: String(request.content || "").length,
+      included: true,
+      reason: preview.reply.slice(0, 500),
+      metadata: {
+        role: "skill_management",
+        action: management.action,
+        target_skill_id: preview.currentSkill,
+        requires_confirmation: preview.requiresConfirmation
+      }
+    });
+    const conversation = await this.recordSkillExchange(request, preview.reply, {
+      skill_management: preview.data,
+      current_skill: preview.currentSkill
+    });
+    return {
+      intent: "skill",
+      reply: preview.reply,
+      conversation,
+      results: [],
+      skill_result: {
+        status: "done",
+        result: preview.reply,
+        saved_path: "",
+        data: {
+          skill_id: preview.currentSkill,
+          skill_management: preview.data,
+          pending_confirmation: preview.requiresConfirmation
+        }
+      },
+      saved_paths: [],
+      requires_confirmation: preview.requiresConfirmation,
+      current_skill: preview.currentSkill,
+      selected_reason: `skill_management:${management.action} - ${management.reason}`
+    };
+  }
+
+  private async *streamSkillManagementPreview(
+    management: SkillManagementIntent,
+    request: AgentRunRequest,
+    trace?: AgentTraceRecorder,
+    options: AgentRunOptions = {}
+  ): AsyncGenerator<AgentStreamEvent> {
+    throwIfAborted(options.signal);
+    yield {
+      type: "start",
+      intent: "skill",
+      conversation_id: request.conversation_id || "",
+      skill_id: "",
+      selected_reason: `skill_management:${management.action} - ${management.reason}`
+    };
+    const payload = await this.runSkillManagementPreview(management, request, trace, options);
+    yield {
+      type: "delta",
+      text: payload.reply,
+      stage: "skill_management_preview",
+      skill_id: payload.current_skill || ""
+    };
+    yield {
+      type: "final",
+      payload
+    };
+  }
+
+  private async buildSkillManagementPreview(
+    management: SkillManagementIntent,
+    request: AgentRunRequest,
+    options: AgentRunOptions
+  ): Promise<{ reply: string; data: Record<string, unknown>; currentSkill: string; requiresConfirmation: boolean }> {
+    if (management.action === "draft") {
+      const draft = await this.skillDrafts.draftSkill(this.buildSkillManagementDraftRequest(request), options);
+      return {
+        reply: buildSkillDraftManagementReply(draft),
+        currentSkill: draft.skill.id,
+        requiresConfirmation: true,
+        data: {
+          action: "draft",
+          confirm_action: "import_skill_draft",
+          draft,
+          warnings: draft.warnings
+        }
+      };
+    }
+
+    const skills = await this.skills.listSkills();
+    const target = this.resolveSkillManagementTarget(request, skills);
+    if (!target) {
+      return {
+        reply: [
+          `我识别到你想${skillManagementActionLabel(management.action)}，但还没有找到目标技能。`,
+          "请在指令里写清楚 skill id 或技能名称，例如：修改 short_review 技能，让它输出更严格。"
+        ].join("\n"),
+        currentSkill: "",
+        requiresConfirmation: false,
+        data: {
+          action: management.action,
+          status: "missing_target"
+        }
+      };
+    }
+
+    if (management.action === "patch") {
+      if (target.builtin) {
+        return this.buildBuiltinPatchPreview(target, request);
+      }
+      const draft = await this.skillDrafts.draftSkill({
+        kind: "existing_skill",
+        instruction: request.content || "",
+        text: "",
+        url: "",
+        current_path: request.current_path || "",
+        selection: request.selection || "",
+        attachment_ids: request.attachment_ids || [],
+        source_skill_id: target.id,
+        target_name: target.name,
+        target_id: target.id
+      }, options);
+      const patch = await this.skills.patchSkill(target.id, {
+        description: draft.skill.description,
+        prompt: draft.skill.prompt,
+        context_requirements: draft.skill.context_requirements,
+        linked_targets: draft.skill.linked_targets,
+        save_policy: draft.skill.save_policy,
+        writable: draft.skill.writable,
+        change_reason: clipForConsistency(request.content || "自然语言修改预览", 2000),
+        expected_version: "",
+        dry_run: true
+      });
+      const hasDiff = Boolean(patch.diff.trim());
+      return {
+        reply: buildSkillPatchManagementReply(target, patch),
+        currentSkill: target.id,
+        requiresConfirmation: hasDiff,
+        data: {
+          action: "patch",
+          confirm_action: "patch_skill",
+          target_skill_id: target.id,
+          patch_preview: patch,
+          draft,
+          warnings: patch.warnings
+        }
+      };
+    }
+
+    if (management.action === "clone") {
+      const suggestion = this.buildSkillCloneSuggestion(target, request);
+      return {
+        reply: [
+          `已准备复制技能预览（未保存）：${target.name}（${target.id}）。`,
+          `建议新 ID：${suggestion.target_id}`,
+          `建议名称：${suggestion.target_name}`,
+          "请在技能页确认复制为自定义技能后再保存；如果还要修改提示词，复制后再预览修改 diff。"
+        ].join("\n"),
+        currentSkill: target.id,
+        requiresConfirmation: true,
+        data: {
+          action: "clone",
+          confirm_action: "clone_skill",
+          target_skill_id: target.id,
+          clone_request: suggestion
+        }
+      };
+    }
+
+    if (management.action === "rollback") {
+      const versions = await this.skills.listSkillVersions(target.id);
+      const suggested = versions.versions.at(-1) || null;
+      return {
+        reply: versions.versions.length
+          ? [
+              `已找到 ${target.name}（${target.id}）的 ${versions.versions.length} 个历史版本，未执行回滚。`,
+              `建议先预览版本：${suggested?.version_id || ""}`,
+              "请在技能页选择版本并确认回滚。"
+            ].join("\n")
+          : `技能 ${target.name}（${target.id}）暂时没有可回滚的版本历史。`,
+        currentSkill: target.id,
+        requiresConfirmation: versions.versions.length > 0,
+        data: {
+          action: "rollback",
+          confirm_action: "rollback_skill",
+          target_skill_id: target.id,
+          versions,
+          suggested_version_id: suggested?.version_id || ""
+        }
+      };
+    }
+
+    const toggleLabel = management.action === "disable" ? "禁用" : "恢复";
+    return {
+      reply: [
+        `已识别到${toggleLabel}技能请求：${target.name}（${target.id}）。`,
+        `此处不会直接${toggleLabel}技能，请在技能页确认后执行。`
+      ].join("\n"),
+      currentSkill: target.id,
+      requiresConfirmation: true,
+      data: {
+        action: management.action,
+        confirm_action: management.action === "disable" ? "disable_skill" : "restore_skill",
+        target_skill_id: target.id
+      }
+    };
+  }
+
+  private buildSkillManagementDraftRequest(request: AgentRunRequest): SkillDraftRequest {
+    const text = String((request as Record<string, unknown>).text || "");
+    const targetName = extractQuotedText(request.content || "");
+    return {
+      kind: request.selection?.trim()
+        ? "selection"
+        : request.current_path?.trim() && /(当前文档|当前文件|这篇|这章|当前选区|选区)/.test(request.content || "")
+          ? "current_document"
+          : text.trim()
+            ? "markdown"
+            : "instruction",
+      instruction: request.content || "",
+      text,
+      url: "",
+      current_path: request.current_path || "",
+      selection: request.selection || "",
+      attachment_ids: request.attachment_ids || [],
+      source_skill_id: "",
+      target_name: targetName,
+      target_id: normalizeGeneratedSkillId(targetName)
+    };
+  }
+
+  private resolveSkillManagementTarget(request: AgentRunRequest, skills: SkillDefinition[]): SkillDefinition | null {
+    const explicitId = String(request.skill_id || (request as Record<string, unknown>).current_skill || "").trim();
+    if (explicitId) {
+      const explicit = skills.find((skill) => skill.id === explicitId);
+      if (explicit) {
+        return explicit;
+      }
+    }
+    const text = request.content || "";
+    const normalizedText = normalizeSkillMention(text);
+    const direct = [...skills]
+      .sort((left, right) => Math.max(right.id.length, right.name.length) - Math.max(left.id.length, left.name.length))
+      .find((skill) => {
+        const id = normalizeSkillMention(skill.id);
+        const name = normalizeSkillMention(skill.name || "");
+        return (id.length >= 2 && normalizedText.includes(id)) || (name.length >= 2 && normalizedText.includes(name));
+      });
+    if (direct) {
+      return direct;
+    }
+    const ranked = rankSkillRoutes(text, skills, { includeNonRunnable: true, limit: 1 });
+    return ranked[0]?.skill || skills.find((skill) => skill.id === ranked[0]?.skillId) || null;
+  }
+
+  private buildBuiltinPatchPreview(
+    target: SkillDefinition,
+    request: AgentRunRequest
+  ): { reply: string; data: Record<string, unknown>; currentSkill: string; requiresConfirmation: boolean } {
+    const suggestion = this.buildSkillCloneSuggestion(target, request);
+    return {
+      reply: [
+        `默认技能 ${target.name}（${target.id}）不能直接修改。`,
+        "建议先复制为自定义技能，再对自定义技能预览修改 diff。",
+        `建议新 ID：${suggestion.target_id}`,
+        `建议名称：${suggestion.target_name}`
+      ].join("\n"),
+      currentSkill: target.id,
+      requiresConfirmation: true,
+      data: {
+        action: "clone_then_patch",
+        confirm_action: "clone_skill",
+        target_skill_id: target.id,
+        clone_request: suggestion,
+        patch_instruction: request.content || ""
+      }
+    };
+  }
+
+  private buildSkillCloneSuggestion(target: SkillDefinition, request: AgentRunRequest): { target_id: string; target_name: string; instruction: string } {
+    const targetName = extractQuotedText(request.content || "") || `${target.name}（自定义）`;
+    return {
+      target_id: normalizeGeneratedSkillId(targetName) || `custom_${target.id}`,
+      target_name: targetName,
+      instruction: request.content || ""
+    };
   }
 
   private async *streamLocalSkillIntent(skillId: string, request: AgentRunRequest, options: AgentRunOptions = {}): AsyncGenerator<AgentStreamEvent> {
@@ -2040,6 +2355,64 @@ function stringListFromUnknown(value: unknown): string[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function buildSkillDraftManagementReply(draft: SkillDraftResponse): string {
+  const lines = [
+    "已生成技能草稿（未导入）。",
+    `- id: ${draft.skill.id}`,
+    `- 名称：${draft.skill.name}`,
+    `- 类型：${draft.skill.handler_type}`,
+    `- 可写入：${draft.skill.writable ? "是" : "否"}`,
+    "请在技能页预览 prompt 后确认导入。"
+  ];
+  if (draft.warnings.length) {
+    lines.push(`提示：${draft.warnings.join("；")}`);
+  }
+  return lines.join("\n");
+}
+
+function buildSkillPatchManagementReply(target: SkillDefinition, patch: SkillPatchResponse): string {
+  const lines = [
+    `已生成技能修改预览（未保存）：${target.name}（${target.id}）。`,
+    patch.diff.trim() ? "修改差异：" : "当前没有检测到可保存的差异。",
+    patch.diff.trim() ? clipForConsistency(patch.diff.trim(), 1800) : "",
+    patch.diff.trim() ? "请在技能页检查 diff 后确认保存。" : ""
+  ].filter(Boolean);
+  return lines.join("\n");
+}
+
+function skillManagementActionLabel(action: SkillManagementIntent["action"]): string {
+  const labels: Record<SkillManagementIntent["action"], string> = {
+    draft: "创建技能",
+    patch: "修改技能",
+    clone: "复制技能",
+    rollback: "回滚技能",
+    disable: "禁用技能",
+    restore: "恢复技能"
+  };
+  return labels[action] || "管理技能";
+}
+
+function extractQuotedText(text: string): string {
+  const match = String(text || "").match(/[“"《]([^”"》]{2,80})[”"》]/);
+  return match?.[1]?.trim() || "";
+}
+
+function normalizeGeneratedSkillId(value: string): string {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .slice(0, 80);
+}
+
+function normalizeSkillMention(value: string): string {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\s+/g, "")
+    .replace(/[《》“”"'`，。！？、：:；;（）()【】\[\]{}]/g, "");
 }
 
 function pickTraceMetadata(value: unknown): Record<string, string | number | boolean> {

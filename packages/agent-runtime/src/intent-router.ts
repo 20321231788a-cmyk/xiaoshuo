@@ -35,6 +35,14 @@ export type RankedSkillRoute = {
   skill?: SkillDefinition;
 };
 
+export type SkillManagementAction = "draft" | "patch" | "clone" | "rollback" | "disable" | "restore";
+
+export type SkillManagementIntent = {
+  action: SkillManagementAction;
+  reason: string;
+  requiresConfirmation: boolean;
+};
+
 export type RankSkillRouteOptions = {
   manualSkillId?: string;
   currentSkillId?: string;
@@ -281,6 +289,27 @@ export function resolveSkillRoute(text: string, manualSkillId = "", skills: Skil
 
 export function hasSkillAction(text: string): boolean {
   return new RegExp(SKILL_ACTION_WORDS).test(normalizeRouteText(text));
+}
+
+export function classifySkillManagementIntent(text: string): SkillManagementIntent | null {
+  const normalized = normalizeRouteText(text);
+  if (!/(技能|skill)/i.test(normalized)) {
+    return null;
+  }
+  const checks: Array<[SkillManagementAction, RegExp, string, boolean]> = [
+    ["rollback", /(回滚|恢复到|还原到).{0,18}(技能|skill)|(技能|skill).{0,18}(回滚|恢复到|还原到)/i, "用户请求回滚技能，需要先展示版本并确认。", true],
+    ["clone", /(复制|拷贝|克隆|clone).{0,18}(技能|skill)|(技能|skill).{0,18}(复制|拷贝|克隆|clone)/i, "用户请求复制技能，需要先确认新技能信息。", true],
+    ["disable", /(禁用|停用|关闭).{0,18}(技能|skill)|(技能|skill).{0,18}(禁用|停用|关闭)/i, "用户请求禁用技能，需要确认后执行。", true],
+    ["restore", /(恢复|启用|打开).{0,18}(技能|skill)|(技能|skill).{0,18}(恢复|启用|打开)/i, "用户请求恢复技能，需要确认后执行。", true],
+    ["patch", /(修改|编辑|调整|更新|优化|改成|改为).{0,18}(技能|skill)|(技能|skill).{0,18}(修改|编辑|调整|更新|优化|改成|改为)/i, "用户请求修改技能，只生成 dry-run diff。", true],
+    ["draft", /(创建|生成|新增|新建|做成|沉淀成|整理成|转成|变成|导入).{0,24}(技能|skill)|(技能|skill).{0,18}(创建|生成|新增|新建|做成|导入)/i, "用户请求创建技能，只生成草稿预览。", true]
+  ];
+  for (const [action, pattern, reason, requiresConfirmation] of checks) {
+    if (pattern.test(normalized)) {
+      return { action, reason, requiresConfirmation };
+    }
+  }
+  return null;
 }
 
 export function isFileOperationIntent(text: string): boolean {
