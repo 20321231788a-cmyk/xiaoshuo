@@ -1292,6 +1292,35 @@ npm run smoke:desktop
 - P1 剩余 legacy workflow 为 `disassemble_book`。
 - 迁移 `disassemble_book` 时直接复用 `workflows/disassemble-library.ts`，覆盖 `list_library`、`archive_source` 和完整拆书生成路径。
 
+### 15.26 2026-07-07 disassemble_book Handler 迁移记录
+
+本轮完成 P1 最后一个 workflow legacy 分支，把完整拆书入口迁移到独立 handler。
+
+主要改动：
+
+- 新增 `packages/agent-runtime/src/workflows/disassemble-book.ts`，承接 `list_library`、`archive_source`、完整拆书生成、拆书库写入和 legacy 同步。
+- `DisassembleBookWorkflow` 复用 `packages/agent-runtime/src/workflows/disassemble-library.ts`，与 `continue_disassemble` / `book_fusion` 共用 manifest、legacy 和 source helper。
+- `packages/agent-runtime/src/workflows/registry.ts` 注册 `DisassembleBookWorkflow`。
+- `AgentRuntimeService.runLocalWorkflowSkill()` 删除最后的 workflow legacy 大分支，只保留 registry 分发与未注册 workflow 报错。
+- 新增 `packages/agent-runtime/src/workflows/disassemble-book.test.ts`，覆盖完整拆书、列出拆书库、归档来源和 runtime registry 路由。
+- `runtime.ts` 当前约 2056 行。
+
+本轮已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/agent-runtime
+npm test -- packages/agent-runtime/src/workflows/disassemble-book.test.ts packages/agent-runtime/src/runtime.test.ts -t "disassemble"
+npm run typecheck
+npm test
+npm run build:desktop
+npm run smoke:desktop
+```
+
+下一步建议：
+
+- P1 Workflow Handler Registry 迁移完成，可进入 P2 `ContextAssembler`。
+- P2 第一刀建议只抽上下文读取/组装边界，先不要调 prompt 语义，避免生成质量和重构混在同一提交里。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：
