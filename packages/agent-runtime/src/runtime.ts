@@ -1037,7 +1037,10 @@ export class AgentRuntimeService {
       "target_path",
       "target_words",
       "chapter",
-      "end_chapter"
+      "end_chapter",
+      "reference_paths",
+      "confirmed_reference_paths",
+      "disable_auto_references"
     ];
     const picked: Record<string, unknown> = {};
     for (const key of keys) {
@@ -1144,6 +1147,9 @@ export class AgentRuntimeService {
       conversation_id: request.conversation_id || "",
       write_result: this.shouldWriteSkillResult(request.content || ""),
       attachment_ids: request.attachment_ids || [],
+      reference_paths: request.reference_paths || [],
+      confirmed_reference_paths: request.confirmed_reference_paths || [],
+      disable_auto_references: Boolean(request.disable_auto_references),
       target_path: ""
     };
   }
@@ -1558,6 +1564,7 @@ export class AgentRuntimeService {
   }
 
   private conversationPayloadToAgentRequest(conversationId: string, payload: ConversationMessageRequest): AgentRunRequest {
+    const extra = payload as Record<string, unknown>;
     return {
       conversation_id: conversationId,
       content: payload.content || "",
@@ -1565,7 +1572,10 @@ export class AgentRuntimeService {
       selection: "",
       project_context_hint: payload.runtime_context || "",
       skill_id: payload.skill_id || "",
-      attachment_ids: payload.attachment_ids || []
+      attachment_ids: payload.attachment_ids || [],
+      reference_paths: stringArray(extra.reference_paths),
+      confirmed_reference_paths: stringArray(extra.confirmed_reference_paths),
+      disable_auto_references: Boolean(extra.disable_auto_references)
     };
   }
 
@@ -2051,6 +2061,13 @@ function skillRequestInputChars(request: SkillRunRequest): number {
     request.target_path,
     ...(request.attachment_ids || [])
   ].reduce((total, item) => total + String(item || "").length, 0);
+}
+
+function stringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((item) => String(item || "").trim()).filter(Boolean);
 }
 
 function uniquePaths(paths: string[]): string[] {

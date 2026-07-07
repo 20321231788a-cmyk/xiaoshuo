@@ -140,6 +140,39 @@ describe("prompt-skill-runner", () => {
     expect(capturedPrompt).toContain("【题材硬约束】");
   });
 
+  it("uses reference_paths as source input when text and attachments are empty", async () => {
+    let capturedPrompt = "";
+    await fs.writeFile(path.join(tempDir, "01_大纲", "章纲.txt"), "这是测试章纲", "utf8");
+    const runner = new PromptSkillRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          capturedPrompt = messages[1]?.content || "";
+          return "参考文件生成结果";
+        }
+      }
+    });
+
+    const result = await runner.runSkill("outline_generate", {
+      text: "",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "根据引用文件生成",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: false,
+      attachment_ids: [],
+      reference_paths: ["01_大纲/章纲.txt"]
+    });
+
+    expect(result.result).toBe("参考文件生成结果");
+    expect(capturedPrompt).toContain("【参考文件：01_大纲/章纲.txt】");
+    expect(capturedPrompt).toContain("这是测试章纲");
+  });
+
   it("caps prompt-skill context with ContextAssembler while preserving prompt sections", async () => {
     let capturedPrompt = "";
     const longSource = `${"很长的输入文本。".repeat(10_000)}SOURCE_TAIL_SHOULD_BE_TRIMMED`;

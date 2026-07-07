@@ -30,6 +30,8 @@ import {
 import { applyHumanizerIfEnabled } from "./humanizer.js";
 import { assembleContext } from "./kernel/context-assembler.js";
 import type { AssembledContext, ContextBlock } from "./kernel/context-block.js";
+import { ProjectFileResolver } from "./kernel/project-file-resolver.js";
+import { buildReferenceContextBlocks } from "./kernel/reference-context.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import { splitVisibleStreamText } from "./stream.js";
 import { isCancellationError, throwIfAborted, type AgentRunOptions } from "./cancellation.js";
@@ -59,6 +61,7 @@ export class AgentChatRunner {
   private readonly modelClient: ChatModelClient;
   private readonly webSearchClient: WebSearchClient;
   private readonly skills: SkillService;
+  private readonly fileResolver: ProjectFileResolver;
 
   constructor(options: AgentChatRunnerOptions) {
     this.projectRoot = path.resolve(options.projectRoot);
@@ -68,6 +71,7 @@ export class AgentChatRunner {
     this.modelClient = options.modelClient ?? new OpenAICompatibleClient();
     this.webSearchClient = options.webSearchClient ?? new DefaultWebSearchClient();
     this.skills = new SkillService({ projectRoot: this.projectRoot });
+    this.fileResolver = new ProjectFileResolver({ projectRoot: this.projectRoot, documents: this.documents });
   }
 
   async runAgent(
@@ -465,6 +469,7 @@ export class AgentChatRunner {
     contextObserver?: ChatContextAssemblyObserver
   ): Promise<string> {
     const runtimeContext = await this.resolveRuntimeContext(payload, compact);
+    const referenceBlocks = await this.resolveReferenceBlocks(payload, compact);
     const limit = compact ? 3_000 : 5_000;
     const webSearchContext = await this.buildWebSearchContext(payload.content || "", runtimeContext, compact, webSearchSources);
     const assembled = assembleContext(
@@ -483,6 +488,7 @@ export class AgentChatRunner {
           priority: "high",
           content: `【当前文档/选区/前端读取上下文】\n${clipText(runtimeContext, limit) || "暂无"}`
         },
+        ...referenceBlocks,
         {
           id: "web_search_context",
           title: "联网搜索小说素材",
@@ -525,6 +531,28 @@ export class AgentChatRunner {
     }
 
     return parts.join("\n\n").slice(0, MAX_RUNTIME_CONTEXT_CHARS);
+  }
+
+  private async resolveReferenceBlocks(payload: AgentRunRequest, compact: boolean): Promise<ContextBlock[]> {
+    try {
+      const resolution = await this.fileResolver.resolve({
+        text: payload.content || "",
+        currentPath: payload.current_path || "",
+        selection: payload.selection || "",
+        attachmentIds: payload.attachment_ids || [],
+        explicitPaths: payload.reference_paths || [],
+        confirmedPaths: payload.confirmed_reference_paths || [],
+        disableAutoReferences: payload.disable_auto_references,
+        maxCandidates: 8
+      });
+      return buildReferenceContextBlocks({
+        documents: this.documents,
+        references: resolution.references,
+        maxCharsPerFile: compact ? 4000 : 12000
+      });
+    } catch {
+      return [];
+    }
   }
 
   private async resolveAttachmentTexts(detail: ConversationDetail, attachmentIds: string[]): Promise<Array<[ConversationAttachment, string]>> {

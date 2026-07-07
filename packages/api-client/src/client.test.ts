@@ -253,6 +253,101 @@ describe("api-client", () => {
     ]);
   });
 
+  it("calls project reference endpoints", async () => {
+    const requests: Array<{ url: string; method: string; body: string }> = [];
+    const client = createApiClient({
+      baseUrl: "http://127.0.0.1:18452",
+      fetchFn: async (input, init) => {
+        requests.push({
+          url: String(input),
+          method: String(init?.method || "GET"),
+          body: String(init?.body || "")
+        });
+        if (String(input).endsWith("/api/project/resolve-files")) {
+          return new Response(
+            JSON.stringify({
+              references: [
+                {
+                  label: "章纲",
+                  path: "01_大纲/章纲.txt",
+                  kind: "alias",
+                  confidence: 0.98,
+                  reason: "用户提到“章纲”",
+                  matched_text: "章纲",
+                  exists: true,
+                  readable: true,
+                  chars: 4,
+                  updated_at: ""
+                }
+              ],
+              candidates: [],
+              ambiguous: false,
+              warnings: []
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        if (String(input).endsWith("/api/project/read-references")) {
+          return new Response(
+            JSON.stringify({
+              blocks: [
+                {
+                  path: "01_大纲/章纲.txt",
+                  title: "章纲",
+                  content: "章纲内容",
+                  chars: 4,
+                  truncated: false
+                }
+              ],
+              warnings: []
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response(JSON.stringify({ ok: true, entries: 1, path: "00_设定集/.agent/file-manifest.json" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    });
+
+    const resolved = await client.resolveProjectFiles({ text: "参考章纲", max_candidates: 8 });
+    const read = await client.readProjectReferences({ paths: ["01_大纲/章纲.txt"] });
+    const rebuilt = await client.rebuildProjectFileManifest();
+
+    expect(resolved.references[0]?.path).toBe("01_大纲/章纲.txt");
+    expect(read.blocks[0]?.content).toBe("章纲内容");
+    expect(rebuilt.entries).toBe(1);
+    expect(requests).toEqual([
+      {
+        url: "http://127.0.0.1:18452/api/project/resolve-files",
+        method: "POST",
+        body: JSON.stringify({
+          text: "参考章纲",
+          current_path: "",
+          selection: "",
+          attachment_ids: [],
+          explicit_paths: [],
+          max_candidates: 8
+        })
+      },
+      {
+        url: "http://127.0.0.1:18452/api/project/read-references",
+        method: "POST",
+        body: JSON.stringify({
+          paths: ["01_大纲/章纲.txt"],
+          max_chars_per_file: 12000,
+          max_total_chars: 36000
+        })
+      },
+      {
+        url: "http://127.0.0.1:18452/api/project/rebuild-file-manifest",
+        method: "POST",
+        body: ""
+      }
+    ]);
+  });
+
   it("posts embedding test requests and parses connection details", async () => {
     const requests: Array<{ url: string; method: string; body: string }> = [];
     const client = createApiClient({

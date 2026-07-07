@@ -23,7 +23,7 @@
 
 ### 2026-07-07 P2/P3 ProjectFileManifest + ProjectFileResolver
 
-状态：已完成，本阶段随下一次 git commit 提交。
+状态：已完成，提交 `9a67eb3`。
 
 落地内容：
 
@@ -37,6 +37,25 @@
 - `npm run typecheck -w @xiaoshuo/shared`
 - `npm run typecheck -w @xiaoshuo/agent-runtime`
 - `npx vitest run packages/agent-runtime/src/kernel/project-file-manifest.test.ts packages/agent-runtime/src/kernel/project-file-resolver.test.ts packages/shared/src/schemas/agent.test.ts packages/shared/src/schemas/skill.test.ts`
+
+### 2026-07-07 P4/P5 reference context + project reference API
+
+状态：已完成，本阶段随本次 git commit 提交。
+
+落地内容：
+
+- 新增 `packages/agent-runtime/src/kernel/reference-context.ts`，把已解析引用文件转成 `ContextBlock`，沿用 `source: "document"` 并用 metadata 标识 `role: "reference_file"`。
+- `chat-runner.ts` 接入 `ProjectFileResolver` 和 reference blocks，保留旧 `project_context_hint/current_path/selection` 逻辑。
+- `skill-runner.ts` 在 text/附件之后消费 `reference_paths/confirmed_reference_paths`，并在 `source_path` 后尝试自动别名引用。
+- `runtime.ts` 向 skill run payload 透传 reference 字段，并让普通 conversation passthrough 的 reference 字段能进入 agent request。
+- 新增 `/api/project/resolve-files`、`/api/project/read-references`、`/api/project/rebuild-file-manifest` 路由，并在 api-client 中增加对应方法。
+
+已验证：
+
+- `npm run typecheck -w @xiaoshuo/api-client`
+- `npm run typecheck -w @xiaoshuo/agent-runtime`
+- `npm run typecheck -w @xiaoshuo/desktop-shell`
+- `npx vitest run packages/agent-runtime/src/kernel/reference-context.test.ts packages/agent-runtime/src/kernel/project-file-manifest.test.ts packages/agent-runtime/src/kernel/project-file-resolver.test.ts packages/agent-runtime/src/skill-runner.test.ts apps/desktop-shell/src/main/runtime/project-reference-routes.test.ts packages/api-client/src/client.test.ts`
 
 ## 0. 当前基线
 

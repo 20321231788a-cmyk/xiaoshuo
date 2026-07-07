@@ -11,6 +11,7 @@ import { HUMANIZER_SYSTEM_PROMPT, applyHumanizerIfEnabled } from "./humanizer.js
 import { GeneratedSavePlanner } from "./generated-save-planner.js";
 import { assembleContext } from "./kernel/context-assembler.js";
 import type { ContextBlock } from "./kernel/context-block.js";
+import { ProjectFileResolver } from "./kernel/project-file-resolver.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import { streamModelText, StreamingGenerationSession, type StreamingModelClient } from "./stream.js";
 import { isCancellationError, throwIfAborted, type AgentRunOptions } from "./cancellation.js";
@@ -96,6 +97,7 @@ export class PromptSkillRunner {
   private readonly conversations: ConversationService;
   private readonly modelClient: StreamingModelClient;
   private readonly savePlanner: GeneratedSavePlanner;
+  private readonly fileResolver: ProjectFileResolver;
 
   constructor(options: PromptSkillRunnerOptions) {
     this.projectRoot = path.resolve(options.projectRoot);
@@ -105,6 +107,7 @@ export class PromptSkillRunner {
     this.cache = new GeneratedCacheService({ projectRoot: this.projectRoot });
     this.conversations = new ConversationService({ projectRoot: this.projectRoot });
     this.modelClient = options.modelClient ?? new OpenAICompatibleClient();
+    this.fileResolver = new ProjectFileResolver({ projectRoot: this.projectRoot, documents: this.documents });
     this.savePlanner = new GeneratedSavePlanner({
       projectRoot: this.projectRoot,
       config: this.config,
@@ -287,6 +290,11 @@ export class PromptSkillRunner {
       return attachmentText;
     }
 
+    const explicitReferenceText = await this.resolveReferenceText(payload, false);
+    if (explicitReferenceText) {
+      return explicitReferenceText;
+    }
+
     if (skill.id === "lore_extract") {
       for (const relPath of LORE_EXTRACT_SOURCE_FALLBACKS) {
         const fallbackText = await this.readProjectText(relPath);
@@ -305,6 +313,11 @@ export class PromptSkillRunner {
       }
     }
 
+    const autoReferenceText = await this.resolveReferenceText(payload, true);
+    if (autoReferenceText) {
+      return autoReferenceText;
+    }
+
     for (const relPath of PROMPT_SKILL_SOURCE_FALLBACKS[skill.id] || []) {
       const fallbackText = await this.readProjectText(relPath);
       if (fallbackText) {
@@ -313,6 +326,33 @@ export class PromptSkillRunner {
     }
 
     return "";
+  }
+
+  private async resolveReferenceText(payload: SkillRunRequest, includeAuto: boolean): Promise<string> {
+    try {
+      const resolution = await this.fileResolver.resolve({
+        text: [payload.instruction || "", payload.text || ""].filter(Boolean).join("\n"),
+        currentPath: payload.source_path || "",
+        attachmentIds: payload.attachment_ids || [],
+        explicitPaths: payload.reference_paths || [],
+        confirmedPaths: payload.confirmed_reference_paths || [],
+        disableAutoReferences: includeAuto ? payload.disable_auto_references : true,
+        maxCandidates: 4
+      });
+      const references = includeAuto
+        ? resolution.references
+        : resolution.references.filter((reference) => reference.kind === "explicit_path" || reference.kind === "at_path");
+      const chunks: string[] = [];
+      for (const reference of references.slice(0, includeAuto ? 4 : 6)) {
+        const text = await this.readProjectText(reference.path);
+        if (text) {
+          chunks.push(`【参考文件：${reference.path}】\n【引用原因：${reference.reason || "用户引用"}】\n\n${text}`);
+        }
+      }
+      return chunks.join("\n\n").trim();
+    } catch {
+      return "";
+    }
   }
 
   private async resolveAttachmentText(payload: SkillRunRequest): Promise<string> {

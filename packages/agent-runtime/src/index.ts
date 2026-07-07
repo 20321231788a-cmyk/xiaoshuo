@@ -8,3 +8,6 @@ export * from "./smart-skill-orchestrator.js";
 export * from "./stream.js";
 export * from "./skill-runner.js";
 export * from "./web-search.js";
+export * from "./kernel/project-file-manifest.js";
+export * from "./kernel/project-file-resolver.js";
+export * from "./kernel/reference-context.js";

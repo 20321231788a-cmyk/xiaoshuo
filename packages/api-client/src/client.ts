@@ -20,6 +20,10 @@ import {
   cardDrawResultSchema,
   cardDrawSelectRequestSchema,
   projectPickerResponseSchema,
+  projectFileReadRequestSchema,
+  projectFileReadResponseSchema,
+  projectFileResolveRequestSchema,
+  projectFileResolveResponseSchema,
   revisionLogEntrySchema,
   skillRunRequestSchema,
   skillRunResponseSchema,
@@ -456,6 +460,20 @@ export function createApiClient(options: ApiClientOptions) {
       requestWithSchema(apiContracts.agentTrace.path, agentRunTraceSchema, {
         method: apiContracts.agentTrace.method,
         pathParams: { run_id: runId }
+      }),
+    resolveProjectFiles: (payload: z.input<typeof projectFileResolveRequestSchema>) =>
+      requestWithSchema("/api/project/resolve-files", projectFileResolveResponseSchema, {
+        method: "POST",
+        body: JSON.stringify(projectFileResolveRequestSchema.parse(payload))
+      }),
+    readProjectReferences: (payload: z.input<typeof projectFileReadRequestSchema>) =>
+      requestWithSchema("/api/project/read-references", projectFileReadResponseSchema, {
+        method: "POST",
+        body: JSON.stringify(projectFileReadRequestSchema.parse(payload))
+      }),
+    rebuildProjectFileManifest: () =>
+      requestWithSchema("/api/project/rebuild-file-manifest", z.object({ ok: z.boolean().default(true), entries: z.number().int().min(0), path: z.string() }).passthrough(), {
+        method: "POST"
       }),
     getSkills: () => requestContract("skills"),
     getSkill: (skillId: string) =>
