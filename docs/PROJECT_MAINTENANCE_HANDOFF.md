@@ -1474,6 +1474,45 @@ npm run smoke:desktop
 - P4 eval 数据可继续扩充真实 `body_generate` / `consistency_check` workflow context fixture，覆盖 graph advisory 不误伤。
 - 下一大块可进入 P5 前端 Controller 拆分，先拆 hook/controller 边界，保持 UI 行为不变。
 
+### 15.32 2026-07-07 P5 前端 Controller 拆分记录
+
+本轮完成 Workbench controller / shell 的第一轮低风险拆分，重点是降低热点文件行数并保持旧 UI 行为。
+
+主要改动：
+
+- `apps/workbench/src/hooks/useWorkbenchController.ts` 改为约 35 行 facade，组合 project、document、conversation、operations、config、cloud project controller。
+- 原大 hook 实现迁入 `apps/workbench/src/hooks/controllers/useWorkbenchCoreController.ts`，其余 `hooks/controllers/*.ts` 先作为选择性 facade，便于后续按真实状态所有权继续拆。
+- `apps/workbench/src/App.tsx` 缩减到约 1183 行。
+- 新增 `apps/workbench/src/layout/AppShell.tsx`、`LeftSidebar.tsx`、`RightRail.tsx`。
+- 新增/拆出 `features/project/ProjectSidebar.tsx`、`ProjectTreeNode.tsx`、settings、skills、card draw、disassembly、ledger、revision、workflow controls 等 feature page。
+- 新增 `apps/workbench/src/features/legacy/LegacyWorkbenchView.tsx`，保留旧 E2E 和用户流依赖的 `Workbench sections` 导航。
+- 修复 legacy 项目创建/打开后异步切回编辑页的竞态，避免用户快速切到会话页后被 `.then()` 覆盖。
+- `apps/desktop-shell/src/main/runtime/license-guard.ts` 增加 E2E-only license bypass，只在 `XIAOSHUO_E2E_RUNTIME=1` 且 `XIAOSHUO_E2E_BYPASS_LICENSE=1` 同时存在时启用；`tests/e2e/start-runtime.mjs` 负责注入测试环境变量。
+
+本轮已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/workbench
+npm run build:workbench
+npx playwright test tests/e2e/project-entry.spec.ts --workers=1 --reporter=list
+npm run typecheck
+npm test
+npm run build:desktop
+npm run smoke:desktop
+```
+
+验收结果：
+
+- P5 手册要求的两个行数目标已达成：`App.tsx` < 1500，`useWorkbenchController.ts` < 1200。
+- 关键 E2E `project-entry.spec.ts` 6/6 通过。
+- 完整测试集当前为 59 个文件、384 个用例通过。
+
+下一步建议：
+
+- 若继续前端瘦身，优先把 `useWorkbenchCoreController.ts` 内的真实状态与副作用继续拆到各 domain controller。
+- 可继续把 `App.tsx` 内剩余 workflow glue 迁入 feature page / feature hooks。
+- 下一大块可进入 P6 Agent 运行检查器 UI。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

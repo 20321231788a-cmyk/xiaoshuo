@@ -44,7 +44,11 @@ if (await isUrlReady(runtimeHealthUrl)) {
 
 const child = runBackground(process.execPath, [path.join(desktopDir, "dist", "e2e-runtime.js")], {
   cwd: desktopDir,
-  env: process.env,
+  env: {
+    ...process.env,
+    XIAOSHUO_E2E_RUNTIME: "1",
+    XIAOSHUO_E2E_BYPASS_LICENSE: "1"
+  },
   stdio: "inherit"
 });
 

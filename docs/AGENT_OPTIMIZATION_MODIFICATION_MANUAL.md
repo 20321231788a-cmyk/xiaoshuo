@@ -1717,3 +1717,43 @@ npm run smoke:desktop
 - P4 后续可把 eval runner 从 Vitest 内联 helper 抽到 `src/evals/` 或 scripts，便于 CI 单独跑 `eval:routing`。
 - 可继续扩充 context eval，加入真实 `body_generate` / `consistency_check` workflow prompt block fixture。
 - 下一阶段可进入 P5 前端 Controller 拆分。
+
+### 16.15 2026-07-07 P5 前端 Controller 拆分已完成
+
+状态：已完成 Workbench 第一轮 controller / shell 纵向拆分，并保留旧 E2E 依赖的 Workbench sections 导航兼容层。
+
+本阶段完成内容：
+
+- `apps/workbench/src/hooks/useWorkbenchController.ts` 缩减为 facade 组合层，当前约 35 行。
+- 新增 `apps/workbench/src/hooks/controllers/` 下的 project、document、conversation、operations、config、cloud project controller facade，并把原核心实现移到 `useWorkbenchCoreController.ts`。
+- `apps/workbench/src/App.tsx` 缩减到约 1183 行。
+- 新增 `apps/workbench/src/layout/AppShell.tsx`、`LeftSidebar.tsx`、`RightRail.tsx`，承接主壳、左侧栏和右侧 AI rail。
+- 新增 feature page：settings、skills、card draw、disassembly、ledger、revision、workflow controls，并拆出 `features/project/ProjectSidebar.tsx` / `ProjectTreeNode.tsx`。
+- 新增 `features/legacy/LegacyWorkbenchView.tsx`，在新 shell 内保留 `aria-label="Workbench sections"` 的旧导航入口，确保旧用户流和 E2E 用例仍能找到项目、编辑、会话、终端视图。
+- 修复 legacy 项目打开/创建后的异步切 tab 竞态：无未保存状态时立即切到编辑页，有未保存状态时保留项目切换确认流程，避免项目创建完成后覆盖用户已切到会话页的操作。
+- `apps/desktop-shell/src/main/runtime/license-guard.ts` 增加 E2E-only 授权绕过；仅当 `XIAOSHUO_E2E_RUNTIME=1` 且 `XIAOSHUO_E2E_BYPASS_LICENSE=1` 同时存在时生效。`tests/e2e/start-runtime.mjs` 只在 E2E runtime 启动时注入这两个变量。
+
+已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/workbench
+npm run build:workbench
+npx playwright test tests/e2e/project-entry.spec.ts --workers=1 --reporter=list
+npm run typecheck
+npm test
+npm run build:desktop
+npm run smoke:desktop
+```
+
+验收结果：
+
+- `App.tsx` 已低于 1500 行。
+- `useWorkbenchController.ts` 已低于 1200 行。
+- 关键 E2E `project-entry.spec.ts` 6/6 通过。
+- 完整测试集 59 个文件、384 个用例通过。
+
+遗留说明：
+
+- P5 当前是保守 facade / shell 拆分，后续可逐步把 `useWorkbenchCoreController.ts` 继续按真实状态所有权拆小。
+- `App.tsx` 仍保留部分 workflow UI glue；下一步可继续迁移到 feature page 或专用 hooks。
+- 下一阶段可进入 P6 Agent 运行检查器 UI，或先继续瘦身 Workbench core controller。

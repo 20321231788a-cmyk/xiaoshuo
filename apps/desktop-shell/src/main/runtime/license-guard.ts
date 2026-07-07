@@ -23,10 +23,20 @@ export async function loadRuntimeLicenseStatus(context: RuntimeContext, configOv
 }
 
 export async function loadLicenseStatusForRoot(projectRoot: string, configOverride?: AppConfig): Promise<LicenseStatus> {
+  const deviceCode = getDeviceCode(projectRoot);
+  if (shouldBypassLicenseForE2e(process.env)) {
+    return {
+      ok: true,
+      licensed: true,
+      status: "e2e_bypass",
+      message: "E2E runtime license bypass enabled.",
+      deviceCode
+    };
+  }
+
   const config = configOverride || (await loadPublicConfig({ rootDir: projectRoot }));
   const websiteProfile: Partial<AiConfigProfile> = config.website_profile || {};
   const tokenKey = stringValue(websiteProfile.license_account_key || websiteProfile.api_key || config.license_account_key).trim();
-  const deviceCode = getDeviceCode(projectRoot);
 
   if (!tokenKey) {
     return {
@@ -60,6 +70,10 @@ export async function writeAiLicenseRequiredIfNeeded(context: RuntimeContext, re
 
   writeJson(response, 403, aiLicenseRequiredPayload(licenseStatus));
   return true;
+}
+
+function shouldBypassLicenseForE2e(env: NodeJS.ProcessEnv): boolean {
+  return env.XIAOSHUO_E2E_RUNTIME === "1" && env.XIAOSHUO_E2E_BYPASS_LICENSE === "1";
 }
 
 export function aiLicenseRequiredPayload(licenseStatus: LicenseStatus): JsonRecord {
