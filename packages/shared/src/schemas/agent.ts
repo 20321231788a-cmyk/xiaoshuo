@@ -74,6 +74,90 @@ export const skillPlanSchema = z
   })
   .passthrough();
 
+export const agentTraceStageSchema = z.enum([
+  "received",
+  "classified",
+  "planned",
+  "context_assembled",
+  "model_started",
+  "model_completed",
+  "workflow_started",
+  "workflow_completed",
+  "save_planned",
+  "save_committed",
+  "conversation_recorded",
+  "failed"
+]);
+
+export const agentRouteCandidateTraceSchema = z
+  .object({
+    skill_id: z.string().default(""),
+    score: z.number().default(0),
+    reasons: z.array(z.string()).default([]),
+    signals: z.array(z.string()).default([])
+  })
+  .passthrough();
+
+export const agentContextBlockTraceSchema = z
+  .object({
+    name: z.string(),
+    source: z.enum(["project", "conversation", "document", "selection", "attachment", "pinned", "vector", "graph", "web", "runtime", "other"]),
+    chars: z.number().int().min(0),
+    included: z.boolean(),
+    reason: z.string().default("")
+  })
+  .passthrough();
+
+export const agentModelCallTraceSchema = z
+  .object({
+    line: z.enum(["primary", "secondary", "primary-fallback", "unknown"]).default("unknown"),
+    model: z.string().default(""),
+    streaming: z.boolean().default(false),
+    temperature: z.number().optional(),
+    input_chars: z.number().int().min(0).default(0),
+    output_chars: z.number().int().min(0).default(0),
+    duration_ms: z.number().int().min(0).default(0),
+    fallback_used: z.boolean().default(false),
+    error: z.string().default("")
+  })
+  .passthrough();
+
+export const agentSaveDecisionTraceSchema = z
+  .object({
+    action: z.string().default(""),
+    mode: z.enum(["replace", "append"]).optional(),
+    target_paths: z.array(z.string()).default([]),
+    cache_id: z.string().default(""),
+    auto_committed: z.boolean().default(false),
+    reason: z.string().default("")
+  })
+  .passthrough();
+
+export const agentRunTraceSchema = z
+  .object({
+    run_id: z.string(),
+    request_id: z.string().default(""),
+    conversation_id: z.string().default(""),
+    skill_id: z.string().default(""),
+    project_path: z.string().default(""),
+    started_at: z.string(),
+    ended_at: z.string().default(""),
+    duration_ms: z.number().int().min(0).default(0),
+    stage: agentTraceStageSchema.default("received"),
+    intent: agentIntentSchema.optional(),
+    input_excerpt: z.string().default(""),
+    route_candidates: z.array(agentRouteCandidateTraceSchema).default([]),
+    selected_skill_id: z.string().default(""),
+    selected_reason: z.string().default(""),
+    context_blocks: z.array(agentContextBlockTraceSchema).default([]),
+    model_calls: z.array(agentModelCallTraceSchema).default([]),
+    save_decision: agentSaveDecisionTraceSchema.optional(),
+    saved_paths: z.array(z.string()).default([]),
+    web_search_sources: z.array(webSearchSourceSchema).default([]),
+    error: z.string().default("")
+  })
+  .passthrough();
+
 export const agentRunRequestSchema = z
   .object({
     conversation_id: z.string().default(""),
@@ -224,6 +308,12 @@ export type ExecutePlanResponse = z.infer<typeof executePlanResponseSchema>;
 export type AgentIntent = z.infer<typeof agentIntentSchema>;
 export type SkillPlanStep = z.infer<typeof skillPlanStepSchema>;
 export type SkillPlan = z.infer<typeof skillPlanSchema>;
+export type AgentTraceStage = z.infer<typeof agentTraceStageSchema>;
+export type AgentRouteCandidateTrace = z.infer<typeof agentRouteCandidateTraceSchema>;
+export type AgentContextBlockTrace = z.infer<typeof agentContextBlockTraceSchema>;
+export type AgentModelCallTrace = z.infer<typeof agentModelCallTraceSchema>;
+export type AgentSaveDecisionTrace = z.infer<typeof agentSaveDecisionTraceSchema>;
+export type AgentRunTrace = z.infer<typeof agentRunTraceSchema>;
 export type AgentRunRequest = z.infer<typeof agentRunRequestSchema>;
 export type AgentRunResponse = z.infer<typeof agentRunResponseSchema>;
 export type AgentStreamEvent = z.infer<typeof agentStreamEventSchema>;

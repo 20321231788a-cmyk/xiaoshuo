@@ -44,6 +44,7 @@ import { GeneratedSavePlanner, hasExplicitWriteIntent } from "./generated-save-p
 import { SmartSkillOrchestrator } from "./smart-skill-orchestrator.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import type { StreamingModelClient } from "./stream.js";
+import { createAgentTraceRecorder, type AgentTraceRecorder } from "./agent-trace.js";
 import { GraphContext } from "@xiaoshuo/vector-service";
 
 const DISASSEMBLE_LIBRARY_DIR = "00_设定集/拆书库";
@@ -143,6 +144,40 @@ export class AgentRuntimeService {
   }
 
   async runSkill(skillId: string, request: SkillRunRequest): Promise<SkillRunResponse> {
+    const trace = this.createTraceRecorder({
+      conversationId: request.conversation_id || "",
+      skillId,
+      content: request.instruction || request.text || ""
+    });
+    const startedAt = Date.now();
+    this.addSkillRequestContextToTrace(trace, request);
+    try {
+      trace.mark("workflow_started", { selected_skill_id: skillId });
+      const result = await this.runSkillInternal(skillId, request);
+      this.addSkillResultToTrace(trace, result);
+      await this.addModelCallSummaryToTrace(trace, {
+        inputChars: skillRequestInputChars(request),
+        outputChars: String(result.result || "").length,
+        durationMs: Date.now() - startedAt,
+        streaming: false
+      });
+      await trace.finish();
+      return result;
+    } catch (error) {
+      await this.addModelCallSummaryToTrace(trace, {
+        inputChars: skillRequestInputChars(request),
+        outputChars: 0,
+        durationMs: Date.now() - startedAt,
+        streaming: false,
+        error
+      });
+      trace.fail(error);
+      await trace.finish();
+      throw error;
+    }
+  }
+
+  private async runSkillInternal(skillId: string, request: SkillRunRequest): Promise<SkillRunResponse> {
     const skill = await this.skills.getSkill(skillId).catch(() => null);
     if (skill?.disabled) {
       throw new Error(`默认技能已禁用：${skill.name || skillId}。请先恢复后再执行。`);
@@ -241,14 +276,53 @@ export class AgentRuntimeService {
   }
 
   async runAgent(request: AgentRunRequest): Promise<AgentRunResponse> {
+    const trace = this.createTraceRecorder({
+      conversationId: request.conversation_id || "",
+      skillId: request.skill_id || "",
+      content: request.content || ""
+    });
+    const startedAt = Date.now();
+    this.addAgentRequestContextToTrace(trace, request);
+    try {
+      await this.addRoutingTrace(request, trace);
+      const response = await this.runAgentInternal(request, trace);
+      this.addAgentResponseToTrace(trace, response);
+      await this.addModelCallSummaryToTrace(trace, {
+        inputChars: agentRequestInputChars(request),
+        outputChars: String(response.reply || response.skill_result?.result || "").length,
+        durationMs: Date.now() - startedAt,
+        streaming: false
+      });
+      await trace.finish({ saved_paths: response.saved_paths || [] });
+      return response;
+    } catch (error) {
+      await this.addModelCallSummaryToTrace(trace, {
+        inputChars: agentRequestInputChars(request),
+        outputChars: 0,
+        durationMs: Date.now() - startedAt,
+        streaming: false,
+        error
+      });
+      trace.fail(error);
+      await trace.finish();
+      throw error;
+    }
+  }
+
+  private async runAgentInternal(request: AgentRunRequest, trace?: AgentTraceRecorder): Promise<AgentRunResponse> {
     if (this.shouldUseSmartSkillOrchestration(request)) {
       const skillPlan = await this.planSkillExecution(request);
       if (skillPlan.should_call_skill && skillPlan.steps.length) {
+        trace?.mark("planned", {
+          selected_skill_id: skillPlan.steps[0]?.skill_id || "",
+          selected_reason: skillPlan.selected_reason
+        });
         return this.runSkillPlan(skillPlan, request);
       }
     }
 
     const intent = await this.classifyIntent(request);
+    trace?.mark("classified", { intent });
     if (intent === "file_operation") {
       return this.fileOperationRunner.runAgent(request);
     }
@@ -267,11 +341,13 @@ export class AgentRuntimeService {
         skillId === "batch_generate" ||
         skillId === "book_fusion"
       ) {
+        trace?.mark("workflow_started", { selected_skill_id: skillId });
         return this.runLocalWorkflowSkill(skillId, request);
       }
       if (!(await this.skillRunner.canRunSkillLocally(skillId))) {
         throw new Error(`TS runtime 尚未接管该意图：${intent}`);
       }
+      trace?.mark("workflow_started", { selected_skill_id: skillId });
       return this.runLocalSkillIntent(skillId, request);
     }
     if (intent !== "chat" && intent !== "read_context") {
@@ -281,15 +357,59 @@ export class AgentRuntimeService {
   }
 
   async *streamAgentRun(request: AgentRunRequest): AsyncGenerator<AgentStreamEvent> {
+    const trace = this.createTraceRecorder({
+      conversationId: request.conversation_id || "",
+      skillId: request.skill_id || "",
+      content: request.content || ""
+    });
+    const startedAt = Date.now();
+    this.addAgentRequestContextToTrace(trace, request);
+    try {
+      await this.addRoutingTrace(request, trace);
+      let finalPayload: AgentRunResponse | null = null;
+      for await (const event of this.streamAgentRunInternal(request, trace)) {
+        if (event.type === "final") {
+          finalPayload = event.payload;
+          this.addAgentResponseToTrace(trace, event.payload);
+        }
+        yield event;
+      }
+      await this.addModelCallSummaryToTrace(trace, {
+        inputChars: agentRequestInputChars(request),
+        outputChars: String(finalPayload?.reply || finalPayload?.skill_result?.result || "").length,
+        durationMs: Date.now() - startedAt,
+        streaming: true
+      });
+      await trace.finish({ saved_paths: finalPayload?.saved_paths || [] });
+    } catch (error) {
+      await this.addModelCallSummaryToTrace(trace, {
+        inputChars: agentRequestInputChars(request),
+        outputChars: 0,
+        durationMs: Date.now() - startedAt,
+        streaming: true,
+        error
+      });
+      trace.fail(error);
+      await trace.finish();
+      throw error;
+    }
+  }
+
+  private async *streamAgentRunInternal(request: AgentRunRequest, trace?: AgentTraceRecorder): AsyncGenerator<AgentStreamEvent> {
     if (this.shouldUseSmartSkillOrchestration(request)) {
       const skillPlan = await this.planSkillExecution(request);
       if (skillPlan.should_call_skill && skillPlan.steps.length) {
+        trace?.mark("planned", {
+          selected_skill_id: skillPlan.steps[0]?.skill_id || "",
+          selected_reason: skillPlan.selected_reason
+        });
         yield* this.streamSkillPlan(skillPlan, request);
         return;
       }
     }
 
     const intent = await this.classifyIntent(request);
+    trace?.mark("classified", { intent });
     if (intent === "file_operation") {
       yield* this.fileOperationRunner.streamAgentRun(request);
       return;
@@ -309,12 +429,14 @@ export class AgentRuntimeService {
         skillId === "batch_generate" ||
         skillId === "book_fusion"
       ) {
+        trace?.mark("workflow_started", { selected_skill_id: skillId });
         yield* this.streamLocalWorkflowSkill(skillId, request);
         return;
       }
       if (!(await this.skillRunner.canRunSkillLocally(skillId))) {
         throw new Error(`TS runtime 尚未接管该意图：${intent}`);
       }
+      trace?.mark("workflow_started", { selected_skill_id: skillId });
       yield* this.streamLocalSkillIntent(skillId, request);
       return;
     }
@@ -331,6 +453,210 @@ export class AgentRuntimeService {
       }
       yield event;
     }
+  }
+
+  private createTraceRecorder(input: { conversationId?: string; skillId?: string; content?: string }): AgentTraceRecorder {
+    return createAgentTraceRecorder({
+      projectRoot: this.documents.projectRoot,
+      conversationId: input.conversationId || "",
+      skillId: input.skillId || "",
+      content: input.content || ""
+    });
+  }
+
+  private addAgentRequestContextToTrace(trace: AgentTraceRecorder, request: AgentRunRequest): void {
+    const content = String(request.content || "");
+    if (content.trim()) {
+      trace.addContextBlock({
+        name: "user_input",
+        source: "conversation",
+        chars: content.length,
+        included: true,
+        reason: "agent request content excerpt only"
+      });
+    }
+    const selection = String(request.selection || "");
+    if (selection.trim()) {
+      trace.addContextBlock({
+        name: "selection",
+        source: "selection",
+        chars: selection.length,
+        included: true,
+        reason: "current selection supplied to agent"
+      });
+    }
+    const hint = String(request.project_context_hint || "");
+    if (hint.trim()) {
+      trace.addContextBlock({
+        name: "project_context_hint",
+        source: "runtime",
+        chars: hint.length,
+        included: true,
+        reason: "runtime supplied context hint"
+      });
+    }
+    if (String(request.current_path || "").trim()) {
+      trace.addContextBlock({
+        name: request.current_path,
+        source: "document",
+        chars: 0,
+        included: true,
+        reason: "current document path reference"
+      });
+    }
+    if (request.attachment_ids?.length) {
+      trace.addContextBlock({
+        name: "attachments",
+        source: "attachment",
+        chars: 0,
+        included: true,
+        reason: `${request.attachment_ids.length} attachment id(s) referenced`
+      });
+    }
+  }
+
+  private addSkillRequestContextToTrace(trace: AgentTraceRecorder, request: SkillRunRequest): void {
+    const instruction = String(request.instruction || "");
+    if (instruction.trim()) {
+      trace.addContextBlock({
+        name: "skill_instruction",
+        source: "runtime",
+        chars: instruction.length,
+        included: true,
+        reason: "skill instruction excerpt only"
+      });
+    }
+    const text = String(request.text || "");
+    if (text.trim()) {
+      trace.addContextBlock({
+        name: "skill_text",
+        source: "selection",
+        chars: text.length,
+        included: true,
+        reason: "skill source text length only"
+      });
+    }
+    if (String(request.source_path || "").trim()) {
+      trace.addContextBlock({
+        name: request.source_path,
+        source: "document",
+        chars: 0,
+        included: true,
+        reason: "skill source path reference"
+      });
+    }
+    if (request.attachment_ids?.length) {
+      trace.addContextBlock({
+        name: "attachments",
+        source: "attachment",
+        chars: 0,
+        included: true,
+        reason: `${request.attachment_ids.length} attachment id(s) referenced`
+      });
+    }
+  }
+
+  private async addModelCallSummaryToTrace(
+    trace: AgentTraceRecorder,
+    input: { inputChars: number; outputChars: number; durationMs: number; streaming: boolean; error?: unknown }
+  ): Promise<void> {
+    try {
+      const config = await loadModelConfig(this.config, "primary").catch(() => null);
+      trace.addModelCall({
+        line: "primary",
+        model: config?.model || "",
+        streaming: input.streaming,
+        temperature: config?.temperature,
+        input_chars: Math.max(0, Math.trunc(input.inputChars || 0)),
+        output_chars: Math.max(0, Math.trunc(input.outputChars || 0)),
+        duration_ms: Math.max(0, Math.trunc(input.durationMs || 0)),
+        fallback_used: false,
+        error: input.error ? (input.error instanceof Error ? input.error.message : String(input.error)) : ""
+      });
+    } catch {
+      // Trace must not affect agent execution.
+    }
+  }
+
+  private async addRoutingTrace(request: AgentRunRequest, trace: AgentTraceRecorder): Promise<void> {
+    try {
+      const skills = await this.skills.listSkills().catch(() => []);
+      const candidates = rankSkillRoutes(request.content || "", skills, {
+        manualSkillId: request.skill_id || "",
+        currentSkillId: String((request as any).current_skill || ""),
+        limit: 8
+      });
+      trace.addRouteCandidates(
+        candidates.map((candidate) => ({
+          skill_id: candidate.skillId,
+          score: candidate.score,
+          reasons: candidate.reasons,
+          signals: candidate.signals
+        }))
+      );
+      const intent = classifyAgentIntent(request.content || "", request.skill_id || "", skills);
+      const top = candidates[0];
+      trace.mark("classified", {
+        intent,
+        selected_skill_id: top?.skillId || request.skill_id || "",
+        selected_reason: top?.reasons.join("；") || ""
+      });
+    } catch {
+      // Trace must not affect routing.
+    }
+  }
+
+  private addAgentResponseToTrace(trace: AgentTraceRecorder, response: AgentRunResponse): void {
+    const data = isRecord(response.skill_result?.data) ? response.skill_result!.data : {};
+    const savedPaths = uniquePaths([...(response.saved_paths || []), ...stringListFromUnknown(data.saved_paths), response.skill_result?.saved_path || ""]);
+    const webSearchSources = [
+      ...(response.web_search_sources || []),
+      ...webSearchSourcesFromUnknown(data.web_search_sources)
+    ];
+    trace.addWebSearchSources(webSearchSources);
+    this.addSaveDecisionToTrace(trace, data, savedPaths);
+    trace.mark(savedPaths.length ? "save_committed" : response.intent === "skill" ? "workflow_completed" : "conversation_recorded", {
+      ...(response.conversation?.id ? { conversation_id: response.conversation.id } : {}),
+      intent: response.intent,
+      selected_skill_id: response.current_skill || String(data.skill_id || ""),
+      saved_paths: savedPaths,
+      web_search_sources: webSearchSources
+    });
+  }
+
+  private addSkillResultToTrace(trace: AgentTraceRecorder, result: SkillRunResponse): void {
+    const data = isRecord(result.data) ? result.data : {};
+    const savedPaths = uniquePaths([...stringListFromUnknown(data.saved_paths), result.saved_path || ""]);
+    const webSearchSources = webSearchSourcesFromUnknown(data.web_search_sources);
+    trace.addWebSearchSources(webSearchSources);
+    this.addSaveDecisionToTrace(trace, data, savedPaths);
+    trace.mark(savedPaths.length ? "save_committed" : "workflow_completed", {
+      selected_skill_id: String(data.skill_id || ""),
+      saved_paths: savedPaths,
+      web_search_sources: webSearchSources
+    });
+  }
+
+  private addSaveDecisionToTrace(trace: AgentTraceRecorder, data: Record<string, unknown>, savedPaths: string[]): void {
+    const savePlan = isRecord(data.save_plan) ? data.save_plan : {};
+    const targetPaths = uniquePaths([
+      ...stringListFromUnknown(savePlan.target_paths),
+      ...stringListFromUnknown(data.target_paths),
+      String(data.target_path || ""),
+      ...savedPaths
+    ]);
+    const cacheId = String(data.cache_id || "");
+    if (!targetPaths.length && !cacheId && !Object.keys(savePlan).length) {
+      return;
+    }
+    trace.addSaveDecision({
+      action: String(savePlan.action || (savedPaths.length ? "save_committed" : data.pending_save ? "pending_save" : "save_planned")),
+      mode: readTraceMode(savePlan.mode || data.default_mode),
+      target_paths: targetPaths,
+      cache_id: cacheId,
+      auto_committed: savedPaths.length > 0,
+      reason: String(savePlan.reason || "")
+    });
   }
 
   private async classifyIntent(request: AgentRunRequest) {
@@ -3109,6 +3435,43 @@ function stringListFromUnknown(value: unknown): string[] {
     return [];
   }
   return value.map((item) => String(item || "").trim()).filter(Boolean);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function webSearchSourcesFromUnknown(value: unknown): WebSearchSource[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => (isRecord(item) ? { title: String(item.title || "").trim(), url: String(item.url || "").trim() } : null))
+    .filter((item): item is WebSearchSource => Boolean(item?.title && /^https?:\/\//i.test(item.url)));
+}
+
+function readTraceMode(value: unknown): "replace" | "append" | undefined {
+  return value === "replace" || value === "append" ? value : undefined;
+}
+
+function agentRequestInputChars(request: AgentRunRequest): number {
+  return [
+    request.content,
+    request.selection,
+    request.project_context_hint,
+    request.current_path,
+    ...(request.attachment_ids || [])
+  ].reduce((total, item) => total + String(item || "").length, 0);
+}
+
+function skillRequestInputChars(request: SkillRunRequest): number {
+  return [
+    request.instruction,
+    request.text,
+    request.source_path,
+    request.target_path,
+    ...(request.attachment_ids || [])
+  ].reduce((total, item) => total + String(item || "").length, 0);
 }
 
 function uniquePaths(paths: string[]): string[] {

@@ -7,6 +7,7 @@ import { ConversationService } from "@xiaoshuo/conversation-service";
 import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
 import type { ChatCompletionMessage } from "@xiaoshuo/model-client";
 import type { AgentStreamEvent } from "@xiaoshuo/shared";
+import { getAgentTraceFilePath } from "./agent-trace.js";
 import { AgentRuntimeService } from "./runtime.js";
 
 let tempDir = "";
@@ -37,6 +38,15 @@ async function writeImportedSkills(skills: Array<Record<string, unknown>>) {
   const agentSkillDir = path.join(tempDir, "00_设定集", ".agent", "skills");
   await fs.mkdir(agentSkillDir, { recursive: true });
   await fs.writeFile(path.join(agentSkillDir, "imported.json"), JSON.stringify(skills, null, 2), "utf8");
+}
+
+async function readAgentRunTraces() {
+  const raw = await fs.readFile(getAgentTraceFilePath(tempDir), "utf8");
+  return raw
+    .trim()
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
 }
 
 describe("agent-runtime chat flow", () => {
@@ -85,6 +95,62 @@ describe("agent-runtime chat flow", () => {
     const persisted = await conversations.getConversation(result.conversation!.id);
     expect(persisted.messages).toHaveLength(2);
     expect(persisted.messages[1]?.content).toBe("本地聊天回复");
+  });
+
+  it("writes a project-local trace for agent runs", async () => {
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "本地聊天回复"
+      }
+    });
+
+    const result = await runtime.runAgent({
+      conversation_id: "",
+      content: "请总结当前项目",
+      current_path: "01_大纲/大纲.txt",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    });
+
+    const [trace] = await readAgentRunTraces();
+    expect(trace).toMatchObject({
+      conversation_id: result.conversation!.id,
+      intent: "read_context",
+      input_excerpt: "请总结当前项目",
+      stage: "conversation_recorded",
+      saved_paths: []
+    });
+    expect(trace.route_candidates).toEqual(expect.any(Array));
+    expect(trace.context_blocks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: "user_input",
+          source: "conversation",
+          chars: "请总结当前项目".length,
+          included: true
+        }),
+        expect.objectContaining({
+          name: "01_大纲/大纲.txt",
+          source: "document",
+          included: true
+        })
+      ])
+    );
+    expect(trace.model_calls).toEqual([
+      expect.objectContaining({
+        line: "primary",
+        model: "demo-model",
+        streaming: false,
+        input_chars: expect.any(Number),
+        output_chars: "本地聊天回复".length,
+        duration_ms: expect.any(Number)
+      })
+    ]);
+    expect(trace.duration_ms).toEqual(expect.any(Number));
   });
 
   it("humanizes chat replies when the global switch is enabled", async () => {

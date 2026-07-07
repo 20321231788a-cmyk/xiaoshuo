@@ -1071,6 +1071,48 @@ npm run dist -w @xiaoshuo/desktop-shell
 - `apps/desktop-shell/release/ArcWriter-Setup-0.3.2.exe.blockmap`
 - `apps/desktop-shell/release/latest.yml`
 
+### 15.18 2026-07-07 Agent 优化手册与 Trace 最小闭环开发记录
+
+本次从专业 Agent 设计视角完成项目评估，并落地第一阶段可观测性改造：先让每次 agent 运行留下可追踪、可复盘、可回归的结构化记录，为后续上下文治理、路由评估、保存决策和模型调用分层优化提供依据。
+
+主要改动：
+
+- **Agent 优化修改手册**：
+  - 新增 `docs/AGENT_OPTIMIZATION_MODIFICATION_MANUAL.md`，按 P0-P8 分层整理问题、目标状态、落地文件、验收标准与实施顺序。
+  - 明确第一阶段优先做 Agent Run Trace，后续再推进 Context Budget、路由评估、模型调用分层、保存策略治理等改造。
+- **共享 Trace 契约**：
+  - `packages/shared/src/schemas/agent.ts` 新增 agent run trace、路由候选、上下文块、模型调用、保存决策等 schema 与类型。
+  - trace stage 覆盖 received、classified、planned、workflow_started、save_committed、conversation_recorded、failed 等关键运行节点。
+- **项目本地 Trace 写入器**：
+  - 新增 `packages/agent-runtime/src/agent-trace.ts`，按 JSONL 写入 `00_设定集/.agent/runs/YYYYMMDD.jsonl`。
+  - 写入器默认吞掉自身失败，避免诊断能力影响正常 agent 执行。
+  - 对输入摘要、错误信息、URL、API Key、Bearer token、`sk-` key、JWT 形态 token 做基础脱敏。
+- **Runtime 接入**：
+  - `AgentRuntimeService.runAgent`、`streamAgentRun`、`runSkill` 增加 trace 包裹，记录路由候选、分类结果、技能启动、保存路径、联网来源和失败信息。
+  - trace 已补充请求上下文块摘要和模型调用摘要，只记录字符数、路径/来源和模型名，不保存 prompt 全文。
+  - chat/read-context 结束后回填最终 `conversation_id`，方便从 trace 反查会话。
+  - 保留原有运行行为，trace 仅作为诊断副产物。
+- **测试覆盖**：
+  - 新增 `packages/agent-runtime/src/agent-trace.test.ts` 覆盖 JSONL 写入、失败脱敏、URL 清洗、finish 幂等和写入异常吞吐。
+  - 扩展 `packages/agent-runtime/src/runtime.test.ts`，覆盖一次真实 `runAgent` 后项目本地 trace 落盘、会话 ID 回填、context blocks 和 model calls。
+
+本轮已验证：
+
+```powershell
+npm test -- packages/agent-runtime/src/agent-trace.test.ts
+npm test -- packages/agent-runtime/src/runtime.test.ts -t "writes a project-local trace"
+npm test -- packages/agent-runtime/src/agent-trace.test.ts packages/agent-runtime/src/runtime.test.ts -t "trace|writes a project-local trace"
+npm test -- packages/agent-runtime/src/agent-trace.test.ts packages/agent-runtime/src/runtime.test.ts
+npm run typecheck -w @xiaoshuo/shared
+npm run typecheck -w @xiaoshuo/agent-runtime
+```
+
+后续建议：
+
+- P1 优先提取 workflow registry，先迁移 `consistency_check`，再拆 `body_generate` / `batch_generate`。
+- P2 再做 ContextAssembler，把当前 trace 里的轻量上下文块升级为统一预算和裁剪记录。
+- P3 在模型客户端层精确补齐 `model_calls`，区分主模型、辅助模型和 fallback。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：
