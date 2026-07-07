@@ -396,7 +396,19 @@ export type AgentContextBlockTrace = z.infer<typeof agentContextBlockTraceSchema
 export type AgentModelCallTrace = z.infer<typeof agentModelCallTraceSchema>;
 export type AgentSaveDecisionTrace = z.infer<typeof agentSaveDecisionTraceSchema>;
 export type AgentRunTrace = z.infer<typeof agentRunTraceSchema>;
-export type AgentRunRequest = z.infer<typeof agentRunRequestSchema>;
+export type AgentRunRequest = {
+  conversation_id: string;
+  content: string;
+  current_path: string;
+  selection: string;
+  project_context_hint: string;
+  skill_id: string;
+  attachment_ids: string[];
+  reference_paths?: string[];
+  confirmed_reference_paths?: string[];
+  disable_auto_references?: boolean;
+  [key: string]: unknown;
+};
 export type AgentRunResponse = z.infer<typeof agentRunResponseSchema>;
 export type AgentStreamEvent = z.infer<typeof agentStreamEventSchema>;
 export type SkillRunResponseWithJob = z.infer<typeof skillRunResponseWithJobSchema>;

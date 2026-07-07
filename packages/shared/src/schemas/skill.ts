@@ -240,7 +240,22 @@ export type SkillVersionsResponse = z.infer<typeof skillVersionsResponseSchema>;
 export type SkillRollbackRequest = z.infer<typeof skillRollbackRequestSchema>;
 export type SkillImportDraftRequest = z.infer<typeof skillImportDraftRequestSchema>;
 export type SkillOpenFolderResponse = z.infer<typeof skillOpenFolderResponseSchema>;
-export type SkillRunRequest = z.infer<typeof skillRunRequestSchema>;
+export type SkillRunRequest = {
+  text: string;
+  chapter: number;
+  end_chapter: number;
+  target_words: number;
+  instruction: string;
+  target_path: string;
+  conversation_id: string;
+  source_path: string;
+  write_result: boolean;
+  attachment_ids: string[];
+  reference_paths?: string[];
+  confirmed_reference_paths?: string[];
+  disable_auto_references?: boolean;
+  [key: string]: unknown;
+};
 export type SkillRunResponse = z.infer<typeof skillRunResponseSchema>;
 
 export const cardDrawRequestSchema = z

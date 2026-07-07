@@ -8,7 +8,7 @@
 
 ### 2026-07-07 P1 shared schema
 
-状态：已完成并提交准备中。
+状态：已完成，提交 `a60d463`。
 
 落地内容：
 
@@ -20,6 +20,23 @@
 
 - `npm run typecheck -w @xiaoshuo/shared`
 - `npx vitest run packages/shared/src/schemas/agent.test.ts packages/shared/src/schemas/skill.test.ts`
+
+### 2026-07-07 P2/P3 ProjectFileManifest + ProjectFileResolver
+
+状态：已完成，本阶段随下一次 git commit 提交。
+
+落地内容：
+
+- 新增 `packages/agent-runtime/src/kernel/project-file-manifest.ts`，扫描 `.txt/.md/.jsonl` 生成 `{AGENT_DIR}/file-manifest.json`，跳过 `.git/node_modules/dist/build/coverage/.agent/cache/.agent/traces` 和大文件。
+- 新增 `packages/agent-runtime/src/kernel/project-file-resolver.ts`，支持 confirmed/reference paths、`@路径`、引号路径、显式路径、章纲/细纲/大纲等中文别名、当前文档和 manifest 模糊候选。
+- 补齐 manifest/resolver 单测，覆盖固定别名、否定别名、路径越界、缺失文件、歧义候选、禁用自动引用和项目内绝对路径转换。
+- 调整 `AgentRunRequest` / `SkillRunRequest` 导出类型，让新增引用字段保持 TypeScript 旧调用兼容，同时 schema parse 仍会补默认值。
+
+已验证：
+
+- `npm run typecheck -w @xiaoshuo/shared`
+- `npm run typecheck -w @xiaoshuo/agent-runtime`
+- `npx vitest run packages/agent-runtime/src/kernel/project-file-manifest.test.ts packages/agent-runtime/src/kernel/project-file-resolver.test.ts packages/shared/src/schemas/agent.test.ts packages/shared/src/schemas/skill.test.ts`
 
 ## 0. 当前基线
 
