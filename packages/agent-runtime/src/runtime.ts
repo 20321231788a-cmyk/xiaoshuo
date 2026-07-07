@@ -1125,55 +1125,6 @@ export class AgentRuntimeService {
       };
     }
 
-    if (skillId === "scan_pits") {
-      const source = await this.resolveWorkflowSourceText(request);
-      if (!source.trim()) {
-        throw new Error("缺少可扫描的正文内容");
-      }
-
-      const raw = await this.skillRunner.runSkill("outline_generate", {
-        text: source,
-        chapter: 0,
-        end_chapter: 0,
-        target_words: 2500,
-        instruction: request.content || "请只输出待追踪伏笔，一行一条，避免空话。",
-        target_path: "",
-        conversation_id: request.conversation_id || "",
-        source_path: "",
-        write_result: false,
-        attachment_ids: []
-      });
-
-      const created = [];
-      for (const item of String(raw.result || "")
-        .split(/\r?\n/)
-        .map((line) => line.replace(/^[-*]\s*/, "").trim())
-        .filter(Boolean)
-        .slice(0, 12)) {
-        created.push(await this.documents.addLedgerItem(item));
-      }
-
-      const reply = "伏笔账本已更新";
-      const conversation = await this.recordSkillExchange(request, reply);
-      return {
-        intent: "skill",
-        reply,
-        conversation,
-        results: [],
-        skill_result: {
-          status: "done",
-          result: "",
-          saved_path: "",
-          data: {
-            skill_id: skillId,
-            items: created
-          }
-        },
-        saved_paths: [],
-        requires_confirmation: false
-      };
-    }
-
     if (skillId === "disassemble_book") {
       const action = String((request as any).action || "").trim();
       if (action === "list_library") {

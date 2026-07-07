@@ -1431,3 +1431,27 @@ npm test -- packages/agent-runtime/src/workflows/batch-generate.test.ts packages
 
 - `disassemble_book`、`continue_disassemble`、`scan_pits`、`book_fusion`、`nuwa_style_distill` 仍在 runtime legacy 分支。
 - 下一步可继续迁移 `scan_pits` 或进入 P2 ContextAssembler；若追求 runtime 瘦身，建议先迁移剩余 workflow。
+
+### 16.5 2026-07-07 scan_pits 已完成
+
+状态：已完成伏笔扫描 handler 迁移。
+
+本阶段完成内容：
+
+- 新增 `packages/agent-runtime/src/workflows/scan-pits.ts`，把 `scan_pits` 从 runtime 大分支迁移为独立 handler。
+- `ScanPitsWorkflow` 保持原行为：解析正文来源，调用 `outline_generate` 提取伏笔条目，写入 `DocumentService` 伏笔账本，并记录技能会话。
+- `packages/agent-runtime/src/workflows/registry.ts` 注册 `ScanPitsWorkflow`。
+- `AgentRuntimeService.runLocalWorkflowSkill()` 删除 `scan_pits` 分支。
+- 新增 `packages/agent-runtime/src/workflows/scan-pits.test.ts`，覆盖条目提取和 ledger 写入。
+
+已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/agent-runtime
+npm test -- packages/agent-runtime/src/workflows/scan-pits.test.ts packages/agent-runtime/src/runtime.test.ts -t "scan_pits|ScanPitsWorkflow"
+```
+
+遗留说明：
+
+- P1 剩余 legacy workflow：`disassemble_book`、`continue_disassemble`、`book_fusion`、`nuwa_style_distill`。
+- `resolveWorkflowSourceText()` 和 `recordSkillExchange()` 已在多个 handler 中重复，后续可抽入 `workflows/helpers.ts`，但本轮先避免额外重构。

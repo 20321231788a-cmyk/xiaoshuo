@@ -1188,6 +1188,29 @@ npm test -- packages/agent-runtime/src/workflows/batch-generate.test.ts packages
 - 若继续 P1，优先迁移 `scan_pits`，它依赖少、风险较低。
 - 若转入 P2 ContextAssembler，先接 chat/read_context，再接 prompt skill，避免正文 prompt 大幅波动。
 
+### 15.22 2026-07-07 scan_pits Handler 迁移记录
+
+本轮继续拆 workflow registry，把伏笔扫描从 runtime legacy 分支迁移到独立 handler。
+
+主要改动：
+
+- 新增 `packages/agent-runtime/src/workflows/scan-pits.ts`，承接正文来源解析、`outline_generate` 调用、伏笔条目清洗、ledger 写入和技能会话记录。
+- `packages/agent-runtime/src/workflows/registry.ts` 注册 `ScanPitsWorkflow`。
+- `AgentRuntimeService.runLocalWorkflowSkill()` 删除 `scan_pits` 分支。
+- 新增 `packages/agent-runtime/src/workflows/scan-pits.test.ts`，覆盖伏笔条目写入 `00_设定集/.agent/ledger.json`。
+
+本轮已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/agent-runtime
+npm test -- packages/agent-runtime/src/workflows/scan-pits.test.ts packages/agent-runtime/src/runtime.test.ts -t "scan_pits|ScanPitsWorkflow"
+```
+
+下一步建议：
+
+- P1 若继续瘦 runtime，可迁移 `book_fusion` 或拆 `disassemble_book` / `continue_disassemble`。
+- 多个 handler 已重复 `recordSkillExchange()` 和来源解析逻辑，下一刀前可抽 `workflows/helpers.ts`。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

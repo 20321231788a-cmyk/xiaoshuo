@@ -1,6 +1,7 @@
 import { BatchGenerateWorkflow } from "./batch-generate.js";
 import { BodyGenerateWorkflow } from "./body-generate.js";
 import { ConsistencyCheckWorkflow } from "./consistency-check.js";
+import { ScanPitsWorkflow } from "./scan-pits.js";
 import type { WorkflowHandler } from "./types.js";
 
 export const WORKFLOW_SKILL_IDS = [
@@ -36,3 +37,4 @@ const bodyGenerateWorkflow = new BodyGenerateWorkflow();
 registerWorkflow(new ConsistencyCheckWorkflow());
 registerWorkflow(bodyGenerateWorkflow);
 registerWorkflow(new BatchGenerateWorkflow(bodyGenerateWorkflow));
+registerWorkflow(new ScanPitsWorkflow());
