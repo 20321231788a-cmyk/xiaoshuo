@@ -239,6 +239,22 @@
 - Workbench 引用确认和 skill 编辑仍缺 Playwright e2e 覆盖；现有 e2e 基建可用，但对应 UI 控件缺少稳定 `data-testid`，直接依赖中文文案会较脆。
 - 自然语言 skill 管理的“一键确认”UI 还未消费 `skill_result.data.skill_management`，当前需在技能页确认导入/保存/回滚。
 
+### 2026-07-07 Final validation pass
+
+状态：已完成。
+
+已验证：
+
+- `npm run typecheck`
+- `npm test`（68 个 test files，452 个 tests 通过）
+- `npm run build -w @xiaoshuo/workbench`（通过；Vite 仍提示现有 chunk size warning）
+- `npm run test:e2e`（6 个现有 Playwright 用例通过）
+
+备注：
+
+- 首次运行 `npm run test:e2e` 时本机缺少 Playwright Chromium，报 `chrome-headless-shell.exe` 不存在；执行 `npx playwright install chromium` 后重跑通过。
+- 当前 e2e 覆盖的是既有项目/会话/终端链路；Workbench 引用确认和 skill 编辑/回滚的专门 e2e 用例仍建议后续在补稳定 `data-testid` 后添加。
+
 ## 0. 当前基线
 
 评估时间：2026-07-07。
