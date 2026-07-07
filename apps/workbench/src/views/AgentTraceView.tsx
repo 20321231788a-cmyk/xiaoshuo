@@ -152,11 +152,7 @@ function TraceDetail({ trace }: { trace: AgentRunTrace | null }) {
       <TraceSection title="上下文块">
         <div className="xw-trace-stack">
           {trace.context_blocks.map((block, index) => (
-            <div key={`${block.name}-${index}`} className={`xw-trace-row ${block.included ? "" : "muted"}`}>
-              <strong>{block.name}</strong>
-              <small>{block.source} · {block.chars} 字 · {block.included ? "已纳入" : "未纳入"}</small>
-              <span>{block.reason || "-"}</span>
-            </div>
+            <TraceContextBlockRow key={`${block.name}-${index}`} block={block} />
           ))}
           {!trace.context_blocks.length && <p>-</p>}
         </div>
@@ -219,6 +215,29 @@ function TraceSection({ title, children }: { title: string; children: ReactNode 
   );
 }
 
+function TraceContextBlockRow({ block }: { block: AgentRunTrace["context_blocks"][number] }) {
+  const reference = getReferenceMetadata(block);
+  const metaParts = [
+    reference?.kind ? `类型 ${reference.kind}` : "",
+    reference?.confidence !== undefined ? `置信度 ${formatConfidence(reference.confidence)}` : "",
+    reference?.matchedText ? `匹配 ${reference.matchedText}` : ""
+  ].filter(Boolean);
+
+  return (
+    <div className={`xw-trace-row ${block.included ? "" : "muted"}`}>
+      <strong>{reference?.label || block.name}</strong>
+      <small>{block.source} · {block.chars} 字 · {block.included ? "已纳入" : "未纳入"}</small>
+      <span>{block.reason || "-"}</span>
+      {reference?.path && (
+        <div className="xw-trace-paths">
+          <code>{reference.path}</code>
+          {metaParts.length > 0 && <small>{metaParts.join(" · ")}</small>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function TracePathList({ paths }: { paths: string[] }) {
   if (!paths.length) {
     return null;
@@ -230,6 +249,46 @@ function TracePathList({ paths }: { paths: string[] }) {
       ))}
     </div>
   );
+}
+
+function getReferenceMetadata(block: AgentRunTrace["context_blocks"][number]): {
+  path: string;
+  label: string;
+  kind: string;
+  confidence?: number;
+  matchedText: string;
+} | null {
+  const record = block as Record<string, unknown>;
+  const metadata = isRecord(record.metadata) ? record.metadata : {};
+  const role = stringValue(metadata.role) || stringValue(record.role);
+  const path = stringValue(metadata.path) || stringValue(record.path);
+  if (!path || (role && role !== "reference_file")) {
+    return null;
+  }
+  return {
+    path,
+    label: stringValue(metadata.label) || stringValue(record.label),
+    kind: stringValue(metadata.kind) || stringValue(record.kind),
+    confidence: numberValue(metadata.confidence ?? record.confidence),
+    matchedText: stringValue(metadata.matched_text) || stringValue(record.matched_text)
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function numberValue(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function formatConfidence(value: number): string {
+  const normalized = value <= 1 ? value * 100 : value;
+  return `${Math.round(normalized)}%`;
 }
 
 function formatTraceTitle(trace: AgentRunTrace): string {

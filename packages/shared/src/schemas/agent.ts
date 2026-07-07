@@ -175,7 +175,8 @@ export const agentContextBlockTraceSchema = z
     source: z.enum(["project", "conversation", "document", "selection", "attachment", "pinned", "vector", "graph", "web", "runtime", "other"]),
     chars: z.number().int().min(0),
     included: z.boolean(),
-    reason: z.string().default("")
+    reason: z.string().default(""),
+    metadata: z.record(z.unknown()).optional()
   })
   .passthrough();
 

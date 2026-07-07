@@ -31,7 +31,8 @@ export async function buildReferenceContextBlocks(input: {
         label: reference.label,
         kind: reference.kind,
         confidence: reference.confidence,
-        reason: reference.reason
+        reason: reference.reason,
+        matched_text: reference.matched_text
       }
     });
   }

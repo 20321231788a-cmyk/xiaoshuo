@@ -165,6 +165,47 @@ describe("agent-runtime chat flow", () => {
     expect(trace.duration_ms).toEqual(expect.any(Number));
   });
 
+  it("records reference file metadata in assembled context traces", async () => {
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "参考章纲后的回复"
+      }
+    });
+
+    await runtime.runAgent({
+      conversation_id: "",
+      content: "参考章纲，总结下一章重点",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    });
+
+    const [trace] = await readAgentRunTraces();
+    const referenceBlock = trace.context_blocks.find(
+      (block: Record<string, unknown>) => block.path === "01_大纲/章纲.txt" || (block.metadata as Record<string, unknown> | undefined)?.path === "01_大纲/章纲.txt"
+    );
+
+    expect(referenceBlock).toMatchObject({
+      source: "document",
+      included: true,
+      path: "01_大纲/章纲.txt",
+      kind: "alias",
+      confidence: expect.any(Number),
+      matched_text: "章纲",
+      metadata: expect.objectContaining({
+        role: "reference_file",
+        path: "01_大纲/章纲.txt",
+        kind: "alias",
+        confidence: expect.any(Number),
+        matched_text: "章纲"
+      })
+    });
+  });
+
   it("humanizes chat replies when the global switch is enabled", async () => {
     await fs.writeFile(configPath, JSON.stringify({ api_key: "demo-key", model: "demo-model", humanizer_enabled: true }), "utf8");
     const calls: string[] = [];

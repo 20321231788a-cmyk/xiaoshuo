@@ -446,6 +446,8 @@ export class AgentRuntimeService {
     return ({ scope, context }) => {
       trace.mark("context_assembled");
       for (const block of context.blocks) {
+        const metadata = pickTraceMetadata(block.metadata);
+        const flattenedMetadata = flattenTraceMetadata(metadata);
         trace.addContextBlock({
           name: `${scope}:${block.id}`,
           source: block.source,
@@ -456,7 +458,9 @@ export class AgentRuntimeService {
           priority: block.priority,
           budget: context.totalBudget,
           scope,
-          truncated: block.includedChars < block.originalChars
+          truncated: block.includedChars < block.originalChars,
+          ...(Object.keys(metadata).length ? { metadata } : {}),
+          ...flattenedMetadata
         });
       }
     };
@@ -2036,6 +2040,38 @@ function stringListFromUnknown(value: unknown): string[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+function pickTraceMetadata(value: unknown): Record<string, string | number | boolean> {
+  if (!isRecord(value)) {
+    return {};
+  }
+  const allowedKeys = ["role", "path", "label", "kind", "confidence", "matched_text", "reason"];
+  const metadata: Record<string, string | number | boolean> = {};
+  for (const key of allowedKeys) {
+    const item = value[key];
+    if (typeof item === "string") {
+      const text = item.trim();
+      if (text) {
+        metadata[key] = text.slice(0, 500);
+      }
+    } else if (typeof item === "number" && Number.isFinite(item)) {
+      metadata[key] = item;
+    } else if (typeof item === "boolean") {
+      metadata[key] = item;
+    }
+  }
+  return metadata;
+}
+
+function flattenTraceMetadata(metadata: Record<string, string | number | boolean>): Record<string, string | number | boolean> {
+  const flattened: Record<string, string | number | boolean> = {};
+  for (const key of ["role", "path", "label", "kind", "confidence", "matched_text"]) {
+    if (metadata[key] !== undefined) {
+      flattened[key] = metadata[key]!;
+    }
+  }
+  return flattened;
 }
 
 function webSearchSourcesFromUnknown(value: unknown): WebSearchSource[] {
