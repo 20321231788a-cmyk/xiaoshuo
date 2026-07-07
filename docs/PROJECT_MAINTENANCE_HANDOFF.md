@@ -1349,6 +1349,34 @@ npm run smoke:desktop
 - P2 下一刀把 chat stable context / turn context 拆成多个真实 `ContextBlock`，并把 assembled block 统计写入 agent trace。
 - 后续再接 `skill-runner.ts` 的 prompt skill 上下文，继续保持 prompt 语义稳定。
 
+### 15.28 2026-07-07 P2 ContextAssembler 第二刀开发记录
+
+本轮继续 P2，通过主线程 + 子智能体 Pauli 并行推进：主线程负责 chat trace 集成，Pauli 负责 skill-runner 接入。
+
+主要改动：
+
+- `packages/agent-runtime/src/chat-runner.ts` 将 stable project context 和 turn context 拆为真实 `ContextBlock`，保留原 section 文本。
+- `AgentChatRunner` 增加可选 `ChatContextAssemblyObserver`，把 assembled context 的 blocks 暴露给 runtime。
+- `packages/agent-runtime/src/runtime.ts` 将 chat assembled blocks 写入 trace，包含 scope、priority、budget、included_chars 和 truncated 等 passthrough 字段。
+- `packages/agent-runtime/src/skill-runner.ts` 将 prompt skill 上下文交给 `assembleContext()`，普通执行使用 `prompt_skill` 26k 预算，compact retry 保持 12k 预算。
+- `packages/agent-runtime/src/runtime.test.ts` 扩展 trace context block 断言。
+- `packages/agent-runtime/src/skill-runner.test.ts` 新增超长 prompt skill 上下文裁剪测试。
+
+本轮已验证：
+
+```powershell
+npm test -- packages/agent-runtime/src/kernel/context-assembler.test.ts packages/agent-runtime/src/skill-runner.test.ts packages/agent-runtime/src/runtime.test.ts -t "trace|ContextAssembler|prompt-skill context|read-context chat"
+npm run typecheck
+npm test
+npm run build:desktop
+npm run smoke:desktop
+```
+
+下一步建议：
+
+- P2 可继续把 workflow 上下文纳入 assembler，优先 `body_generate` / `consistency_check`。
+- 下一大块可进入 P3 GraphMemory，建议先做 vector-service skeleton，再进入 agent-runtime 集成。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

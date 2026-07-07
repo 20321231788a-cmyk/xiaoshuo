@@ -29,6 +29,7 @@ import {
 } from "./web-search.js";
 import { applyHumanizerIfEnabled } from "./humanizer.js";
 import { assembleContext } from "./kernel/context-assembler.js";
+import type { AssembledContext, ContextBlock } from "./kernel/context-block.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import { splitVisibleStreamText } from "./stream.js";
 
@@ -39,6 +40,8 @@ const MAX_COMPACT_CONTEXT_CHARS = 14_000;
 
 type ChatModelClient = Pick<OpenAICompatibleClient, "requestCompletion"> &
   Partial<Pick<OpenAICompatibleClient, "streamCompletion">>;
+
+export type ChatContextAssemblyObserver = (event: { scope: string; context: AssembledContext }) => void;
 
 export type AgentChatRunnerOptions = {
   projectRoot: string;
@@ -66,11 +69,15 @@ export class AgentChatRunner {
     this.skills = new SkillService({ projectRoot: this.projectRoot });
   }
 
-  async runAgent(payload: AgentRunRequest, intent: Extract<AgentIntent, "chat" | "read_context">): Promise<AgentRunResponse> {
+  async runAgent(
+    payload: AgentRunRequest,
+    intent: Extract<AgentIntent, "chat" | "read_context">,
+    contextObserver?: ChatContextAssemblyObserver
+  ): Promise<AgentRunResponse> {
     const state = await this.prepareConversationState(payload);
     const config = await this.requireModelConfig();
     const webSearchSources: WebSearchSource[] = [];
-    const messages = await this.buildMessages(state.detail, payload, config.thinking_enabled, false, webSearchSources);
+    const messages = await this.buildMessages(state.detail, payload, config.thinking_enabled, false, webSearchSources, contextObserver);
 
     try {
       const reply = String(await this.modelClient.requestCompletion(config, messages, config.temperature)).trim();
@@ -81,7 +88,7 @@ export class AgentChatRunner {
       if (!looksGatewayTimeout(error)) {
         throw error;
       }
-      const compactMessages = await this.buildMessages(state.detail, payload, config.thinking_enabled, true);
+      const compactMessages = await this.buildMessages(state.detail, payload, config.thinking_enabled, true, undefined, contextObserver);
       const reply = String(await this.modelClient.requestCompletion(config, compactMessages, config.temperature)).trim();
       const humanized = await this.humanizeConversationText(state.detail, reply);
       const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized);
@@ -91,7 +98,8 @@ export class AgentChatRunner {
 
   async *streamAgentRun(
     payload: AgentRunRequest,
-    intent: Extract<AgentIntent, "chat" | "read_context">
+    intent: Extract<AgentIntent, "chat" | "read_context">,
+    contextObserver?: ChatContextAssemblyObserver
   ): AsyncGenerator<AgentStreamEvent> {
     const state = await this.prepareConversationState(payload);
     yield {
@@ -103,8 +111,8 @@ export class AgentChatRunner {
 
     const config = await this.requireModelConfig();
     const webSearchSources: WebSearchSource[] = [];
-    const baseMessages = await this.buildMessages(state.detail, payload, config.thinking_enabled, false, webSearchSources);
-    const compactMessages = await this.buildMessages(state.detail, payload, config.thinking_enabled, true);
+    const baseMessages = await this.buildMessages(state.detail, payload, config.thinking_enabled, false, webSearchSources, contextObserver);
+    const compactMessages = await this.buildMessages(state.detail, payload, config.thinking_enabled, true, undefined, contextObserver);
     const streamCompletion = this.modelClient.streamCompletion?.bind(this.modelClient);
     const replyParts: string[] = [];
 
@@ -335,7 +343,8 @@ export class AgentChatRunner {
     payload: AgentRunRequest,
     thinkingEnabled: boolean,
     compact: boolean,
-    webSearchSources?: WebSearchSource[]
+    webSearchSources?: WebSearchSource[],
+    contextObserver?: ChatContextAssemblyObserver
   ): Promise<ChatCompletionMessage[]> {
     const continuity = await buildProjectContinuityContext(this.projectRoot);
     const attachments = await this.resolveAttachmentTexts(detail, payload.attachment_ids);
@@ -354,7 +363,7 @@ export class AgentChatRunner {
       },
       {
         role: "system",
-        content: buildStableProjectContext(detail, continuity, attachments, compact)
+        content: buildStableProjectContext(detail, continuity, attachments, compact, contextObserver, compact ? "agent_chat_stable_compact" : "agent_chat_stable")
       }
     ];
 
@@ -368,39 +377,55 @@ export class AgentChatRunner {
     messages.push(...recentMessages);
     messages.push({
       role: "user",
-      content: await this.buildTurnContext(payload, compact, webSearchSources)
+      content: await this.buildTurnContext(payload, compact, webSearchSources, contextObserver)
     });
 
     return messages;
   }
 
-  private async buildTurnContext(payload: AgentRunRequest, compact: boolean, webSearchSources?: WebSearchSource[]): Promise<string> {
+  private async buildTurnContext(
+    payload: AgentRunRequest,
+    compact: boolean,
+    webSearchSources?: WebSearchSource[],
+    contextObserver?: ChatContextAssemblyObserver
+  ): Promise<string> {
     const runtimeContext = await this.resolveRuntimeContext(payload, compact);
     const limit = compact ? 3_000 : 5_000;
     const webSearchContext = await this.buildWebSearchContext(payload.content || "", runtimeContext, compact, webSearchSources);
-    const content = [
-      "【本轮动态上下文】",
-      "这些内容只用于当前这一轮的回答，优先级低于项目稳定上下文。",
-      "",
-      `【当前文档/选区/前端读取上下文】\n${clipText(runtimeContext, limit) || "暂无"}`,
-      "",
-      `【联网搜索小说素材】\n${webSearchContext}`,
-      "",
-      `【用户输入】\n${clipText(payload.content || "", compact ? 8_000 : MAX_USER_INPUT_CHARS)}`
-    ]
-      .join("\n");
-    return assembleContext(
+    const assembled = assembleContext(
       [
         {
-          id: "agent-turn-context",
-          title: "本轮动态上下文",
+          id: "turn_instructions",
+          title: "本轮动态上下文说明",
           source: "runtime",
           priority: "critical",
-          content
+          content: ["【本轮动态上下文】", "这些内容只用于当前这一轮的回答，优先级低于项目稳定上下文。"].join("\n")
+        },
+        {
+          id: "runtime_context",
+          title: "当前文档/选区/前端读取上下文",
+          source: "runtime",
+          priority: "high",
+          content: `【当前文档/选区/前端读取上下文】\n${clipText(runtimeContext, limit) || "暂无"}`
+        },
+        {
+          id: "web_search_context",
+          title: "联网搜索小说素材",
+          source: "web",
+          priority: "medium",
+          content: `【联网搜索小说素材】\n${webSearchContext}`
+        },
+        {
+          id: "user_input",
+          title: "用户输入",
+          source: "conversation",
+          priority: "critical",
+          content: `【用户输入】\n${clipText(payload.content || "", compact ? 8_000 : MAX_USER_INPUT_CHARS)}`
         }
       ],
       { budget: compact ? MAX_COMPACT_CONTEXT_CHARS : MAX_CONTEXT_CHARS }
-    ).text;
+    );
+    return observeContextAssembly(compact ? "agent_chat_turn_compact" : "agent_chat_turn", assembled, contextObserver);
   }
 
   private async resolveRuntimeContext(payload: AgentRunRequest, compact: boolean): Promise<string> {
@@ -867,30 +892,47 @@ export class AgentChatRunner {
     }
     const webSearchContext = await this.buildWebSearchContext(text, rtContext, compact, webSearchSources);
 
-    const content = [
-      "【本轮动态上下文】",
-      "这些内容每轮可能变化，优先级低于前置项目稳定上下文；只在与用户目标相关时使用。",
-      "",
-      `【当前文档/选区/前端读取上下文】\n${clipText(rtContext, runtimeLimit) || "暂无"}`,
-      "",
-      `【长期记忆召回】\n${clipText(vectorContext, vectorLimit)}`,
-      "",
-      `【联网搜索小说素材】\n${webSearchContext}`,
-      "",
-      `【用户输入】\n${clipText(text, userLimit)}`
-    ].join("\n");
-    return assembleContext(
+    const assembled = assembleContext(
       [
         {
-          id: "conversation-turn-context",
-          title: "会话本轮动态上下文",
+          id: "turn_instructions",
+          title: "会话本轮动态上下文说明",
           source: "runtime",
           priority: "critical",
-          content
+          content: ["【本轮动态上下文】", "这些内容每轮可能变化，优先级低于前置项目稳定上下文；只在与用户目标相关时使用。"].join("\n")
+        },
+        {
+          id: "runtime_context",
+          title: "当前文档/选区/前端读取上下文",
+          source: "runtime",
+          priority: "high",
+          content: `【当前文档/选区/前端读取上下文】\n${clipText(rtContext, runtimeLimit) || "暂无"}`
+        },
+        {
+          id: "vector_context",
+          title: "长期记忆召回",
+          source: "vector",
+          priority: "medium",
+          content: `【长期记忆召回】\n${clipText(vectorContext, vectorLimit)}`
+        },
+        {
+          id: "web_search_context",
+          title: "联网搜索小说素材",
+          source: "web",
+          priority: "medium",
+          content: `【联网搜索小说素材】\n${webSearchContext}`
+        },
+        {
+          id: "user_input",
+          title: "用户输入",
+          source: "conversation",
+          priority: "critical",
+          content: `【用户输入】\n${clipText(text, userLimit)}`
         }
       ],
       { budget: compact ? MAX_COMPACT_CONTEXT_CHARS : MAX_CONTEXT_CHARS }
-    ).text;
+    );
+    return assembled.text;
   }
 
   private async buildWebSearchContext(userText: string, runtimeContext: string, compact: boolean, webSearchSources?: WebSearchSource[]): Promise<string> {
@@ -1016,7 +1058,9 @@ function buildStableProjectContext(
   detail: ConversationDetail,
   continuity: Awaited<ReturnType<typeof buildProjectContinuityContext>>,
   attachments: Array<[ConversationAttachment, string]>,
-  compact: boolean
+  compact: boolean,
+  contextObserver?: ChatContextAssemblyObserver,
+  scope = compact ? "stable_project_context_compact" : "stable_project_context"
 ): string {
   const pinned = detail.pinned_context
     .slice(compact ? -2 : -6)
@@ -1033,42 +1077,84 @@ function buildStableProjectContext(
 
   const outlineLimit = compact ? 1_600 : 2_200;
   const libraryLimit = compact ? 1_800 : 4_000;
-  const content = [
-    compact ? "【自动压缩】已压缩项目上下文以避免超时，请优先完成用户当前目标。" : "",
-    `【项目状态摘要】\n${clipText(continuity.state_summary || "暂无", compact ? 2_500 : 4_000)}`,
-    "",
-    `【大纲】\n${clipText(continuity.outline, outlineLimit)}`,
-    "",
-    `【细纲】\n${clipText(continuity.detailed_outline, outlineLimit)}`,
-    "",
-    `【章纲】\n${clipText(continuity.chapter_outline, outlineLimit)}`,
-    "",
-    buildStyleGenreConstraintBlock(continuity.style, continuity.genre, {
-      compact,
-      styleLimit: libraryLimit,
-      genreLimit: libraryLimit
-    }),
-    "",
-    `【最近正文】\n${previous}`,
-    "",
-    `【上传附件摘录】\n${attachmentText}`,
-    "",
-    `【固定上下文】\n${pinned}`
-  ]
-    .filter(Boolean)
-    .join("\n");
-  return assembleContext(
-    [
-      {
-        id: "stable-project-context",
-        title: "项目稳定上下文",
-        source: "project",
-        priority: "critical",
-        content
-      }
-    ],
-    { budget: compact ? MAX_COMPACT_CONTEXT_CHARS : MAX_CONTEXT_CHARS }
-  ).text;
+  const blocks: ContextBlock[] = [
+    compact
+      ? {
+          id: "compact_notice",
+          title: "自动压缩提示",
+          source: "runtime",
+          priority: "critical",
+          content: "【自动压缩】已压缩项目上下文以避免超时，请优先完成用户当前目标。"
+        }
+      : null,
+    {
+      id: "project_state_summary",
+      title: "项目状态摘要",
+      source: "project",
+      priority: "critical",
+      content: `【项目状态摘要】\n${clipText(continuity.state_summary || "暂无", compact ? 2_500 : 4_000)}`
+    },
+    {
+      id: "outline",
+      title: "大纲",
+      source: "project",
+      priority: "high",
+      content: `【大纲】\n${clipText(continuity.outline, outlineLimit)}`
+    },
+    {
+      id: "detailed_outline",
+      title: "细纲",
+      source: "project",
+      priority: "high",
+      content: `【细纲】\n${clipText(continuity.detailed_outline, outlineLimit)}`
+    },
+    {
+      id: "chapter_outline",
+      title: "章纲",
+      source: "project",
+      priority: "high",
+      content: `【章纲】\n${clipText(continuity.chapter_outline, outlineLimit)}`
+    },
+    {
+      id: "style_genre_constraints",
+      title: "风格与题材约束",
+      source: "project",
+      priority: "high",
+      content: buildStyleGenreConstraintBlock(continuity.style, continuity.genre, {
+        compact,
+        styleLimit: libraryLimit,
+        genreLimit: libraryLimit
+      })
+    },
+    {
+      id: "recent_chapters",
+      title: "最近正文",
+      source: "document",
+      priority: "medium",
+      content: `【最近正文】\n${previous}`
+    },
+    {
+      id: "attachment_excerpts",
+      title: "上传附件摘录",
+      source: "attachment",
+      priority: "medium",
+      content: `【上传附件摘录】\n${attachmentText}`
+    },
+    {
+      id: "pinned_context",
+      title: "固定上下文",
+      source: "pinned",
+      priority: "high",
+      content: `【固定上下文】\n${pinned}`
+    }
+  ].filter((block): block is ContextBlock => Boolean(block));
+  const assembled = assembleContext(blocks, { budget: compact ? MAX_COMPACT_CONTEXT_CHARS : MAX_CONTEXT_CHARS });
+  return observeContextAssembly(scope, assembled, contextObserver);
+}
+
+function observeContextAssembly(scope: string, context: AssembledContext, observer?: ChatContextAssemblyObserver): string {
+  observer?.({ scope, context });
+  return context.text;
 }
 
 function clipText(text: string, limit: number): string {

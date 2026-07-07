@@ -137,6 +137,18 @@ describe("agent-runtime chat flow", () => {
           name: "01_大纲/大纲.txt",
           source: "document",
           included: true
+        }),
+        expect.objectContaining({
+          name: "agent_chat_stable:project_state_summary",
+          source: "project",
+          included: true,
+          included_chars: expect.any(Number)
+        }),
+        expect.objectContaining({
+          name: "agent_chat_turn:user_input",
+          source: "conversation",
+          included: true,
+          priority: "critical"
         })
       ])
     );

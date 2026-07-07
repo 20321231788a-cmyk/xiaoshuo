@@ -1592,3 +1592,32 @@ npm run smoke:desktop
 
 - P2 下一刀可把 chat stable / turn context 拆为多个真实 `ContextBlock`，并把 assembled block 统计接入 trace。
 - 再下一步接 `skill-runner.ts` 的 `buildSkillPrompt()`，保持 prompt 文本稳定。
+
+### 16.11 2026-07-07 P2 ContextAssembler 第二刀已完成
+
+状态：已完成 chat 真实 block 拆分、trace 统计接入，以及 prompt skill 上下文预算接入。
+
+本阶段完成内容：
+
+- `packages/agent-runtime/src/chat-runner.ts` 把 stable project context 与 turn context 拆成多个真实 `ContextBlock`，保留原有中文 section 标题与顺序。
+- `AgentChatRunner.runAgent()` / `streamAgentRun()` 新增可选 `ChatContextAssemblyObserver`，用于把 assembled block 统计传回 runtime。
+- `packages/agent-runtime/src/runtime.ts` 把 chat assembled block 写入 agent trace，记录 scope、priority、budget、original chars、included chars 与 truncated 状态。
+- `packages/agent-runtime/src/skill-runner.ts` 将 prompt skill 的 `buildSkillPrompt()` 改为输出 `ContextBlock[]`，由 `assembleContext()` 按 `prompt_skill` / `compact_retry` 预算统一裁剪。
+- `packages/agent-runtime/src/runtime.test.ts` 扩展 trace 断言，覆盖 `agent_chat_stable:*` 与 `agent_chat_turn:*` block。
+- `packages/agent-runtime/src/skill-runner.test.ts` 新增超长 prompt skill 上下文裁剪测试，验证关键 section 保留且尾部被裁剪。
+- 本阶段由主线程与子智能体 Pauli 并行完成；Pauli 负责 skill-runner 接入，主线程负责 chat-runner / runtime trace 集成。
+
+已验证：
+
+```powershell
+npm test -- packages/agent-runtime/src/kernel/context-assembler.test.ts packages/agent-runtime/src/skill-runner.test.ts packages/agent-runtime/src/runtime.test.ts -t "trace|ContextAssembler|prompt-skill context|read-context chat"
+npm run typecheck
+npm test
+npm run build:desktop
+npm run smoke:desktop
+```
+
+遗留说明：
+
+- P2 下一步可把 `sendMessage()` 会话路径也接入 observer/trace，或继续接 body_generate / consistency_check 的 workflow 上下文。
+- 下一大块可进入 P3 GraphMemory 最小骨架，需单独审阅、更新文档并提交。

@@ -9,6 +9,8 @@ import { skillRunResponseSchema, skillDraftFromUrlRequestSchema, skillDraftRespo
 import path from "node:path";
 import { HUMANIZER_SYSTEM_PROMPT, applyHumanizerIfEnabled } from "./humanizer.js";
 import { GeneratedSavePlanner } from "./generated-save-planner.js";
+import { assembleContext } from "./kernel/context-assembler.js";
+import type { ContextBlock } from "./kernel/context-block.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import { streamModelText, StreamingGenerationSession, type StreamingModelClient } from "./stream.js";
 
@@ -54,7 +56,6 @@ const PROMPT_SKILL_SOURCE_FALLBACKS: Record<string, string[]> = {
 };
 
 const MAX_SOURCE_CHARS = 24_000;
-const MAX_FULL_PROMPT_CHARS = 26_000;
 const MAX_COMPACT_PROMPT_CHARS = 12_000;
 
 const STORY_DESLOP_SYSTEM_PROMPT = `
@@ -243,11 +244,16 @@ export class PromptSkillRunner {
     compact: boolean
   ): ChatCompletionMessage[] {
     const prompt = buildSkillPrompt(skill, context, sourceText, instruction, compact);
+    const assembled = assembleContext(prompt, {
+      mode: compact ? "compact_retry" : "prompt_skill",
+      budget: compact ? MAX_COMPACT_PROMPT_CHARS : undefined,
+      separator: "\n\n"
+    });
     return [
       { role: "system", content: systemPrompt },
       {
         role: "user",
-        content: prompt.slice(0, compact ? MAX_COMPACT_PROMPT_CHARS : MAX_FULL_PROMPT_CHARS)
+        content: assembled.text
       }
     ];
   }
@@ -747,49 +753,53 @@ function buildSkillPrompt(
   sourceText: string,
   instruction: string,
   compact: boolean
-): string {
+): ContextBlock[] {
   if (compact) {
     return [
-      "【自动压缩】",
-      "上一次请求触发网关超时，已保留最关键的创作信息重试。请直接完成任务，不要解释压缩过程。",
-      "",
-      `【Skill】${skill.name}`,
-      skill.description,
-      "",
-      `【项目状态】\n${clipText(context.state_summary || "无", 1800)}`,
-      "",
-      `【大纲】\n${clipText(context.outline, 1800)}`,
-      "",
-      `【细纲】\n${clipText(context.detailed_outline, 1800)}`,
-      "",
-      `【章纲】\n${clipText(context.chapter_outline, 1800)}`,
-      "",
-      buildStyleGenreConstraintBlock(context.style, context.genre, { compact: true }),
-      "",
-      `【输入文本】\n${clipText(sourceText || "无", 3200)}`,
-      "",
-      `【额外要求】\n${instruction || "无"}`
-    ].join("\n");
+      {
+        id: "skill-compact-notice",
+        title: "自动压缩",
+        source: "runtime",
+        priority: "critical",
+        content: "【自动压缩】\n上一次请求触发网关超时，已保留最关键的创作信息重试。请直接完成任务，不要解释压缩过程。"
+      },
+      buildPromptBlock("skill", "Skill", "runtime", "critical", `【Skill】${skill.name}\n${skill.description}`),
+      buildPromptBlock("project-state", "项目状态", "project", "high", `【项目状态】\n${clipText(context.state_summary || "无", 1800)}`),
+      buildPromptBlock("outline", "大纲", "project", "high", `【大纲】\n${clipText(context.outline, 1800)}`),
+      buildPromptBlock("detailed-outline", "细纲", "project", "high", `【细纲】\n${clipText(context.detailed_outline, 1800)}`),
+      buildPromptBlock("chapter-outline", "章纲", "project", "high", `【章纲】\n${clipText(context.chapter_outline, 1800)}`),
+      buildPromptBlock("style-genre", "风格题材约束", "project", "high", buildStyleGenreConstraintBlock(context.style, context.genre, { compact: true })),
+      buildPromptBlock("source-text", "输入文本", "document", "medium", `【输入文本】\n${clipText(sourceText || "无", 3200)}`),
+      buildPromptBlock("instruction", "额外要求", "runtime", "critical", `【额外要求】\n${instruction || "无"}`)
+    ];
   }
 
   return [
-    `【Skill】${skill.name}`,
-    skill.description,
-    "",
-    `【项目状态】\n${context.state_summary || "无"}`,
-    "",
-    `【大纲】\n${context.outline}`,
-    "",
-    `【细纲】\n${context.detailed_outline}`,
-    "",
-    `【章纲】\n${context.chapter_outline}`,
-    "",
-    buildStyleGenreConstraintBlock(context.style, context.genre),
-    "",
-    `【输入文本】\n${sourceText || "无"}`,
-    "",
-    `【额外要求】\n${instruction || "无"}`
-  ].join("\n");
+    buildPromptBlock("skill", "Skill", "runtime", "critical", `【Skill】${skill.name}\n${skill.description}`),
+    buildPromptBlock("project-state", "项目状态", "project", "high", `【项目状态】\n${context.state_summary || "无"}`),
+    buildPromptBlock("outline", "大纲", "project", "high", `【大纲】\n${context.outline}`),
+    buildPromptBlock("detailed-outline", "细纲", "project", "high", `【细纲】\n${context.detailed_outline}`),
+    buildPromptBlock("chapter-outline", "章纲", "project", "high", `【章纲】\n${context.chapter_outline}`),
+    buildPromptBlock("style-genre", "风格题材约束", "project", "high", buildStyleGenreConstraintBlock(context.style, context.genre)),
+    buildPromptBlock("source-text", "输入文本", "document", "medium", `【输入文本】\n${sourceText || "无"}`),
+    buildPromptBlock("instruction", "额外要求", "runtime", "critical", `【额外要求】\n${instruction || "无"}`)
+  ];
+}
+
+function buildPromptBlock(
+  id: string,
+  title: string,
+  source: ContextBlock["source"],
+  priority: ContextBlock["priority"],
+  content: string
+): ContextBlock {
+  return {
+    id,
+    title,
+    source,
+    priority,
+    content
+  };
 }
 
 function clipText(text: string, limit: number): string {

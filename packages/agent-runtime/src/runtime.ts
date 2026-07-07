@@ -17,7 +17,7 @@ import type {
   SkillDraftFromUrlRequest,
   SkillDraftResponse
 } from "@xiaoshuo/shared";
-import { AgentChatRunner } from "./chat-runner.js";
+import { AgentChatRunner, type ChatContextAssemblyObserver } from "./chat-runner.js";
 import { classifyAgentIntent, hasSkillAction, isReadContextIntent, rankSkillRoutes } from "./intent-router.js";
 import { AgentPlanner, type AgentPlannerOptions } from "./planner.js";
 import { PromptSkillRunner } from "./skill-runner.js";
@@ -288,7 +288,7 @@ export class AgentRuntimeService {
     if (intent !== "chat" && intent !== "read_context") {
       throw new Error(`TS runtime 尚未接管该意图：${intent}`);
     }
-    return this.attachGeneratedSaveDecision(request, await this.chatRunner.runAgent(request, intent));
+    return this.attachGeneratedSaveDecision(request, await this.chatRunner.runAgent(request, intent, this.buildChatContextObserver(trace)));
   }
 
   async *streamAgentRun(request: AgentRunRequest): AsyncGenerator<AgentStreamEvent> {
@@ -369,7 +369,7 @@ export class AgentRuntimeService {
     if (intent !== "chat" && intent !== "read_context") {
       throw new Error(`TS runtime 尚未接管该意图：${intent}`);
     }
-    for await (const event of this.chatRunner.streamAgentRun(request, intent)) {
+    for await (const event of this.chatRunner.streamAgentRun(request, intent, this.buildChatContextObserver(trace))) {
       if (event.type === "final") {
         yield {
           ...event,
@@ -402,6 +402,29 @@ export class AgentRuntimeService {
       savePlanner: this.savePlanner,
       skillRunner: this.skillRunner,
       trace
+    };
+  }
+
+  private buildChatContextObserver(trace?: AgentTraceRecorder): ChatContextAssemblyObserver | undefined {
+    if (!trace) {
+      return undefined;
+    }
+    return ({ scope, context }) => {
+      trace.mark("context_assembled");
+      for (const block of context.blocks) {
+        trace.addContextBlock({
+          name: `${scope}:${block.id}`,
+          source: block.source,
+          chars: Math.max(0, Math.trunc(block.originalChars || 0)),
+          included: block.included,
+          reason: `${block.title}; included ${block.includedChars}/${block.originalChars}; budget ${context.totalBudget}`,
+          included_chars: Math.max(0, Math.trunc(block.includedChars || 0)),
+          priority: block.priority,
+          budget: context.totalBudget,
+          scope,
+          truncated: block.includedChars < block.originalChars
+        });
+      }
     };
   }
 

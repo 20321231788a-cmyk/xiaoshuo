@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ConversationService } from "@xiaoshuo/conversation-service";
 import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
+import { getContextBudget } from "./kernel/context-assembler.js";
 import { PromptSkillRunner } from "./skill-runner.js";
 
 let tempDir = "";
@@ -137,6 +138,45 @@ describe("prompt-skill-runner", () => {
     expect(capturedPrompt).toContain("附件里的剧情素材");
     expect(capturedPrompt).toContain("【风格库调用规则】");
     expect(capturedPrompt).toContain("【题材硬约束】");
+  });
+
+  it("caps prompt-skill context with ContextAssembler while preserving prompt sections", async () => {
+    let capturedPrompt = "";
+    const longSource = `${"很长的输入文本。".repeat(10_000)}SOURCE_TAIL_SHOULD_BE_TRIMMED`;
+    const runner = new PromptSkillRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          capturedPrompt = messages[1]?.content || "";
+          return "已按长输入生成";
+        }
+      }
+    });
+
+    await runner.runSkill("outline_generate", {
+      text: longSource,
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "保留关键结构",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: false,
+      attachment_ids: []
+    });
+
+    expect(capturedPrompt.length).toBeLessThanOrEqual(getContextBudget("prompt_skill"));
+    expect(capturedPrompt).toContain("【Skill】");
+    expect(capturedPrompt).toContain("【项目状态】");
+    expect(capturedPrompt).toContain("【大纲】");
+    expect(capturedPrompt).toContain("【细纲】");
+    expect(capturedPrompt).toContain("【章纲】");
+    expect(capturedPrompt).toContain("【输入文本】");
+    expect(capturedPrompt).toContain("很长的输入文本");
+    expect(capturedPrompt).toContain("【额外要求】\n保留关键结构");
+    expect(capturedPrompt).not.toContain("SOURCE_TAIL_SHOULD_BE_TRIMMED");
   });
 
   it("returns multi-target pending-save metadata for style_extract", async () => {
