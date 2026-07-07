@@ -4,10 +4,24 @@ import { OpenAICompatibleClient } from "@xiaoshuo/model-client";
 import { conversationMessageRequestSchema, type CurrentProject } from "@xiaoshuo/shared";
 import { AgentRuntimeService, encodeNdjsonEvent } from "@xiaoshuo/agent-runtime";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { createRequestAbortSignal } from "./http-utils.js";
 import { writeAiLicenseRequiredIfNeeded } from "./license-guard.js";
 import type { RuntimeContext } from "./types.js";
 
 type JsonRecord = Record<string, unknown>;
+type RuntimeAbortOptions = { signal: AbortSignal };
+type AbortableConversationRuntimeService = Omit<AgentRuntimeService, "sendMessage" | "streamMessage"> & {
+  sendMessage: (
+    conversationId: Parameters<AgentRuntimeService["sendMessage"]>[0],
+    payload: Parameters<AgentRuntimeService["sendMessage"]>[1],
+    options: RuntimeAbortOptions
+  ) => ReturnType<AgentRuntimeService["sendMessage"]>;
+  streamMessage: (
+    conversationId: Parameters<AgentRuntimeService["streamMessage"]>[0],
+    payload: Parameters<AgentRuntimeService["streamMessage"]>[1],
+    options: RuntimeAbortOptions
+  ) => ReturnType<AgentRuntimeService["streamMessage"]>;
+};
 
 type ConversationRouteMatch =
   | {
@@ -74,7 +88,8 @@ export async function handleConversationRoutes(
     const runtime = new AgentRuntimeService({
       projectRoot: projectPath,
       config: { rootDir: context.projectRoot, env: process.env }
-    });
+    }) as AbortableConversationRuntimeService;
+    const signal = createRequestAbortSignal(request, response);
     const rawBody = await deps.readRawBody(request);
     const payload = conversationMessageRequestSchema.parse(deps.parseJsonRecord(rawBody));
     const acceptHeader = String(request.headers["accept"] || "").toLowerCase();
@@ -84,22 +99,31 @@ export async function handleConversationRoutes(
       deps.addCorsHeaders(response);
       response.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8" });
       try {
-        for await (const event of runtime.streamMessage(conversationRoute.id, payload)) {
+        for await (const event of runtime.streamMessage(conversationRoute.id, payload, { signal })) {
           deps.writeNdjsonEvent(response, event);
         }
       } catch (error) {
-        deps.writeNdjsonEvent(response, {
-          type: "error",
-          message: error instanceof Error ? error.message : String(error)
-        });
+        if (!signal.aborted) {
+          deps.writeNdjsonEvent(response, {
+            type: "error",
+            message: error instanceof Error ? error.message : String(error)
+          });
+        }
       } finally {
-        response.end();
+        if (!response.writableEnded) {
+          response.end();
+        }
       }
     } else {
       try {
-        deps.writeJson(response, 200, await runtime.sendMessage(conversationRoute.id, payload));
+        const result = await runtime.sendMessage(conversationRoute.id, payload, { signal });
+        if (!signal.aborted) {
+          deps.writeJson(response, 200, result);
+        }
       } catch (error) {
-        deps.writeJson(response, 400, { detail: error instanceof Error ? error.message : String(error) });
+        if (!signal.aborted) {
+          deps.writeJson(response, 400, { detail: error instanceof Error ? error.message : String(error) });
+        }
       }
     }
     return true;

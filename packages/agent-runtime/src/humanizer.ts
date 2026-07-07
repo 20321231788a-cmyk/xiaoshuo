@@ -1,5 +1,6 @@
 import { loadModelConfig, loadPublicConfig, type ConfigServiceOptions, type ModelConfig } from "@xiaoshuo/config-service";
 import type { OpenAICompatibleClient, ChatCompletionMessage } from "@xiaoshuo/model-client";
+import { isCancellationError, throwIfAborted } from "./cancellation.js";
 
 export const HUMANIZER_SYSTEM_PROMPT = `
 你是 Humanizer-zh 中文文本编辑，专门去除 AI 生成痕迹，让文本更自然、更像人类写作。
@@ -23,23 +24,27 @@ export async function applyHumanizerIfEnabled({
   config,
   modelClient,
   mode = "写作内容",
-  skip = false
+  skip = false,
+  signal
 }: {
   text: string;
   config: ConfigServiceOptions;
   modelClient: Pick<OpenAICompatibleClient, "requestCompletion">;
   mode?: string;
   skip?: boolean;
+  signal?: AbortSignal;
 }): Promise<HumanizerResult> {
   const original = String(text || "").trim();
   if (skip || !original) {
     return { text: original, applied: false };
   }
+  throwIfAborted(signal);
 
   const publicConfig = await loadPublicConfig(config);
   if (!publicConfig.humanizer_enabled) {
     return { text: original, applied: false };
   }
+  throwIfAborted(signal);
 
   try {
     const modelConfig = await loadModelConfig(config, "primary");
@@ -59,12 +64,17 @@ export async function applyHumanizerIfEnabled({
           { role: "system", content: HUMANIZER_SYSTEM_PROMPT },
           { role: "user", content: prompt }
         ] satisfies ChatCompletionMessage[],
-        resolveHumanizerTemperature(modelConfig)
+        resolveHumanizerTemperature(modelConfig),
+        { signal }
       )
     ).trim();
+    throwIfAborted(signal);
     const cleaned = guardAgainstOverdelete(original, cleanHumanizerOutput(raw));
     return { text: cleaned, applied: cleaned.trim() !== original.trim() };
   } catch (error) {
+    if (isCancellationError(error, signal)) {
+      throw error;
+    }
     return { text: original, applied: false, error: error instanceof Error ? error.message : String(error) };
   }
 }

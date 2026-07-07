@@ -6,6 +6,7 @@ import { GraphMemory, type CheckGraphDraftConsistencyResult } from "@xiaoshuo/ve
 import { randomUUID } from "node:crypto";
 import { buildConsistencyCheckPrompt, parseConsistencyCheckResult } from "../prompts/consistency.js";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
+import { throwIfAborted } from "../cancellation.js";
 
 const SOURCE_IMPORT_CHARS = 60_000;
 
@@ -26,6 +27,7 @@ export class ConsistencyCheckWorkflow implements WorkflowHandler {
   id = "consistency_check";
 
   async runAgent(request: AgentRunRequest, context: WorkflowRunContext): Promise<AgentRunResponse> {
+    throwIfAborted(context.signal);
     const text = await resolveWorkflowSourceText(request, context);
     if (!text.trim()) {
       throw new Error("缺少要审查的正文");
@@ -34,6 +36,7 @@ export class ConsistencyCheckWorkflow implements WorkflowHandler {
     const continuity = await buildProjectContinuityContext(context.projectRoot);
     const assistantConfig = await loadAssistantModelConfig(context);
     const chapterOutline = await resolveConsistencyChapterOutline(request, context);
+    throwIfAborted(context.signal);
     const recent = continuity.previous_chapters.map((item) => item.content).join("\n");
     const graphAdvisoryPromise = checkGraphDraftConsistency(text, chapterOutline, context);
     const prompt = buildConsistencyCheckPrompt({
@@ -54,9 +57,12 @@ export class ConsistencyCheckWorkflow implements WorkflowHandler {
         { role: "system", content: "你是严厉的长篇小说连续性审稿人。只输出 JSON。" },
         { role: "user", content: prompt }
       ] satisfies ChatCompletionMessage[],
-      0.1
+      0.1,
+      { signal: context.signal }
     );
+    throwIfAborted(context.signal);
     const graphAdvisory = await graphAdvisoryPromise;
+    throwIfAborted(context.signal);
     const result = attachGraphAdvisory(parseConsistencyCheckResult(raw, assistantConfig.line), graphAdvisory);
     const reply = JSON.stringify(result, null, 2);
     const conversation = await recordSkillExchange(request, reply, context);

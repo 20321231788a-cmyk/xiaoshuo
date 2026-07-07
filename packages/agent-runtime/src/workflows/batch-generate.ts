@@ -1,5 +1,6 @@
 import type { AgentRunRequest, AgentRunResponse, ConversationDetail } from "@xiaoshuo/shared";
 import { randomUUID } from "node:crypto";
+import { throwIfAborted } from "../cancellation.js";
 import type { WebSearchSource } from "../web-search.js";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
 
@@ -20,7 +21,9 @@ export class BatchGenerateWorkflow implements WorkflowHandler {
     const savedPaths: string[] = [];
     const webSearchSources: WebSearchSource[] = [];
 
+    throwIfAborted(context.signal);
     for (let chapter = startChapter; chapter <= endChapter; chapter += 1) {
+      throwIfAborted(context.signal);
       const originalInstruction = (request.content || "").trim();
       const chapterInstruction = shouldWriteSkillResult(originalInstruction)
         ? `生成第${chapter}章正文并写入文件`
@@ -32,6 +35,7 @@ export class BatchGenerateWorkflow implements WorkflowHandler {
         selection: ""
       };
       const result = await this.bodyHandler.runAgent(chapterRequest, context);
+      throwIfAborted(context.signal);
       savedPaths.push(...result.saved_paths);
       webSearchSources.push(...(result.web_search_sources || []));
       results.push({

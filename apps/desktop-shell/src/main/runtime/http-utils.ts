@@ -43,6 +43,58 @@ export async function readRawBody(request: IncomingMessage): Promise<Buffer> {
   return Buffer.concat(chunks);
 }
 
+export function createRequestAbortSignal(request: IncomingMessage, response: ServerResponse): AbortSignal {
+  const controller = new AbortController();
+
+  const removeRequestListeners = () => {
+    request.off("aborted", onRequestAborted);
+    request.off("close", onRequestClose);
+  };
+  const cleanup = () => {
+    removeRequestListeners();
+    response.off("close", onResponseClose);
+    response.off("finish", onResponseFinish);
+  };
+  const abort = (message: string) => {
+    if (!controller.signal.aborted) {
+      controller.abort(new Error(message));
+    }
+    cleanup();
+  };
+  function onRequestAborted() {
+    abort("HTTP request aborted");
+  }
+  function onRequestClose() {
+    removeRequestListeners();
+    if (!request.complete) {
+      abort("HTTP request closed before completion");
+    }
+  }
+  function onResponseClose() {
+    if (!response.writableEnded) {
+      abort("HTTP response closed before completion");
+      return;
+    }
+    cleanup();
+  }
+  function onResponseFinish() {
+    cleanup();
+  }
+
+  request.once("aborted", onRequestAborted);
+  request.once("close", onRequestClose);
+  response.once("close", onResponseClose);
+  response.once("finish", onResponseFinish);
+
+  if (request.aborted) {
+    abort("HTTP request aborted");
+  } else if (request.destroyed && !request.complete) {
+    abort("HTTP request closed before completion");
+  }
+
+  return controller.signal;
+}
+
 export function writeJson(response: ServerResponse, statusCode: number, payload: unknown): void {
   if (response.headersSent) {
     return;

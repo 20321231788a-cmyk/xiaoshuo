@@ -1,6 +1,9 @@
+import { EventEmitter } from "node:events";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import { describe, expect, it } from "vitest";
 import {
   booleanValue,
+  createRequestAbortSignal,
   parseJsonRecord,
   parseMultipartFile,
   readBooleanQuery,
@@ -75,4 +78,66 @@ describe("runtime http utils", () => {
       content: Buffer.from("hello runtime", "utf8")
     });
   });
+
+  it("aborts request-scoped signals when the request aborts", () => {
+    const { request, response } = createHttpAbortHarness();
+    const signal = createRequestAbortSignal(request, response);
+
+    request.emit("aborted");
+
+    expect(signal.aborted).toBe(true);
+  });
+
+  it("aborts request-scoped signals when the request closes before completion", () => {
+    const { request, response } = createHttpAbortHarness({ requestComplete: false });
+    const signal = createRequestAbortSignal(request, response);
+
+    request.emit("close");
+
+    expect(signal.aborted).toBe(true);
+  });
+
+  it("aborts request-scoped signals when the response closes early", () => {
+    const { request, response } = createHttpAbortHarness();
+    const signal = createRequestAbortSignal(request, response);
+
+    response.emit("close");
+
+    expect(signal.aborted).toBe(true);
+  });
+
+  it("does not abort request-scoped signals on normal response close", () => {
+    const { request, response, endResponse } = createHttpAbortHarness();
+    const signal = createRequestAbortSignal(request, response);
+
+    endResponse();
+    response.emit("close");
+
+    expect(signal.aborted).toBe(false);
+  });
 });
+
+function createHttpAbortHarness(options: { requestComplete?: boolean } = {}): {
+  request: IncomingMessage;
+  response: ServerResponse;
+  endResponse: () => void;
+} {
+  const request = new EventEmitter() as IncomingMessage;
+  const response = new EventEmitter() as ServerResponse;
+  let writableEnded = false;
+
+  Object.defineProperty(request, "aborted", { value: false, configurable: true });
+  Object.defineProperty(request, "complete", { value: options.requestComplete ?? true, configurable: true });
+  Object.defineProperty(response, "writableEnded", {
+    get: () => writableEnded,
+    configurable: true
+  });
+
+  return {
+    request,
+    response,
+    endResponse: () => {
+      writableEnded = true;
+    }
+  };
+}

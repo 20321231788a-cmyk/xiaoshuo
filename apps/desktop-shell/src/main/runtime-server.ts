@@ -19,6 +19,7 @@ import { URL } from "node:url";
 import {
   addCorsHeaders,
   booleanValue,
+  createRequestAbortSignal,
   ensureDocumentSession,
   ensureProjectSessionCurrent,
   handleAgentRoutes,
@@ -204,6 +205,7 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
       writeJson(response, 400, { detail: "尚未打开项目" });
       return;
     }
+    const signal = createRequestAbortSignal(request, response);
     const rawBody = await readRawBody(request);
     const payload = cardDrawRequestSchema.parse(parseJsonRecord(rawBody));
     const runtime = new AgentRuntimeService({
@@ -211,11 +213,15 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
       config: { rootDir: context.projectRoot, env: process.env }
     });
     try {
-      const result = await runtime.generateCardDraw(payload, () => undefined);
-      await rebuildProjectManifest(currentProject.path);
-      writeJson(response, 200, result);
+      const result = await runtime.generateCardDraw(payload, () => undefined, { signal });
+      if (!signal.aborted) {
+        await rebuildProjectManifest(currentProject.path);
+        writeJson(response, 200, result);
+      }
     } catch (error) {
-      writeJson(response, 400, { detail: error instanceof Error ? error.message : String(error) });
+      if (!signal.aborted) {
+        writeJson(response, 400, { detail: error instanceof Error ? error.message : String(error) });
+      }
     }
     return;
   }

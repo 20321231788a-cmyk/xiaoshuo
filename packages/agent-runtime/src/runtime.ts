@@ -41,6 +41,7 @@ import type { StreamingModelClient } from "./stream.js";
 import { createAgentTraceRecorder, type AgentTraceRecorder } from "./agent-trace.js";
 import { getWorkflowHandler, isWorkflowSkillId } from "./workflows/registry.js";
 import type { WorkflowRunContext } from "./workflows/types.js";
+import { isCancellationError, throwIfAborted, type AgentRunOptions } from "./cancellation.js";
 
 const TARGET_WORD_SKILL_IDS = new Set([
   "body_generate",
@@ -89,8 +90,9 @@ export class AgentRuntimeService {
     });
   }
 
-  async plan(request: AgentPlanRequest): Promise<AgentPlanResponse> {
-    return this.planner.buildPlan(request);
+  async plan(request: AgentPlanRequest, options: AgentRunOptions = {}): Promise<AgentPlanResponse> {
+    throwIfAborted(options.signal);
+    return this.planner.buildPlan(request, options);
   }
 
   async canRunSkillLocally(skillId: string): Promise<boolean> {
@@ -104,17 +106,18 @@ export class AgentRuntimeService {
     return this.skillRunner.canRunSkillLocally(skillId);
   }
 
-  async runSkill(skillId: string, request: SkillRunRequest): Promise<SkillRunResponse> {
+  async runSkill(skillId: string, request: SkillRunRequest, options: AgentRunOptions = {}): Promise<SkillRunResponse> {
+    throwIfAborted(options.signal);
     const trace = this.createTraceRecorder({
       conversationId: request.conversation_id || "",
       skillId,
       content: request.instruction || request.text || ""
     });
     const startedAt = Date.now();
-    this.addSkillRequestContextToTrace(trace, request);
+      this.addSkillRequestContextToTrace(trace, request);
     try {
       trace.mark("workflow_started", { selected_skill_id: skillId });
-      const result = await this.runSkillInternal(skillId, request);
+      const result = await this.runSkillInternal(skillId, request, options);
       this.addSkillResultToTrace(trace, result);
       await this.addModelCallSummaryToTrace(trace, {
         inputChars: skillRequestInputChars(request),
@@ -132,20 +135,26 @@ export class AgentRuntimeService {
         streaming: false,
         error
       });
-      trace.fail(error);
-      await trace.finish();
+      if (isCancellationError(error, options.signal)) {
+        trace.mark("workflow_completed", { selected_skill_id: skillId, cancelled: true });
+        await trace.finish({ cancelled: true });
+      } else {
+        trace.fail(error);
+        await trace.finish();
+      }
       throw error;
     }
   }
 
-  private async runSkillInternal(skillId: string, request: SkillRunRequest): Promise<SkillRunResponse> {
+  private async runSkillInternal(skillId: string, request: SkillRunRequest, options: AgentRunOptions = {}): Promise<SkillRunResponse> {
+    throwIfAborted(options.signal);
     const skill = await this.skills.getSkill(skillId).catch(() => null);
     if (skill?.disabled) {
       throw new Error(`默认技能已禁用：${skill.name || skillId}。请先恢复后再执行。`);
     }
     const workflowHandler = getWorkflowHandler(skillId);
     if (workflowHandler?.runSkill) {
-      return workflowHandler.runSkill(request, this.buildWorkflowContext());
+      return workflowHandler.runSkill(request, this.buildWorkflowContext(undefined, options));
     }
     if (isWorkflowSkillId(skillId)) {
       let content = request.instruction || request.text || "";
@@ -187,7 +196,7 @@ export class AgentRuntimeService {
         }
       }
 
-      const agentResponse = await this.runLocalWorkflowSkill(skillId, agentRequest);
+      const agentResponse = await this.runLocalWorkflowSkill(skillId, agentRequest, undefined, options);
       if (agentResponse.skill_result) {
         return agentResponse.skill_result;
       }
@@ -198,7 +207,7 @@ export class AgentRuntimeService {
         data: {}
       };
     }
-    return this.skillRunner.runSkill(skillId, request);
+    return this.skillRunner.runSkill(skillId, request, options);
   }
 
   async canRunAgentLocally(request: AgentRunRequest): Promise<boolean> {
@@ -219,7 +228,8 @@ export class AgentRuntimeService {
     return intent === "chat" || intent === "read_context" || intent === "file_operation";
   }
 
-  async runAgent(request: AgentRunRequest): Promise<AgentRunResponse> {
+  async runAgent(request: AgentRunRequest, options: AgentRunOptions = {}): Promise<AgentRunResponse> {
+    throwIfAborted(options.signal);
     const trace = this.createTraceRecorder({
       conversationId: request.conversation_id || "",
       skillId: request.skill_id || "",
@@ -229,7 +239,7 @@ export class AgentRuntimeService {
     this.addAgentRequestContextToTrace(trace, request);
     try {
       await this.addRoutingTrace(request, trace);
-      const response = await this.runAgentInternal(request, trace);
+      const response = await this.runAgentInternal(request, trace, options);
       this.addAgentResponseToTrace(trace, response);
       await this.addModelCallSummaryToTrace(trace, {
         inputChars: agentRequestInputChars(request),
@@ -247,24 +257,31 @@ export class AgentRuntimeService {
         streaming: false,
         error
       });
-      trace.fail(error);
-      await trace.finish();
+      if (isCancellationError(error, options.signal)) {
+        trace.mark("workflow_completed", { cancelled: true });
+        await trace.finish({ cancelled: true });
+      } else {
+        trace.fail(error);
+        await trace.finish();
+      }
       throw error;
     }
   }
 
-  private async runAgentInternal(request: AgentRunRequest, trace?: AgentTraceRecorder): Promise<AgentRunResponse> {
+  private async runAgentInternal(request: AgentRunRequest, trace?: AgentTraceRecorder, options: AgentRunOptions = {}): Promise<AgentRunResponse> {
+    throwIfAborted(options.signal);
     if (this.shouldUseSmartSkillOrchestration(request)) {
-      const skillPlan = await this.planSkillExecution(request);
+      const skillPlan = await this.planSkillExecution(request, options);
       if (skillPlan.should_call_skill && skillPlan.steps.length) {
         trace?.mark("planned", {
           selected_skill_id: skillPlan.steps[0]?.skill_id || "",
           selected_reason: skillPlan.selected_reason
         });
-        return this.runSkillPlan(skillPlan, request);
+        return this.runSkillPlan(skillPlan, request, options);
       }
     }
 
+    throwIfAborted(options.signal);
     const intent = await this.classifyIntent(request);
     trace?.mark("classified", { intent });
     if (intent === "file_operation") {
@@ -277,21 +294,26 @@ export class AgentRuntimeService {
       }
       if (isWorkflowSkillId(skillId)) {
         trace?.mark("workflow_started", { selected_skill_id: skillId });
-        return this.runLocalWorkflowSkill(skillId, request, trace);
+        return this.runLocalWorkflowSkill(skillId, request, trace, options);
       }
       if (!(await this.skillRunner.canRunSkillLocally(skillId))) {
         throw new Error(`TS runtime 尚未接管该意图：${intent}`);
       }
       trace?.mark("workflow_started", { selected_skill_id: skillId });
-      return this.runLocalSkillIntent(skillId, request);
+      return this.runLocalSkillIntent(skillId, request, options);
     }
     if (intent !== "chat" && intent !== "read_context") {
       throw new Error(`TS runtime 尚未接管该意图：${intent}`);
     }
-    return this.attachGeneratedSaveDecision(request, await this.chatRunner.runAgent(request, intent, this.buildChatContextObserver(trace)));
+    return this.attachGeneratedSaveDecision(
+      request,
+      await this.chatRunner.runAgent(request, intent, this.buildChatContextObserver(trace), options),
+      options
+    );
   }
 
-  async *streamAgentRun(request: AgentRunRequest): AsyncGenerator<AgentStreamEvent> {
+  async *streamAgentRun(request: AgentRunRequest, options: AgentRunOptions = {}): AsyncGenerator<AgentStreamEvent> {
+    throwIfAborted(options.signal);
     const trace = this.createTraceRecorder({
       conversationId: request.conversation_id || "",
       skillId: request.skill_id || "",
@@ -302,7 +324,7 @@ export class AgentRuntimeService {
     try {
       await this.addRoutingTrace(request, trace);
       let finalPayload: AgentRunResponse | null = null;
-      for await (const event of this.streamAgentRunInternal(request, trace)) {
+      for await (const event of this.streamAgentRunInternal(request, trace, options)) {
         if (event.type === "final") {
           finalPayload = event.payload;
           this.addAgentResponseToTrace(trace, event.payload);
@@ -324,25 +346,32 @@ export class AgentRuntimeService {
         streaming: true,
         error
       });
-      trace.fail(error);
-      await trace.finish();
+      if (isCancellationError(error, options.signal)) {
+        trace.mark("workflow_completed", { cancelled: true });
+        await trace.finish({ cancelled: true });
+      } else {
+        trace.fail(error);
+        await trace.finish();
+      }
       throw error;
     }
   }
 
-  private async *streamAgentRunInternal(request: AgentRunRequest, trace?: AgentTraceRecorder): AsyncGenerator<AgentStreamEvent> {
+  private async *streamAgentRunInternal(request: AgentRunRequest, trace?: AgentTraceRecorder, options: AgentRunOptions = {}): AsyncGenerator<AgentStreamEvent> {
+    throwIfAborted(options.signal);
     if (this.shouldUseSmartSkillOrchestration(request)) {
-      const skillPlan = await this.planSkillExecution(request);
+      const skillPlan = await this.planSkillExecution(request, options);
       if (skillPlan.should_call_skill && skillPlan.steps.length) {
         trace?.mark("planned", {
           selected_skill_id: skillPlan.steps[0]?.skill_id || "",
           selected_reason: skillPlan.selected_reason
         });
-        yield* this.streamSkillPlan(skillPlan, request);
+        yield* this.streamSkillPlan(skillPlan, request, options);
         return;
       }
     }
 
+    throwIfAborted(options.signal);
     const intent = await this.classifyIntent(request);
     trace?.mark("classified", { intent });
     if (intent === "file_operation") {
@@ -356,24 +385,24 @@ export class AgentRuntimeService {
       }
       if (isWorkflowSkillId(skillId)) {
         trace?.mark("workflow_started", { selected_skill_id: skillId });
-        yield* this.streamLocalWorkflowSkill(skillId, request, trace);
+        yield* this.streamLocalWorkflowSkill(skillId, request, trace, options);
         return;
       }
       if (!(await this.skillRunner.canRunSkillLocally(skillId))) {
         throw new Error(`TS runtime 尚未接管该意图：${intent}`);
       }
       trace?.mark("workflow_started", { selected_skill_id: skillId });
-      yield* this.streamLocalSkillIntent(skillId, request);
+      yield* this.streamLocalSkillIntent(skillId, request, options);
       return;
     }
     if (intent !== "chat" && intent !== "read_context") {
       throw new Error(`TS runtime 尚未接管该意图：${intent}`);
     }
-    for await (const event of this.chatRunner.streamAgentRun(request, intent, this.buildChatContextObserver(trace))) {
+    for await (const event of this.chatRunner.streamAgentRun(request, intent, this.buildChatContextObserver(trace), options)) {
       if (event.type === "final") {
         yield {
           ...event,
-          payload: await this.attachGeneratedSaveDecision(request, event.payload)
+          payload: await this.attachGeneratedSaveDecision(request, event.payload, options)
         };
         continue;
       }
@@ -390,7 +419,7 @@ export class AgentRuntimeService {
     });
   }
 
-  private buildWorkflowContext(trace?: AgentTraceRecorder): WorkflowRunContext {
+  private buildWorkflowContext(trace?: AgentTraceRecorder, options: AgentRunOptions = {}): WorkflowRunContext {
     return {
       projectRoot: this.documents.projectRoot,
       config: this.config,
@@ -401,7 +430,8 @@ export class AgentRuntimeService {
       cache: this.cache,
       savePlanner: this.savePlanner,
       skillRunner: this.skillRunner,
-      trace
+      trace,
+      signal: options.signal
     };
   }
 
@@ -637,7 +667,8 @@ export class AgentRuntimeService {
     })[0]?.skillId || "";
   }
 
-  private async attachGeneratedSaveDecision(request: AgentRunRequest, response: AgentRunResponse): Promise<AgentRunResponse> {
+  private async attachGeneratedSaveDecision(request: AgentRunRequest, response: AgentRunResponse, options: AgentRunOptions = {}): Promise<AgentRunResponse> {
+    throwIfAborted(options.signal);
     if (response.intent !== "chat" && response.intent !== "read_context") {
       return response;
     }
@@ -658,7 +689,8 @@ export class AgentRuntimeService {
       chapter: this.resolveSkillChapter("body_generate", request),
       writeRequested: true,
       defaultMode: "replace"
-    });
+    }, options);
+    throwIfAborted(options.signal);
 
     if (plan.action === "no_save" || !plan.target_paths.length) {
       return response;
@@ -674,8 +706,10 @@ export class AgentRuntimeService {
       save_plan: plan
     });
     const meta = await this.cache.replace(entry.cache_id, content);
+    throwIfAborted(options.signal);
 
     if (await this.savePlanner.shouldAutoCommit(plan)) {
+      throwIfAborted(options.signal);
       const savedPaths = await this.cache.commitSavePlan(entry.cache_id, plan, { cleanupContent: true });
       return {
         ...response,
@@ -718,12 +752,13 @@ export class AgentRuntimeService {
     };
   }
 
-  private async planSkillExecution(request: AgentRunRequest): Promise<SkillPlan> {
+  private async planSkillExecution(request: AgentRunRequest, options: AgentRunOptions = {}): Promise<SkillPlan> {
     const skills = await this.skills.listSkills().catch(() => []);
-    return this.skillOrchestrator.plan(request, skills);
+    return this.skillOrchestrator.plan(request, skills, options);
   }
 
-  private async *streamLocalSkillIntent(skillId: string, request: AgentRunRequest): AsyncGenerator<AgentStreamEvent> {
+  private async *streamLocalSkillIntent(skillId: string, request: AgentRunRequest, options: AgentRunOptions = {}): AsyncGenerator<AgentStreamEvent> {
+    throwIfAborted(options.signal);
     request = { ...request, skill_id: skillId };
     yield {
       type: "start",
@@ -732,7 +767,8 @@ export class AgentRuntimeService {
       skill_id: skillId
     };
     const skillRequest = this.buildSkillRequest(skillId, request);
-    for await (const event of this.skillRunner.streamSkill(skillId, skillRequest)) {
+    for await (const event of this.skillRunner.streamSkill(skillId, skillRequest, options)) {
+      throwIfAborted(options.signal);
       if (event.type !== "final") {
         yield event;
         continue;
@@ -756,7 +792,8 @@ export class AgentRuntimeService {
     }
   }
 
-  private async *streamLocalWorkflowSkill(skillId: string, request: AgentRunRequest, trace?: AgentTraceRecorder): AsyncGenerator<AgentStreamEvent> {
+  private async *streamLocalWorkflowSkill(skillId: string, request: AgentRunRequest, trace?: AgentTraceRecorder, options: AgentRunOptions = {}): AsyncGenerator<AgentStreamEvent> {
+    throwIfAborted(options.signal);
     request = { ...request, skill_id: skillId };
     yield {
       type: "start",
@@ -770,7 +807,8 @@ export class AgentRuntimeService {
       stage: "workflow_start",
       skill_id: skillId
     };
-    const payload = await this.runLocalWorkflowSkill(skillId, request, trace);
+    const payload = await this.runLocalWorkflowSkill(skillId, request, trace, options);
+    throwIfAborted(options.signal);
     const resultText = this.extractStreamPreviewText(payload);
     if (resultText.trim()) {
       yield {
@@ -788,7 +826,8 @@ export class AgentRuntimeService {
     };
   }
 
-  private async *streamSkillPlan(skillPlan: SkillPlan, request: AgentRunRequest): AsyncGenerator<AgentStreamEvent> {
+  private async *streamSkillPlan(skillPlan: SkillPlan, request: AgentRunRequest, options: AgentRunOptions = {}): AsyncGenerator<AgentStreamEvent> {
+    throwIfAborted(options.signal);
     const steps = skillPlan.steps.slice(0, 4);
     yield {
       type: "start",
@@ -807,7 +846,8 @@ export class AgentRuntimeService {
       stage: "skill_plan_start",
       skill_id: steps[0]?.skill_id || ""
     };
-    const payload = await this.runSkillPlan(skillPlan, request);
+    const payload = await this.runSkillPlan(skillPlan, request, options);
+    throwIfAborted(options.signal);
     const resultText = this.extractStreamPreviewText(payload);
     if (resultText.trim()) {
       yield {
@@ -840,7 +880,8 @@ export class AgentRuntimeService {
     return !String(request.skill_id || "").trim() && Boolean(String(request.content || "").trim());
   }
 
-  private async runSkillPlan(skillPlan: SkillPlan, request: AgentRunRequest): Promise<AgentRunResponse> {
+  private async runSkillPlan(skillPlan: SkillPlan, request: AgentRunRequest, options: AgentRunOptions = {}): Promise<AgentRunResponse> {
+    throwIfAborted(options.signal);
     const steps = skillPlan.steps.slice(0, 4);
     const stepRecords: Array<Record<string, unknown>> = [];
     const savedPaths: string[] = [];
@@ -850,9 +891,11 @@ export class AgentRuntimeService {
     let priorOutput = String(request.selection || "").trim();
 
     for (const [index, step] of steps.entries()) {
+      throwIfAborted(options.signal);
       const skillRequest = this.buildPlannedSkillRequest(step, request, priorOutput);
       try {
-        const result = await this.runSkill(step.skill_id, skillRequest);
+        const result = await this.runSkill(step.skill_id, skillRequest, options);
+        throwIfAborted(options.signal);
         lastResult = result;
         const resultText = String(result.data?.result || result.result || result.content || "").trim();
         const stepSavedPaths = this.resolveSavedPaths(result);
@@ -874,6 +917,9 @@ export class AgentRuntimeService {
         priorOutput = resultText || priorOutput;
         lastReply = resultText || (stepSavedPaths.length ? `已写入 ${stepSavedPaths.length} 个文件：\n${stepSavedPaths.join("\n")}` : `${step.name || step.skill_id} 已完成。`);
       } catch (error) {
+        if (isCancellationError(error, options.signal)) {
+          throw error;
+        }
         const message = error instanceof Error ? error.message : String(error);
         stepRecords.push({
           index: index + 1,
@@ -1045,10 +1091,12 @@ export class AgentRuntimeService {
     };
   }
 
-  private async runLocalSkillIntent(skillId: string, request: AgentRunRequest): Promise<AgentRunResponse> {
+  private async runLocalSkillIntent(skillId: string, request: AgentRunRequest, options: AgentRunOptions = {}): Promise<AgentRunResponse> {
+    throwIfAborted(options.signal);
     request = { ...request, skill_id: skillId };
     const skillRequest = this.buildSkillRequest(skillId, request);
-    const result = await this.skillRunner.runSkill(skillId, skillRequest);
+    const result = await this.skillRunner.runSkill(skillId, skillRequest, options);
+    throwIfAborted(options.signal);
     const savedPaths = this.resolveSavedPaths(result);
 
     let reply = result.result || "技能已完成。";
@@ -1068,9 +1116,10 @@ export class AgentRuntimeService {
     };
   }
 
-  private async runLocalWorkflowSkill(skillId: string, request: AgentRunRequest, trace?: AgentTraceRecorder): Promise<AgentRunResponse> {
+  private async runLocalWorkflowSkill(skillId: string, request: AgentRunRequest, trace?: AgentTraceRecorder, options: AgentRunOptions = {}): Promise<AgentRunResponse> {
+    throwIfAborted(options.signal);
     request = { ...request, skill_id: skillId };
-    const context = this.buildWorkflowContext(trace);
+    const context = this.buildWorkflowContext(trace, options);
     const handler = getWorkflowHandler(skillId);
     if (handler) {
       return handler.runAgent(request, context);
@@ -1242,7 +1291,8 @@ export class AgentRuntimeService {
     }
   }
 
-  private async applyBodyDeslop(text: string, chapter: number): Promise<{ text: string; changed: boolean }> {
+  private async applyBodyDeslop(text: string, chapter: number, options: AgentRunOptions = {}): Promise<{ text: string; changed: boolean }> {
+    throwIfAborted(options.signal);
     const config = await loadModelConfig(this.config, "primary");
     if (!config.configured || !text.trim()) {
       return { text, changed: false };
@@ -1259,6 +1309,7 @@ export class AgentRuntimeService {
       `【待处理文本】\n${text.slice(0, 30000)}`
     ].join("\n");
     try {
+      throwIfAborted(options.signal);
       const raw = String(
         await this.modelClient.requestCompletion(
           config,
@@ -1266,15 +1317,20 @@ export class AgentRuntimeService {
             { role: "system", content: systemPrompt },
             { role: "user", content: userPrompt }
           ] satisfies ChatCompletionMessage[],
-          Math.max(0.2, Math.min(0.7, config.temperature))
+          Math.max(0.2, Math.min(0.7, config.temperature)),
+          { signal: options.signal }
         )
       ).trim();
+      throwIfAborted(options.signal);
       const cleaned = raw.replace(/^```(?:text|markdown|md)?\s*/i, "").replace(/\s*```$/, "").trim();
       if (!cleaned) {
         return { text, changed: false };
       }
       return { text: cleaned, changed: cleaned !== text.trim() };
-    } catch {
+    } catch (error) {
+      if (isCancellationError(error, options.signal)) {
+        throw error;
+      }
       return { text, changed: false };
     }
   }
@@ -1434,14 +1490,18 @@ export class AgentRuntimeService {
 
   async sendMessage(
     conversationId: string,
-    payload: ConversationMessageRequest
+    payload: ConversationMessageRequest,
+    options: AgentRunOptions = {}
   ): Promise<{ conversation: ConversationDetail; reply: string; saved_path: string; web_search_sources?: import("./web-search.js").WebSearchSource[]; skill_result?: SkillRunResponse }> {
+    throwIfAborted(options.signal);
     await this.validateConversationWriteBackRequest(payload);
     const request = this.conversationPayloadToAgentRequest(conversationId, payload);
     await this.attachCurrentSkillToRequest(request, payload.skill_id || "");
-    let agentResponse = await this.runAgent(request);
+    let agentResponse = await this.runAgent(request, options);
+    throwIfAborted(options.signal);
     if (payload.write_target?.trim()) {
       const writeMode = resolveConversationWriteBackMode(payload);
+      throwIfAborted(options.signal);
       const savedPath = await this.writeConversationReplyBack(payload.write_target, agentResponse.reply, writeMode, Boolean(payload.confirm_write));
       const conversation = agentResponse.conversation
         ? await this.appendConversationWriteBackMessage(agentResponse.conversation.id, savedPath, writeMode)
@@ -1463,16 +1523,20 @@ export class AgentRuntimeService {
 
   async *streamMessage(
     conversationId: string,
-    payload: ConversationMessageRequest
+    payload: ConversationMessageRequest,
+    options: AgentRunOptions = {}
   ): AsyncGenerator<AgentStreamEvent> {
+    throwIfAborted(options.signal);
     await this.validateConversationWriteBackRequest(payload);
     const agentRequest = this.conversationPayloadToAgentRequest(conversationId, payload);
     await this.attachCurrentSkillToRequest(agentRequest, payload.skill_id || "");
-    for await (const event of this.streamAgentRun(agentRequest)) {
+    for await (const event of this.streamAgentRun(agentRequest, options)) {
+      throwIfAborted(options.signal);
       if (event.type === "final") {
         let payloadResponse = event.payload;
         if (payload.write_target?.trim()) {
           const writeMode = resolveConversationWriteBackMode(payload);
+          throwIfAborted(options.signal);
           const savedPath = await this.writeConversationReplyBack(payload.write_target, payloadResponse.reply, writeMode, Boolean(payload.confirm_write));
           const conversation = payloadResponse.conversation
             ? await this.appendConversationWriteBackMessage(payloadResponse.conversation.id, savedPath, writeMode)
@@ -1589,11 +1653,12 @@ export class AgentRuntimeService {
     return this.conversations.saveConversation(detail);
   }
 
-  async draftSkillFromUrl(payload: SkillDraftFromUrlRequest): Promise<SkillDraftResponse> {
-    return this.skillRunner.draftSkillFromUrl(payload);
+  async draftSkillFromUrl(payload: SkillDraftFromUrlRequest, options: AgentRunOptions = {}): Promise<SkillDraftResponse> {
+    return this.skillRunner.draftSkillFromUrl(payload, options);
   }
 
-  async generateCardDraw(payload: CardDrawRequest, progress: (v: number, m: string) => void): Promise<CardDrawResult> {
+  async generateCardDraw(payload: CardDrawRequest, progress: (v: number, m: string) => void, options: AgentRunOptions = {}): Promise<CardDrawResult> {
+    throwIfAborted(options.signal);
     const request = payload;
     const drawId = randomUUID().replace(/-/g, "").slice(0, 12);
     const cardDrawTargets: Record<string, string> = {
@@ -1610,18 +1675,23 @@ export class AgentRuntimeService {
 
     let doneCount = 0;
     const generateOne = async (index: number) => {
-      const generated = await this.generateCardCandidate(request, index, request.candidate_count, targetPath);
+      throwIfAborted(options.signal);
+      const generated = await this.generateCardCandidate(request, index, request.candidate_count, targetPath, options);
+      throwIfAborted(options.signal);
       doneCount += 1;
       progress(0.08 + (doneCount / request.candidate_count) * 0.72, `候选 ${doneCount}/${request.candidate_count} 已生成`);
       return { index, ...generated };
     };
 
+    throwIfAborted(options.signal);
     const tasks = Array.from({ length: request.candidate_count }, (_, i) => generateOne(i + 1));
     const results = await Promise.all(tasks);
+    throwIfAborted(options.signal);
 
     const candidates: CardDrawCandidate[] = [];
     const webSearchSources: WebSearchSource[] = [];
     for (const res of results.sort((a, b) => a.index - b.index)) {
+      throwIfAborted(options.signal);
       const content = res.content.trim();
       webSearchSources.push(...res.web_search_sources);
       if (!content) {
@@ -1655,7 +1725,9 @@ export class AgentRuntimeService {
     };
 
     const manifestPath = getCardDrawManifestPath(this.documents.projectRoot, drawId);
+    throwIfAborted(options.signal);
     await fs.mkdir(path.dirname(manifestPath), { recursive: true });
+    throwIfAborted(options.signal);
     await fs.writeFile(manifestPath, JSON.stringify(result, null, 2), "utf8");
 
     progress(1.0, "抽卡候选已生成");
@@ -1723,13 +1795,20 @@ export class AgentRuntimeService {
     };
   }
 
-  private async generateCardCandidate(request: CardDrawRequest, index: number, total: number, targetPath: string): Promise<{ content: string; web_search_sources: WebSearchSource[] }> {
+  private async generateCardCandidate(
+    request: CardDrawRequest,
+    index: number,
+    total: number,
+    targetPath: string,
+    options: AgentRunOptions = {}
+  ): Promise<{ content: string; web_search_sources: WebSearchSource[] }> {
+    throwIfAborted(options.signal);
     const variantInstruction = getCardDrawVariantInstruction(request, index, total);
     if (request.mode === "body") {
-      return this.generateBodyCardCandidate(request, variantInstruction, targetPath);
+      return this.generateBodyCardCandidate(request, variantInstruction, targetPath, options);
     }
     if (request.mode === "chapter_outline") {
-      return { content: await this.generateChapterOutlineCardCandidate(request, variantInstruction), web_search_sources: [] };
+      return { content: await this.generateChapterOutlineCardCandidate(request, variantInstruction, options), web_search_sources: [] };
     }
     const cardDrawSkills: Record<string, string> = {
       outline: "outline_generate",
@@ -1740,10 +1819,16 @@ export class AgentRuntimeService {
     if (!skillId) {
       throw new Error(`不支持的抽卡模式: ${request.mode}`);
     }
-    return { content: await this.generatePromptCardCandidate(skillId, request, variantInstruction), web_search_sources: [] };
+    return { content: await this.generatePromptCardCandidate(skillId, request, variantInstruction, options), web_search_sources: [] };
   }
 
-  private async generateBodyCardCandidate(request: CardDrawRequest, instruction: string, targetPath: string): Promise<{ content: string; web_search_sources: WebSearchSource[] }> {
+  private async generateBodyCardCandidate(
+    request: CardDrawRequest,
+    instruction: string,
+    targetPath: string,
+    options: AgentRunOptions = {}
+  ): Promise<{ content: string; web_search_sources: WebSearchSource[] }> {
+    throwIfAborted(options.signal);
     const config = await loadModelConfig(this.config, "primary");
     if (!config.configured) {
       throw new Error("未配置主线路 API Key 或模型名。");
@@ -1780,6 +1865,7 @@ export class AgentRuntimeService {
       [chapterOutline, continuity.state_summary, JSON.stringify(continuity.genre)].join("\n"),
       false
     );
+    throwIfAborted(options.signal);
     const systemPrompt =
       "你是长篇网文正文写作智能体。文章连续性是最高优先级，必须严格服从设定、章纲和上一章结尾。\n" +
       "不得擅自新增主线、境界、科技词、人物关系或与题材不符的概念。\n" +
@@ -1818,19 +1904,22 @@ export class AgentRuntimeService {
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt }
         ] satisfies ChatCompletionMessage[],
-        drawTemp
+        drawTemp,
+        { signal: options.signal }
       )
     ).trim();
+    throwIfAborted(options.signal);
 
     if (!result) {
       throw new Error("模型未返回正文候选");
     }
 
-    const deslopped = await this.applyBodyDeslop(result, request.chapter);
+    const deslopped = await this.applyBodyDeslop(result, request.chapter, options);
     return { content: deslopped.text, web_search_sources: webSearch.sources };
   }
 
-  private async generateChapterOutlineCardCandidate(request: CardDrawRequest, instruction: string): Promise<string> {
+  private async generateChapterOutlineCardCandidate(request: CardDrawRequest, instruction: string, options: AgentRunOptions = {}): Promise<string> {
+    throwIfAborted(options.signal);
     let text = (request.text || "").trim();
     if (!text && request.source_path) {
       try {
@@ -1856,12 +1945,14 @@ export class AgentRuntimeService {
       source_path: text ? "" : (request.source_path || ""),
       write_result: false,
       attachment_ids: []
-    });
+    }, options);
+    throwIfAborted(options.signal);
 
     return result.result || "";
   }
 
-  private async generatePromptCardCandidate(skillId: string, request: CardDrawRequest, instruction: string): Promise<string> {
+  private async generatePromptCardCandidate(skillId: string, request: CardDrawRequest, instruction: string, options: AgentRunOptions = {}): Promise<string> {
+    throwIfAborted(options.signal);
     let text = (request.text || "").trim();
     if (!text && request.source_path) {
       try {
@@ -1879,7 +1970,8 @@ export class AgentRuntimeService {
       source_path: text ? "" : (request.source_path || ""),
       write_result: false,
       attachment_ids: []
-    });
+    }, options);
+    throwIfAborted(options.signal);
     return result.result || "";
   }
 

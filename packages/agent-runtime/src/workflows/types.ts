@@ -20,6 +20,7 @@ export type WorkflowRunContext = {
   savePlanner: GeneratedSavePlanner;
   skillRunner: PromptSkillRunner;
   trace?: AgentTraceRecorder;
+  signal?: AbortSignal;
 };
 
 export type WorkflowHandler = {

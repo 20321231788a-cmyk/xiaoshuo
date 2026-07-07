@@ -154,6 +154,7 @@ export const agentRunTraceSchema = z
     save_decision: agentSaveDecisionTraceSchema.optional(),
     saved_paths: z.array(z.string()).default([]),
     web_search_sources: z.array(webSearchSourceSchema).default([]),
+    cancelled: z.boolean().default(false),
     error: z.string().default("")
   })
   .passthrough();

@@ -10,11 +10,13 @@ import {
   writeDisassembleBookManifest
 } from "./disassemble-library.js";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
+import { throwIfAborted } from "../cancellation.js";
 
 export class ContinueDisassembleWorkflow implements WorkflowHandler {
   id = "continue_disassemble";
 
   async runAgent(request: AgentRunRequest, context: WorkflowRunContext): Promise<AgentRunResponse> {
+    throwIfAborted(context.signal);
     const sourceBook = await resolveDisassembleBookForRequest(request, context);
     const source = sourceBook ? await readDisassembleBookText(sourceBook, "reverse_outline", context, 30_000) : await resolveContinueDisassembleSource(request, context);
     if (!source.trim()) {
@@ -32,7 +34,8 @@ export class ContinueDisassembleWorkflow implements WorkflowHandler {
       source_path: "",
       write_result: false,
       attachment_ids: []
-    });
+    }, { signal: context.signal });
+    throwIfAborted(context.signal);
 
     const book = await createDisassembleBook(
       {
@@ -43,6 +46,7 @@ export class ContinueDisassembleWorkflow implements WorkflowHandler {
       },
       context
     );
+    throwIfAborted(context.signal);
     const detailPath = `${book.dir}/拆书细纲.txt`;
     await context.documents.saveDocument(detailPath, result.result || "", {
       source: "skill",

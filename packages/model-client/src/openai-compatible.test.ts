@@ -122,6 +122,76 @@ describe("model-client", () => {
     expect(fallbackBody.top_p).toBe(0.88);
   });
 
+  it("passes an abort signal to fetch and preserves caller cancellation", async () => {
+    let requestInit: RequestInit | undefined;
+    const fetchFn = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestInit = init;
+      return new Response('data: {"choices":[{"delta":{"content":"ok"}}]}', { status: 200 });
+    });
+    const client = new OpenAICompatibleClient({ fetchFn: fetchFn as typeof fetch });
+    const controller = new AbortController();
+
+    const chunks: string[] = [];
+    for await (const chunk of client.streamCompletion(configuredModel, [{ role: "user", content: "hi" }], undefined, { signal: controller.signal })) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual(["ok"]);
+    expect(requestInit?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("does not call fetch when the caller signal is already aborted", async () => {
+    const fetchFn = vi.fn();
+    const client = new OpenAICompatibleClient({ fetchFn: fetchFn as typeof fetch });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(client.requestCompletion(configuredModel, [{ role: "user", content: "hi" }], undefined, { signal: controller.signal })).rejects.toMatchObject({
+      name: "AbortError"
+    });
+    expect(fetchFn).not.toHaveBeenCalled();
+  });
+
+  it("does not fall back to non-stream completion after caller abort", async () => {
+    const controller = new AbortController();
+    const fetchFn = vi.fn(async () => {
+      controller.abort();
+      return new Response('{"error":{"message":"streaming unsupported"}}', { status: 400 });
+    });
+    const client = new OpenAICompatibleClient({ fetchFn: fetchFn as typeof fetch });
+
+    await expect(client.requestCompletion(configuredModel, [{ role: "user", content: "hi" }], undefined, { signal: controller.signal })).rejects.toMatchObject({
+      name: "AbortError"
+    });
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels an active stream reader after caller abort", async () => {
+    let cancelled = false;
+    const controller = new AbortController();
+    const client = new OpenAICompatibleClient({
+      fetchFn: vi.fn(async () =>
+        new Response(
+          new ReadableStream({
+            start(streamController) {
+              streamController.enqueue(new TextEncoder().encode('data: {"choices":[{"delta":{"content":"一"}}]}\n'));
+            },
+            cancel() {
+              cancelled = true;
+            }
+          }),
+          { status: 200 }
+        )
+      ) as typeof fetch
+    });
+    const iterator = client.streamCompletion(configuredModel, [{ role: "user", content: "hi" }], undefined, { signal: controller.signal });
+
+    await expect(iterator.next()).resolves.toEqual({ done: false, value: "一" });
+    controller.abort();
+    await expect(iterator.next()).rejects.toMatchObject({ name: "AbortError" });
+    expect(cancelled).toBe(true);
+  });
+
   it("formats gateway errors with desktop-friendly text", () => {
     expect(formatApiError(504, "Gateway Time-out")).toContain("模型网关超时");
     expect(formatApiError(503, "Service Unavailable")).toContain("模型网关暂时不可用");

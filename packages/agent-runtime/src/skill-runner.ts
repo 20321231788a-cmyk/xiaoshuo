@@ -13,6 +13,7 @@ import { assembleContext } from "./kernel/context-assembler.js";
 import type { ContextBlock } from "./kernel/context-block.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import { streamModelText, StreamingGenerationSession, type StreamingModelClient } from "./stream.js";
+import { isCancellationError, throwIfAborted, type AgentRunOptions } from "./cancellation.js";
 
 const DEFAULT_TARGETS: Record<string, string> = {
   outline_generate: "01_大纲/大纲.txt",
@@ -116,7 +117,8 @@ export class PromptSkillRunner {
     return Boolean(skill && skill.handler_type === "prompt" && !LOCAL_BLOCKED_SKILLS.has(skill.id));
   }
 
-  async runSkill(skillId: string, payload: SkillRunRequest): Promise<SkillRunResponse> {
+  async runSkill(skillId: string, payload: SkillRunRequest, options: AgentRunOptions = {}): Promise<SkillRunResponse> {
+    throwIfAborted(options.signal);
     const skill = await this.skills.getSkill(skillId);
     if (!skill) {
       throw new Error(`未知 skill: ${skillId}`);
@@ -125,11 +127,12 @@ export class PromptSkillRunner {
       throw new Error(`TS runtime 尚未接管该 skill: ${skillId}`);
     }
 
-    const result = await this.runPromptSkill(skill, payload);
-    return this.finalizePromptSkill(skill, payload, result);
+    const result = await this.runPromptSkill(skill, payload, options);
+    return this.finalizePromptSkill(skill, payload, result, undefined, options);
   }
 
-  async *streamSkill(skillId: string, payload: SkillRunRequest): AsyncGenerator<AgentStreamEvent> {
+  async *streamSkill(skillId: string, payload: SkillRunRequest, options: AgentRunOptions = {}): AsyncGenerator<AgentStreamEvent> {
+    throwIfAborted(options.signal);
     const skill = await this.skills.getSkill(skillId);
     if (!skill) {
       throw new Error(`未知 skill: ${skillId}`);
@@ -165,8 +168,10 @@ export class PromptSkillRunner {
         config,
         messages,
         fallbackMessages: compactMessages,
-        temperature: config.temperature
+        temperature: config.temperature,
+        signal: options.signal
       })) {
+        throwIfAborted(options.signal);
         await session.append(chunk);
         yield {
           type: "delta",
@@ -179,7 +184,9 @@ export class PromptSkillRunner {
         };
       }
       const raw = await session.finalize();
-      const finalText = await this.applyDefaultDeslop(skill.id, session.text || "");
+      throwIfAborted(options.signal);
+      const finalText = await this.applyDefaultDeslop(skill.id, session.text || "", options);
+      throwIfAborted(options.signal);
       if (finalText.trim() !== (session.text || "").trim()) {
         await this.cache.replace(initial.cache_id, finalText);
       }
@@ -192,11 +199,14 @@ export class PromptSkillRunner {
             cacheId: initial.cache_id,
             cachePath: raw.cache_path,
             cacheChars: finalText.length
-          })
+          }, options)
         )
       };
     } catch (error) {
       await session.fail(error);
+      if (isCancellationError(error, options.signal)) {
+        throw error;
+      }
       yield {
         type: "error",
         message: error instanceof Error ? error.message : String(error)
@@ -204,7 +214,8 @@ export class PromptSkillRunner {
     }
   }
 
-  private async runPromptSkill(skill: SkillDefinition, payload: SkillRunRequest): Promise<string> {
+  private async runPromptSkill(skill: SkillDefinition, payload: SkillRunRequest, options: AgentRunOptions = {}): Promise<string> {
+    throwIfAborted(options.signal);
     const config = await loadModelConfig(this.config, "primary");
     if (!config.configured) {
       throw new Error("未配置主线路 API Key 或模型名。");
@@ -218,10 +229,15 @@ export class PromptSkillRunner {
       const result = await this.modelClient.requestCompletion(
         config,
         this.buildMessages(skill, systemPrompt, context, sourceText || payload.text, payload.instruction, false),
-        config.temperature
+        config.temperature,
+        { signal: options.signal }
       );
-      return this.applyDefaultDeslop(skill.id, result);
+      throwIfAborted(options.signal);
+      return this.applyDefaultDeslop(skill.id, result, options);
     } catch (error) {
+      if (isCancellationError(error, options.signal)) {
+        throw error;
+      }
       if (!looksGatewayTimeout(error)) {
         throw error;
       }
@@ -230,9 +246,11 @@ export class PromptSkillRunner {
     const compactResult = await this.modelClient.requestCompletion(
       config,
       this.buildMessages(skill, systemPrompt, context, sourceText || payload.text, payload.instruction, true),
-      config.temperature
+      config.temperature,
+      { signal: options.signal }
     );
-    return this.applyDefaultDeslop(skill.id, compactResult);
+    throwIfAborted(options.signal);
+    return this.applyDefaultDeslop(skill.id, compactResult, options);
   }
 
   private buildMessages(
@@ -324,15 +342,19 @@ export class PromptSkillRunner {
     skill: SkillDefinition,
     payload: SkillRunRequest,
     result: string,
-    existingCache?: { cacheId: string; cachePath?: string; cacheChars?: number }
+    existingCache?: { cacheId: string; cachePath?: string; cacheChars?: number },
+    options: AgentRunOptions = {}
   ): Promise<SkillRunResponse> {
+    throwIfAborted(options.signal);
     const humanized = await applyHumanizerIfEnabled({
       text: String(result || "").trim(),
       config: this.config,
       modelClient: this.modelClient,
       mode: `${skill.name || skill.id} 生成结果`,
-      skip: skill.id === "humanizer_zh"
+      skip: skill.id === "humanizer_zh",
+      signal: options.signal
     });
+    throwIfAborted(options.signal);
     const finalResult = humanized.text;
     let savedPaths: string[] = [];
     let savedPath = "";
@@ -347,7 +369,8 @@ export class PromptSkillRunner {
       chapter: payload.chapter || 0,
       writeRequested: payload.write_result,
       defaultMode: "replace"
-    });
+    }, options);
+    throwIfAborted(options.signal);
     const targetPaths = savePlan.target_paths;
     const data: Record<string, unknown> = {
       skill_id: skill.id,
@@ -358,6 +381,7 @@ export class PromptSkillRunner {
     };
 
     if (finalResult && existingCache?.cacheId) {
+      throwIfAborted(options.signal);
       const updated = await this.cache.replace(existingCache.cacheId, finalResult);
       data.result = finalResult;
       data.cache_id = existingCache.cacheId;
@@ -369,6 +393,7 @@ export class PromptSkillRunner {
     }
 
     if (targetPaths.length && finalResult) {
+      throwIfAborted(options.signal);
       const entry = existingCache?.cacheId
         ? await this.cache.get(existingCache.cacheId)
         : await this.cache.create({
@@ -385,6 +410,7 @@ export class PromptSkillRunner {
       }
 
       if (await this.savePlanner.shouldAutoCommit(savePlan)) {
+        throwIfAborted(options.signal);
         savedPaths =
           skill.id === "style_extract"
             ? await this.saveStyleSections(finalResult, savePlan.mode, {
@@ -480,7 +506,8 @@ export class PromptSkillRunner {
     return normalized;
   }
 
-  private async applyDefaultDeslop(skillId: string, value: string): Promise<string> {
+  private async applyDefaultDeslop(skillId: string, value: string, options: AgentRunOptions = {}): Promise<string> {
+    throwIfAborted(options.signal);
     const result = String(value || "").trim();
     if (!result) {
       return result;
@@ -491,6 +518,7 @@ export class PromptSkillRunner {
     }
 
     const config = await loadModelConfig(this.config, "primary");
+    throwIfAborted(options.signal);
     const systemPrompt = STORY_DESLOP_SYSTEM_PROMPT;
     const userPrompt = [
       `【处理模式】${mode === "detail_outline" ? "细纲去AI味" : "章纲去AI味"}`,
@@ -509,12 +537,17 @@ export class PromptSkillRunner {
             { role: "system", content: systemPrompt },
             { role: "user", content: userPrompt }
           ],
-          Math.max(0.2, Math.min(0.7, config.temperature))
+          Math.max(0.2, Math.min(0.7, config.temperature)),
+          { signal: options.signal }
         )
       ).trim();
+      throwIfAborted(options.signal);
       const cleaned = cleanDeslopOutput(polished);
       return guardAgainstOverdelete(result, cleaned);
-    } catch {
+    } catch (error) {
+      if (isCancellationError(error, options.signal)) {
+        throw error;
+      }
       return result;
     }
   }
@@ -648,7 +681,8 @@ export class PromptSkillRunner {
     await this.documents.saveDocument(targetPath, text, { source: "agent_generated_save", summary });
   }
 
-  async draftSkillFromUrl(payload: SkillDraftFromUrlRequest): Promise<SkillDraftResponse> {
+  async draftSkillFromUrl(payload: SkillDraftFromUrlRequest, options: AgentRunOptions = {}): Promise<SkillDraftResponse> {
+    throwIfAborted(options.signal);
     const urlStr = (payload.url || "").trim();
     let parsed: URL;
     try {
@@ -661,10 +695,13 @@ export class PromptSkillRunner {
     }
 
     const fetchedUrl = await normalizeSkillUrl(urlStr, this.skills);
+    throwIfAborted(options.signal);
     const { text: sourceText, sourceName } = await this.skills.fetchUrlText(fetchedUrl);
+    throwIfAborted(options.signal);
     const clippedText = sourceText.slice(0, MAX_SKILL_TEXT_CHARS);
 
     const config = await loadModelConfig(this.config, "primary");
+    throwIfAborted(options.signal);
     if (!config.configured) {
       if (looksLikeSkillMarkdown(clippedText)) {
         const skill = this.skills.parseExternalSkill(sourceName, clippedText);
@@ -700,8 +737,10 @@ export class PromptSkillRunner {
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt }
       ],
-      0.2
+      0.2,
+      { signal: options.signal }
     );
+    throwIfAborted(options.signal);
 
     const raw = parseJsonObject(content);
     const defaultId = path.parse(sourceName).name || "imported_skill";

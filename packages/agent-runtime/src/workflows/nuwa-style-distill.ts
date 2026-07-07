@@ -15,6 +15,7 @@ import type {
 } from "@xiaoshuo/shared";
 import { createHash, randomUUID } from "node:crypto";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
+import { throwIfAborted } from "../cancellation.js";
 
 const DISTILLATION_SOURCE_IMPORT_CHARS = 60_000;
 
@@ -23,6 +24,7 @@ export class NuwaStyleDistillWorkflow implements WorkflowHandler {
   canRunSkillRequest = true;
 
   async runAgent(request: AgentRunRequest, context: WorkflowRunContext): Promise<AgentRunResponse> {
+    throwIfAborted(context.signal);
     const result = await this.runSkill(
       {
         text: request.selection || "",
@@ -54,6 +56,7 @@ export class NuwaStyleDistillWorkflow implements WorkflowHandler {
   }
 
   async runSkill(payload: SkillRunRequest, context: WorkflowRunContext): Promise<SkillRunResponse> {
+    throwIfAborted(context.signal);
     const action = String((payload as any).action || "distill").trim();
     if (action === "status") {
       return {
@@ -103,11 +106,13 @@ export class NuwaStyleDistillWorkflow implements WorkflowHandler {
     }
 
     const source = await resolveNuwaDistillationSource(payload, context);
+    throwIfAborted(context.signal);
     if (!source.text.trim()) {
       throw new Error("蒸馏需要当前文档、附件、拆书原文或已有拆书产物");
     }
 
     const config = await loadModelConfig(context.config, "primary");
+    throwIfAborted(context.signal);
     if (!config.configured) {
       throw new Error("未配置主线路 API Key 或模型名，无法执行 Nuwa 蒸馏。");
     }
@@ -143,9 +148,11 @@ export class NuwaStyleDistillWorkflow implements WorkflowHandler {
           { role: "system", content: systemPrompt },
           { role: "user", content: userPrompt }
         ] satisfies ChatCompletionMessage[],
-        Math.max(0.2, Math.min(0.65, config.temperature))
+        Math.max(0.2, Math.min(0.65, config.temperature)),
+        { signal: context.signal }
       )
     ).trim();
+    throwIfAborted(context.signal);
     if (!raw) {
       throw new Error("模型未返回蒸馏档案");
     }

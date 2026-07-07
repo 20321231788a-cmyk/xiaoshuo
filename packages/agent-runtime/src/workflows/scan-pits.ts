@@ -1,6 +1,7 @@
 import type { AgentRunRequest, AgentRunResponse, ConversationDetail } from "@xiaoshuo/shared";
 import { randomUUID } from "node:crypto";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
+import { throwIfAborted } from "../cancellation.js";
 
 const SOURCE_IMPORT_CHARS = 60_000;
 
@@ -8,6 +9,7 @@ export class ScanPitsWorkflow implements WorkflowHandler {
   id = "scan_pits";
 
   async runAgent(request: AgentRunRequest, context: WorkflowRunContext): Promise<AgentRunResponse> {
+    throwIfAborted(context.signal);
     const source = await resolveWorkflowSourceText(request, context);
     if (!source.trim()) {
       throw new Error("缺少可扫描的正文内容");
@@ -24,7 +26,8 @@ export class ScanPitsWorkflow implements WorkflowHandler {
       source_path: "",
       write_result: false,
       attachment_ids: []
-    });
+    }, { signal: context.signal });
+    throwIfAborted(context.signal);
 
     const created = [];
     for (const item of String(raw.result || "")
@@ -32,6 +35,7 @@ export class ScanPitsWorkflow implements WorkflowHandler {
       .map((line) => line.replace(/^[-*]\s*/, "").trim())
       .filter(Boolean)
       .slice(0, 12)) {
+      throwIfAborted(context.signal);
       created.push(await context.documents.addLedgerItem(item));
     }
 

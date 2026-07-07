@@ -16,6 +16,7 @@ import { clipForConsistency } from "../prompts/consistency.js";
 import { buildStyleGenreConstraintBlock } from "../style-genre-context.js";
 import { formatWebSearchContext, shouldUseWebSearch, summarizeWebSearchSources, type WebSearchSource } from "../web-search.js";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
+import { isCancellationError, throwIfAborted } from "../cancellation.js";
 
 type BodyConsistencyCheck = {
   score: number;
@@ -32,11 +33,14 @@ export class BodyGenerateWorkflow implements WorkflowHandler {
   id = "body_generate";
 
   async runAgent(request: AgentRunRequest, context: WorkflowRunContext): Promise<AgentRunResponse> {
+    throwIfAborted(context.signal);
     const skillId = this.id;
     const chapter = resolveSkillChapter(request) || 1;
     const chapterOutline = await resolveBodyChapterOutline(request, chapter, context);
     const outputPath = `02_正文/第${String(chapter).padStart(3, "0")}章.txt`;
+    throwIfAborted(context.signal);
     const generated = await generateBodyChapter(request, chapter, chapterOutline, context);
+    throwIfAborted(context.signal);
     const webSearchSources = generated.sources;
 
     const autoRevision = (request as any).auto_revision !== false;
@@ -48,9 +52,12 @@ export class BodyGenerateWorkflow implements WorkflowHandler {
 
     if (autoRevision) {
       check = await runConsistencyCheckForText(generated.text, chapterOutline, context);
+      throwIfAborted(context.signal);
       check = mergeGraphCheck(check, await runGraphDraftConsistency(generated.text, chapter, chapterOutline, context));
+      throwIfAborted(context.signal);
       if (check.score < scoreThreshold || check.risks.length > 0) {
         const continuity = await buildProjectContinuityContext(context.projectRoot);
+        throwIfAborted(context.signal);
         const revision = await runBodyChapterRevision(
           chapter,
           generated.text,
@@ -60,6 +67,7 @@ export class BodyGenerateWorkflow implements WorkflowHandler {
           continuity.state_summary,
           context
         );
+        throwIfAborted(context.signal);
         finalRawText = revision.text;
         revised = finalRawText.trim() !== generated.text.trim();
 
@@ -70,13 +78,16 @@ export class BodyGenerateWorkflow implements WorkflowHandler {
     }
 
     const deslopped = await applyBodyDeslop(finalRawText, chapter, context);
+    throwIfAborted(context.signal);
     const humanized = await applyHumanizerIfEnabled({
       text: deslopped.text,
       config: context.config,
       modelClient: context.modelClient,
       mode: "正文生成结果",
-      skip: false
+      skip: false,
+      signal: context.signal
     });
+    throwIfAborted(context.signal);
     const text = humanized.text;
     const writeRequested = shouldWriteSkillResult(request.content || "");
     const savePlan = await context.savePlanner.planGeneratedSave({
@@ -90,7 +101,8 @@ export class BodyGenerateWorkflow implements WorkflowHandler {
       chapter,
       writeRequested,
       defaultMode: "replace"
-    });
+    }, { signal: context.signal });
+    throwIfAborted(context.signal);
 
     const entry = await context.cache.create({
       source: "body_generate",
@@ -101,6 +113,7 @@ export class BodyGenerateWorkflow implements WorkflowHandler {
       save_plan: savePlan
     });
     const meta = await context.cache.replace(entry.cache_id, text);
+    throwIfAborted(context.signal);
 
     const baseData = {
       skill_id: skillId,
@@ -148,7 +161,9 @@ export class BodyGenerateWorkflow implements WorkflowHandler {
       };
     }
 
+    throwIfAborted(context.signal);
     const savedPaths = await context.cache.commitSavePlan(entry.cache_id, savePlan, { cleanupContent: true });
+    throwIfAborted(context.signal);
     const graphUpdateError = await updateGraphMemoryForSavedPaths(savedPaths, context);
     if (savedPaths.includes(outputPath)) {
       await appendHandoff(chapter, outputPath, text, chapterOutline, check, context);
@@ -199,11 +214,13 @@ async function generateBodyChapter(
   chapterOutline: string,
   context: WorkflowRunContext
 ): Promise<{ text: string; sources: WebSearchSource[]; graph_error?: string }> {
+  throwIfAborted(context.signal);
   const config = await loadModelConfig(context.config, "primary");
   if (!config.configured) {
     throw new Error("未配置主线路 API Key 或模型名。");
   }
   const continuity = await buildProjectContinuityContext(context.projectRoot);
+  throwIfAborted(context.signal);
   const ledger = await context.documents.getLedger().catch(() => []);
   const openLedger = ledger
     .filter((item) => item.status === "open")
@@ -218,8 +235,10 @@ async function generateBodyChapter(
     false,
     context
   );
+  throwIfAborted(context.signal);
 
   const graph = await buildGraphWritingContext([chapterOutline, request.content || ""].join("\n"), context, { topK: 6, chapter });
+  throwIfAborted(context.signal);
 
   const text = String(
     await context.modelClient.requestCompletion(
@@ -242,9 +261,11 @@ async function generateBodyChapter(
           })
         }
       ] satisfies ChatCompletionMessage[],
-      config.temperature
+      config.temperature,
+      { signal: context.signal }
     )
   ).trim();
+  throwIfAborted(context.signal);
   return { text, sources: webSearch.sources, graph_error: graph.error };
 }
 
@@ -280,6 +301,7 @@ async function runConsistencyCheckForText(
   chapterOutline: string,
   context: WorkflowRunContext
 ): Promise<BodyConsistencyCheck> {
+  throwIfAborted(context.signal);
   const continuity = await buildProjectContinuityContext(context.projectRoot);
   const assistantConfig = await loadAssistantModelConfig(context).catch(() => null);
   if (!assistantConfig) {
@@ -288,6 +310,7 @@ async function runConsistencyCheckForText(
   const recent = continuity.previous_chapters.map((item) => item.content).join("\n");
 
   const graph = await buildGraphWritingContext(text, context, { topK: 5 });
+  throwIfAborted(context.signal);
 
   const prompt = [
     "请检查正文是否违背章纲、人物设定、体系设定、地图设定、道具设定、风格库、题材库和上一章承接。",
@@ -310,8 +333,10 @@ async function runConsistencyCheckForText(
       { role: "system", content: "你是严厉的长篇小说连续性审稿人。只输出 JSON。" },
       { role: "user", content: prompt }
     ] satisfies ChatCompletionMessage[],
-    0.1
+    0.1,
+    { signal: context.signal }
   );
+  throwIfAborted(context.signal);
   const parsed = safeJsonObject(raw);
   return {
     score: clampScore(Number(parsed.score || 0)),
@@ -446,6 +471,7 @@ async function runBodyChapterRevision(
   contextSummary: string,
   context: WorkflowRunContext
 ): Promise<{ text: string; log: string }> {
+  throwIfAborted(context.signal);
   const config = await loadModelConfig(context.config, "primary");
   if (!config.configured) {
     throw new Error("未配置主线路 API Key 或模型名。");
@@ -457,9 +483,11 @@ async function runBodyChapterRevision(
         { role: "system", content: buildBodyRevisionSystemPrompt() },
         { role: "user", content: buildBodyRevisionUserPrompt({ chapter, text, chapterOutline, targetWords, checkResult, contextSummary }) }
       ] satisfies ChatCompletionMessage[],
-      Math.max(0.3, (config.temperature ?? 0.7) - 0.15)
+      Math.max(0.3, (config.temperature ?? 0.7) - 0.15),
+      { signal: context.signal }
     )
   ).trim();
+  throwIfAborted(context.signal);
 
   const bodyMatch = /【修正后正文】\s*([\s\S]*?)(?:【修正原因日志】|$)/.exec(raw);
   const logMatch = /【修正原因日志】\s*([\s\S]*)$/.exec(raw);
@@ -474,6 +502,7 @@ async function runBodyChapterRevision(
 }
 
 async function applyBodyDeslop(text: string, chapter: number, context: WorkflowRunContext): Promise<{ text: string; changed: boolean }> {
+  throwIfAborted(context.signal);
   const config = await loadModelConfig(context.config, "primary");
   if (!config.configured || !text.trim()) {
     return { text, changed: false };
@@ -489,15 +518,20 @@ async function applyBodyDeslop(text: string, chapter: number, context: WorkflowR
           { role: "system", content: systemPrompt },
           { role: "user", content: buildBodyDeslopUserPrompt({ chapter, text }) }
         ] satisfies ChatCompletionMessage[],
-        Math.max(0.2, Math.min(0.7, config.temperature))
+        Math.max(0.2, Math.min(0.7, config.temperature)),
+        { signal: context.signal }
       )
     ).trim();
+    throwIfAborted(context.signal);
     const cleaned = raw.replace(/^```(?:text|markdown|md)?\s*/i, "").replace(/\s*```$/, "").trim();
     if (!cleaned) {
       return { text, changed: false };
     }
     return { text: cleaned, changed: cleaned !== text.trim() };
-  } catch {
+  } catch (error) {
+    if (isCancellationError(error, context.signal)) {
+      throw error;
+    }
     return { text, changed: false };
   }
 }

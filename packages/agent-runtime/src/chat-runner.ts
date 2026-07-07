@@ -32,6 +32,7 @@ import { assembleContext } from "./kernel/context-assembler.js";
 import type { AssembledContext, ContextBlock } from "./kernel/context-block.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import { splitVisibleStreamText } from "./stream.js";
+import { isCancellationError, throwIfAborted, type AgentRunOptions } from "./cancellation.js";
 
 const MAX_RUNTIME_CONTEXT_CHARS = 8_000;
 const MAX_USER_INPUT_CHARS = 16_000;
@@ -72,25 +73,36 @@ export class AgentChatRunner {
   async runAgent(
     payload: AgentRunRequest,
     intent: Extract<AgentIntent, "chat" | "read_context">,
-    contextObserver?: ChatContextAssemblyObserver
+    contextObserver?: ChatContextAssemblyObserver,
+    options: AgentRunOptions = {}
   ): Promise<AgentRunResponse> {
+    throwIfAborted(options.signal);
     const state = await this.prepareConversationState(payload);
     const config = await this.requireModelConfig();
     const webSearchSources: WebSearchSource[] = [];
     const messages = await this.buildMessages(state.detail, payload, config.thinking_enabled, false, webSearchSources, contextObserver);
+    throwIfAborted(options.signal);
 
     try {
-      const reply = String(await this.modelClient.requestCompletion(config, messages, config.temperature)).trim();
-      const humanized = await this.humanizeConversationText(state.detail, reply);
+      const reply = String(await this.modelClient.requestCompletion(config, messages, config.temperature, { signal: options.signal })).trim();
+      throwIfAborted(options.signal);
+      const humanized = await this.humanizeConversationText(state.detail, reply, options);
+      throwIfAborted(options.signal);
       const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized);
       return this.buildResponse(intent, humanized.text, conversation, webSearchSources);
     } catch (error) {
+      if (isCancellationError(error, options.signal)) {
+        throw error;
+      }
       if (!looksGatewayTimeout(error)) {
         throw error;
       }
       const compactMessages = await this.buildMessages(state.detail, payload, config.thinking_enabled, true, undefined, contextObserver);
-      const reply = String(await this.modelClient.requestCompletion(config, compactMessages, config.temperature)).trim();
-      const humanized = await this.humanizeConversationText(state.detail, reply);
+      throwIfAborted(options.signal);
+      const reply = String(await this.modelClient.requestCompletion(config, compactMessages, config.temperature, { signal: options.signal })).trim();
+      throwIfAborted(options.signal);
+      const humanized = await this.humanizeConversationText(state.detail, reply, options);
+      throwIfAborted(options.signal);
       const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized);
       return this.buildResponse(intent, humanized.text, conversation, webSearchSources);
     }
@@ -99,8 +111,10 @@ export class AgentChatRunner {
   async *streamAgentRun(
     payload: AgentRunRequest,
     intent: Extract<AgentIntent, "chat" | "read_context">,
-    contextObserver?: ChatContextAssemblyObserver
+    contextObserver?: ChatContextAssemblyObserver,
+    options: AgentRunOptions = {}
   ): AsyncGenerator<AgentStreamEvent> {
+    throwIfAborted(options.signal);
     const state = await this.prepareConversationState(payload);
     yield {
       type: "start",
@@ -115,10 +129,23 @@ export class AgentChatRunner {
     const compactMessages = await this.buildMessages(state.detail, payload, config.thinking_enabled, true, undefined, contextObserver);
     const streamCompletion = this.modelClient.streamCompletion?.bind(this.modelClient);
     const replyParts: string[] = [];
+    let stoppedPersisted = false;
+    const persistStoppedReply = async () => {
+      if (stoppedPersisted) {
+        return;
+      }
+      const partial = replyParts.join("").trim();
+      if (!partial) {
+        return;
+      }
+      stoppedPersisted = true;
+      await this.persistStoppedAssistantReply(state.detail.id, partial, webSearchSources).catch(() => {});
+    };
 
     if (streamCompletion) {
       try {
-        for await (const chunk of streamCompletion(config, baseMessages, config.temperature)) {
+        for await (const chunk of streamCompletion(config, baseMessages, config.temperature, { signal: options.signal })) {
+          throwIfAborted(options.signal);
           if (!chunk) {
             continue;
           }
@@ -131,6 +158,10 @@ export class AgentChatRunner {
           }
         }
       } catch (error) {
+        if (isCancellationError(error, options.signal)) {
+          await persistStoppedReply();
+          throw error;
+        }
         const message = error instanceof Error ? error.message : String(error);
         if (replyParts.length) {
           yield {
@@ -141,9 +172,9 @@ export class AgentChatRunner {
         }
         try {
           const fallbackReply = looksGatewayTimeout(error)
-            ? await this.completeOnce(config, compactMessages)
+            ? await this.completeOnce(config, compactMessages, options)
             : canRetryWithoutStream(message)
-              ? await this.completeOnce(config, baseMessages)
+              ? await this.completeOnce(config, baseMessages, options)
               : "";
           if (!fallbackReply && !looksGatewayTimeout(error) && !canRetryWithoutStream(message)) {
             throw error;
@@ -158,6 +189,10 @@ export class AgentChatRunner {
             }
           }
         } catch (fallbackError) {
+          if (isCancellationError(fallbackError, options.signal)) {
+            await persistStoppedReply();
+            throw fallbackError;
+          }
           yield {
             type: "error",
             message: fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
@@ -167,7 +202,7 @@ export class AgentChatRunner {
       }
     } else {
       try {
-        const reply = await this.completeOnce(config, baseMessages);
+        const reply = await this.completeOnce(config, baseMessages, options);
         if (reply) {
           replyParts.push(reply);
           for (const visibleChunk of splitVisibleStreamText(reply)) {
@@ -178,11 +213,15 @@ export class AgentChatRunner {
           }
         }
       } catch (error) {
+        if (isCancellationError(error, options.signal)) {
+          await persistStoppedReply();
+          throw error;
+        }
         try {
           if (!looksGatewayTimeout(error)) {
             throw error;
           }
-          const reply = await this.completeOnce(config, compactMessages);
+          const reply = await this.completeOnce(config, compactMessages, options);
           if (reply) {
             replyParts.push(reply);
             for (const visibleChunk of splitVisibleStreamText(reply)) {
@@ -193,6 +232,10 @@ export class AgentChatRunner {
             }
           }
         } catch (fallbackError) {
+          if (isCancellationError(fallbackError, options.signal)) {
+            await persistStoppedReply();
+            throw fallbackError;
+          }
           yield {
             type: "error",
             message: fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
@@ -204,7 +247,7 @@ export class AgentChatRunner {
 
     if (!replyParts.length) {
       try {
-        const reply = await this.completeOnce(config, baseMessages);
+        const reply = await this.completeOnce(config, baseMessages, options);
         if (reply) {
           replyParts.push(reply);
           for (const visibleChunk of splitVisibleStreamText(reply)) {
@@ -215,6 +258,10 @@ export class AgentChatRunner {
           }
         }
       } catch (error) {
+        if (isCancellationError(error, options.signal)) {
+          await persistStoppedReply();
+          throw error;
+        }
         yield {
           type: "error",
           message: error instanceof Error ? error.message : String(error)
@@ -224,23 +271,34 @@ export class AgentChatRunner {
     }
 
     const reply = replyParts.join("").trim();
-    if (await this.shouldRunConversationHumanizer(state.detail, reply)) {
+    try {
+      throwIfAborted(options.signal);
+      if (await this.shouldRunConversationHumanizer(state.detail, reply)) {
+        yield {
+          type: "delta",
+          text: "",
+          stage: "humanizer_start"
+        };
+      }
+      const humanized = await this.humanizeConversationText(state.detail, reply, options);
+      throwIfAborted(options.signal);
+      const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized);
       yield {
-        type: "delta",
-        text: "",
-        stage: "humanizer_start"
+        type: "final",
+        payload: this.buildResponse(intent, humanized.text, conversation, webSearchSources)
       };
+    } catch (error) {
+      if (isCancellationError(error, options.signal)) {
+        await persistStoppedReply();
+      }
+      throw error;
     }
-    const humanized = await this.humanizeConversationText(state.detail, reply);
-    const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized);
-    yield {
-      type: "final",
-      payload: this.buildResponse(intent, humanized.text, conversation, webSearchSources)
-    };
   }
 
-  private async completeOnce(config: ModelConfig, messages: ChatCompletionMessage[]): Promise<string> {
-    const reply = String(await this.modelClient.requestCompletion(config, messages, config.temperature)).trim();
+  private async completeOnce(config: ModelConfig, messages: ChatCompletionMessage[], options: AgentRunOptions = {}): Promise<string> {
+    throwIfAborted(options.signal);
+    const reply = String(await this.modelClient.requestCompletion(config, messages, config.temperature, { signal: options.signal })).trim();
+    throwIfAborted(options.signal);
     return reply;
   }
 
@@ -285,13 +343,14 @@ export class AgentChatRunner {
     return { detail };
   }
 
-  private async humanizeConversationText(detail: ConversationDetail, reply: string) {
+  private async humanizeConversationText(detail: ConversationDetail, reply: string, options: AgentRunOptions = {}) {
     return applyHumanizerIfEnabled({
       text: reply,
       config: this.config,
       modelClient: this.modelClient,
       mode: detail.current_skill ? `会话技能 ${detail.current_skill} 回复` : "会话回复",
-      skip: detail.current_skill === "humanizer_zh"
+      skip: detail.current_skill === "humanizer_zh",
+      signal: options.signal
     });
   }
 
@@ -328,6 +387,22 @@ export class AgentChatRunner {
     }
 
     return detail;
+  }
+
+  private async persistStoppedAssistantReply(
+    conversationId: string,
+    partialReply: string,
+    webSearchSources: WebSearchSource[] = []
+  ): Promise<ConversationDetail> {
+    return this.conversations.appendMessage(conversationId, {
+      role: "assistant",
+      content: String(partialReply || "").trim() || "已停止。",
+      metadata: {
+        stopped: true,
+        cancelled: true,
+        ...(webSearchSources.length ? { web_search_sources: webSearchSources } : {})
+      }
+    });
   }
 
   private async requireModelConfig(): Promise<ModelConfig> {
@@ -483,8 +558,10 @@ export class AgentChatRunner {
 
   async sendMessage(
     conversationId: string,
-    payload: ConversationMessageRequest
+    payload: ConversationMessageRequest,
+    options: AgentRunOptions = {}
   ): Promise<{ conversation: ConversationDetail; reply: string; saved_path: string; web_search_sources?: WebSearchSource[] }> {
+    throwIfAborted(options.signal);
     const userText = (payload.content || "").trim();
     if (!userText) {
       throw new Error("消息内容不能为空");
@@ -514,14 +591,17 @@ export class AgentChatRunner {
       detail.title = userText.slice(0, 24);
     }
 
-    const generated = await this.generateConversationReply(detail, payload);
+    const generated = await this.generateConversationReply(detail, payload, options);
+    throwIfAborted(options.signal);
     const humanized = await applyHumanizerIfEnabled({
       text: generated.reply,
       config: this.config,
       modelClient: this.modelClient,
       mode: detail.current_skill ? `会话技能 ${detail.current_skill} 回复` : "会话回复",
-      skip: detail.current_skill === "humanizer_zh"
+      skip: detail.current_skill === "humanizer_zh",
+      signal: options.signal
     });
+    throwIfAborted(options.signal);
     const reply = humanized.text;
     const assistantMessage = {
       id: randomUUID().replaceAll("-", ""),
@@ -546,6 +626,7 @@ export class AgentChatRunner {
 
     let savedPath = "";
     if (payload.write_target && payload.write_target.trim()) {
+      throwIfAborted(options.signal);
       const target = payload.write_target.trim();
       savedPath = await this.writeBack(target, reply, writeMode, Boolean(payload.confirm_write));
       detail.messages.push({
@@ -568,8 +649,10 @@ export class AgentChatRunner {
 
   async *streamMessage(
     conversationId: string,
-    payload: ConversationMessageRequest
+    payload: ConversationMessageRequest,
+    options: AgentRunOptions = {}
   ): AsyncGenerator<AgentStreamEvent> {
+    throwIfAborted(options.signal);
     const userText = (payload.content || "").trim();
     if (!userText) {
       throw new Error("消息内容不能为空");
@@ -613,10 +696,35 @@ export class AgentChatRunner {
     const compactMessages = await this.buildConversationMessages(detail, payload, skill, config.thinking_enabled, true);
     const streamCompletion = this.modelClient.streamCompletion?.bind(this.modelClient);
     const replyParts: string[] = [];
+    let stoppedPersisted = false;
+    const persistStoppedReply = async () => {
+      if (stoppedPersisted) {
+        return;
+      }
+      const partial = replyParts.join("").trim();
+      if (!partial) {
+        return;
+      }
+      stoppedPersisted = true;
+      await this.conversations
+        .appendMessage(conversationId, {
+          role: "assistant",
+          content: partial,
+          metadata: {
+            skill_id: detail.current_skill,
+            agent_name: detail.current_agent,
+            stopped: true,
+            cancelled: true,
+            ...(webSearchSources.length ? { web_search_sources: webSearchSources } : {})
+          }
+        })
+        .catch(() => {});
+    };
 
     if (streamCompletion) {
       try {
-        for await (const chunk of streamCompletion(config, baseMessages, config.temperature)) {
+        for await (const chunk of streamCompletion(config, baseMessages, config.temperature, { signal: options.signal })) {
+          throwIfAborted(options.signal);
           if (!chunk) {
             continue;
           }
@@ -627,6 +735,10 @@ export class AgentChatRunner {
           };
         }
       } catch (error) {
+        if (isCancellationError(error, options.signal)) {
+          await persistStoppedReply();
+          throw error;
+        }
         const message = error instanceof Error ? error.message : String(error);
         if (replyParts.length) {
           yield {
@@ -637,9 +749,9 @@ export class AgentChatRunner {
         }
         try {
           const fallbackReply = looksGatewayTimeout(error)
-            ? await this.completeOnce(config, compactMessages)
+            ? await this.completeOnce(config, compactMessages, options)
             : canRetryWithoutStream(message)
-              ? await this.completeOnce(config, baseMessages)
+              ? await this.completeOnce(config, baseMessages, options)
               : "";
           if (!fallbackReply && !looksGatewayTimeout(error) && !canRetryWithoutStream(message)) {
             throw error;
@@ -652,6 +764,10 @@ export class AgentChatRunner {
             };
           }
         } catch (fallbackError) {
+          if (isCancellationError(fallbackError, options.signal)) {
+            await persistStoppedReply();
+            throw fallbackError;
+          }
           yield {
             type: "error",
             message: fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
@@ -661,7 +777,7 @@ export class AgentChatRunner {
       }
     } else {
       try {
-        const reply = await this.completeOnce(config, baseMessages);
+        const reply = await this.completeOnce(config, baseMessages, options);
         if (reply) {
           replyParts.push(reply);
           yield {
@@ -670,11 +786,15 @@ export class AgentChatRunner {
           };
         }
       } catch (error) {
+        if (isCancellationError(error, options.signal)) {
+          await persistStoppedReply();
+          throw error;
+        }
         try {
           if (!looksGatewayTimeout(error)) {
             throw error;
           }
-          const reply = await this.completeOnce(config, compactMessages);
+          const reply = await this.completeOnce(config, compactMessages, options);
           if (reply) {
             replyParts.push(reply);
             yield {
@@ -683,6 +803,10 @@ export class AgentChatRunner {
             };
           }
         } catch (fallbackError) {
+          if (isCancellationError(fallbackError, options.signal)) {
+            await persistStoppedReply();
+            throw fallbackError;
+          }
           yield {
             type: "error",
             message: fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
@@ -694,7 +818,7 @@ export class AgentChatRunner {
 
     if (!replyParts.length) {
       try {
-        const reply = await this.completeOnce(config, baseMessages);
+        const reply = await this.completeOnce(config, baseMessages, options);
         if (reply) {
           replyParts.push(reply);
           yield {
@@ -703,6 +827,10 @@ export class AgentChatRunner {
           };
         }
       } catch (error) {
+        if (isCancellationError(error, options.signal)) {
+          await persistStoppedReply();
+          throw error;
+        }
         yield {
           type: "error",
           message: error instanceof Error ? error.message : String(error)
@@ -711,15 +839,27 @@ export class AgentChatRunner {
       }
     }
 
-    const rawReply = replyParts.join("").trim();
-    const humanized = await applyHumanizerIfEnabled({
-      text: rawReply,
-      config: this.config,
-      modelClient: this.modelClient,
-      mode: detail.current_skill ? `会话技能 ${detail.current_skill} 回复` : "会话回复",
-      skip: detail.current_skill === "humanizer_zh"
-    });
-    const reply = humanized.text;
+    let reply = "";
+    let humanized: { text: string; applied: boolean; error?: string };
+    try {
+      throwIfAborted(options.signal);
+      const rawReply = replyParts.join("").trim();
+      humanized = await applyHumanizerIfEnabled({
+        text: rawReply,
+        config: this.config,
+        modelClient: this.modelClient,
+        mode: detail.current_skill ? `会话技能 ${detail.current_skill} 回复` : "会话回复",
+        skip: detail.current_skill === "humanizer_zh",
+        signal: options.signal
+      });
+      throwIfAborted(options.signal);
+      reply = humanized.text;
+    } catch (error) {
+      if (isCancellationError(error, options.signal)) {
+        await persistStoppedReply();
+      }
+      throw error;
+    }
     const assistantMessage = {
       id: randomUUID().replaceAll("-", ""),
       role: "assistant" as const,
@@ -743,6 +883,7 @@ export class AgentChatRunner {
 
     let savedPath = "";
     if (payload.write_target && payload.write_target.trim()) {
+      throwIfAborted(options.signal);
       const target = payload.write_target.trim();
       savedPath = await this.writeBack(target, reply, writeMode, Boolean(payload.confirm_write));
       detail.messages.push({
@@ -774,19 +915,31 @@ export class AgentChatRunner {
     };
   }
 
-  private async generateConversationReply(detail: ConversationDetail, payload: ConversationMessageRequest): Promise<{ reply: string; webSearchSources: WebSearchSource[] }> {
+  private async generateConversationReply(
+    detail: ConversationDetail,
+    payload: ConversationMessageRequest,
+    options: AgentRunOptions = {}
+  ): Promise<{ reply: string; webSearchSources: WebSearchSource[] }> {
+    throwIfAborted(options.signal);
     const skill = detail.current_skill ? await this.skills.getSkill(detail.current_skill).catch(() => null) : null;
     const config = await this.requireModelConfig();
     const webSearchSources: WebSearchSource[] = [];
     const messages = await this.buildConversationMessages(detail, payload, skill, config.thinking_enabled, false, webSearchSources);
     try {
-      return { reply: (await this.modelClient.requestCompletion(config, messages, config.temperature)).trim(), webSearchSources };
+      const reply = (await this.modelClient.requestCompletion(config, messages, config.temperature, { signal: options.signal })).trim();
+      throwIfAborted(options.signal);
+      return { reply, webSearchSources };
     } catch (error) {
+      if (isCancellationError(error, options.signal)) {
+        throw error;
+      }
       if (!looksGatewayTimeout(error)) {
         throw error;
       }
       const retryMessages = await this.buildConversationMessages(detail, payload, skill, config.thinking_enabled, true);
-      return { reply: (await this.modelClient.requestCompletion(config, retryMessages, config.temperature)).trim(), webSearchSources };
+      const reply = (await this.modelClient.requestCompletion(config, retryMessages, config.temperature, { signal: options.signal })).trim();
+      throwIfAborted(options.signal);
+      return { reply, webSearchSources };
     }
   }
 

@@ -4,6 +4,7 @@ import { OpenAICompatibleClient, type ChatCompletionMessage } from "@xiaoshuo/mo
 import { ProjectManifestService } from "@xiaoshuo/project-manifest";
 import { generatedSavePlanSchema, type DocumentInfo, type GeneratedSavePlan } from "@xiaoshuo/shared";
 import fs from "node:fs/promises";
+import { isCancellationError, throwIfAborted, type AgentRunOptions } from "./cancellation.js";
 
 const FIXED_TEXT_TARGETS: Record<string, string> = {
   大纲: "01_大纲/大纲.txt",
@@ -79,7 +80,8 @@ export class GeneratedSavePlanner {
     this.modelClient = options.modelClient ?? new OpenAICompatibleClient();
   }
 
-  async planGeneratedSave(input: GeneratedSavePlanInput): Promise<GeneratedSavePlan> {
+  async planGeneratedSave(input: GeneratedSavePlanInput, options: AgentRunOptions = {}): Promise<GeneratedSavePlan> {
+    throwIfAborted(options.signal);
     const fallback = await this.buildFallbackPlan(input);
     if (!String(input.content || "").trim()) {
       return fallback;
@@ -95,15 +97,19 @@ export class GeneratedSavePlanner {
     }
 
     try {
+      throwIfAborted(options.signal);
       const docs = await this.manifest.listDocuments({ limit: 260, force: false }).catch(() => []);
-      const raw = await this.modelClient.requestCompletion(config, this.buildMessages(input, fallback, docs), 0.1);
+      const raw = await this.modelClient.requestCompletion(config, this.buildMessages(input, fallback, docs), 0.1, { signal: options.signal });
       const parsed = this.parseJson(raw);
       const plan = await this.normalizePlan(parsed, input, fallback);
       if (!plan.target_paths.length && fallback.target_paths.length) {
         plan.target_paths = fallback.target_paths;
       }
       return this.applyConfirmationPolicy(plan, input);
-    } catch {
+    } catch (error) {
+      if (isCancellationError(error, options.signal)) {
+        throw error;
+      }
       return fallback;
     }
   }

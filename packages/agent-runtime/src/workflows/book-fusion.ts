@@ -14,6 +14,7 @@ import {
   type DisassembleBookManifest
 } from "./disassemble-library.js";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
+import { throwIfAborted } from "../cancellation.js";
 
 const FUSION_LIBRARY_DIR = "00_设定集/融梗方案";
 
@@ -28,6 +29,7 @@ export class BookFusionWorkflow implements WorkflowHandler {
   id = "book_fusion";
 
   async runAgent(request: AgentRunRequest, context: WorkflowRunContext): Promise<AgentRunResponse> {
+    throwIfAborted(context.signal);
     const result = await runBookFusion(request, context);
     const savedPaths = resolveSavedPaths(result);
     const reply = savedPaths.length ? `融梗方案已生成：\n${savedPaths.join("\n")}` : result.result || "融梗方案已生成。";
@@ -44,6 +46,7 @@ export class BookFusionWorkflow implements WorkflowHandler {
 }
 
 async function runBookFusion(request: AgentRunRequest, context: WorkflowRunContext): Promise<SkillRunResponse> {
+  throwIfAborted(context.signal);
   const sourceBookIds = uniquePaths(stringListFromUnknown((request as any).source_book_ids));
   if (sourceBookIds.length < 3) {
     throw new Error("融梗至少需要选择三本已拆书籍");
@@ -52,12 +55,14 @@ async function runBookFusion(request: AgentRunRequest, context: WorkflowRunConte
   const genreHint = String((request as any).genre_hint || "").trim();
   const outputMode = String((request as any).output_mode || "candidate").trim();
   const books = await loadBooksForFusion(sourceBookIds, context);
+  throwIfAborted(context.signal);
   if (books.length < 3) {
     throw new Error("融梗只能选择已经完成拆书的文件夹，且至少需要三本");
   }
 
   const continuity = await buildProjectContinuityContext(context.projectRoot);
   const config = await loadModelConfig(context.config, "primary");
+  throwIfAborted(context.signal);
   if (!config.configured) {
     throw new Error("未配置主线路 API Key 或模型名，无法执行融梗。");
   }
@@ -109,15 +114,18 @@ async function runBookFusion(request: AgentRunRequest, context: WorkflowRunConte
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt }
       ] satisfies ChatCompletionMessage[],
-      Math.max(0.2, Math.min(0.55, config.temperature))
+      Math.max(0.2, Math.min(0.55, config.temperature)),
+      { signal: context.signal }
     )
   ).trim();
+  throwIfAborted(context.signal);
 
   if (!raw) {
     throw new Error("模型未返回融梗候选方案");
   }
 
   await fs.mkdir(path.join(context.projectRoot, FUSION_LIBRARY_DIR, fusionId), { recursive: true });
+  throwIfAborted(context.signal);
   const fusionManifest: Record<string, unknown> = {
     id: fusionId,
     dir: fusionDir,

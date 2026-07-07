@@ -10,6 +10,10 @@ export type OpenAICompatibleClientOptions = {
   timeoutMs?: number;
 };
 
+export type ModelRequestOptions = {
+  signal?: AbortSignal;
+};
+
 export class OpenAICompatibleClient {
   private readonly fetchFn: typeof fetch;
   private readonly timeoutMs: number;
@@ -19,11 +23,11 @@ export class OpenAICompatibleClient {
     this.timeoutMs = options.timeoutMs ?? 240_000;
   }
 
-  async requestCompletion(config: ModelConfig, messages: ChatCompletionMessage[], temperature?: number): Promise<string> {
+  async requestCompletion(config: ModelConfig, messages: ChatCompletionMessage[], temperature?: number, options: ModelRequestOptions = {}): Promise<string> {
     let streamError = "";
     try {
       const chunks: string[] = [];
-      for await (const chunk of this.streamCompletion(config, messages, temperature)) {
+      for await (const chunk of this.streamCompletion(config, messages, temperature, options)) {
         chunks.push(chunk);
       }
       const streamed = chunks.join("").trim();
@@ -31,18 +35,25 @@ export class OpenAICompatibleClient {
         return streamed;
       }
     } catch (error) {
+      if (isAbortLike(error, options.signal)) {
+        throw createAbortError();
+      }
       streamError = error instanceof Error ? error.message : String(error);
       if (!canRetryWithoutStream(streamError)) {
         throw error;
       }
     }
 
-    const response = await this.fetchChatCompletions(config, {
-      model: config.model,
-      messages,
-      temperature: temperature ?? config.temperature,
-      top_p: config.top_p
-    });
+    const response = await this.fetchChatCompletions(
+      config,
+      {
+        model: config.model,
+        messages,
+        temperature: temperature ?? config.temperature,
+        top_p: config.top_p
+      },
+      options
+    );
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
@@ -57,14 +68,18 @@ export class OpenAICompatibleClient {
     throw new Error(streamError ? `模型返回空内容（流式错误：${streamError}）` : "模型返回空内容");
   }
 
-  async *streamCompletion(config: ModelConfig, messages: ChatCompletionMessage[], temperature?: number): AsyncGenerator<string> {
-    const response = await this.fetchChatCompletions(config, {
-      model: config.model,
-      messages,
-      temperature: temperature ?? config.temperature,
-      top_p: config.top_p,
-      stream: true
-    });
+  async *streamCompletion(config: ModelConfig, messages: ChatCompletionMessage[], temperature?: number, options: ModelRequestOptions = {}): AsyncGenerator<string> {
+    const response = await this.fetchChatCompletions(
+      config,
+      {
+        model: config.model,
+        messages,
+        temperature: temperature ?? config.temperature,
+        top_p: config.top_p,
+        stream: true
+      },
+      options
+    );
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
@@ -75,24 +90,40 @@ export class OpenAICompatibleClient {
     }
 
     const reader = response.body.getReader();
+    const cancelReader = () => {
+      void reader.cancel().catch(() => {});
+    };
+    options.signal?.addEventListener("abort", cancelReader, { once: true });
     const decoder = new TextDecoder();
     let buffer = "";
-    while (true) {
-      const { done, value } = await reader.read();
-      buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() || "";
-      for (const line of lines) {
-        for (const chunk of extractStreamLineChunks(line)) {
-          yield chunk;
+    try {
+      while (true) {
+        throwIfSignalAborted(options.signal);
+        const { done, value } = await reader.read();
+        throwIfSignalAborted(options.signal);
+        buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+        const lines = buffer.split(/\r?\n/);
+        buffer = lines.pop() || "";
+        for (const line of lines) {
+          for (const chunk of extractStreamLineChunks(line)) {
+            yield chunk;
+          }
+        }
+        if (done) {
+          break;
         }
       }
-      if (done) {
-        break;
+      for (const chunk of extractStreamLineChunks(buffer)) {
+        throwIfSignalAborted(options.signal);
+        yield chunk;
       }
-    }
-    for (const chunk of extractStreamLineChunks(buffer)) {
-      yield chunk;
+    } catch (error) {
+      if (isAbortLike(error, options.signal)) {
+        throw createAbortError();
+      }
+      throw error;
+    } finally {
+      options.signal?.removeEventListener("abort", cancelReader);
     }
   }
 
@@ -104,14 +135,22 @@ export class OpenAICompatibleClient {
       temperature: number;
       top_p: number;
       stream?: boolean;
-    }
+    },
+    options: ModelRequestOptions = {}
   ): Promise<Response> {
     if (!config.configured) {
       throw new Error("未配置可用的大模型 API");
     }
+    throwIfSignalAborted(options.signal);
     const baseUrl = normalizeBaseUrl(config.base_url);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, this.timeoutMs);
+    const abortFromCaller = () => controller.abort();
+    options.signal?.addEventListener("abort", abortFromCaller, { once: true });
     try {
       return await this.fetchFn(new URL("chat/completions", baseUrl), {
         method: "POST",
@@ -125,14 +164,41 @@ export class OpenAICompatibleClient {
         signal: controller.signal
       });
     } catch (error) {
-      if (controller.signal.aborted) {
+      if (timedOut) {
         throw new Error("接口请求超时，请检查网络或降低单次生成长度。");
+      }
+      if (isAbortLike(error, options.signal) || options.signal?.aborted) {
+        throw createAbortError();
       }
       throw new Error(formatNetworkError(error));
     } finally {
       clearTimeout(timer);
+      options.signal?.removeEventListener("abort", abortFromCaller);
     }
   }
+}
+
+function createAbortError(): Error {
+  const error = new Error("操作已取消");
+  error.name = "AbortError";
+  return error;
+}
+
+function throwIfSignalAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw createAbortError();
+  }
+}
+
+function isAbortLike(error: unknown, signal?: AbortSignal): boolean {
+  if (signal?.aborted) {
+    return true;
+  }
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const value = error as { name?: unknown; code?: unknown; message?: unknown };
+  return String(value.name || "") === "AbortError" || String(value.code || "") === "ABORT_ERR";
 }
 
 function normalizeBaseUrl(baseUrl: string): string {

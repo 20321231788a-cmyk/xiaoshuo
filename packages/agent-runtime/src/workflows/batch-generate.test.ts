@@ -102,4 +102,53 @@ describe("BatchGenerateWorkflow", () => {
     expect(result.skill_result?.data?.chapters).toEqual([1, 2]);
     expect(result.web_search_sources).toEqual([{ title: "素材", url: "https://example.test/source" }]);
   });
+
+  it("does not start chapter 2 after chapter 1 aborts", async () => {
+    const controller = new AbortController();
+    const calls: AgentRunRequest[] = [];
+    const bodyHandler: WorkflowHandler = {
+      id: "body_generate",
+      async runAgent(request): Promise<AgentRunResponse> {
+        calls.push(request);
+        controller.abort();
+        return {
+          intent: "skill",
+          reply: "已写入 02_正文/第001章.txt",
+          results: [],
+          skill_result: {
+            status: "done",
+            result: "第1章正文",
+            saved_path: "02_正文/第001章.txt",
+            data: {
+              chapter: 1,
+              saved_paths: ["02_正文/第001章.txt"]
+            }
+          },
+          saved_paths: ["02_正文/第001章.txt"],
+          requires_confirmation: false
+        };
+      }
+    };
+    const workflow = new BatchGenerateWorkflow(bodyHandler);
+    const context = createWorkflowContext();
+    context.signal = controller.signal;
+
+    await expect(
+      workflow.runAgent(
+        {
+          conversation_id: "",
+          content: "生成第1章到第2章正文并写入文件",
+          current_path: "",
+          selection: "",
+          project_context_hint: "",
+          skill_id: "batch_generate",
+          attachment_ids: []
+        },
+        context
+      )
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.content).toMatch(/^生成第1章正文并写入文件。/);
+  });
 });

@@ -12,11 +12,13 @@ import {
   writeDisassembleBookManifest
 } from "./disassemble-library.js";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
+import { throwIfAborted } from "../cancellation.js";
 
 export class DisassembleBookWorkflow implements WorkflowHandler {
   id = "disassemble_book";
 
   async runAgent(request: AgentRunRequest, context: WorkflowRunContext): Promise<AgentRunResponse> {
+    throwIfAborted(context.signal);
     const action = String((request as any).action || "").trim();
     if (action === "list_library") {
       return listDisassembleLibrary(context);
@@ -50,6 +52,7 @@ async function listDisassembleLibrary(context: WorkflowRunContext): Promise<Agen
 }
 
 async function archiveDisassembleSource(request: AgentRunRequest, context: WorkflowRunContext): Promise<AgentRunResponse> {
+  throwIfAborted(context.signal);
   const source = await resolveWorkflowSourceText(request, context);
   if (!source.trim()) {
     throw new Error("缺少可归档的拆书原文");
@@ -63,6 +66,7 @@ async function archiveDisassembleSource(request: AgentRunRequest, context: Workf
     },
     context
   );
+  throwIfAborted(context.signal);
   const books = await listDisassembleBooks(context, { includeLegacy: true });
   const reply = `已归档拆书原文：${book.title}`;
   return {
@@ -87,6 +91,7 @@ async function archiveDisassembleSource(request: AgentRunRequest, context: Workf
 }
 
 async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRunContext): Promise<AgentRunResponse> {
+  throwIfAborted(context.signal);
   const existingBook = await resolveDisassembleBookForRequest(request, context);
   const directSource = await resolveWorkflowSourceText(request, context);
   const source = directSource.trim() || (existingBook ? await readDisassembleBookText(existingBook, "source", context, 80_000) : "");
@@ -102,6 +107,7 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
     },
     context
   );
+  throwIfAborted(context.signal);
 
   const lore = await context.skillRunner.runSkill("lore_extract", {
     text: source,
@@ -114,7 +120,8 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
     source_path: "",
     write_result: false,
     attachment_ids: []
-  });
+  }, { signal: context.signal });
+  throwIfAborted(context.signal);
   const reverseOutline = await context.skillRunner.runSkill("reverse_outline_extract", {
     text: source,
     chapter: 0,
@@ -126,7 +133,8 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
     source_path: "",
     write_result: false,
     attachment_ids: []
-  });
+  }, { signal: context.signal });
+  throwIfAborted(context.signal);
 
   const lorePath = `${book.dir}/拆书设定提取.txt`;
   const reversePath = `${book.dir}/反向细纲.txt`;

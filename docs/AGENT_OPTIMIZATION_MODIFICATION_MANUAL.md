@@ -1841,3 +1841,44 @@ npm run build -w @xiaoshuo/workbench
 - 外部导入仍保守强制为 prompt skill，尚不允许导入真正的 workflow / job / external handler。
 - frontmatter 解析仍是浅解析，复杂嵌套建议继续使用 JSON 单行字段。
 - 后续 P7 可继续把内置技能拆成独立 manifest 文件，并逐步让 runtime 消费 `model_policy` 与 `save_policy`。
+
+### 16.18 2026-07-07 P8 取消/中断治理已完成
+
+状态：已完成 request abort -> runtime signal -> model/workflow/card draw 的主链路贯穿，并补齐停止响应的 trace 与会话语义。
+
+本阶段完成内容：
+
+- 新增 `packages/agent-runtime/src/cancellation.ts`，统一 `AgentRunOptions`、取消错误识别与 `throwIfAborted()`。
+- `packages/model-client/src/openai-compatible.ts` 为 `requestCompletion()` / `streamCompletion()` 增加外部 `AbortSignal`，组合内部超时与调用方取消；流式读取期间 abort 会 cancel reader，且不会 fallback 到非流式请求。
+- `AgentRuntimeService`、`AgentChatRunner`、`PromptSkillRunner`、planner、save planner、smart skill orchestrator、humanizer 和 `streamModelText()` 均支持传入 `options.signal`。
+- 流式聊天已输出 partial delta 后被取消时，不再写 normal assistant final message；会话会保存 partial assistant，metadata 标记 `stopped: true`、`cancelled: true`。
+- agent trace schema 新增 `cancelled` 字段；取消时 trace 以 `workflow_completed` + `cancelled=true` 收尾。
+- `WorkflowRunContext` 增加 `signal`，`body_generate`、`batch_generate`、`consistency_check`、`book_fusion`、`nuwa_style_distill`、拆书、扫伏笔等 workflow 在长 await / 写盘前检查取消，并把 signal 传入内部模型或 prompt skill 调用。
+- `batch_generate` 每章前后检查 signal，取消后不再进入下一章。
+- 抽卡并发生成支持取消：候选开始、模型返回、候选写盘、manifest 写盘前均检查 signal；预取消不会启动模型或写候选目录。
+- 桌面 runtime 新增 `createRequestAbortSignal()`，将 HTTP request abort、request close 和 response 提前 close 转成 `AbortSignal`；agent / conversation / card draw 路由已传入 runtime，断连后不再继续写响应。
+- 新增/扩展 cancellation 测试，覆盖 model-client abort、流式 stopped 会话、batch 章间取消、抽卡预取消和桌面 request abort helper。
+
+已验证：
+
+```powershell
+npx vitest run packages/model-client/src/openai-compatible.test.ts packages/agent-runtime/src/workflows/batch-generate.test.ts packages/agent-runtime/src/runtime.test.ts apps/desktop-shell/src/main/runtime/runtime-utils.test.ts apps/desktop-shell/src/main/runtime/conversation-routes.test.ts apps/desktop-shell/src/main/runtime/license-guarded-routes.test.ts
+npm run typecheck
+npm test
+npm run build:desktop
+npm run smoke:desktop
+```
+
+验收结果：
+
+- 用户点击停止后，后端 cancellation 不再触发普通 final 事件，也不会把半截回复当完整 assistant final 写入。
+- 已有 partial delta 的流式会话会保存为 stopped/cancelled，而不是 failed。
+- 批量生成取消后不会继续生成下一章。
+- 抽卡预取消不会启动候选模型调用或写 manifest。
+- trace 可记录 `cancelled=true`，完整测试集当前为 60 个文件、402 个用例通过。
+
+遗留说明：
+
+- P8 当前聚焦 HTTP request 级取消；后台 `JobManager` 已有 signal，但部分 job route 若未来新增长 agent job，仍需显式把 job worker 的 signal 传入 runtime。
+- GraphMemory / web search 第三方 I/O 当前只能在调用前后检查取消，具体底层中断能力取决于各服务自身 API。
+- 后续可在 Workbench Agent 运行检查器里增加 cancelled/stopped 筛选。

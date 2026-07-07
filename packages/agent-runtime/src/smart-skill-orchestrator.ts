@@ -3,6 +3,7 @@ import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
 import type { AgentRunRequest, SkillDefinition, SkillPlan, SkillPlanStep } from "@xiaoshuo/shared";
 import type { ChatCompletionMessage, OpenAICompatibleClient } from "@xiaoshuo/model-client";
 import { hasSkillAction, rankSkillRoutes, type RankedSkillRoute } from "./intent-router.js";
+import { isCancellationError, type AgentRunOptions } from "./cancellation.js";
 
 const MAX_PLAN_STEPS = 4;
 const MAX_CANDIDATES = 8;
@@ -28,7 +29,7 @@ export class SmartSkillOrchestrator {
     this.modelClient = options.modelClient;
   }
 
-  async plan(request: AgentRunRequest, skills: SkillDefinition[]): Promise<SkillPlan> {
+  async plan(request: AgentRunRequest, skills: SkillDefinition[], options: AgentRunOptions = {}): Promise<SkillPlan> {
     const enabledSkills = skills.filter((skill) => !skill.disabled);
     const explicitSkillId = String(request.skill_id || "").trim();
     if (explicitSkillId) {
@@ -60,7 +61,12 @@ export class SmartSkillOrchestrator {
       return emptyPlan();
     }
 
-    const modelPlan = await this.planWithModel(request, candidates).catch(() => null);
+    const modelPlan = await this.planWithModel(request, candidates, options).catch((error) => {
+      if (isCancellationError(error, options.signal)) {
+        throw error;
+      }
+      return null;
+    });
     if (modelPlan && modelPlan.should_call_skill && modelPlan.confidence >= MODEL_PLAN_CONFIDENCE) {
       const normalized = normalizePlan(modelPlan, enabledSkills);
       if (normalized.should_call_skill && normalized.steps.length) {
@@ -122,7 +128,7 @@ export class SmartSkillOrchestrator {
     return candidate.score >= 42;
   }
 
-  private async planWithModel(request: AgentRunRequest, candidates: SkillDefinition[]): Promise<SkillPlan> {
+  private async planWithModel(request: AgentRunRequest, candidates: SkillDefinition[], options: AgentRunOptions = {}): Promise<SkillPlan> {
     if (!candidates.length) {
       return emptyPlan();
     }
@@ -142,7 +148,8 @@ export class SmartSkillOrchestrator {
         },
         { role: "user", content: prompt }
       ] satisfies ChatCompletionMessage[],
-      0.1
+      0.1,
+      { signal: options.signal }
     );
     return normalizePlan(readJsonPlan(raw), candidates);
   }

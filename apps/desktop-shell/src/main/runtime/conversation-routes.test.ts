@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { EventEmitter } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { handleConversationRoutes } from "./conversation-routes.js";
 import type { RuntimeContext } from "./types.js";
@@ -28,11 +29,32 @@ function createContext(): RuntimeContext {
   };
 }
 
-function createResponse() {
-  return {
+function createRequest(method: string, headers: IncomingMessage["headers"] = {}): IncomingMessage {
+  const request = new EventEmitter() as IncomingMessage;
+  Object.assign(request, { method, headers });
+  Object.defineProperty(request, "aborted", { value: false, configurable: true });
+  Object.defineProperty(request, "complete", { value: true, configurable: true });
+  Object.defineProperty(request, "destroyed", { value: false, configurable: true });
+  return request;
+}
+
+function createResponse(): ServerResponse {
+  const response = new EventEmitter() as ServerResponse;
+  let writableEnded = false;
+
+  Object.defineProperty(response, "writableEnded", {
+    get: () => writableEnded,
+    configurable: true
+  });
+  Object.assign(response, {
     writeHead: vi.fn(),
-    end: vi.fn()
-  } as unknown as ServerResponse;
+    end: vi.fn(() => {
+      writableEnded = true;
+      response.emit("finish");
+      response.emit("close");
+    })
+  });
+  return response;
 }
 
 describe("handleConversationRoutes", () => {
@@ -44,7 +66,7 @@ describe("handleConversationRoutes", () => {
     const writeJson = vi.fn();
 
     const handled = await handleConversationRoutes(
-      { method: "GET", headers: {} } as IncomingMessage,
+      createRequest("GET"),
       createResponse(),
       "/api/conversations",
       createContext(),
@@ -70,10 +92,7 @@ describe("handleConversationRoutes", () => {
     const writeJson = vi.fn();
 
     const handled = await handleConversationRoutes(
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" }
-      } as IncomingMessage,
+      createRequest("POST", { "content-type": "application/json" }),
       createResponse(),
       "/api/conversations/conv-1/attachments",
       createContext(),
@@ -111,10 +130,7 @@ describe("handleConversationRoutes", () => {
     });
 
     const handled = await handleConversationRoutes(
-      {
-        method: "POST",
-        headers: { accept: "application/x-ndjson" }
-      } as IncomingMessage,
+      createRequest("POST", { accept: "application/x-ndjson" }),
       response,
       "/api/conversations/conv-1/messages",
       createContext(),
@@ -149,10 +165,7 @@ describe("handleConversationRoutes", () => {
     });
 
     const handled = await handleConversationRoutes(
-      {
-        method: "POST",
-        headers: {}
-      } as IncomingMessage,
+      createRequest("POST"),
       createResponse(),
       "/api/conversations/conv-1/messages",
       createContext(),

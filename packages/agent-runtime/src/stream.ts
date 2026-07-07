@@ -19,19 +19,21 @@ export async function* streamModelText({
   config,
   messages,
   temperature,
-  fallbackMessages
+  fallbackMessages,
+  signal
 }: {
   modelClient: StreamingModelClient;
   config: ModelConfig;
   messages: ChatCompletionMessage[];
   temperature?: number;
   fallbackMessages?: ChatCompletionMessage[];
+  signal?: AbortSignal;
 }): AsyncGenerator<string> {
   const streamCompletion = modelClient.streamCompletion?.bind(modelClient);
   const parts: string[] = [];
   if (streamCompletion) {
     try {
-      for await (const chunk of streamCompletion(config, messages, temperature ?? config.temperature)) {
+      for await (const chunk of streamCompletion(config, messages, temperature ?? config.temperature, { signal })) {
         if (!chunk) {
           continue;
         }
@@ -51,7 +53,8 @@ export async function* streamModelText({
       const fallback = await modelClient.requestCompletion(
         config,
         looksGatewayTimeoutMessage(message) && fallbackMessages ? fallbackMessages : messages,
-        temperature ?? config.temperature
+        temperature ?? config.temperature,
+        { signal }
       );
       if (fallback) {
         for (const visibleChunk of splitVisibleStreamText(fallback)) {
@@ -63,7 +66,7 @@ export async function* streamModelText({
   }
 
   try {
-    const fallback = await modelClient.requestCompletion(config, messages, temperature ?? config.temperature);
+    const fallback = await modelClient.requestCompletion(config, messages, temperature ?? config.temperature, { signal });
     if (fallback) {
       for (const visibleChunk of splitVisibleStreamText(fallback)) {
         yield visibleChunk;
@@ -73,7 +76,7 @@ export async function* streamModelText({
     if (!looksGatewayTimeoutMessage(error instanceof Error ? error.message : String(error)) || !fallbackMessages) {
       throw error;
     }
-    const fallback = await modelClient.requestCompletion(config, fallbackMessages, temperature ?? config.temperature);
+    const fallback = await modelClient.requestCompletion(config, fallbackMessages, temperature ?? config.temperature, { signal });
     if (fallback) {
       for (const visibleChunk of splitVisibleStreamText(fallback)) {
         yield visibleChunk;

@@ -1592,6 +1592,45 @@ npm run build -w @xiaoshuo/workbench
 - 让 `PromptSkillRunner` 或 runtime 逐步消费 `model_policy`、`save_policy` 和 `tools`，但每一步都要有 trace/eval 覆盖。
 - 若继续平台化 workflow/job/external skill 导入，仍应先设计白名单和签名/来源校验，避免直接执行外部 handler。
 
+### 15.35 2026-07-07 P8 取消/中断治理记录
+
+本轮完成 agent 长任务取消治理，让 Workbench 停止响应和 HTTP 断连能真正传到模型调用、workflow、抽卡和 trace。
+
+主要改动：
+
+- 新增 `packages/agent-runtime/src/cancellation.ts`，统一 `AgentRunOptions`、取消错误和 `throwIfAborted()`。
+- `packages/model-client/src/openai-compatible.ts` 支持外部 `AbortSignal`；caller abort 会取消 fetch / stream reader，并保持 `AbortError` 语义，不再误走 timeout 或非流式 fallback。
+- `AgentRuntimeService`、`AgentChatRunner`、`PromptSkillRunner`、planner、save planner、smart skill orchestrator、humanizer、`streamModelText()` 全部接收并传递 `options.signal`。
+- 流式聊天已产生 partial delta 后取消时，不产出 final；会话写入 partial assistant，并在 metadata 标记 `stopped` / `cancelled`。
+- `packages/shared/src/schemas/agent.ts` 的 trace schema 增加 `cancelled`，runtime 取消时 trace 以 `workflow_completed` + `cancelled=true` 收尾。
+- `WorkflowRunContext` 增加 `signal`；正文生成、批量生成、一致性检查、融梗、Nuwa 蒸馏、拆书、扫伏笔等 workflow 在模型调用和写盘前检查取消。
+- `batch_generate` 取消后不会继续进入下一章。
+- `generateCardDraw()` 支持取消，预取消不会启动候选模型调用，也不会写候选文件或 manifest。
+- `apps/desktop-shell/src/main/runtime/http-utils.ts` 新增 `createRequestAbortSignal()`；agent routes、conversation routes 和 card draw route 已把 request abort/early response close 传给 runtime。
+- 新增/扩展测试覆盖 model-client abort、流式 stopped 会话、batch 章间取消、抽卡预取消、HTTP abort helper 与 conversation routes。
+
+本轮已验证：
+
+```powershell
+npx vitest run packages/model-client/src/openai-compatible.test.ts packages/agent-runtime/src/workflows/batch-generate.test.ts packages/agent-runtime/src/runtime.test.ts apps/desktop-shell/src/main/runtime/runtime-utils.test.ts apps/desktop-shell/src/main/runtime/conversation-routes.test.ts apps/desktop-shell/src/main/runtime/license-guarded-routes.test.ts
+npm run typecheck
+npm test
+npm run build:desktop
+npm run smoke:desktop
+```
+
+验收结果：
+
+- 完整测试集当前为 60 个文件、402 个用例通过。
+- `npm run typecheck`、`npm run build:desktop`、`npm run smoke:desktop` 均通过。
+- 停止响应不会再把半截内容作为正常 final assistant 保存；partial 会话可通过 metadata 区分 stopped/cancelled。
+
+下一步建议：
+
+- 若后续把长 agent 任务迁入 `JobManager` 后台 job，继续把 job worker signal 显式传入 runtime。
+- Agent Trace 检查器可增加 cancelled/stopped 筛选。
+- web search / graph memory 底层 I/O 目前主要依赖调用前后检查；若服务层未来支持 AbortSignal，可继续向下传递。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

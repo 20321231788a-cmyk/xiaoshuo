@@ -357,6 +357,75 @@ describe("agent-runtime chat flow", () => {
     expect(updated.messages[1]?.content).toBe("第一句第二句");
   });
 
+  it("marks partial streamed chat replies as stopped when cancelled", async () => {
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const conversation = await conversations.createConversation({ title: "stream cancel" });
+    const controller = new AbortController();
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => {
+          throw new Error("fallback should not run after abort");
+        },
+        async *streamCompletion(
+          _config: ModelConfig,
+          _messages: ChatCompletionMessage[],
+          _temperature?: number,
+          _options?: { signal?: AbortSignal }
+        ) {
+          yield "第一句";
+          controller.abort();
+          const error = new Error("操作已取消");
+          error.name = "AbortError";
+          throw error;
+        }
+      }
+    });
+
+    const events: AgentStreamEvent[] = [];
+    let thrown: unknown = null;
+    try {
+      for await (const event of runtime.streamAgentRun(
+        {
+          conversation_id: conversation.id,
+          content: "我们继续聊这个项目",
+          current_path: "",
+          selection: "",
+          project_context_hint: "",
+          skill_id: "",
+          attachment_ids: []
+        },
+        { signal: controller.signal }
+      )) {
+        events.push(event);
+      }
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toMatchObject({ name: "AbortError" });
+    expect(events.map((event) => event.type)).toEqual(["start", "delta"]);
+    expect(events.some((event) => event.type === "final")).toBe(false);
+
+    const updated = await conversations.getConversation(conversation.id);
+    expect(updated.messages).toHaveLength(2);
+    expect(updated.messages[1]).toMatchObject({
+      role: "assistant",
+      content: "第一句",
+      metadata: {
+        stopped: true,
+        cancelled: true
+      }
+    });
+
+    const [trace] = await readAgentRunTraces();
+    expect(trace).toMatchObject({
+      stage: "workflow_completed",
+      cancelled: true
+    });
+  });
+
   it("streams web search sources in the final chat payload", async () => {
     await fs.writeFile(configPath, JSON.stringify({ api_key: "demo-key", model: "demo-model", web_search_enabled: true }), "utf8");
     const conversations = new ConversationService({ projectRoot: tempDir });
@@ -2240,6 +2309,46 @@ describe("agent-runtime chat flow", () => {
     const manifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
     expect(manifest.draw_id).toBe(result.draw_id);
     expect(manifest.candidates).toHaveLength(3);
+  });
+
+  it("does not start or write card draw candidates when pre-cancelled", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let calls = 0;
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => {
+          calls += 1;
+          return "不应生成";
+        }
+      }
+    });
+
+    await expect(
+      runtime.generateCardDraw(
+        {
+          mode: "body" as const,
+          instruction: "生成三个不同的开头",
+          chapter: 1,
+          start_chapter: 1,
+          chapter_count: 1,
+          section_words: 300,
+          target_words: 500,
+          target_path: "",
+          source_path: "",
+          text: "",
+          candidate_count: 3
+        },
+        () => undefined,
+        { signal: controller.signal }
+      )
+    ).rejects.toMatchObject({ name: "AbortError" });
+
+    expect(calls).toBe(0);
+    await expect(fs.stat(path.join(tempDir, "00_设定集", "抽卡候选"))).rejects.toThrow();
+    await expect(fs.stat(path.join(tempDir, "00_设定集", ".agent", "card_draw"))).rejects.toThrow();
   });
 
   it("injects web search material into body card draw candidates when requested", async () => {

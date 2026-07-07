@@ -3,6 +3,7 @@ import { DocumentService } from "@xiaoshuo/document-service";
 import { OpenAICompatibleClient, type ChatCompletionMessage } from "@xiaoshuo/model-client";
 import { ProjectManifestService } from "@xiaoshuo/project-manifest";
 import { agentPlanResponseSchema, type AgentPlanRequest, type AgentPlanResponse, type DocumentInfo, type FileOperation } from "@xiaoshuo/shared";
+import { isCancellationError, type AgentRunOptions } from "./cancellation.js";
 
 const LORE_TARGETS: Record<string, string> = {
   人物设定: "00_设定集/设定集/人物设定.txt",
@@ -42,7 +43,7 @@ export class AgentPlanner {
     this.modelClient = options.modelClient ?? new OpenAICompatibleClient();
   }
 
-  async buildPlan(request: AgentPlanRequest): Promise<AgentPlanResponse> {
+  async buildPlan(request: AgentPlanRequest, options: AgentRunOptions = {}): Promise<AgentPlanResponse> {
     const text = String(request.instruction || "").trim();
     if (!text) {
       return agentPlanResponseSchema.parse({
@@ -60,10 +61,10 @@ export class AgentPlanner {
 
     return this.buildAiPlan({
       instruction: this.augmentInstruction(text, request.current_path || "", request.selection || "", request.project_context_hint || "")
-    });
+    }, options);
   }
 
-  private async buildAiPlan(input: { instruction: string }): Promise<AgentPlanResponse> {
+  private async buildAiPlan(input: { instruction: string }, options: AgentRunOptions = {}): Promise<AgentPlanResponse> {
     const warnings: string[] = [];
     const docs = await this.manifest.listDocuments({ limit: 500, force: false });
     const config = await loadModelConfig(this.config, "primary");
@@ -77,7 +78,7 @@ export class AgentPlanner {
     }
 
     try {
-      const content = await this.modelClient.requestCompletion(config, this.buildPlannerMessages(input.instruction, docs), 0.1);
+      const content = await this.modelClient.requestCompletion(config, this.buildPlannerMessages(input.instruction, docs), 0.1, { signal: options.signal });
       const parsed = this.parseJson(content);
       const rawOperations = Array.isArray(parsed.operations) ? parsed.operations : [];
       if (!rawOperations.length) {
@@ -98,6 +99,9 @@ export class AgentPlanner {
         can_execute: canExecute
       });
     } catch (error) {
+      if (isCancellationError(error, options.signal)) {
+        throw error;
+      }
       return agentPlanResponseSchema.parse({
         operations: [],
         summary: "模型规划失败，未执行任何文件操作。",
