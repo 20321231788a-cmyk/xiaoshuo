@@ -1358,3 +1358,28 @@ npm run typecheck -w @xiaoshuo/agent-runtime
 
 - P0 只记录模型调用摘要，尚未在 model-client 层精确区分主模型、辅助模型和 fallback；后续 P8 或模型调用治理阶段再下沉。
 - 暂未新增 trace 查询 API/UI；trace 文件路径已固定，P6 再补 `GET /api/agent/traces` 和 Workbench 面板。
+
+### 16.2 2026-07-07 P1 Workflow Registry 第一刀已完成
+
+状态：已完成最小闭环，先迁移 `consistency_check`。
+
+本阶段完成内容：
+
+- 新增 `packages/agent-runtime/src/workflows/types.ts`，定义 `WorkflowRunContext` 和 `WorkflowHandler`。
+- 新增 `packages/agent-runtime/src/workflows/registry.ts`，集中维护 workflow skill id，并注册已迁移 handler。
+- 新增 `packages/agent-runtime/src/workflows/consistency-check.ts`，把 `consistency_check` 从 `AgentRuntimeService.runLocalWorkflowSkill()` 中移到独立 handler。
+- 新增 `packages/agent-runtime/src/prompts/consistency.ts`，把一致性检查 prompt、裁剪和 JSON 解析移出 runtime。
+- `AgentRuntimeService` 通过 `getWorkflowHandler()` 优先分发；未迁移的 workflow 继续走 legacy 分支，避免本阶段改变用户可见行为。
+- 新增 `packages/agent-runtime/src/workflows/consistency-check.test.ts`，覆盖 handler 直跑、prompt 内容、会话记录和 JSON 异常降级。
+
+已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/agent-runtime
+npm test -- packages/agent-runtime/src/workflows/consistency-check.test.ts packages/agent-runtime/src/runtime.test.ts -t "consistency_check|ConsistencyCheckWorkflow"
+```
+
+遗留说明：
+
+- `body_generate` 和 `batch_generate` 仍在 legacy runtime 分支中；下一大块按任务 C 迁移正文生成。
+- `runtime.ts` 已删除 `consistency_check` 大分支，但总行数下降有限；真正的大幅瘦身要等正文和批量生成拆出。

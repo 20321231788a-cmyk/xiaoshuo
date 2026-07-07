@@ -1113,6 +1113,32 @@ npm run typecheck -w @xiaoshuo/agent-runtime
 - P2 再做 ContextAssembler，把当前 trace 里的轻量上下文块升级为统一预算和裁剪记录。
 - P3 在模型客户端层精确补齐 `model_calls`，区分主模型、辅助模型和 fallback。
 
+### 15.19 2026-07-07 Workflow Registry 第一刀开发记录
+
+本轮按 `docs/AGENT_OPTIMIZATION_MODIFICATION_MANUAL.md` 的 P1 最小闭环执行，先迁移风险较低但价值明确的 `consistency_check`。
+
+主要改动：
+
+- 新增 `packages/agent-runtime/src/workflows/types.ts`，定义 workflow handler 和运行上下文。
+- 新增 `packages/agent-runtime/src/workflows/registry.ts`，集中维护 workflow skill id，并注册已迁移 handler。
+- 新增 `packages/agent-runtime/src/workflows/consistency-check.ts`，承接一致性检查完整执行链路。
+- 新增 `packages/agent-runtime/src/prompts/consistency.ts`，集中保存一致性检查 prompt、裁剪和 JSON 解析逻辑。
+- `AgentRuntimeService.runLocalWorkflowSkill()` 改为先查 registry；没有 handler 的 workflow 继续走旧分支。
+- 删除 runtime 中 `consistency_check` 对应大分支，外部行为保持不变。
+- 新增 `packages/agent-runtime/src/workflows/consistency-check.test.ts`，覆盖 handler 直跑和 JSON 异常降级。
+
+本轮已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/agent-runtime
+npm test -- packages/agent-runtime/src/workflows/consistency-check.test.ts packages/agent-runtime/src/runtime.test.ts -t "consistency_check|ConsistencyCheckWorkflow"
+```
+
+下一步建议：
+
+- 继续按任务 C 拆 `body_generate`，但要优先抽出可复用保存/回炉/后处理函数，降低一次搬迁的风险。
+- `batch_generate` 拆分时应改为调 `body_generate` handler，而不是递归调 runtime legacy 方法。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

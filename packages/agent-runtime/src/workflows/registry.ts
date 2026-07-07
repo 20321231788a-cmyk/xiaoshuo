@@ -1,0 +1,32 @@
+import { ConsistencyCheckWorkflow } from "./consistency-check.js";
+import type { WorkflowHandler } from "./types.js";
+
+export const WORKFLOW_SKILL_IDS = [
+  "disassemble_book",
+  "continue_disassemble",
+  "nuwa_style_distill",
+  "scan_pits",
+  "consistency_check",
+  "body_generate",
+  "batch_generate",
+  "book_fusion"
+] as const;
+
+export type WorkflowSkillId = (typeof WORKFLOW_SKILL_IDS)[number];
+
+const workflowSkillIds = new Set<string>(WORKFLOW_SKILL_IDS);
+const workflowHandlers = new Map<string, WorkflowHandler>();
+
+export function registerWorkflow(handler: WorkflowHandler): void {
+  workflowHandlers.set(handler.id, handler);
+}
+
+export function getWorkflowHandler(skillId: string): WorkflowHandler | null {
+  return workflowHandlers.get(skillId) || null;
+}
+
+export function isWorkflowSkillId(skillId: string): boolean {
+  return workflowSkillIds.has(skillId);
+}
+
+registerWorkflow(new ConsistencyCheckWorkflow());

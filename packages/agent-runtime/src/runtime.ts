@@ -45,6 +45,8 @@ import { SmartSkillOrchestrator } from "./smart-skill-orchestrator.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import type { StreamingModelClient } from "./stream.js";
 import { createAgentTraceRecorder, type AgentTraceRecorder } from "./agent-trace.js";
+import { getWorkflowHandler, isWorkflowSkillId } from "./workflows/registry.js";
+import type { WorkflowRunContext } from "./workflows/types.js";
 import { GraphContext } from "@xiaoshuo/vector-service";
 
 const DISASSEMBLE_LIBRARY_DIR = "00_设定集/拆书库";
@@ -128,16 +130,7 @@ export class AgentRuntimeService {
     if (skill?.disabled) {
       return false;
     }
-    if (
-      skillId === "disassemble_book" ||
-      skillId === "continue_disassemble" ||
-      skillId === "nuwa_style_distill" ||
-      skillId === "scan_pits" ||
-      skillId === "consistency_check" ||
-      skillId === "body_generate" ||
-      skillId === "batch_generate" ||
-      skillId === "book_fusion"
-    ) {
+    if (isWorkflowSkillId(skillId)) {
       return true;
     }
     return this.skillRunner.canRunSkillLocally(skillId);
@@ -185,16 +178,7 @@ export class AgentRuntimeService {
     if (skillId === "nuwa_style_distill") {
       return this.runNuwaStyleDistillSkill(request);
     }
-    if (
-      skillId === "disassemble_book" ||
-      skillId === "continue_disassemble" ||
-      skillId === "nuwa_style_distill" ||
-      skillId === "scan_pits" ||
-      skillId === "consistency_check" ||
-      skillId === "body_generate" ||
-      skillId === "batch_generate" ||
-      skillId === "book_fusion"
-    ) {
+    if (isWorkflowSkillId(skillId)) {
       let content = request.instruction || request.text || "";
       if (skillId === "batch_generate" && request.chapter && request.end_chapter) {
         content = `第${request.chapter}章到第${request.end_chapter}章 ${content}`.trim();
@@ -258,16 +242,7 @@ export class AgentRuntimeService {
     const intent = await this.classifyIntent(request);
     if (intent === "skill") {
       const skillId = await this.resolveSkillId(request);
-      if (
-        skillId === "disassemble_book" ||
-        skillId === "continue_disassemble" ||
-        skillId === "nuwa_style_distill" ||
-        skillId === "scan_pits" ||
-        skillId === "consistency_check" ||
-        skillId === "body_generate" ||
-        skillId === "batch_generate" ||
-        skillId === "book_fusion"
-      ) {
+      if (isWorkflowSkillId(skillId)) {
         return true;
       }
       return Boolean(skillId) && (await this.skillRunner.canRunSkillLocally(skillId));
@@ -331,18 +306,9 @@ export class AgentRuntimeService {
       if (!skillId) {
         throw new Error(`TS runtime 尚未接管该意图：${intent}`);
       }
-      if (
-        skillId === "disassemble_book" ||
-        skillId === "continue_disassemble" ||
-        skillId === "nuwa_style_distill" ||
-        skillId === "scan_pits" ||
-        skillId === "consistency_check" ||
-        skillId === "body_generate" ||
-        skillId === "batch_generate" ||
-        skillId === "book_fusion"
-      ) {
+      if (isWorkflowSkillId(skillId)) {
         trace?.mark("workflow_started", { selected_skill_id: skillId });
-        return this.runLocalWorkflowSkill(skillId, request);
+        return this.runLocalWorkflowSkill(skillId, request, trace);
       }
       if (!(await this.skillRunner.canRunSkillLocally(skillId))) {
         throw new Error(`TS runtime 尚未接管该意图：${intent}`);
@@ -419,18 +385,9 @@ export class AgentRuntimeService {
       if (!skillId) {
         throw new Error(`TS runtime 尚未接管该意图：${intent}`);
       }
-      if (
-        skillId === "disassemble_book" ||
-        skillId === "continue_disassemble" ||
-        skillId === "nuwa_style_distill" ||
-        skillId === "scan_pits" ||
-        skillId === "consistency_check" ||
-        skillId === "body_generate" ||
-        skillId === "batch_generate" ||
-        skillId === "book_fusion"
-      ) {
+      if (isWorkflowSkillId(skillId)) {
         trace?.mark("workflow_started", { selected_skill_id: skillId });
-        yield* this.streamLocalWorkflowSkill(skillId, request);
+        yield* this.streamLocalWorkflowSkill(skillId, request, trace);
         return;
       }
       if (!(await this.skillRunner.canRunSkillLocally(skillId))) {
@@ -462,6 +419,21 @@ export class AgentRuntimeService {
       skillId: input.skillId || "",
       content: input.content || ""
     });
+  }
+
+  private buildWorkflowContext(trace?: AgentTraceRecorder): WorkflowRunContext {
+    return {
+      projectRoot: this.documents.projectRoot,
+      config: this.config,
+      modelClient: this.modelClient,
+      webSearchClient: this.webSearchClient,
+      documents: this.documents,
+      conversations: this.conversations,
+      cache: this.cache,
+      savePlanner: this.savePlanner,
+      skillRunner: this.skillRunner,
+      trace
+    };
   }
 
   private addAgentRequestContextToTrace(trace: AgentTraceRecorder, request: AgentRunRequest): void {
@@ -792,7 +764,7 @@ export class AgentRuntimeService {
     }
   }
 
-  private async *streamLocalWorkflowSkill(skillId: string, request: AgentRunRequest): AsyncGenerator<AgentStreamEvent> {
+  private async *streamLocalWorkflowSkill(skillId: string, request: AgentRunRequest, trace?: AgentTraceRecorder): AsyncGenerator<AgentStreamEvent> {
     request = { ...request, skill_id: skillId };
     yield {
       type: "start",
@@ -806,7 +778,7 @@ export class AgentRuntimeService {
       stage: "workflow_start",
       skill_id: skillId
     };
-    const payload = await this.runLocalWorkflowSkill(skillId, request);
+    const payload = await this.runLocalWorkflowSkill(skillId, request, trace);
     const resultText = this.extractStreamPreviewText(payload);
     if (resultText.trim()) {
       yield {
@@ -1104,18 +1076,13 @@ export class AgentRuntimeService {
     };
   }
 
-  private async runLocalWorkflowSkill(skillId: string, request: AgentRunRequest): Promise<AgentRunResponse> {
+  private async runLocalWorkflowSkill(skillId: string, request: AgentRunRequest, trace?: AgentTraceRecorder): Promise<AgentRunResponse> {
     request = { ...request, skill_id: skillId };
-    if (
-      skillId !== "disassemble_book" &&
-      skillId !== "continue_disassemble" &&
-      skillId !== "nuwa_style_distill" &&
-      skillId !== "scan_pits" &&
-      skillId !== "consistency_check" &&
-      skillId !== "body_generate" &&
-      skillId !== "batch_generate" &&
-      skillId !== "book_fusion"
-    ) {
+    const handler = getWorkflowHandler(skillId);
+    if (handler) {
+      return handler.runAgent(request, this.buildWorkflowContext(trace));
+    }
+    if (!isWorkflowSkillId(skillId)) {
       throw new Error(`TS runtime 尚未接管该 workflow skill: ${skillId}`);
     }
 
@@ -1377,66 +1344,6 @@ export class AgentRuntimeService {
         saved_paths: savedPaths,
         requires_confirmation: false,
         web_search_sources: webSearchSources
-      };
-    }
-
-    if (skillId === "consistency_check") {
-      const text = await this.resolveWorkflowSourceText(request);
-      if (!text.trim()) {
-        throw new Error("缺少要审查的正文");
-      }
-      const continuity = await buildProjectContinuityContext(this.documents.projectRoot);
-      const assistantConfig = await this.loadAssistantModelConfig();
-
-      const chapterOutline = await this.resolveConsistencyChapterOutline(request);
-      const recent = continuity.previous_chapters.map((item) => item.content).join("\n");
-      const prompt = [
-        "请检查正文是否违背章纲、人物设定、体系设定、地图设定、道具设定、风格库、题材库和上一章承接。",
-        '输出 JSON：{"score": 0-100, "risks": ["问题"], "reason": "简短说明"}。',
-        "低于 80 分代表必须回炉。",
-        "",
-        `【章纲】\n${clipForConsistency(chapterOutline, 5000)}`,
-        "",
-        `【连续性上下文】\n${clipForConsistency(JSON.stringify({ state_summary: continuity.state_summary, lore: continuity.lore, style: continuity.style, genre: continuity.genre }), 14000)}`,
-        "",
-        `【最近正文】\n${clipForConsistency(recent, 8000)}`,
-        "",
-        `【待审查正文】\n${clipForConsistency(text, 18000)}`
-      ].join("\n");
-
-      const raw = await this.modelClient.requestCompletion(
-        assistantConfig.config,
-        [
-          { role: "system", content: "你是严厉的长篇小说连续性审稿人。只输出 JSON。" },
-          { role: "user", content: prompt }
-        ] satisfies ChatCompletionMessage[],
-        0.1
-      );
-      const parsed = safeJsonObject(raw);
-      const score = clampScore(Number(parsed.score || 0));
-      const risks = Array.isArray(parsed.risks) ? parsed.risks.map((item) => String(item)).slice(0, 12) : [];
-      const reason = String(parsed.reason || String(raw || "").slice(0, 1000));
-      const result = {
-        score,
-        risks,
-        reason,
-        model_line: assistantConfig.line
-      };
-      const reply = JSON.stringify(result, null, 2);
-      const conversation = await this.recordSkillExchange(request, reply);
-      return {
-        intent: "skill",
-        reply,
-        conversation,
-        results: [],
-        skill_result: {
-          status: "done",
-          result: reply,
-          saved_path: "",
-          data: result
-        },
-        saved_paths: [],
-        requires_confirmation: false
       };
     }
 
