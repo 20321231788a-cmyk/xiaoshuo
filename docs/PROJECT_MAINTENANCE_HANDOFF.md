@@ -1377,6 +1377,36 @@ npm run smoke:desktop
 - P2 可继续把 workflow 上下文纳入 assembler，优先 `body_generate` / `consistency_check`。
 - 下一大块可进入 P3 GraphMemory，建议先做 vector-service skeleton，再进入 agent-runtime 集成。
 
+### 15.29 2026-07-07 P3 GraphMemory 最小骨架开发记录
+
+本轮由子智能体 McClintock 并行实现 vector-service 内的 P3 GraphMemory 最小骨架，主线程审阅、验证并提交。
+
+主要改动：
+
+- 新增 `packages/vector-service/src/graph-memory.ts`，提供 `GraphMemory` facade，封装 rebuild、updatePaths、writing context 和 draft consistency。
+- 新增 `packages/vector-service/src/graph-extractor.ts`，作为规则抽取 facade，复用现有 `GraphContext.extractGraphData()`。
+- 新增 `packages/vector-service/src/graph-consistency.ts`，实现保守 advisory draft consistency 检查，能识别 draft 对 confirmed claim 的直接否定。
+- `packages/vector-service/src/graph-context.ts` 让 `appears_in` 使用现有中文/阿拉伯数字章节 parser。
+- `packages/vector-service/src/index.ts` 导出新模块与类型。
+- 新增 `packages/vector-service/src/graph-memory.test.ts`，覆盖 planned/confirmed claims、角色出场关系、blocking claims、上下文截断和 extractor facade。
+
+本轮已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/vector-service
+npx vitest run packages/vector-service/src/graph-context.test.ts packages/vector-service/src/graph-memory.test.ts
+npm run typecheck
+npm test
+npm run build:desktop
+npm run smoke:desktop
+```
+
+下一步建议：
+
+- 将 `GraphMemory.buildWritingContext()` 接入 `body_generate`，作为 GraphContext 的后续替代 facade。
+- 将 `GraphMemory.checkDraftConsistency()` 接入 `consistency_check`，先作为 advisory，不阻断保存。
+- 后续再把 `updatePaths()` 从全量 rebuild 优化为按变更路径增量更新。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

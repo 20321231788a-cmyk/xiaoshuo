@@ -315,11 +315,7 @@ export class GraphContext {
           continue;
         }
 
-        let chapterNum: number | undefined;
-        const matchChapter = chunk.path.match(/(?:第)?\s*(\d+)\s*(?:章|集)/);
-        if (matchChapter && matchChapter[1]) {
-          chapterNum = parseInt(matchChapter[1], 10);
-        }
+        const chapterNum = parseChapterNumber(chunk.path);
         const eventId = `event:chapter_${chapterNum || "unknown"}`;
 
         for (const ent of registeredEntities) {
