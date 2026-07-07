@@ -146,7 +146,32 @@
 
 当前剩余完整验收缺口：
 
-- Workbench 还缺 skill patch/clone/version/rollback 的 diff 与版本 UI。
+- Workbench skill patch/clone/version/rollback 的 diff 与版本 UI 已进入下一阶段，仍需 e2e 覆盖。
+- trace 尚未完整展示 reference metadata 和 skill 管理事件。
+- P12 自然语言 skill 管理路由尚未接入。
+- Workbench 引用确认和 skill 编辑仍缺 e2e 覆盖。
+
+### 2026-07-07 P11 Workbench skill edit/version UI MVP
+
+状态：已完成，提交 `9565e28`。
+
+落地内容：
+
+- `useWorkbenchCoreController.ts` 新增 skill edit 状态：`pendingSkillPatchPreview`、`selectedSkillVersions`。
+- 新增 `cloneSelectedSkill`、`previewSelectedSkillPatch`、`commitPendingSkillPatch`、`discardPendingSkillPatch`、`loadSkillVersions`、`rollbackSelectedSkill` 控制器动作。
+- `useOperationsController.ts` 向技能页透出 clone、dry-run patch、确认 patch、版本读取和 rollback 能力。
+- `SkillFeaturePage.tsx` 新增选中技能编辑面板：默认技能只能复制为自定义技能，自定义技能可编辑 description/prompt/context_requirements/linked_targets/change_reason。
+- 修改保存前必须先 `dry_run` 展示 diff；确认后再调用实际 patch 并刷新 skill catalog 和版本历史。
+- 新增版本历史列表和单版本 rollback 按钮。
+- `styles.css` 补充 skill 编辑、diff 预览、版本列表和移动端布局样式。
+
+已验证：
+
+- `npm run typecheck -w @xiaoshuo/workbench`
+- `npm run build -w @xiaoshuo/workbench`（通过；Vite 仍提示现有 chunk size warning）
+
+当前剩余完整验收缺口：
+
 - trace 尚未完整展示 reference metadata 和 skill 管理事件。
 - P12 自然语言 skill 管理路由尚未接入。
 - Workbench 引用确认和 skill 编辑仍缺 e2e 覆盖。
