@@ -1383,3 +1383,27 @@ npm test -- packages/agent-runtime/src/workflows/consistency-check.test.ts packa
 
 - `body_generate` 和 `batch_generate` 仍在 legacy runtime 分支中；下一大块按任务 C 迁移正文生成。
 - `runtime.ts` 已删除 `consistency_check` 大分支，但总行数下降有限；真正的大幅瘦身要等正文和批量生成拆出。
+
+### 16.3 2026-07-07 任务 C body_generate 已完成
+
+状态：已完成正文生成 handler 迁移。
+
+本阶段完成内容：
+
+- 新增 `packages/agent-runtime/src/workflows/body-generate.ts`，把 `body_generate` 从 runtime 大分支迁移为独立 handler。
+- 新增 `packages/agent-runtime/src/prompts/body.ts`，迁移正文生成、正文回炉和正文去 AI 味 prompt。
+- `packages/agent-runtime/src/workflows/registry.ts` 注册 `BodyGenerateWorkflow`，`batch_generate` 旧分支递归调用 `body_generate` 时已经落到新 handler。
+- `AgentRuntimeService.runLocalWorkflowSkill()` 删除 `body_generate` 分支，并清理只服务正文生成的旧 helper；抽卡仍复用的 `resolveBodyChapterOutline()`、`applyBodyDeslop()`、联网素材 helper 暂时保留。
+- 新增 `packages/agent-runtime/src/workflows/body-generate.test.ts`，覆盖 pending save 和显式写入 commit 两条关键路径。
+
+已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/agent-runtime
+npm test -- packages/agent-runtime/src/workflows/body-generate.test.ts packages/agent-runtime/src/runtime.test.ts -t "body_generate|batch_generate|BodyGenerateWorkflow"
+```
+
+遗留说明：
+
+- `batch_generate` 仍在 legacy runtime 分支中；下一步应新增 `BatchGenerateWorkflow`，直接调用 `BodyGenerateWorkflow` handler。
+- 抽卡正文候选仍在 runtime 中复用部分正文 helper，后续拆 `card-draw` 或抽共享 body helper 时再处理。

@@ -1139,6 +1139,31 @@ npm test -- packages/agent-runtime/src/workflows/consistency-check.test.ts packa
 - 继续按任务 C 拆 `body_generate`，但要优先抽出可复用保存/回炉/后处理函数，降低一次搬迁的风险。
 - `batch_generate` 拆分时应改为调 `body_generate` handler，而不是递归调 runtime legacy 方法。
 
+### 15.20 2026-07-07 body_generate Handler 迁移记录
+
+本轮继续按优化手册任务 C 执行，把正文生成主价值链从 `AgentRuntimeService.runLocalWorkflowSkill()` 中拆到独立 workflow handler。
+
+主要改动：
+
+- 新增 `packages/agent-runtime/src/workflows/body-generate.ts`，承接 `body_generate` 的章纲解析、正文生成、自动回炉、一致性检查、deslop/humanizer、GeneratedCache、pending save / auto commit、修正日志和章节交接摘要。
+- 新增 `packages/agent-runtime/src/prompts/body.ts`，保存正文生成、回炉和去 AI 味 prompt。
+- `packages/agent-runtime/src/workflows/registry.ts` 注册 `BodyGenerateWorkflow`。
+- `AgentRuntimeService.runLocalWorkflowSkill()` 删除 `body_generate` 分支；未迁移的 `batch_generate` 调 `body_generate` 时已经通过 registry 落到新 handler。
+- 清理 runtime 中只服务旧正文分支的生成、回炉、交接 helper；抽卡正文候选仍复用的少量 helper 暂时保留。
+- 新增 `packages/agent-runtime/src/workflows/body-generate.test.ts`，覆盖 pending save 和显式写入 commit。
+
+本轮已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/agent-runtime
+npm test -- packages/agent-runtime/src/workflows/body-generate.test.ts packages/agent-runtime/src/runtime.test.ts -t "body_generate|batch_generate|BodyGenerateWorkflow"
+```
+
+下一步建议：
+
+- 迁移 `batch_generate` 为独立 handler，改为直接调用 `getWorkflowHandler("body_generate")`。
+- 迁移前补一条 batch handler 直跑测试，确保章节范围、联网素材聚合和 saved paths 不漂移。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：
