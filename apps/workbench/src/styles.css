@@ -4907,6 +4907,39 @@ body {
   accent-color: var(--xw-primary);
 }
 
+.xw-consistency-auto-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid var(--xw-line);
+  border-radius: 10px;
+  background: rgba(238, 247, 255, 0.92);
+  color: #315d7e;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.xw-consistency-auto-toggle:hover,
+.xw-consistency-auto-toggle:focus-visible {
+  border-color: rgba(42, 134, 232, 0.42);
+  background: rgba(225, 241, 255, 0.96);
+  color: var(--xw-primary);
+}
+
+.xw-consistency-auto-toggle.active {
+  border-color: var(--xw-primary);
+  background: var(--xw-primary);
+  color: #f8fcff;
+}
+
+.xw-consistency-auto-toggle:active {
+  transform: translateY(1px);
+}
+
 .xw-operation-actions {
   display: flex;
   align-items: center;

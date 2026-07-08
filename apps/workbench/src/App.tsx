@@ -1394,14 +1394,15 @@ function ConsistencyFeaturePage({ controller }: { controller: WorkbenchControlle
         <div className="xw-operation-grid two">
           <ProjectFileSelect label="检查来源文件" value={sourcePath} onChange={setSourcePath} controller={controller} />
           <label><span>风险阈值</span><input type="number" min={1} max={100} value={threshold} onChange={(event) => updateThreshold(Number(event.target.value))} /></label>
-          <label className="xw-check-row" style={{ gridColumnStart: 2 }}>
-            <input
-              type="checkbox"
-              checked={autoConsistency}
-              onChange={() => controller.patchConfig({ enable_consistency_revision: !autoConsistency })}
-            />
+          <button
+            type="button"
+            className={`xw-consistency-auto-toggle${autoConsistency ? " active" : ""}`}
+            aria-pressed={autoConsistency}
+            onClick={() => controller.patchConfig({ enable_consistency_revision: !autoConsistency })}
+          >
+            <ScanSearch size={14} />
             <span>自动一致性检查</span>
-          </label>
+          </button>
         </div>
         <textarea value={text} onChange={(event) => setText(event.target.value)} placeholder="可粘贴待检查正文。留空则使用当前文档或来源路径。" />
         <textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} placeholder="补充检查要求，例如重点看人物动机、地图距离、伏笔承接。" />

@@ -1776,6 +1776,29 @@ npm run build:workbench
 - Workbench 构建通过；仍只有既有 Vite chunk size warning。
 - 向量索引状态区域由竖向卡片压缩为横向长条，减少纵向空间占用。
 
+### 15.41 2026-07-08 一致性自动检查入口位置调整记录
+
+本轮按界面标注调整“一致性检查”页的自动检查开关，让它出现在来源文件下方的左侧空位，并使用右侧功能选中态同风格的点击效果。
+
+主要改动：
+
+- 将“自动一致性检查”从右侧小 checkbox 改为独立胶囊按钮，放到表单网格第二行左列。
+- 点击按钮仍然写入 `enable_consistency_revision` 配置，保持原有自动一致性检查功能不变。
+- 按钮开启后使用蓝色填充和浅色文字，视觉接近右侧“一致性”功能按钮的选中效果。
+
+本轮已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/workbench
+npm run build:workbench
+```
+
+验收结果：
+
+- Workbench 类型检查通过。
+- Workbench 构建通过；仍只有既有 Vite chunk size warning。
+- 一致性自动检查入口已移动到标注位置，点击后会切换为蓝色激活态。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：
