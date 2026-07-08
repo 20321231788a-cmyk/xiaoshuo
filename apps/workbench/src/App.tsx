@@ -180,7 +180,10 @@ export function App() {
   useEffect(() => {
     const unsubscribeTutorial = window.xiaoshuoDesktop?.onOpenTutorial?.(() => setTutorialOpen(true));
     const unsubscribeRefresh = window.xiaoshuoDesktop?.onRequestRefresh?.(() => {
-      void controller.refreshProjectWorkspace();
+      void (async () => {
+        await controller.refreshProjectWorkspace();
+        await controller.reopenDocumentFromDisk();
+      })();
     });
     const unsubscribeSave = window.xiaoshuoDesktop?.onRequestSave?.(() => {
       void controller.saveActiveDocument();
@@ -433,11 +436,11 @@ function webSearchTogglePatch(config: AppConfig, enabled: boolean): Partial<AppC
 function WebsiteTutorialDialog({ onClose }: { onClose: () => void }) {
   return (
     <div className="xw-website-modal-backdrop" onClick={onClose}>
-      <section className="xw-tutorial-modal" onClick={(event) => event.stopPropagation()} aria-modal="true" role="dialog" aria-label="网站使用教程">
+      <section className="xw-tutorial-modal" onClick={(event) => event.stopPropagation()} aria-modal="true" role="dialog" aria-label="使用教程">
         <div className="xw-tutorial-head">
           <div>
-            <strong>网站使用教程</strong>
-            <span>注册账号、接入模型、充值兑换和授权状态都从这里开始。</span>
+            <strong>使用教程</strong>
+            <span>分为网站使用和软件使用两部分，常用入口都从这里确认。</span>
           </div>
           <button className="xw-secondary-button compact" type="button" onClick={onClose} aria-label="关闭教程">
             <X size={15} />
@@ -455,31 +458,50 @@ function WebsiteTutorialDialog({ onClose }: { onClose: () => void }) {
           </a>
         </div>
 
-        <div className="xw-tutorial-list">
-          <article>
-            <strong>1. 注册网站账号</strong>
-            <p>点击“注册账号”，使用 QQ 邮箱获取验证码，设置密码后完成注册。注册完成后回到软件的“设置 - 网站配置”。</p>
-          </article>
-          <article>
-            <strong>2. 登录网站配置</strong>
-            <p>在软件里填写 QQ 邮箱和密码，点击“登录网站”。登录后会读取账号状态、余额、并发限制和可用模型列表。</p>
-          </article>
-          <article>
-            <strong>3. 选择模型并应用</strong>
-            <p>在“网站模型”中选择语言模型，按需要调整 temperature 和 top_p，然后点击“应用网站配置”。软件会隐藏写入中转连接信息，不在界面显示 URL、Key 或 token。</p>
-          </article>
-          <article>
-            <strong>4. 充值与兑换</strong>
-            <p>登录后可以在网站账号区点击“充值”选择档位，也可以点击“兑换”输入兑换码。支付或兑换成功后刷新网站状态即可看到余额变化。</p>
-          </article>
-          <article>
-            <strong>5. 授权与使用</strong>
-            <p>授权绑定网站账号。更换设备后，登录同一网站账号并应用网站配置，即可继续校验授权并使用写作、拆书、批量生成等功能。</p>
-          </article>
-          <article>
-            <strong>6. 常见处理</strong>
-            <p>模型列表为空时先刷新账号；余额不足时充值或兑换；登录失败时确认邮箱、密码和验证码注册状态；仍不可用时前往网站检查账号状态。</p>
-          </article>
+        <div className="xw-tutorial-sections">
+          <section className="xw-tutorial-section">
+            <h3>网站使用</h3>
+            <div className="xw-tutorial-list">
+              <article>
+                <strong>1. 注册网站账号</strong>
+                <p>点击“注册账号”，使用 QQ 邮箱获取验证码，设置密码后完成注册。注册完成后回到软件的“设置 - 网站配置”。</p>
+              </article>
+              <article>
+                <strong>2. 登录网站配置</strong>
+                <p>在软件里填写 QQ 邮箱和密码，点击“登录网站”。登录后会读取账号状态、余额、并发限制和可用模型列表。</p>
+              </article>
+              <article>
+                <strong>3. 选择模型并应用</strong>
+                <p>在“网站模型”中选择语言模型，按需要调整 temperature 和 top_p，然后点击“应用网站配置”。软件会隐藏写入中转连接信息，不在界面显示 URL、Key 或 token。</p>
+              </article>
+              <article>
+                <strong>4. 充值与兑换</strong>
+                <p>登录后可以在网站账号区点击“充值”选择档位，也可以点击“兑换”输入兑换码。支付或兑换成功后刷新网站状态即可看到余额变化。</p>
+              </article>
+            </div>
+          </section>
+
+          <section className="xw-tutorial-section">
+            <h3>软件使用</h3>
+            <div className="xw-tutorial-list">
+              <article>
+                <strong>1. 打开或新建项目</strong>
+                <p>左侧只保留“新建项目”和“打开项目”。项目打开后，项目树、拆书库、时间线会在左侧显示。</p>
+              </article>
+              <article>
+                <strong>2. 统一刷新入口</strong>
+                <p>点击中间顶部“状态 - 刷新”，会同时刷新项目工作区；如果当前有打开文档，也会读取当前文档最新版。</p>
+              </article>
+              <article>
+                <strong>3. 补全索引</strong>
+                <p>需要补全或重建向量索引时，进入“状态 - 向量测试”，点击“补全索引”。这里也能处理待嵌入文件和测试召回。</p>
+              </article>
+              <article>
+                <strong>4. 常用写作功能</strong>
+                <p>右侧功能入口包含 AI、批量、拆书、抽卡、伏笔、日志、技能、一致性和设置；常用功能页打开后仍保留在中间工作区。</p>
+              </article>
+            </div>
+          </section>
         </div>
       </section>
     </div>
@@ -760,6 +782,16 @@ function FeatureWorkbenchPanel({
     onSelectFeature(nextFeature);
   }
 
+  async function refreshWorkspaceAndDocument(event?: ReactMouseEvent<HTMLElement>) {
+    if (event) {
+      closeStatusMenu(event);
+    }
+    await controller.refreshProjectWorkspace();
+    if (currentPaneDoc) {
+      await controller.reopenDocumentFromDisk(currentPaneDoc.path);
+    }
+  }
+
   return (
     <div className="xw-editor-workbench">
       <header className="xw-editor-topbar">
@@ -794,11 +826,8 @@ function FeatureWorkbenchPanel({
               <button
                 type="button"
                 role="menuitem"
-                onClick={(event) => {
-                  closeStatusMenu(event);
-                  void controller.reopenDocumentFromDisk();
-                }}
-                disabled={!currentPaneDoc || controller.documentBusy}
+                onClick={(event) => void refreshWorkspaceAndDocument(event)}
+                disabled={controller.projectBusy || controller.documentBusy}
               >
                 <RefreshCw size={15} />
                 <span>刷新</span>

@@ -5524,6 +5524,23 @@ body {
   gap: 10px;
 }
 
+.xw-tutorial-sections {
+  display: grid;
+  gap: 14px;
+}
+
+.xw-tutorial-section {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.xw-tutorial-section h3 {
+  margin: 0;
+  color: var(--xw-text);
+  font-size: 14px;
+}
+
 .xw-tutorial-list article {
   min-width: 0;
   padding: 10px;

@@ -1,4 +1,4 @@
-import { Database, RefreshCw, Search, Sparkles } from "lucide-react";
+import { Database, RefreshCw, Search, Shield } from "lucide-react";
 import { useState } from "react";
 import type { WorkbenchController } from "../../hooks/useWorkbenchController.js";
 
@@ -55,8 +55,8 @@ export function VectorTestFeaturePage({ controller }: { controller: WorkbenchCon
 
       <div className="project-action-grid xw-vector-test-actions">
         <button data-testid="vector-test-rebuild-button" className="ghost-button" onClick={() => void controller.rebuildVectorIndex()} disabled={controller.projectBusy || !hasProject}>
-          <Sparkles size={15} />
-          <span>重建向量索引</span>
+          <Shield size={15} />
+          <span>补全索引</span>
         </button>
         <button data-testid="vector-test-process-pending-button" className="ghost-button" onClick={() => void controller.processPendingVectorFiles()} disabled={controller.projectBusy || !hasProject}>
           <Database size={15} />

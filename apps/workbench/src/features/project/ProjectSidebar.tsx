@@ -10,7 +10,6 @@ import {
   FolderPlus,
   History,
   RefreshCw,
-  Shield,
   Sparkles,
   Trash2,
   Upload
@@ -490,14 +489,6 @@ export function ProjectSidebar({
           <button className="xw-secondary-button" onClick={() => controller.pickAndOpenProject("open")} disabled={controller.projectBusy}>
             <FolderOpen size={15} />
             <span>打开项目</span>
-          </button>
-          <button className="xw-secondary-button" onClick={controller.rebuildVectorIndex} disabled={controller.projectBusy || !project?.path}>
-            <Shield size={15} />
-            <span>补全索引</span>
-          </button>
-          <button className="xw-secondary-button" onClick={controller.refreshProjectWorkspace} disabled={controller.projectBusy}>
-            <RefreshCw size={15} className={controller.projectBusy ? "spin" : ""} />
-            <span>刷新项目</span>
           </button>
           <div className={`xw-cloud-project-strip ${cloudPanelOpen ? "open" : ""}`}>
             <button
