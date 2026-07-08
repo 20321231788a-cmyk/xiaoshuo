@@ -4907,7 +4907,7 @@ body {
   accent-color: var(--xw-primary);
 }
 
-.xw-consistency-auto-toggle {
+.xw-operation-toggle {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -4923,20 +4923,20 @@ body {
   white-space: nowrap;
 }
 
-.xw-consistency-auto-toggle:hover,
-.xw-consistency-auto-toggle:focus-visible {
+.xw-operation-toggle:hover,
+.xw-operation-toggle:focus-visible {
   border-color: rgba(42, 134, 232, 0.42);
   background: rgba(225, 241, 255, 0.96);
   color: var(--xw-primary);
 }
 
-.xw-consistency-auto-toggle.active {
+.xw-operation-toggle.active {
   border-color: var(--xw-primary);
   background: var(--xw-primary);
   color: #f8fcff;
 }
 
-.xw-consistency-auto-toggle:active {
+.xw-operation-toggle:active {
   transform: translateY(1px);
 }
 

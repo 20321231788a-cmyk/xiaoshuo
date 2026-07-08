@@ -1799,6 +1799,29 @@ npm run build:workbench
 - Workbench 构建通过；仍只有既有 Vite chunk size warning。
 - 一致性自动检查入口已移动到标注位置，点击后会切换为蓝色激活态。
 
+### 15.42 2026-07-08 批量生成开关胶囊化记录
+
+本轮按界面标注调整“批量生成”页的两个开关，让它们按红圈位置排列，并复用上一轮一致性入口的点击效果。
+
+主要改动：
+
+- “生成后直接写入正文文件”从 checkbox 改为第 4 列胶囊按钮，默认开启时显示蓝色激活态。
+- “自动审查生成文件”从 checkbox 改为第 2 行第 1 列胶囊按钮，点击后切换 `enable_consistency_revision` 配置。
+- 将上一轮一致性页按钮样式抽成通用 `xw-operation-toggle`，批量页和一致性页复用同一套 hover、focus、active、按下反馈。
+
+本轮已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/workbench
+npm run build:workbench
+```
+
+验收结果：
+
+- Workbench 类型检查通过。
+- Workbench 构建通过；仍只有既有 Vite chunk size warning。
+- 批量页两个开关已按标注位置排列，点击效果与上一条一致。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

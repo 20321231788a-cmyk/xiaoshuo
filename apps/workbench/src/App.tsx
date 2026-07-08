@@ -1351,7 +1351,15 @@ function BatchFeaturePage({ controller }: { controller: WorkbenchController }) {
           <label><span>起始章节</span><input type="number" min={1} value={startChapter} onChange={(event) => setStartChapter(Number(event.target.value))} /></label>
           <label><span>结束章节</span><input type="number" min={startChapter} value={endChapter} onChange={(event) => setEndChapter(Number(event.target.value))} /></label>
           <label><span>目标字数</span><input type="number" min={300} max={20000} value={targetWords} onChange={(event) => setTargetWords(Number(event.target.value))} /></label>
-          <label className="xw-check-row"><input type="checkbox" checked={writeResult} onChange={(event) => setWriteResult(event.target.checked)} /><span>生成后直接写入正文文件</span></label>
+          <button
+            type="button"
+            className={`xw-operation-toggle${writeResult ? " active" : ""}`}
+            aria-pressed={writeResult}
+            onClick={() => setWriteResult((current) => !current)}
+          >
+            <FilePenLine size={14} />
+            <span>生成后直接写入正文文件</span>
+          </button>
           <AutoReviewGeneratedToggle controller={controller} />
         </div>
         <textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} placeholder="批量写作要求，例如节奏、爽点、角色行动、禁用桥段。" />
@@ -1396,7 +1404,7 @@ function ConsistencyFeaturePage({ controller }: { controller: WorkbenchControlle
           <label><span>风险阈值</span><input type="number" min={1} max={100} value={threshold} onChange={(event) => updateThreshold(Number(event.target.value))} /></label>
           <button
             type="button"
-            className={`xw-consistency-auto-toggle${autoConsistency ? " active" : ""}`}
+            className={`xw-operation-toggle${autoConsistency ? " active" : ""}`}
             aria-pressed={autoConsistency}
             onClick={() => controller.patchConfig({ enable_consistency_revision: !autoConsistency })}
           >

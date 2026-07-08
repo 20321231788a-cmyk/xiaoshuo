@@ -1,4 +1,5 @@
 import type { TreeNode } from "@xiaoshuo/shared";
+import { ShieldCheck } from "lucide-react";
 import type { WorkbenchController } from "../../hooks/useWorkbenchController.js";
 
 function flattenProjectFilePaths(nodes: TreeNode[] = []): string[] {
@@ -51,13 +52,14 @@ export function ProjectFileSelect({
 export function AutoReviewGeneratedToggle({ controller }: { controller: WorkbenchController }) {
   const enabled = Boolean(controller.configDraft?.enable_consistency_revision);
   return (
-    <label className="xw-check-row">
-      <input
-        type="checkbox"
-        checked={enabled}
-        onChange={() => controller.patchConfig({ enable_consistency_revision: !enabled })}
-      />
+    <button
+      type="button"
+      className={`xw-operation-toggle${enabled ? " active" : ""}`}
+      aria-pressed={enabled}
+      onClick={() => controller.patchConfig({ enable_consistency_revision: !enabled })}
+    >
+      <ShieldCheck size={14} />
       <span>自动审查生成文件</span>
-    </label>
+    </button>
   );
 }
