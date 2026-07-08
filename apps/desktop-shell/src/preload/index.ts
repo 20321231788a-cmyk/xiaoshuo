@@ -46,6 +46,20 @@ const desktopApi: XiaoShuoDesktopApi = {
     ipcRenderer.on(ipcChannels.appRequestRefresh, listener);
     return () => ipcRenderer.off(ipcChannels.appRequestRefresh, listener);
   },
+  onRequestRun: (callback) => {
+    const listener = () => {
+      callback();
+    };
+    ipcRenderer.on(ipcChannels.appRequestRun, listener);
+    return () => ipcRenderer.off(ipcChannels.appRequestRun, listener);
+  },
+  onRequestVectorTest: (callback) => {
+    const listener = () => {
+      callback();
+    };
+    ipcRenderer.on(ipcChannels.appRequestVectorTest, listener);
+    return () => ipcRenderer.off(ipcChannels.appRequestVectorTest, listener);
+  },
   onRequestSave: (callback) => {
     const listener = () => {
       callback();

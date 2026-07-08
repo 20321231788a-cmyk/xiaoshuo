@@ -6,6 +6,8 @@ export const ipcChannels = {
   backendRestart: "backend:restart",
   appOpenTutorial: "app:open-tutorial",
   appRequestRefresh: "app:request-refresh",
+  appRequestRun: "app:request-run",
+  appRequestVectorTest: "app:request-vector-test",
   appRequestSave: "app:request-save",
   appRequestFind: "app:request-find",
   appRequestReplace: "app:request-replace",
@@ -340,6 +342,8 @@ export type XiaoShuoDesktopApi = {
   restartBackend: () => Promise<BackendStatus>;
   onOpenTutorial: (callback: () => void) => () => void;
   onRequestRefresh: (callback: () => void) => () => void;
+  onRequestRun: (callback: () => void) => () => void;
+  onRequestVectorTest: (callback: () => void) => () => void;
   onRequestSave: (callback: () => void) => () => void;
   onRequestFind: (callback: () => void) => () => void;
   onRequestReplace: (callback: () => void) => () => void;

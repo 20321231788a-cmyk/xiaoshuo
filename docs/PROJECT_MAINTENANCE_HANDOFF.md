@@ -1701,6 +1701,34 @@ npm run typecheck -w @xiaoshuo/workbench
 - 拆书上传/项目文件读取/已归档源书重跑不再卡在旧 6 万或 8 万上限。
 - 相关 workflow、crawler 和 runtime 回归测试通过。
 
+### 15.38 2026-07-08 Workbench 状态入口与二级运行页调整记录
+
+本轮按界面反馈收拢中间工作区和右侧功能入口，把“运行”和“向量测试”移入统一的状态入口。
+
+主要改动：
+
+- 移除 Workbench 中心区顶部旧版“项目 / 编辑 / 会话 / 终端”四个按钮，默认直接显示新版中间工作区，让内容上移。
+- 右侧九宫格不再单独显示“运行”，保留 AI、批量、拆书、抽卡、伏笔、日志、技能、一致性、设置。
+- 中间顶部原“刷新”位置改为“状态”下拉，内含“刷新 / 运行 / 向量测试”三个动作。
+- “运行”作为二级页打开现有 `AgentTraceView`。
+- 新增 `VectorTestFeaturePage`，把向量索引重建、待嵌入处理、刷新状态、召回调试放到独立“向量测试”二级页。
+- 桌面顶部菜单从“刷新”改为“状态”子菜单，并通过新增 IPC 事件打开“运行”和“向量测试”页。
+
+本轮已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/workbench
+npm run typecheck -w @xiaoshuo/desktop-shell
+npm run build:workbench
+npm run build -w @xiaoshuo/desktop-shell
+```
+
+验收结果：
+
+- Workbench 和 Desktop Shell 类型检查通过。
+- Workbench 和 Desktop Shell 构建通过；Workbench build 仍只有既有 Vite chunk size warning。
+- 已重启本地 Electron 预览，右侧“运行”入口消失，应用窗口可正常打开。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

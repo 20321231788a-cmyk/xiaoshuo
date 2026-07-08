@@ -1,6 +1,5 @@
 import type { AppConfig, ConversationSummary, JobInfo } from "@xiaoshuo/shared";
 import {
-  Activity,
   ArchiveRestore,
   Bot,
   BookOpen,
@@ -50,7 +49,6 @@ export const railModes = [
   { key: "card_draw", label: "抽卡", icon: Sparkles, tab: "operations", feature: "card_draw" },
   { key: "ledger", label: "伏笔", icon: Pin, tab: "overview", feature: "ledger" },
   { key: "revision", label: "日志", icon: History, tab: "overview", feature: "revision" },
-  { key: "traces", label: "运行", icon: Activity, tab: "overview", feature: "traces" },
   { key: "skills", label: "技能", icon: Library, tab: "operations", feature: "skills" },
   { key: "consistency", label: "一致性", icon: ScanSearch, tab: "operations", feature: "consistency" },
   { key: "settings", label: "设置", icon: Settings, tab: "config", feature: "settings" }

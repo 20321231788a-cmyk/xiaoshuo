@@ -51,9 +51,22 @@ function registerApplicationMenu(): void {
       click: () => app.quit()
     },
     {
-      label: "刷新",
-      accelerator: "CommandOrControl+R",
-      click: () => activeWindow()?.webContents.send(ipcChannels.appRequestRefresh)
+      label: "状态",
+      submenu: [
+        {
+          label: "刷新",
+          accelerator: "CommandOrControl+R",
+          click: () => activeWindow()?.webContents.send(ipcChannels.appRequestRefresh)
+        },
+        {
+          label: "运行",
+          click: () => activeWindow()?.webContents.send(ipcChannels.appRequestRun)
+        },
+        {
+          label: "向量测试",
+          click: () => activeWindow()?.webContents.send(ipcChannels.appRequestVectorTest)
+        }
+      ]
     },
     {
       label: "教程",

@@ -10,6 +10,7 @@ import type {
   WebsiteAiRechargeOrder
 } from "@xiaoshuo/shared";
 import {
+  Activity,
   ArchiveRestore,
   Bot,
   BookOpen,
@@ -19,6 +20,7 @@ import {
   Cloud,
   Columns,
   Copy,
+  Database,
   Download,
   Eye,
   EyeOff,
@@ -65,6 +67,7 @@ import { CardDrawFeaturePage } from "./features/card-draw/CardDrawFeaturePage.js
 import { DisassembleFeaturePage } from "./features/disassembly/DisassemblyFeaturePage.js";
 import { SettingsFeaturePage } from "./features/settings/SettingsFeaturePage.js";
 import { SkillFeaturePage } from "./features/skills/SkillFeaturePage.js";
+import { VectorTestFeaturePage } from "./features/vector/VectorTestFeaturePage.js";
 import { LedgerFeaturePage } from "./features/ledger/LedgerFeaturePage.js";
 import { LegacyWorkbenchView, type LegacyWorkbenchTab } from "./features/legacy/LegacyWorkbenchView.js";
 import { LogsFeaturePage } from "./features/revision/LogsFeaturePage.js";
@@ -108,6 +111,7 @@ type CenterFeature =
   | "revision"
   | "skills"
   | "traces"
+  | "vector_test"
   | "consistency"
   | "settings"
   | "terminal";
@@ -189,12 +193,24 @@ export function App() {
       setCenterFeature("editor");
       setReplaceRequestTick((value) => value + 1);
     });
+    const unsubscribeRun = window.xiaoshuoDesktop?.onRequestRun?.(() => {
+      setLegacyWorkbenchTab(null);
+      setCenterFeature("traces");
+      controller.setActiveTab("overview");
+    });
+    const unsubscribeVectorTest = window.xiaoshuoDesktop?.onRequestVectorTest?.(() => {
+      setLegacyWorkbenchTab(null);
+      setCenterFeature("vector_test");
+      controller.setActiveTab("overview");
+    });
     return () => {
       unsubscribeTutorial?.();
       unsubscribeRefresh?.();
       unsubscribeSave?.();
       unsubscribeFind?.();
       unsubscribeReplace?.();
+      unsubscribeRun?.();
+      unsubscribeVectorTest?.();
     };
   }, [controller]);
 
@@ -281,7 +297,7 @@ export function App() {
       controller.setActiveTab("config");
       return;
     }
-    if (feature === "timeline" || feature === "ledger" || feature === "revision" || feature === "traces") {
+    if (feature === "timeline" || feature === "ledger" || feature === "revision" || feature === "traces" || feature === "vector_test") {
       controller.setActiveTab("overview");
       return;
     }
@@ -735,6 +751,15 @@ function FeatureWorkbenchPanel({
     ref.current?.setSelectionRange(index, index + query.length);
   }
 
+  function closeStatusMenu(event: ReactMouseEvent<HTMLElement>) {
+    event.currentTarget.closest("details")?.removeAttribute("open");
+  }
+
+  function openStatusFeature(event: ReactMouseEvent<HTMLElement>, nextFeature: CenterFeature) {
+    closeStatusMenu(event);
+    onSelectFeature(nextFeature);
+  }
+
   return (
     <div className="xw-editor-workbench">
       <header className="xw-editor-topbar">
@@ -759,10 +784,35 @@ function FeatureWorkbenchPanel({
             <span>{isSplit ? "单屏" : "分屏"}</span>
           </button>
 
-          <button className="xw-secondary-button compact" onClick={() => void controller.reopenDocumentFromDisk()} disabled={!currentPaneDoc || controller.documentBusy}>
-            <RefreshCw size={15} />
-            <span>刷新</span>
-          </button>
+          <details className="xw-status-menu">
+            <summary className="xw-secondary-button compact xw-status-summary" title="状态操作">
+              <Activity size={15} />
+              <span>状态</span>
+              <ChevronDown size={14} />
+            </summary>
+            <div className="xw-status-menu-popover" role="menu">
+              <button
+                type="button"
+                role="menuitem"
+                onClick={(event) => {
+                  closeStatusMenu(event);
+                  void controller.reopenDocumentFromDisk();
+                }}
+                disabled={!currentPaneDoc || controller.documentBusy}
+              >
+                <RefreshCw size={15} />
+                <span>刷新</span>
+              </button>
+              <button type="button" role="menuitem" onClick={(event) => openStatusFeature(event, "traces")}>
+                <Activity size={15} />
+                <span>运行</span>
+              </button>
+              <button type="button" role="menuitem" onClick={(event) => openStatusFeature(event, "vector_test")}>
+                <Database size={15} />
+                <span>向量测试</span>
+              </button>
+            </div>
+          </details>
           <button className="xw-primary-button compact" onClick={() => void controller.saveActiveDocument()} disabled={!currentPaneDoc || controller.documentBusy}>
             <Save size={15} />
             <span>保存当前</span>
@@ -1045,6 +1095,7 @@ function featureTitle(feature: CenterFeature, activeDocument: OpenDocumentTab | 
     revision: "日志",
     skills: "技能",
     traces: "Agent 运行",
+    vector_test: "向量测试",
     consistency: "一致性检查",
     settings: "设置",
     terminal: "终端"
@@ -1143,6 +1194,9 @@ function FeatureContentSurface({
   }
   if (feature === "traces") {
     return <AgentTraceView runtime={controller.runtime} />;
+  }
+  if (feature === "vector_test") {
+    return <VectorTestFeaturePage controller={controller} />;
   }
   if (feature === "settings") {
     return <SettingsFeaturePage controller={controller} />;

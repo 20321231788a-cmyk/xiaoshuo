@@ -8,13 +8,6 @@ const TerminalView = lazy(() => import("../../views/TerminalView.js").then((modu
 
 export type LegacyWorkbenchTab = "project" | "editor" | "conversations" | "terminal";
 
-const legacyTabs: Array<{ key: LegacyWorkbenchTab; label: string }> = [
-  { key: "project", label: "项目" },
-  { key: "editor", label: "编辑" },
-  { key: "conversations", label: "会话" },
-  { key: "terminal", label: "终端" }
-];
-
 export function LegacyWorkbenchView({
   controller,
   activeTab,
@@ -28,19 +21,6 @@ export function LegacyWorkbenchView({
 }) {
   return (
     <div className="xw-embedded-view">
-      <nav className="xw-page-tabs xw-legacy-nav" aria-label="Workbench sections">
-        <span>工作区</span>
-        {legacyTabs.map((tab) => (
-          <button
-            key={tab.key}
-            className={activeTab === tab.key ? "active" : ""}
-            type="button"
-            onClick={() => onActiveTabChange(tab.key)}
-          >
-            {tab.label}
-          </button>
-        ))}
-      </nav>
       {activeTab ? renderLegacyTab(controller, activeTab, onActiveTabChange) : children}
     </div>
   );
