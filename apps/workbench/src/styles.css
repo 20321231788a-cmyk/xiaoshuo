@@ -836,6 +836,71 @@ button {
   border: 1px solid rgba(27, 43, 41, 0.08);
 }
 
+.xw-vector-test-page .xw-vector-status-grid {
+  grid-template-columns: minmax(0, 1fr);
+  margin-top: 12px;
+}
+
+.xw-vector-status-strip {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+  padding: 12px 14px;
+}
+
+.xw-vector-status-strip .status-card-head {
+  justify-content: flex-start;
+  gap: 10px;
+  min-width: 148px;
+}
+
+.xw-vector-status-strip .status-card-meta {
+  grid-template-columns: repeat(4, minmax(100px, 1fr));
+  gap: 8px;
+  margin: 0;
+  min-width: 0;
+}
+
+.xw-vector-status-strip .status-card-meta div {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 10px;
+  border-radius: 8px;
+  background: rgba(239, 247, 253, 0.62);
+}
+
+.xw-vector-status-strip .status-card-meta dt {
+  flex: 0 0 auto;
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.xw-vector-status-strip .status-card-meta dd {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (max-width: 900px) {
+  .xw-vector-status-strip {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .xw-vector-status-strip .status-card-meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .xw-vector-status-strip .status-card-meta {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .readiness-grid {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));

@@ -24,8 +24,8 @@ export function VectorTestFeaturePage({ controller }: { controller: WorkbenchCon
         </button>
       </div>
 
-      <div className="status-card-grid">
-        <article data-testid="vector-test-status-card" className="status-card">
+      <div className="status-card-grid xw-vector-status-grid">
+        <article data-testid="vector-test-status-card" className="status-card xw-vector-status-strip">
           <div className="status-card-head">
             <strong>向量索引</strong>
             <span className={`status-chip ${vectorIndex.ready ? "ready" : vectorIndex.pending_files ? "warn" : "idle"}`}>
