@@ -1846,6 +1846,31 @@ npm run build:workbench
 - Workbench 构建通过；仍只有既有 Vite chunk size warning。
 - 左侧重复按钮已移除，刷新和补全索引入口已按新位置收拢。
 
+### 15.44 2026-07-08 0.4.0 版本号同步记录
+
+本轮按发布要求将 ArcWriter 应用版本推进到 `0.4.0`，并准备把当前 `main` 最新提交同步到 GitHub。
+
+主要改动：
+
+- 桌面壳 `@xiaoshuo/desktop-shell` 的包版本从 `0.3.2` 更新为 `0.4.0`，锁文件同步更新。
+- Workbench 浏览器窗口标题从 `ArcWriter 0.3.2` 更新为 `ArcWriter 0.4.0`。
+- 更新服务测试里的打包应用模拟版本同步为 `0.4.0`。
+
+本轮已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/workbench
+npm run build:workbench
+npm run typecheck -w @xiaoshuo/desktop-shell
+npm run build -w @xiaoshuo/desktop-shell
+```
+
+验收结果：
+
+- 应用显示版本和桌面壳打包版本已统一为 `0.4.0`。
+- 维护文档已记录本次版本号同步范围。
+- `release/` 下未跟踪的安装包元数据没有手工修改，后续如需发布安装包应由 `npm run dist -w @xiaoshuo/desktop-shell` 或发布流水线生成。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：
