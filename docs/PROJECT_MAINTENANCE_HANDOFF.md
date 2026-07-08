@@ -1848,7 +1848,7 @@ npm run build:workbench
 
 ### 15.44 2026-07-08 0.4.0 版本号同步记录
 
-本轮按发布要求将 ArcWriter 应用版本推进到 `0.4.0`，并准备把当前 `main` 最新提交同步到 GitHub。
+本轮按发布要求将 ArcWriter 应用版本推进到 `0.4.0`，并通过 `v0.4.0` 标签触发 GitHub Release 工作流生成安装包。
 
 主要改动：
 
@@ -1869,7 +1869,9 @@ npm run build -w @xiaoshuo/desktop-shell
 
 - 应用显示版本和桌面壳打包版本已统一为 `0.4.0`。
 - 维护文档已记录本次版本号同步范围。
-- `release/` 下未跟踪的安装包元数据没有手工修改，后续如需发布安装包应由 `npm run dist -w @xiaoshuo/desktop-shell` 或发布流水线生成。
+- `main` 已推送到 GitHub，`v0.4.0` 标签已推送并触发 `Release Desktop` 工作流。
+- GitHub Actions 运行 `28925684476` 已成功完成，Release 页面已生成 `ArcWriter-Setup-0.4.0.exe`、`ArcWriter-Setup-0.4.0.exe.blockmap` 和 `latest.yml`。
+- 本地 `release/` 下旧安装包产物没有手工修改；0.4.0 安装包由 GitHub Actions 从 `v0.4.0` 标签构建生成。
 
 ## 16. 交接注意
 
