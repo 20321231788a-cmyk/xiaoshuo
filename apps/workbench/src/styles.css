@@ -4170,12 +4170,11 @@ body {
 
 .xw-skill-draft-panel {
   display: grid;
-  grid-template-columns: minmax(240px, 0.9fr) minmax(280px, 1.1fr);
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   min-width: 0;
 }
 
-.xw-skill-draft-form,
 .xw-skill-draft-preview {
   display: grid;
   align-content: start;
@@ -4185,30 +4184,6 @@ body {
   border: 1px solid var(--xw-line);
   border-radius: 14px;
   background: rgba(250, 253, 255, 0.84);
-}
-
-.xw-skill-draft-form input,
-.xw-skill-draft-form textarea {
-  width: 100%;
-  min-width: 0;
-  border: 1px solid var(--xw-line);
-  border-radius: 11px;
-  background: rgba(250, 253, 255, 0.94);
-  color: var(--xw-text);
-  font: inherit;
-  outline: none;
-}
-
-.xw-skill-draft-form input {
-  min-height: 36px;
-  padding: 0 12px;
-}
-
-.xw-skill-draft-form textarea {
-  min-height: 82px;
-  resize: vertical;
-  padding: 10px 12px;
-  line-height: 1.55;
 }
 
 .xw-skill-draft-heading {

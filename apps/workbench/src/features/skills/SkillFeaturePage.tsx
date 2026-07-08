@@ -16,8 +16,6 @@ function parseListDraft(value: string): string[] {
 export function SkillFeaturePage({ controller }: { controller: WorkbenchController }) {
   const [pathInput, setPathInput] = useState("");
   const [urlInput, setUrlInput] = useState("");
-  const [draftNameInput, setDraftNameInput] = useState("");
-  const [draftInstructionInput, setDraftInstructionInput] = useState("");
   const [cloneNameInput, setCloneNameInput] = useState("");
   const [editDescriptionInput, setEditDescriptionInput] = useState("");
   const [editPromptInput, setEditPromptInput] = useState("");
@@ -132,14 +130,6 @@ export function SkillFeaturePage({ controller }: { controller: WorkbenchControll
     skillFileInputRef.current?.click();
   }
 
-  function submitSkillDraft(kind: "instruction" | "current_document") {
-    void controller.draftSkillPreview({
-      kind,
-      instruction: draftInstructionInput,
-      targetName: draftNameInput
-    });
-  }
-
   function previewSkillPatch() {
     if (!selectedSkill) {
       return;
@@ -194,32 +184,8 @@ export function SkillFeaturePage({ controller }: { controller: WorkbenchControll
         <button className="xw-secondary-button compact" onClick={controller.openSkillFolder} disabled={controller.operationsBusy}>技能目录</button>
         <button className="xw-secondary-button compact" onClick={() => void refreshSkills()} disabled={controller.operationsBusy}>刷新技能</button>
       </div>
-      <div className="xw-skill-draft-panel">
-        <div className="xw-skill-draft-form">
-          <input value={draftNameInput} onChange={(event) => setDraftNameInput(event.target.value)} placeholder="技能名（可选）" />
-          <textarea
-            value={draftInstructionInput}
-            onChange={(event) => setDraftInstructionInput(event.target.value)}
-            placeholder="把这套提示词做成一个技能"
-          />
-          <div className="xw-skill-draft-actions">
-            <button
-              className="xw-primary-button compact"
-              onClick={() => submitSkillDraft("instruction")}
-              disabled={controller.operationsBusy || (!draftInstructionInput.trim() && !draftNameInput.trim())}
-            >
-              生成草稿
-            </button>
-            <button
-              className="xw-secondary-button compact"
-              onClick={() => submitSkillDraft("current_document")}
-              disabled={controller.operationsBusy}
-            >
-              当前文档草稿
-            </button>
-          </div>
-        </div>
-        {pendingDraft && (
+      {pendingDraft && (
+        <div className="xw-skill-draft-panel">
           <article className="xw-skill-draft-preview">
             <div className="xw-skill-draft-heading">
               <strong>{pendingDraft.skill.name}</strong>
@@ -233,8 +199,8 @@ export function SkillFeaturePage({ controller }: { controller: WorkbenchControll
               <button className="xw-secondary-button compact" onClick={controller.discardPendingSkillDraft} disabled={controller.operationsBusy}>丢弃</button>
             </div>
           </article>
-        )}
-      </div>
+        </div>
+      )}
       {selectedSkill && (
         <section className="xw-skill-edit-panel">
           <div className="xw-skill-edit-head">

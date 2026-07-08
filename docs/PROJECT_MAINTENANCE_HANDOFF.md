@@ -1729,6 +1729,30 @@ npm run build -w @xiaoshuo/desktop-shell
 - Workbench 和 Desktop Shell 构建通过；Workbench build 仍只有既有 Vite chunk size warning。
 - 已重启本地 Electron 预览，右侧“运行”入口消失，应用窗口可正常打开。
 
+### 15.39 2026-07-08 技能页手动草稿入口移除记录
+
+本轮按界面反馈删除技能页内“技能名 / 提示词 / 生成草稿 / 当前文档草稿”手动创建区域，技能创建改由右侧 AI 对话自然语言完成。
+
+主要改动：
+
+- 技能页不再展示手动技能草稿生成表单，也不再提供“当前文档草稿”按钮。
+- 保留顶部本地路径导入、文件上传、URL 草稿、技能目录、刷新技能入口。
+- 保留 URL 草稿生成后的预览、导入草稿和丢弃确认区，避免 URL 导入流程失去确认入口。
+- 清理手动草稿表单相关状态、函数和 CSS，仅保留草稿预览样式。
+
+本轮已验证：
+
+```powershell
+npm run typecheck -w @xiaoshuo/workbench
+npm run build:workbench
+```
+
+验收结果：
+
+- Workbench 类型检查通过。
+- Workbench 构建通过；仍只有既有 Vite chunk size warning。
+- 技能页手动创建技能表单已从中心区移除；现有导入、预览确认和技能管理流程保持可用。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：
