@@ -1898,6 +1898,29 @@ npm test
 - 本轮只替换设计与维护文档，没有修改运行时代码。
 - 工作区原有未跟踪 `PRODUCT.md` 未纳入本轮变更。
 
+### 15.46 2026-07-10 Agent 优化方案二次审查补强记录
+
+本轮对新版 Agent 智能化优化手册进行第二次工程完整性审查，并按审查结果直接补强现行方案。
+
+新增和修正内容：
+
+- 新增安全与信任模型：区分系统策略、用户指令、可信项目、不可信文件/网页和模型草稿，明确 imported skill 工具权限白名单、本地 runtime 会话令牌、Origin 校验和统一脱敏要求。
+- 新增并发与事务原则：写入携带文档版本/hash、幂等键和 write lease；Generated Cache、时间线和文档版本按逻辑事务提交，禁止多个 run 静默覆盖同一路径。
+- 补齐 AgentConfirmation、AgentRunEvent、Artifact 和 Verification 数据契约，增加确认过期/失效、SSE 或流式事件重连、sequence 去重和状态回放要求。
+- P0 增加 SQLite schema migration、备份、只读恢复、数据保留、磁盘清理、并发冲突和故障测试。
+- P1 增加 provider 并发限制、Rate Limiter、Circuit Breaker、数据发送披露和本地私密内容保护。
+- P2 通过 VerifierPort/MemoryCommitPort 解除对 P3/P5 的阶段依赖，并补充 Action 权限和 Prompt Injection 测试。
+- P3 增加记忆查看、纠正、遗忘、导出、冲突处理和跨项目隔离；P5 增加评分校准与用户覆盖；P6 增加事件重连和 WCAG 2.2 AA 验收。
+- P7 增加可复现 Eval Manifest、人工盲评校准、故障注入、并发、安全、性能和长时间 soak test。
+- 更新 0.5.0-0.7.0 工作量、P0 第一批任务、Feature Flag 兼容矩阵、停止放量条件和最终完成定义。
+
+本轮验证：
+
+- 文档结构、标题编号和 Markdown 围栏检查。
+- `git diff --check`。
+- 本轮只修改文档，未重复运行代码测试；代码基线仍沿用上一轮已通过的 68 个测试文件、457 个测试用例。
+- 工作区原有未跟踪 `PRODUCT.md` 继续保留，未纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：
