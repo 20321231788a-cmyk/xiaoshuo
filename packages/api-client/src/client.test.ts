@@ -299,7 +299,7 @@ describe("api-client", () => {
     ]);
   });
 
-  it("lists agent runs, gets run detail, and replays events", async () => {
+  it("lists agent runs, gets run detail and confirmations, and replays events", async () => {
     const requests: Array<{ url: string; method: string }> = [];
     const run = {
       run_id: "run-one",
@@ -332,7 +332,11 @@ describe("api-client", () => {
             { status: 200, headers: { "Content-Type": "application/json" } }
           );
         }
-        const body = url.pathname === "/api/agent/runs" ? { runs: [run], next_cursor: "cursor-two" } : run;
+        const body = url.pathname === "/api/agent/runs"
+          ? { runs: [run], next_cursor: "cursor-two" }
+          : url.pathname.endsWith("/confirmations")
+            ? [{ confirmation_id: "confirmation-one", run_id: "run-one", step_id: "step-one", action: "replace_document", risk_level: "high", status: "pending" }]
+            : run;
         return new Response(JSON.stringify(body), {
           status: 200,
           headers: { "Content-Type": "application/json" }
@@ -347,11 +351,13 @@ describe("api-client", () => {
       limit: 25
     });
     const detail = await client.getAgentRun("run-one");
+    const confirmations = await client.getAgentRunConfirmations("run-one");
     const replay = await client.getAgentRunEvents("run-one", 3);
 
     expect(list.runs[0]).toMatchObject({ run_id: "run-one", status: "queued", version: 1 });
     expect(list.next_cursor).toBe("cursor-two");
     expect(detail.goal.instruction).toBe("续写下一章");
+    expect(confirmations).toMatchObject([{ confirmation_id: "confirmation-one", status: "pending" }]);
     expect(replay.events[0]).toMatchObject({ sequence: 4, step_id: "", payload: {} });
     expect(replay.next_after).toBe(4);
     expect(requests).toEqual([
@@ -361,6 +367,10 @@ describe("api-client", () => {
       },
       {
         url: "http://127.0.0.1:18452/api/agent/runs/run-one",
+        method: "GET"
+      },
+      {
+        url: "http://127.0.0.1:18452/api/agent/runs/run-one/confirmations",
         method: "GET"
       },
       {

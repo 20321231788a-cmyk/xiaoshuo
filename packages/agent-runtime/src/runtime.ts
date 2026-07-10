@@ -557,6 +557,10 @@ export class AgentRuntimeService {
     return this.runCoordinator.listEvents(runId, after, limit);
   }
 
+  listDurableRunConfirmations(runId: string) {
+    return this.runCoordinator.store.listConfirmations(runId);
+  }
+
   listDurableCommitJournal(runId?: string) {
     return this.runCoordinator.listCommitJournal(runId);
   }

@@ -74,6 +74,7 @@ export const apiContracts = {
   createAgentRun: { method: "POST", path: "/api/agent/runs", response: agentRunStateContractSchema },
   agentRuns: { method: "GET", path: "/api/agent/runs", response: agentRunListContractSchema },
   agentRun: { method: "GET", path: "/api/agent/runs/{run_id}", response: agentRunStateContractSchema },
+  agentRunConfirmations: { method: "GET", path: "/api/agent/runs/{run_id}/confirmations", response: z.array(agentConfirmationSchema) },
   agentRunEvents: { method: "GET", path: "/api/agent/runs/{run_id}/events", response: agentRunEventReplayContractSchema },
   pauseAgentRun: { method: "POST", path: "/api/agent/runs/{run_id}/pause", response: agentRunStateContractSchema },
   resumeAgentRun: { method: "POST", path: "/api/agent/runs/{run_id}/resume", response: agentRunStateContractSchema },

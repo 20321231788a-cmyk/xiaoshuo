@@ -502,6 +502,10 @@ export function createApiClient(options: ApiClientOptions) {
       requestContract("agentRun", {
         pathParams: { run_id: runId }
       }),
+    getAgentRunConfirmations: (runId: string) =>
+      requestContract("agentRunConfirmations", {
+        pathParams: { run_id: runId }
+      }),
     getAgentRunEvents: (runId: string, after = 0, limit?: number) =>
       requestContract("agentRunEvents", {
         pathParams: { run_id: runId },

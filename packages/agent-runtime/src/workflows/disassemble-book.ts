@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   createDisassembleBook,
   DISASSEMBLE_SOURCE_IMPORT_CHARS,
+  type DisassembleBookManifest,
   inferDisassembleBookTitle,
   LEGACY_DISASSEMBLE_LORE_PATH,
   LEGACY_REVERSE_OUTLINE_PATH,
@@ -108,83 +109,125 @@ async function archiveDisassembleSource(request: AgentRunRequest, context: Workf
 
 async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRunContext): Promise<AgentRunResponse> {
   throwIfAborted(context.signal);
-  const existingBook = await resolveDisassembleBookForRequest(request, context);
-  const directSource = await resolveWorkflowSourceText(request, context);
-  const source = directSource.trim() || (existingBook ? await readDisassembleBookText(existingBook, "source", context, DISASSEMBLE_SOURCE_IMPORT_CHARS) : "");
-  if (!source.trim()) {
-    throw new Error("拆书需要上传文件、来源文件或直接输入文本");
+  const completed = new Map(
+    (context.checkpoint?.listCompletedUnits("disassemble_book") || []).map((checkpoint) => [checkpoint.unit_id, checkpoint.payload])
+  );
+  let book = restoreCheckpointBook(completed.get("book"));
+  let source = "";
+
+  if (!book) {
+    const existingBook = await resolveDisassembleBookForRequest(request, context);
+    const directSource = await resolveWorkflowSourceText(request, context);
+    source = directSource.trim() || (existingBook ? await readDisassembleBookText(existingBook, "source", context, DISASSEMBLE_SOURCE_IMPORT_CHARS) : "");
+    if (!source.trim()) {
+      throw new Error("拆书需要上传文件、来源文件或直接输入文本");
+    }
+    book = await createDisassembleBook(
+      {
+        title: String((request as any).book_title || existingBook?.title || "").trim() || (await inferDisassembleBookTitle(request, source)),
+        sourceText: source,
+        sourcePath: existingBook?.source_path || request.current_path || "",
+        origin: request.attachment_ids?.length ? "upload" : request.current_path ? "document" : existingBook?.origin || "input"
+      },
+      context
+    );
+    context.checkpoint?.completeUnit({
+      workflow_id: "disassemble_book",
+      unit_id: "book",
+      payload: { book }
+    });
   }
-  const book = await createDisassembleBook(
-    {
-      title: String((request as any).book_title || existingBook?.title || "").trim() || (await inferDisassembleBookTitle(request, source)),
-      sourceText: source,
-      sourcePath: existingBook?.source_path || request.current_path || "",
-      origin: request.attachment_ids?.length ? "upload" : request.current_path ? "document" : existingBook?.origin || "input"
-    },
-    context
-  );
   throwIfAborted(context.signal);
 
-  const bookTitle = book.title || "当前拆书书籍";
-  const lore = await context.skillRunner.runSkill("lore_extract", {
-    text: source,
-    chapter: 0,
-    end_chapter: 0,
-    target_words: 2500,
-    instruction: buildLoreInstruction(bookTitle, request),
-    target_path: "",
-    conversation_id: request.conversation_id || "",
-    source_path: "",
-    write_result: false,
-    attachment_ids: []
-  }, { signal: context.signal });
-  throwIfAborted(context.signal);
-  const reverseOutline = await context.skillRunner.runSkill("reverse_outline_extract", {
-    text: source,
-    chapter: 0,
-    end_chapter: 0,
-    target_words: 2500,
-    instruction: buildReverseOutlineInstruction(bookTitle, request),
-    target_path: "",
-    conversation_id: request.conversation_id || "",
-    source_path: "",
-    write_result: false,
-    attachment_ids: []
-  }, { signal: context.signal });
-  throwIfAborted(context.signal);
-
-  const lorePath = `${book.dir}/拆书设定提取.txt`;
-  const reversePath = `${book.dir}/反向细纲.txt`;
-  const loreText = normalizeDisassembleOutput("lore", bookTitle, lore.result || "");
-  const reverseOutlineText = normalizeDisassembleOutput("reverse", bookTitle, reverseOutline.result || "");
-  await context.documents.saveDocument(lorePath, loreText, {
-    source: "skill",
-    summary: "拆书写入设定"
-  });
-  await context.documents.saveDocument(reversePath, reverseOutlineText, {
-    source: "skill",
-    summary: "拆书写入反向细纲"
-  });
-  await context.documents.saveDocument(LEGACY_DISASSEMBLE_LORE_PATH, loreText, {
-    source: "skill",
-    summary: "拆书写入设定 legacy 同步"
-  });
-  await context.documents.saveDocument(LEGACY_REVERSE_OUTLINE_PATH, reverseOutlineText, {
-    source: "skill",
-    summary: "拆书写入反向细纲 legacy 同步"
-  });
-  const updatedBook = await writeDisassembleBookManifest(
-    {
+  let lore = restoreDisassembleOutput(completed.get("lore"));
+  if (lore) {
+    book = lore.book;
+  } else {
+    source = source || await readDisassembleBookText(book, "source", context, DISASSEMBLE_SOURCE_IMPORT_CHARS);
+    if (!source.trim()) {
+      throw new Error("拆书需要上传文件、来源文件或直接输入文本");
+    }
+    const lorePath = `${book.dir}/拆书设定提取.txt`;
+    const loreResult = await context.skillRunner.runSkill("lore_extract", {
+      text: source,
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: buildLoreInstruction(book.title || "当前拆书书籍", request),
+      target_path: "",
+      conversation_id: request.conversation_id || "",
+      source_path: "",
+      write_result: false,
+      attachment_ids: []
+    }, { signal: context.signal });
+    throwIfAborted(context.signal);
+    const text = normalizeDisassembleOutput("lore", book.title || "当前拆书书籍", loreResult.result || "");
+    await context.documents.saveDocument(lorePath, text, {
+      source: "skill",
+      summary: "拆书写入设定"
+    });
+    await context.documents.saveDocument(LEGACY_DISASSEMBLE_LORE_PATH, text, {
+      source: "skill",
+      summary: "拆书写入设定 legacy 同步"
+    });
+    book = await writeDisassembleBookManifest({
       ...book,
-      updated_at: new Date().toISOString(),
-      paths: {
-        ...book.paths,
-        lore: lorePath,
-        reverse_outline: reversePath
-      }
-    },
-    context
-  );
+      paths: { ...book.paths, lore: lorePath }
+    }, context);
+    lore = { book, path: lorePath, legacy_path: LEGACY_DISASSEMBLE_LORE_PATH };
+    context.checkpoint?.completeUnit({
+      workflow_id: "disassemble_book",
+      unit_id: "lore",
+      payload: lore
+    });
+  }
+
+  let reverseOutline = restoreDisassembleOutput(completed.get("reverse_outline"));
+  if (reverseOutline) {
+    book = reverseOutline.book;
+  } else {
+    source = source || await readDisassembleBookText(book, "source", context, DISASSEMBLE_SOURCE_IMPORT_CHARS);
+    if (!source.trim()) {
+      throw new Error("拆书需要上传文件、来源文件或直接输入文本");
+    }
+    const reversePath = `${book.dir}/反向细纲.txt`;
+    const reverseResult = await context.skillRunner.runSkill("reverse_outline_extract", {
+      text: source,
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: buildReverseOutlineInstruction(book.title || "当前拆书书籍", request),
+      target_path: "",
+      conversation_id: request.conversation_id || "",
+      source_path: "",
+      write_result: false,
+      attachment_ids: []
+    }, { signal: context.signal });
+    throwIfAborted(context.signal);
+    const text = normalizeDisassembleOutput("reverse", book.title || "当前拆书书籍", reverseResult.result || "");
+    await context.documents.saveDocument(reversePath, text, {
+      source: "skill",
+      summary: "拆书写入反向细纲"
+    });
+    await context.documents.saveDocument(LEGACY_REVERSE_OUTLINE_PATH, text, {
+      source: "skill",
+      summary: "拆书写入反向细纲 legacy 同步"
+    });
+    book = await writeDisassembleBookManifest({
+      ...book,
+      paths: { ...book.paths, reverse_outline: reversePath }
+    }, context);
+    reverseOutline = { book, path: reversePath, legacy_path: LEGACY_REVERSE_OUTLINE_PATH };
+    context.checkpoint?.completeUnit({
+      workflow_id: "disassemble_book",
+      unit_id: "reverse_outline",
+      payload: reverseOutline
+    });
+  }
+
+  const lorePath = lore.path;
+  const reversePath = reverseOutline.path;
+  const updatedBook = reverseOutline.book;
 
   const savedPaths = [lorePath, reversePath];
   const reply = `已写入 ${savedPaths.length} 个文件：\n${savedPaths.join("\n")}`;
@@ -210,6 +253,66 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
     },
     saved_paths: savedPaths,
     requires_confirmation: false
+  };
+}
+
+type DisassembleOutputCheckpoint = {
+  book: DisassembleBookManifest;
+  path: string;
+  legacy_path: string;
+};
+
+function restoreCheckpointBook(value: unknown): DisassembleBookManifest | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  return restoreDisassembleBook((value as Record<string, unknown>).book);
+}
+
+function restoreDisassembleOutput(value: unknown): DisassembleOutputCheckpoint | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const source = value as Record<string, unknown>;
+  const book = restoreDisassembleBook(source.book);
+  const outputPath = String(source.path || "").trim();
+  const legacyPath = String(source.legacy_path || "").trim();
+  if (!book || !outputPath || !legacyPath) {
+    return null;
+  }
+  return { book, path: outputPath, legacy_path: legacyPath };
+}
+
+function restoreDisassembleBook(value: unknown): DisassembleBookManifest | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const source = value as Record<string, unknown>;
+  const id = String(source.id || "").trim();
+  const title = String(source.title || "").trim();
+  const dir = String(source.dir || "").trim();
+  if (!id || !title || !dir) {
+    return null;
+  }
+  const paths = source.paths && typeof source.paths === "object" && !Array.isArray(source.paths)
+    ? source.paths as Record<string, unknown>
+    : {};
+  return {
+    id,
+    title,
+    dir,
+    created_at: String(source.created_at || "").trim(),
+    updated_at: String(source.updated_at || "").trim(),
+    origin: String(source.origin || "").trim(),
+    source_path: String(source.source_path || "").trim(),
+    source_summary: String(source.source_summary || "").trim(),
+    chars: Number.isFinite(Number(source.chars)) ? Math.max(0, Math.trunc(Number(source.chars))) : 0,
+    paths: {
+      source: String(paths.source || "").trim(),
+      lore: String(paths.lore || "").trim(),
+      reverse_outline: String(paths.reverse_outline || "").trim(),
+      detail_outline: String(paths.detail_outline || "").trim()
+    }
   };
 }
 

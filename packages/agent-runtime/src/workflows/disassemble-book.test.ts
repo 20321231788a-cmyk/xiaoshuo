@@ -6,6 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { GeneratedSavePlanner } from "../generated-save-planner.js";
+import { RunCoordinator } from "../kernel/run-coordinator.js";
+import { DurableWorkflowCheckpointStore } from "../kernel/workflow-checkpoint.js";
 import { AgentRuntimeService, closeAllAgentRuntimeServices } from "../runtime.js";
 import { PromptSkillRunner } from "../skill-runner.js";
 import { DisassembleBookWorkflow } from "./disassemble-book.js";
@@ -187,5 +189,78 @@ describe("DisassembleBookWorkflow", () => {
     expect(book?.title).toBe("归档书籍");
     expect(result.saved_paths).toEqual([`${book?.dir}/原文.txt`]);
     expect(await fs.readFile(path.join(tempDir, book?.dir || "", "原文.txt"), "utf8")).toContain("归档的拆书原文");
+  });
+
+  it("resumes the same durable run without recomputing its persisted lore output after a SQLite restart", async () => {
+    const request = {
+      request_id: "disassemble-checkpoint-recovery",
+      conversation_id: "",
+      content: "请拆书",
+      current_path: "",
+      selection: "林默从寒门少年一路成长为宗门天骄。",
+      project_context_hint: "",
+      skill_id: "disassemble_book",
+      attachment_ids: []
+    };
+    const workflow = new DisassembleBookWorkflow();
+    const calls: string[] = [];
+    let failReverseOutline = true;
+    const modelClient = {
+      requestCompletion: async (_config: unknown, messages: Array<{ content: string }>) => {
+        const prompt = messages.map((message) => message.content).join("\n");
+        if (prompt.includes("拆书设定提取.txt")) {
+          calls.push("lore");
+          return "【人物设定】\n林默：主角，出身寒门。";
+        }
+        calls.push("reverse_outline");
+        if (failReverseOutline) {
+          failReverseOutline = false;
+          throw new Error("simulated runtime interruption");
+        }
+        return "第一章：林默入宗门。";
+      }
+    };
+    const coordinator = new RunCoordinator({ projectRoot: tempDir, autoHeartbeat: false });
+    const firstExecution = coordinator.beginRun(request, { stepType: "workflow", retryable: true });
+    const firstContext = createWorkflowContext(modelClient);
+    firstContext.checkpoint = new DurableWorkflowCheckpointStore(coordinator.store, {
+      runId: firstExecution.run_id,
+      stepId: firstExecution.step_id,
+      attemptId: firstExecution.attempt_id
+    });
+
+    await expect(workflow.runAgent(request, firstContext)).rejects.toThrow("simulated runtime interruption");
+    const failed = coordinator.failRun(firstExecution, new Error("simulated runtime interruption"));
+    expect(coordinator.listEvents(firstExecution.run_id)
+      .filter((event) => event.event_type === "workflow.unit.completed")
+      .map((event) => event.payload.unit_id)).toEqual(["book", "lore"]);
+    coordinator.close();
+
+    const recovered = new RunCoordinator({ projectRoot: tempDir, autoHeartbeat: false });
+    try {
+      const resumed = recovered.resumeRun(firstExecution.run_id, "resume-disassemble-checkpoint", failed.version);
+      const resumedContext = createWorkflowContext(modelClient);
+      resumedContext.checkpoint = new DurableWorkflowCheckpointStore(recovered.store, {
+        runId: resumed.run_id,
+        stepId: resumed.step_id,
+        attemptId: resumed.attempt_id
+      });
+
+      const response = await workflow.runAgent(request, resumedContext);
+      recovered.completeRun(resumed, response);
+
+      const book = response.skill_result?.data?.book as { dir?: string } | undefined;
+      const library = await fs.readdir(path.join(tempDir, "00_设定集", "拆书库"), { withFileTypes: true });
+      expect(calls).toEqual(["lore", "reverse_outline", "reverse_outline"]);
+      expect(library.filter((entry) => entry.isDirectory())).toHaveLength(1);
+      expect(await fs.readFile(path.join(tempDir, book?.dir || "", "拆书设定提取.txt"), "utf8")).toContain("林默：主角");
+      expect(response.saved_paths).toEqual([`${book?.dir}/拆书设定提取.txt`, `${book?.dir}/反向细纲.txt`]);
+      expect(recovered.getRun(firstExecution.run_id)).toMatchObject({ run_id: firstExecution.run_id, status: "completed" });
+      expect(recovered.store.listEvents(firstExecution.run_id)
+        .filter((event) => event.event_type === "workflow.unit.completed")
+        .map((event) => event.payload.unit_id)).toEqual(["book", "lore", "reverse_outline"]);
+    } finally {
+      recovered.close();
+    }
   });
 });

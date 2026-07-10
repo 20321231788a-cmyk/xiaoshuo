@@ -1,5 +1,9 @@
 import { EventEmitter } from "node:events";
+import fs from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import os from "node:os";
+import path from "node:path";
+import { RunCoordinator } from "@xiaoshuo/agent-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { handleAgentRoutes } from "./agent-routes.js";
 import type { RuntimeContext } from "./types.js";
@@ -7,6 +11,7 @@ import type { RuntimeContext } from "./types.js";
 const runtime = vi.hoisted(() => ({
   listDurableRuns: vi.fn(),
   getDurableRun: vi.fn(),
+  listDurableRunConfirmations: vi.fn(),
   listDurableRunEvents: vi.fn(),
   pauseDurableRun: vi.fn(),
   cancelDurableRun: vi.fn(),
@@ -186,6 +191,96 @@ describe("agent lifecycle routes", () => {
       detail: "Confirmation version changed",
       code: "VERSION_CONFLICT"
     });
+  });
+
+  it("keeps confirmation-required work incomplete until an approved checkpoint is explicitly resumed", async () => {
+    const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "xiaoshuo-confirmation-api-"));
+    const coordinator = new RunCoordinator({ projectRoot, runtimeInstanceId: "runtime-confirmation-api", autoHeartbeat: false });
+    try {
+      const execution = coordinator.beginRun({
+        request_id: "confirmation-api-request",
+        conversation_id: "",
+        content: "替换正文文件",
+        current_path: "",
+        selection: "",
+        project_context_hint: "",
+        skill_id: "",
+        attachment_ids: []
+      }, { stepType: "file_operation", requiresConfirmation: true });
+      const waiting = coordinator.completeRun(execution, {
+        intent: "file_operation",
+        reply: "待写入预览",
+        conversation: null,
+        results: [],
+        skill_result: null,
+        saved_paths: [],
+        requires_confirmation: true
+      });
+      const confirmation = coordinator.store.listConfirmations(execution.run_id, "pending")[0]!;
+      expect(waiting.status).toBe("waiting_confirmation");
+
+      runtime.getDurableRun.mockImplementation((runId: string) => coordinator.getRun(runId));
+      runtime.listDurableRunConfirmations.mockImplementation((runId: string) => coordinator.store.listConfirmations(runId));
+      runtime.resolveDurableConfirmation.mockImplementation((confirmationId: string, status: "approved" | "rejected", operationId: string, version: number) =>
+        coordinator.resolveConfirmation(confirmationId, status, operationId, version)
+      );
+      runtime.resumeDurableRun.mockImplementation((runId: string, operationId: string, version: number) => {
+        coordinator.resumeRun(runId, operationId, version);
+        return coordinator.getRun(runId)!;
+      });
+      const writeJson = vi.fn();
+
+      await handleAgentRoutes(request("GET"), response(), `/api/agent/runs/${execution.run_id}/confirmations`, context(), deps(writeJson));
+      expect(writeJson).toHaveBeenLastCalledWith(expect.anything(), 200, [expect.objectContaining({ confirmation_id: confirmation.confirmation_id, status: "pending" })]);
+
+      const approval = { operation_id: "operation-approve", expected_version: confirmation.version };
+      await handleAgentRoutes(request("POST"), response(), `/api/agent/confirmations/${confirmation.confirmation_id}/approve`, context(), deps(writeJson, approval));
+      await handleAgentRoutes(request("POST"), response(), `/api/agent/confirmations/${confirmation.confirmation_id}/approve`, context(), deps(writeJson, approval));
+      expect(writeJson).toHaveBeenLastCalledWith(expect.anything(), 200, expect.objectContaining({ status: "approved" }));
+      const paused = coordinator.getRun(execution.run_id)!;
+      expect(paused.status).toBe("paused");
+
+      await handleAgentRoutes(
+        request("POST"),
+        response(),
+        `/api/agent/runs/${execution.run_id}/resume`,
+        context(),
+        deps(writeJson, { operation_id: "operation-resume", expected_version: paused.version })
+      );
+      expect(writeJson).toHaveBeenLastCalledWith(expect.anything(), 200, expect.objectContaining({ status: "running" }));
+    } finally {
+      coordinator.close();
+      await fs.rm(projectRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects and expires confirmation checkpoints without allowing completion", async () => {
+    const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "xiaoshuo-confirmation-expiry-api-"));
+    let nowMs = Date.parse("2026-07-10T04:00:00.000Z");
+    const coordinator = new RunCoordinator({ projectRoot, runtimeInstanceId: "runtime-confirmation-expiry-api", autoHeartbeat: false, now: () => new Date(nowMs) });
+    try {
+      const createWaitingRun = () => {
+        const execution = coordinator.beginRun({ request_id: `confirmation-${nowMs}`, conversation_id: "", content: "删除文件", current_path: "", selection: "", project_context_hint: "", skill_id: "", attachment_ids: [] }, { stepType: "file_operation", requiresConfirmation: true });
+        coordinator.completeRun(execution, { intent: "file_operation", reply: "预览", conversation: null, results: [], skill_result: null, saved_paths: [], requires_confirmation: true });
+        return { execution, confirmation: coordinator.store.listConfirmations(execution.run_id, "pending")[0]! };
+      };
+      const rejected = createWaitingRun();
+      runtime.resolveDurableConfirmation.mockImplementation((confirmationId: string, status: "approved" | "rejected", operationId: string, version: number) =>
+        coordinator.resolveConfirmation(confirmationId, status, operationId, version)
+      );
+      const writeJson = vi.fn();
+      await handleAgentRoutes(request("POST"), response(), `/api/agent/confirmations/${rejected.confirmation.confirmation_id}/reject`, context(), deps(writeJson, { operation_id: "operation-reject", expected_version: rejected.confirmation.version }));
+      expect(coordinator.getRun(rejected.execution.run_id)).toMatchObject({ status: "failed", error_code: "CONFIRMATION_REJECTED" });
+
+      nowMs += 1;
+      const expired = createWaitingRun();
+      nowMs += 16 * 60_000;
+      expect(coordinator.expirePendingConfirmations()).toBe(1);
+      expect(coordinator.getRun(expired.execution.run_id)).toMatchObject({ status: "failed", error_code: "CONFIRMATION_EXPIRED" });
+    } finally {
+      coordinator.close();
+      await fs.rm(projectRoot, { recursive: true, force: true });
+    }
   });
 
   it("returns 404 for an unknown run", async () => {

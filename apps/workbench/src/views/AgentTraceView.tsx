@@ -1,5 +1,5 @@
 import { createApiClient } from "@xiaoshuo/api-client";
-import type { AgentRunEvent, AgentRunState, AgentRunTrace } from "@xiaoshuo/shared";
+import type { AgentConfirmation, AgentRunEvent, AgentRunState, AgentRunTrace } from "@xiaoshuo/shared";
 import { Pause, Play, RefreshCw, RotateCcw, Square } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { WorkbenchRuntime } from "../lib/runtime.js";
@@ -25,6 +25,7 @@ export function AgentTraceView({ runtime }: { runtime: WorkbenchRuntime }) {
   const [message, setMessage] = useState("");
   const [acting, setActing] = useState("");
   const [events, setEvents] = useState<AgentRunEvent[]>([]);
+  const [confirmations, setConfirmations] = useState<AgentConfirmation[]>([]);
   const [eventGapDetected, setEventGapDetected] = useState(false);
   const replayStateRef = useRef(new Map<string, ReplayState>());
   const loadSequenceRef = useRef(0);
@@ -90,6 +91,7 @@ export function AgentTraceView({ runtime }: { runtime: WorkbenchRuntime }) {
       setRunDetail(null);
       setDetail(null);
       setEvents([]);
+      setConfirmations([]);
       setEventGapDetected(false);
       return;
     }
@@ -99,12 +101,14 @@ export function AgentTraceView({ runtime }: { runtime: WorkbenchRuntime }) {
     setRunDetail(fallbackRun || null);
     setDetail(fallbackTrace || null);
     setEvents(replayState.events);
+    setConfirmations([]);
     setEventGapDetected(replayState.gapDetected);
     setDetailLoading(true);
     try {
-      const [nextRun, nextTrace, replay] = await Promise.allSettled([
+      const [nextRun, nextTrace, nextConfirmations, replay] = await Promise.allSettled([
         client.getAgentRun(runId),
         client.getAgentTrace(runId),
+        client.getAgentRunConfirmations(runId),
         replayAgentRunEvents((after) => client.getAgentRunEvents(runId, after), replayState.nextSequence)
       ]);
       if (loadSequence !== loadSequenceRef.current) {
@@ -115,6 +119,9 @@ export function AgentTraceView({ runtime }: { runtime: WorkbenchRuntime }) {
       }
       if (nextTrace.status === "fulfilled") {
         setDetail(nextTrace.value);
+      }
+      if (nextConfirmations.status === "fulfilled") {
+        setConfirmations(nextConfirmations.value);
       }
       if (replay.status === "fulfilled") {
         const nextReplayState: ReplayState = {
@@ -219,6 +226,26 @@ export function AgentTraceView({ runtime }: { runtime: WorkbenchRuntime }) {
     }
   }
 
+  async function resolveConfirmation(confirmation: AgentConfirmation, action: "approve" | "reject") {
+    if (!selectedRun) return;
+    setActing(`${action}:${confirmation.confirmation_id}`);
+    setMessage("");
+    try {
+      const payload = { operation_id: createOperationId(), expected_version: confirmation.version };
+      const resolved = action === "approve"
+        ? await client.approveAgentConfirmation(confirmation.confirmation_id, payload)
+        : await client.rejectAgentConfirmation(confirmation.confirmation_id, payload);
+      setConfirmations((current) => current.map((item) => item.confirmation_id === resolved.confirmation_id ? resolved : item));
+      const next = await client.getAgentRun(selectedRun.run_id);
+      setRunDetail(next);
+      setRuns((current) => current.map((run) => run.run_id === next.run_id ? next : run));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setActing("");
+    }
+  }
+
   return (
     <section className="xw-feature-page xw-trace-page">
       <div className="xw-feature-toolbar">
@@ -268,7 +295,7 @@ export function AgentTraceView({ runtime }: { runtime: WorkbenchRuntime }) {
           {!runs.length && !legacyTraces.length && <p className="xw-feature-empty">{loading ? "正在读取运行记录" : "暂无运行记录"}</p>}
         </div>
 
-        <TraceDetail trace={selectedTrace} run={selectedRun} events={events} eventGapDetected={eventGapDetected} acting={acting} onAction={runAction} />
+        <TraceDetail trace={selectedTrace} run={selectedRun} events={events} confirmations={confirmations} eventGapDetected={eventGapDetected} acting={acting} onAction={runAction} onResolveConfirmation={resolveConfirmation} />
       </div>
     </section>
   );
@@ -278,16 +305,20 @@ function TraceDetail({
   trace,
   run,
   events,
+  confirmations,
   eventGapDetected,
   acting,
-  onAction
+  onAction,
+  onResolveConfirmation
 }: {
   trace: AgentRunTrace | null;
   run: AgentRunState | null;
   events: AgentRunEvent[];
+  confirmations: AgentConfirmation[];
   eventGapDetected: boolean;
   acting: string;
   onAction: (action: "pause" | "resume" | "cancel" | "retry", stepId?: string) => Promise<void>;
+  onResolveConfirmation: (confirmation: AgentConfirmation, action: "approve" | "reject") => Promise<void>;
 }) {
   if (!trace && !run) {
     return <p className="xw-feature-empty">未选择运行记录</p>;
@@ -333,6 +364,21 @@ function TraceDetail({
               ))}
             </div>
           </TraceSection>
+          {confirmations.length > 0 && <TraceSection title="执行确认">
+            <div className="xw-trace-stack">
+              {confirmations.map((confirmation) => (
+                <div key={confirmation.confirmation_id} className={`xw-trace-row ${confirmation.status === "rejected" || confirmation.status === "expired" ? "error" : ""}`}>
+                  <strong>{confirmation.summary || confirmation.action}</strong>
+                  <small>{formatConfirmationStatus(confirmation.status)}{confirmation.target_paths.length ? ` · ${confirmation.target_paths.join("、")}` : ""}</small>
+                  {confirmation.status === "pending" && <span className="xw-trace-row-actions">
+                    <button className="xw-secondary-button compact" disabled={Boolean(acting)} onClick={() => void onResolveConfirmation(confirmation, "approve")}>批准</button>
+                    <button className="xw-secondary-button compact" disabled={Boolean(acting)} onClick={() => void onResolveConfirmation(confirmation, "reject")}>拒绝</button>
+                  </span>}
+                  {confirmation.status === "approved" && <span>已批准。请使用“继续”显式恢复任务。</span>}
+                </div>
+              ))}
+            </div>
+          </TraceSection>}
           <TraceSection title="运行事件">
             {eventGapDetected && <p className="xw-trace-warning">部分历史事件已不再保留，状态以当前运行详情为准。</p>}
             <div className="xw-trace-stack">
@@ -604,6 +650,16 @@ function formatStepStatus(status: AgentRunState["steps"][number]["status"]): str
     failed: "失败",
     skipped: "已跳过",
     cancelled: "已取消"
+  }[status];
+}
+
+function formatConfirmationStatus(status: AgentConfirmation["status"]): string {
+  return {
+    pending: "待确认",
+    approved: "已批准",
+    rejected: "已拒绝",
+    expired: "已过期",
+    superseded: "已替代"
   }[status];
 }
 

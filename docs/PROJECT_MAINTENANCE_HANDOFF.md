@@ -2122,6 +2122,14 @@ npm test
 
 本轮根级验证：`npm run typecheck`、`npm test`（79 files/596 tests）、`npm run build:desktop` 和 `git diff --check` 通过。P0 仍未验收；`PRODUCT.md` 未纳入提交。
 
+### 15.57 2026-07-10 P0 拆书恢复、legacy 映射与 Confirmation UI 记录
+
+- `disassemble_book` 为 book、lore、reverse_outline 持久单元写入 checkpoint；SQLite reopen 后复用 manifest 并仅重跑未完成单元；
+- 旧 JobManager 通过 `legacy-job:` 只读、不可恢复投影公开，拒绝将 legacy job 当作 Agent Run 控制；
+- Agent Trace 可展示 pending Confirmation 并执行 approve/reject；批准后保持 paused，必须显式 resume；路由、client、UI 都有回归覆盖。
+
+本轮根级验证：`npm run typecheck`、`npm test`（82 files/605 tests）、`npm run build:workbench`、`npm run build:desktop` 和 `git diff --check` 通过。P0 仍未验收；`PRODUCT.md` 未纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：
