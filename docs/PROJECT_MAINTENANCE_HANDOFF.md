@@ -2239,6 +2239,17 @@ npm test
 
 本轮定向验证：`npm run typecheck -w @xiaoshuo/agent-runtime`、`npx vitest run packages/agent-runtime/src/runtime.test.ts`（87 tests）和 `git diff --check` 通过。根级验证：`npm run typecheck`、`npm test`（86 files / 671 tests）、`npm run build:desktop`、`npm run build:workbench` 和 `git diff --check` 通过；Workbench 只有既有的 >500 kB chunk warning。
 
+### 15.69 2026-07-10 P0 Conversation Write Target Durable Commit 记录
+
+- 显式会话 `write_target` 写回不再由 `sendMessage()` / `streamMessage()` 在 durable run 完成后调用 `DocumentService.saveDocument()` 直写；请求会把写回目标、模式和确认位写入 recoverable request snapshot；
+- runtime 使用 `run_id + step_id + conversation_write_back` 派生 deterministic generated cache，并通过当前 outer run 的 `commitGeneratedCache()` / CommitJournal 写目标文件；该路径复用现有 journal lease、hash 校验、append replay 和 completed-run cache finalizer；
+- 同步会话在 outer `completeRun()` 前完成写回 journal 与 system “已写回”消息；流式会话会暂存内部 final，等 journal 完成、payload 带上 `saved_paths` 和最新 conversation 后再 yield final；
+- 覆盖 journal finalized 后、outer run complete 前崩溃的恢复窗口：同一 `run_id` resume 时从 pending `conversation_write_back` cache 恢复回复，不重新调用模型、不重复写目标文件，也不重复追加 system 写回消息；
+- 本板块没有新增 SQLite schema。回滚代码不得删除已有 durable run、journal 或 deterministic cache；失败恢复仍以 cache 正文、写回 save-plan、原 run journal 和 conversation system 消息幂等键为依据；
+- 本板块只收口显式会话 `write_target` 写回；普通 `file_operation` plan 和 card draw 写入仍是 P0-F 的剩余旁路，P0 继续为“实现中”。`PRODUCT.md` 未修改、未纳入提交。
+
+本轮定向验证：`npm run typecheck -w @xiaoshuo/agent-runtime`、`npm run typecheck -w @xiaoshuo/shared`、`npx vitest run packages/shared/src/schemas/agent.test.ts` 和 `npx vitest run packages/agent-runtime/src/runtime.test.ts`（89 tests）通过。根级验证：`npm run typecheck`、`npm test`（86 files / 673 tests）、`npm run build:desktop`、`npm run build:workbench` 和 `git diff --check` 通过；Workbench 只有既有的 >500 kB chunk warning。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

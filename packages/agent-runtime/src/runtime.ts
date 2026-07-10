@@ -878,8 +878,12 @@ export class AgentRuntimeService {
     this.addAgentRequestContextToTrace(trace, request);
     try {
       await this.addRoutingTrace(request, trace);
-      const response = {
+      let response: AgentRunResponse = {
         ...(await this.runAgentInternal(request, trace, runOptions, execution)),
+        run_id: execution.run_id
+      };
+      response = {
+        ...(await this.attachConversationWriteBack(request, response, runOptions, execution)),
         run_id: execution.run_id
       };
       this.addAgentResponseToTrace(trace, response);
@@ -1027,13 +1031,15 @@ export class AgentRuntimeService {
               : sourceEvent;
         if (event.type === "final") {
           finalPayload = event.payload;
-          this.addAgentResponseToTrace(trace, event.payload);
+          continue;
         }
         yield event;
       }
       if (!finalPayload) {
         throw Object.assign(new Error("Agent stream ended without a final payload"), { code: "STREAM_FINAL_MISSING" });
       }
+      finalPayload = await this.attachConversationWriteBack(request, finalPayload, runOptions, execution);
+      this.addAgentResponseToTrace(trace, finalPayload);
       await this.addModelCallSummaryToTrace(trace, {
         inputChars: agentRequestInputChars(request),
         outputChars: String(finalPayload?.reply || finalPayload?.skill_result?.result || "").length,
@@ -1047,6 +1053,7 @@ export class AgentRuntimeService {
         execution.request_id
       );
       await trace.finish({ saved_paths: finalPayload?.saved_paths || [] });
+      yield { type: "final", payload: finalPayload };
     } catch (error) {
       const durableState = this.failDurableRun(execution, error);
       await this.addModelCallSummaryToTrace(trace, {
@@ -1650,25 +1657,56 @@ export class AgentRuntimeService {
     })[0]?.skillId || "";
   }
 
+  private conversationWriteBackIntent(request: AgentRunRequest): { targetPath: string; mode: "append" | "replace"; confirmWrite: boolean } | null {
+    const targetPath = String((request as any).conversation_write_target || "").trim();
+    if (!targetPath) {
+      return null;
+    }
+    const mode = (request as any).conversation_write_mode === "append" ? "append" : "replace";
+    return {
+      targetPath,
+      mode,
+      confirmWrite: Boolean((request as any).conversation_confirm_write)
+    };
+  }
+
   private async restoreDeferredChatGeneratedResponse(
     request: AgentRunRequest,
     intent: "chat" | "read_context",
     execution: DurableRunExecution
   ): Promise<AgentRunResponse | null> {
-    if (!hasExplicitWriteIntent(request.content || "")) {
+    const candidates: Array<{ cacheId: string; skillId: string }> = [];
+    if (hasExplicitWriteIntent(request.content || "")) {
+      candidates.push({
+        cacheId: deterministicGeneratedCacheId(execution, "chat_generated", "chat_auto_save"),
+        skillId: "chat_generated"
+      });
+    }
+    if (this.conversationWriteBackIntent(request)) {
+      candidates.push({
+        cacheId: deterministicGeneratedCacheId(execution, "conversation_write_back", "conversation_write_back"),
+        skillId: "conversation_write_back"
+      });
+    }
+    if (!candidates.length) {
       return null;
     }
-    const cacheId = deterministicGeneratedCacheId(execution, "chat_generated", "chat_auto_save");
-    const meta = await this.cache.get(cacheId).catch(() => null);
-    if (
-      !meta
-      || meta.skill_id !== "chat_generated"
-      || (meta.status !== "pending" && meta.status !== "committed")
-      || !meta.save_plan
-    ) {
-      return null;
+    let reply = "";
+    for (const candidate of candidates) {
+      const meta = await this.cache.get(candidate.cacheId).catch(() => null);
+      if (
+        !meta
+        || meta.skill_id !== candidate.skillId
+        || (meta.status !== "pending" && meta.status !== "committed")
+        || !meta.save_plan
+      ) {
+        continue;
+      }
+      reply = await this.cache.readContent(candidate.cacheId).catch(() => "");
+      if (reply.trim()) {
+        break;
+      }
     }
-    const reply = await this.cache.readContent(cacheId).catch(() => "");
     if (!reply.trim()) {
       return null;
     }
@@ -1833,6 +1871,129 @@ export class AgentRuntimeService {
           save_plan: plan
         }
       }
+    };
+  }
+
+  private async attachConversationWriteBack(
+    request: AgentRunRequest,
+    response: AgentRunResponse,
+    options: AgentRunOptions,
+    execution: DurableRunExecution
+  ): Promise<AgentRunResponse> {
+    const intent = this.conversationWriteBackIntent(request);
+    if (!intent) {
+      return response;
+    }
+    throwIfAborted(options.signal);
+    let content = String(response.reply || "").trim();
+    if (!content) {
+      return response;
+    }
+
+    const cacheId = deterministicGeneratedCacheId(execution, "conversation_write_back", "conversation_write_back");
+    const savePlan = generatedSavePlanSchema.parse({
+      action: intent.mode === "append" ? "append_to_existing" : "replace_existing",
+      mode: intent.mode,
+      target_paths: [intent.targetPath],
+      reason: "显式会话 write_target 写回",
+      confidence: 1,
+      requires_confirmation: false,
+      should_auto_commit: true,
+      source: "conversation",
+      skill_id: "conversation_write_back"
+    });
+    const existing = await this.cache.get(cacheId).catch(() => null);
+    const cachedContent = existing
+      ? await this.cache.readContent(existing.cache_id).catch(() => "")
+      : "";
+    if (cachedContent.trim()) {
+      if (cachedContent !== content) {
+        throw codedRuntimeError(
+          "CONVERSATION_WRITE_BACK_CACHE_CONTENT_CONFLICT",
+          "同一 durable conversation write_back run 已绑定到不同回复内容"
+        );
+      }
+      content = cachedContent;
+    }
+    if (existing && existing.status !== "pending") {
+      throw codedRuntimeError(
+        "CONVERSATION_WRITE_BACK_CACHE_NOT_PENDING",
+        `会话写回缓存状态为 ${existing.status}，不能继续提交`
+      );
+    }
+    const entry = existing || await this.cache.createWithId(cacheId, {
+      source: "conversation",
+      target_paths: [intent.targetPath],
+      skill_id: "conversation_write_back",
+      conversation_id: response.conversation?.id || request.conversation_id || "",
+      mode: intent.mode,
+      summary: "会话显式写回",
+      save_plan: savePlan
+    });
+    if (!cachedContent) {
+      await this.cache.replace(entry.cache_id, content);
+    }
+    throwIfAborted(options.signal);
+
+    const committed = await this.commitGeneratedCache({
+      cache_id: entry.cache_id,
+      source: "conversation",
+      skill_id: "conversation_write_back",
+      mode: intent.mode,
+      target_paths: [intent.targetPath],
+      save_plan: savePlan,
+      summary: "Conversation write_target write-back",
+      cleanup_content: false
+    }, {
+      ...options,
+      execution
+    });
+    const savedPath = committed.saved_paths[0] || intent.targetPath;
+    const conversation = response.conversation
+      ? await this.appendConversationWriteBackMessage(
+          response.conversation.id,
+          savedPath,
+          intent.mode,
+          execution.run_id,
+          committed.journal_ids
+        )
+      : response.conversation;
+    const writeBackDescriptor = {
+      cache_id: entry.cache_id,
+      saved_paths: committed.saved_paths,
+      journal_ids: committed.journal_ids,
+      source: "conversation_write_back",
+      target_paths: [intent.targetPath],
+      run_id: execution.run_id,
+      request_id: execution.request_id,
+      replayed: committed.replayed
+    };
+    const baseSkillResult = response.skill_result || {
+      status: "done" as const,
+      result: content,
+      saved_path: "",
+      data: {}
+    };
+    const baseData = isRecord(baseSkillResult.data) ? baseSkillResult.data : {};
+    const existingDeferred = Array.isArray(baseData.deferred_generated_caches)
+      ? baseData.deferred_generated_caches
+      : [];
+    return {
+      ...response,
+      conversation,
+      saved_paths: uniquePaths([...(response.saved_paths || []), ...committed.saved_paths]),
+      skill_result: skillRunResponseSchema.parse({
+        ...baseSkillResult,
+        saved_path: baseSkillResult.saved_path || savedPath,
+        data: {
+          ...baseData,
+          conversation_write_back: writeBackDescriptor,
+          deferred_generated_caches: [
+            ...existingDeferred,
+            writeBackDescriptor
+          ]
+        }
+      })
     };
   }
 
@@ -2549,13 +2710,37 @@ export class AgentRuntimeService {
     requestId: string
   ): Promise<void> {
     const data = isRecord(result?.data) ? result.data : {};
-    const cacheId = String(data.cache_id || "").trim();
-    const savedPaths = canonicalGeneratedPaths([
-      ...stringListFromUnknown(data.saved_paths),
-      result?.saved_path || ""
-    ]);
-    const journalIds = stringListFromUnknown(data.journal_ids);
-    if (!cacheId || !savedPaths.length || !journalIds.length) {
+    const descriptors: Array<{ cacheId: string; savedPaths: string[]; journalIds: string[] }> = [];
+    const primaryCacheId = String(data.cache_id || "").trim();
+    if (primaryCacheId) {
+      descriptors.push({
+        cacheId: primaryCacheId,
+        savedPaths: canonicalGeneratedPaths([
+          ...stringListFromUnknown(data.saved_paths),
+          result?.saved_path || ""
+        ]),
+        journalIds: stringListFromUnknown(data.journal_ids)
+      });
+    }
+    if (Array.isArray(data.deferred_generated_caches)) {
+      for (const item of data.deferred_generated_caches) {
+        if (!isRecord(item)) {
+          continue;
+        }
+        descriptors.push({
+          cacheId: String(item.cache_id || "").trim(),
+          savedPaths: canonicalGeneratedPaths([
+            ...stringListFromUnknown(item.saved_paths),
+            ...stringListFromUnknown(item.target_paths)
+          ]),
+          journalIds: stringListFromUnknown(item.journal_ids)
+        });
+      }
+    }
+    const validDescriptors = descriptors.filter((descriptor) =>
+      descriptor.cacheId && descriptor.savedPaths.length && descriptor.journalIds.length
+    );
+    if (!validDescriptors.length) {
       return;
     }
 
@@ -2565,23 +2750,24 @@ export class AgentRuntimeService {
           .listCommitJournal(runId)
           .map((journal) => [journal.journal_id, journal] as const)
       );
-      if (!journalIds.every((journalId) => journalById.get(journalId)?.stage === "finalized")) {
-        return;
+      for (const descriptor of validDescriptors) {
+        if (!descriptor.journalIds.every((journalId) => journalById.get(journalId)?.stage === "finalized")) {
+          continue;
+        }
+        const meta = await this.cache.get(descriptor.cacheId);
+        if (meta.status !== "pending" && meta.status !== "committed") {
+          continue;
+        }
+        if (meta.commit_run_id && meta.commit_run_id !== runId) {
+          continue;
+        }
+        await this.cache.markCommitted(descriptor.cacheId, descriptor.savedPaths, {
+          cleanupContent: true,
+          commitRunId: runId,
+          commitRequestId: requestId,
+          commitJournalIds: descriptor.journalIds
+        });
       }
-
-      const meta = await this.cache.get(cacheId);
-      if (meta.status !== "pending" && meta.status !== "committed") {
-        return;
-      }
-      if (meta.commit_run_id && meta.commit_run_id !== runId) {
-        return;
-      }
-      await this.cache.markCommitted(cacheId, savedPaths, {
-        cleanupContent: true,
-        commitRunId: runId,
-        commitRequestId: requestId,
-        commitJournalIds: journalIds
-      });
     } catch {
       // The outer run already owns the durable result. A completed-request
       // replay will retry this metadata/content cleanup without rerunning the model.
@@ -3017,21 +3203,8 @@ export class AgentRuntimeService {
     await this.validateConversationWriteBackRequest(payload);
     const request = this.conversationPayloadToAgentRequest(conversationId, payload);
     await this.attachCurrentSkillToRequest(request, payload.skill_id || "");
-    let agentResponse = await this.runAgent(request, options);
+    const agentResponse = await this.runAgent(request, options);
     throwIfAborted(options.signal);
-    if (payload.write_target?.trim()) {
-      const writeMode = resolveConversationWriteBackMode(payload);
-      throwIfAborted(options.signal);
-      const savedPath = await this.writeConversationReplyBack(payload.write_target, agentResponse.reply, writeMode, Boolean(payload.confirm_write));
-      const conversation = agentResponse.conversation
-        ? await this.appendConversationWriteBackMessage(agentResponse.conversation.id, savedPath, writeMode)
-        : agentResponse.conversation;
-      agentResponse = {
-        ...agentResponse,
-        conversation,
-        saved_paths: uniquePaths([...(agentResponse.saved_paths || []), savedPath])
-      };
-    }
     return {
       conversation: agentResponse.conversation!,
       reply: agentResponse.reply,
@@ -3053,23 +3226,9 @@ export class AgentRuntimeService {
     for await (const event of this.streamAgentRun(agentRequest, options)) {
       throwIfAborted(options.signal);
       if (event.type === "final") {
-        let payloadResponse = event.payload;
-        if (payload.write_target?.trim()) {
-          const writeMode = resolveConversationWriteBackMode(payload);
-          throwIfAborted(options.signal);
-          const savedPath = await this.writeConversationReplyBack(payload.write_target, payloadResponse.reply, writeMode, Boolean(payload.confirm_write));
-          const conversation = payloadResponse.conversation
-            ? await this.appendConversationWriteBackMessage(payloadResponse.conversation.id, savedPath, writeMode)
-            : payloadResponse.conversation;
-          payloadResponse = {
-            ...payloadResponse,
-            conversation,
-            saved_paths: uniquePaths([...(payloadResponse.saved_paths || []), savedPath])
-          };
-        }
         yield {
           ...event,
-          payload: payloadResponse
+          payload: event.payload
         };
         continue;
       }
@@ -3079,7 +3238,9 @@ export class AgentRuntimeService {
 
   private conversationPayloadToAgentRequest(conversationId: string, payload: ConversationMessageRequest): AgentRunRequest {
     const extra = payload as Record<string, unknown>;
+    const writeTarget = String(payload.write_target || "").trim();
     return {
+      request_id: String(extra.request_id || "").trim(),
       conversation_id: conversationId,
       content: payload.content || "",
       current_path: payload.current_path || "",
@@ -3089,7 +3250,14 @@ export class AgentRuntimeService {
       attachment_ids: payload.attachment_ids || [],
       reference_paths: stringArray(extra.reference_paths),
       confirmed_reference_paths: stringArray(extra.confirmed_reference_paths),
-      disable_auto_references: Boolean(extra.disable_auto_references)
+      disable_auto_references: Boolean(extra.disable_auto_references),
+      ...(writeTarget
+        ? {
+            conversation_write_target: writeTarget,
+            conversation_write_mode: resolveConversationWriteBackMode(payload),
+            conversation_confirm_write: Boolean(payload.confirm_write)
+          }
+        : {})
     };
   }
 
@@ -3129,32 +3297,29 @@ export class AgentRuntimeService {
     }
   }
 
-  private async writeConversationReplyBack(targetPath: string, reply: string, insertMode: "append" | "replace", confirmWrite: boolean): Promise<string> {
-    const target = String(targetPath || "").trim();
-    if (!target) {
-      return "";
-    }
-    let existing = "";
-    let exists = false;
-    try {
-      const doc = await this.documents.readDocument(target);
-      existing = doc.content || "";
-      exists = true;
-    } catch {
-      existing = "";
-    }
-    if (insertMode === "replace" && exists && existing.trim() && !confirmWrite) {
-      throw new Error("覆盖写入已有文档需要 confirm_write=true。");
-    }
-    const content = insertMode === "append" && existing.trim()
-      ? `${existing.trimEnd()}\n\n${String(reply || "").trim()}`
-      : String(reply || "").trim();
-    await this.documents.saveDocument(target, content, { source: "agent" });
-    return target;
-  }
-
-  private async appendConversationWriteBackMessage(conversationId: string, savedPath: string, insertMode: "append" | "replace"): Promise<ConversationDetail> {
+  private async appendConversationWriteBackMessage(
+    conversationId: string,
+    savedPath: string,
+    insertMode: "append" | "replace",
+    runId = "",
+    journalIds: string[] = []
+  ): Promise<ConversationDetail> {
     let detail = await this.conversations.getConversation(conversationId);
+    const messageId = runId
+      ? `writeback_${sha256Text(`${runId}:${savedPath}:${insertMode}`).slice(0, 24)}`
+      : randomUUID().replace(/-/g, "");
+    if (detail.messages.some((message) =>
+      message.id === messageId ||
+      (
+        runId &&
+        isRecord(message.metadata) &&
+        message.metadata.write_back_run_id === runId &&
+        message.metadata.write_target === savedPath &&
+        message.metadata.insert_mode === insertMode
+      )
+    )) {
+      return detail;
+    }
     const now = new Date().toISOString();
     detail = {
       ...detail,
@@ -3162,13 +3327,15 @@ export class AgentRuntimeService {
       messages: [
         ...detail.messages,
         {
-          id: randomUUID().replace(/-/g, ""),
+          id: messageId,
           role: "system",
           content: `已写回 ${savedPath}`,
           created_at: now,
           metadata: {
             write_target: savedPath,
-            insert_mode: insertMode
+            insert_mode: insertMode,
+            ...(runId ? { write_back_run_id: runId } : {}),
+            ...(journalIds.length ? { commit_journal_ids: journalIds } : {})
           }
         }
       ],

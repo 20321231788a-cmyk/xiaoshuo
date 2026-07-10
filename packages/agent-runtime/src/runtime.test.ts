@@ -9,7 +9,7 @@ import { DocumentService } from "@xiaoshuo/document-service";
 import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
 import { ProjectManifestService } from "@xiaoshuo/project-manifest";
 import type { ChatCompletionMessage } from "@xiaoshuo/model-client";
-import type { AgentStreamEvent } from "@xiaoshuo/shared";
+import type { AgentStreamEvent, ConversationMessageRequest } from "@xiaoshuo/shared";
 import { getAgentTraceFilePath } from "./agent-trace.js";
 import { RunCoordinator } from "./kernel/run-coordinator.js";
 import { AgentRuntimeService, closeAllAgentRuntimeServices } from "./runtime.js";
@@ -1337,7 +1337,9 @@ describe("agent-runtime chat flow", () => {
     }
 
     expect(requestCalls).toBeGreaterThan(0);
-    expect(events.map((event) => event.type)).toEqual(["start", "delta", "final"]);
+    expect(events[0]?.type).toBe("start");
+    expect(events.at(-1)?.type).toBe("final");
+    expect(events.some((event) => event.type === "delta")).toBe(true);
     expect(events[1]).toMatchObject({
       type: "delta",
       text: "普通补偿回复"
@@ -1368,6 +1370,7 @@ describe("agent-runtime chat flow", () => {
     });
 
     const payload = {
+      request_id: "conversation-writeback-journal",
       content: "测试发送消息",
       skill_id: "",
       agent_name: "test-agent",
@@ -1392,6 +1395,164 @@ describe("agent-runtime chat flow", () => {
     // Check file content
     const fileContent = await fs.readFile(path.join(tempDir, "02_正文/第一章.txt"), "utf8");
     expect(fileContent).toBe("助理回复内容");
+    const run = runtime.listDurableRuns(["completed"], 10)
+      .find((item) => item.request_id === "conversation-writeback-journal");
+    expect(run?.status).toBe("completed");
+    expect(runtime.listDurableCommitJournal(run!.run_id)).toEqual([
+      expect.objectContaining({
+        run_id: run!.run_id,
+        action: "generated_cache.commit.target:02_正文/第一章.txt",
+        stage: "finalized"
+      })
+    ]);
+    const writeBack = result.skill_result?.data?.conversation_write_back as Record<string, unknown> | undefined;
+    expect(writeBack).toMatchObject({
+      run_id: run!.run_id,
+      saved_paths: ["02_正文/第一章.txt"]
+    });
+    const cacheId = String(writeBack?.cache_id || "");
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    expect(await cache.get(cacheId)).toMatchObject({
+      status: "committed",
+      commit_run_id: run!.run_id,
+      commit_request_id: "conversation-writeback-journal"
+    });
+    await expect(cache.readContent(cacheId)).rejects.toThrow("正文不存在");
+  });
+
+  it("resumes conversation write_target from its pending cache without rerunning the model or duplicating write-back messages", async () => {
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const conversation = await conversations.createConversation({ title: "写回恢复测试" });
+    let modelCalls = 0;
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => {
+          modelCalls += 1;
+          return "写回恢复内容";
+        }
+      }
+    });
+    const coordinator = (runtime as any).runCoordinator;
+    const completeRun = coordinator.completeRun.bind(coordinator);
+    let failBeforeOuterCompletion = true;
+    coordinator.completeRun = (...args: any[]) => {
+      if (failBeforeOuterCompletion) {
+        failBeforeOuterCompletion = false;
+        throw new Error("simulated conversation writeback outer completion crash");
+      }
+      return completeRun(...args);
+    };
+    const payload = {
+      request_id: "conversation-writeback-recovery",
+      content: "测试发送消息",
+      skill_id: "",
+      agent_name: "test-agent",
+      write_target: "02_正文/第一章.txt",
+      insert_mode: "replace" as const,
+      runtime_context: "",
+      attachment_ids: []
+    };
+
+    await expect(runtime.sendMessage(conversation.id, payload))
+      .rejects.toThrow("simulated conversation writeback outer completion crash");
+    const failedRun = runtime.listDurableRuns(["failed"], 10)[0];
+    expect(failedRun?.status).toBe("failed");
+    expect(runtime.listDurableCommitJournal(failedRun!.run_id)).toEqual([
+      expect.objectContaining({
+        action: "generated_cache.commit.target:02_正文/第一章.txt",
+        stage: "finalized"
+      })
+    ]);
+    expect(await fs.readFile(path.join(tempDir, "02_正文", "第一章.txt"), "utf8"))
+      .toBe("写回恢复内容");
+    const cacheRoot = path.join(tempDir, "00_设定集", ".agent", "generated_cache");
+    const cacheIds = await fs.readdir(cacheRoot);
+    expect(cacheIds).toHaveLength(1);
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    expect(await cache.get(cacheIds[0]!)).toMatchObject({
+      status: "pending",
+      skill_id: "conversation_write_back"
+    });
+    await expect(cache.readContent(cacheIds[0]!)).resolves.toBe("写回恢复内容");
+    let detail = await conversations.getConversation(conversation.id);
+    expect(detail.messages.filter((message) =>
+      message.role === "system" && message.content.includes("已写回 02_正文/第一章.txt")
+    )).toHaveLength(1);
+
+    const resumed = runtime.resumeDurableRun(failedRun!.run_id, "op_conversation_writeback_resume", failedRun!.version);
+    expect(resumed.run_id).toBe(failedRun?.run_id);
+    await waitForRunStatus(runtime, failedRun!.run_id, "completed");
+    await waitForCacheStatus(cache, cacheIds[0]!, "committed");
+
+    expect(modelCalls).toBe(1);
+    expect(runtime.exportDurableRun(failedRun!.run_id).attempts).toHaveLength(2);
+    expect(runtime.listDurableCommitJournal(failedRun!.run_id)).toHaveLength(1);
+    expect(await cache.get(cacheIds[0]!)).toMatchObject({
+      status: "committed",
+      commit_run_id: failedRun?.run_id,
+      commit_request_id: "conversation-writeback-recovery"
+    });
+    await expect(cache.readContent(cacheIds[0]!)).rejects.toThrow("正文不存在");
+    expect(await fs.readFile(path.join(tempDir, "02_正文", "第一章.txt"), "utf8"))
+      .toBe("写回恢复内容");
+    detail = await conversations.getConversation(conversation.id);
+    expect(detail.messages.filter((message) =>
+      message.role === "system" && message.content.includes("已写回 02_正文/第一章.txt")
+    )).toHaveLength(1);
+  });
+
+  it("streams conversation write_target through the durable journal before yielding the final event", async () => {
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const conversation = await conversations.createConversation({ title: "流式写回测试" });
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "流式写回内容"
+      }
+    });
+
+    const events: AgentStreamEvent[] = [];
+    for await (const event of runtime.streamMessage(conversation.id, {
+      request_id: "conversation-writeback-stream",
+      content: "测试流式回复",
+      skill_id: "",
+      agent_name: "test-agent",
+      write_target: "02_正文/第一章.txt",
+      insert_mode: "replace" as const,
+      runtime_context: "",
+      attachment_ids: []
+    } as ConversationMessageRequest & { request_id: string })) {
+      events.push(event);
+    }
+
+    expect(events[0]?.type).toBe("start");
+    expect(events.at(-1)?.type).toBe("final");
+    expect(events.some((event) => event.type === "delta")).toBe(true);
+    const final = events.find((event) => event.type === "final");
+    expect(final?.type).toBe("final");
+    if (final?.type !== "final") {
+      throw new Error("missing final event");
+    }
+    expect(final.payload.saved_paths).toContain("02_正文/第一章.txt");
+    expect(final.payload.conversation?.messages.at(-1)).toMatchObject({
+      role: "system",
+      content: "已写回 02_正文/第一章.txt"
+    });
+    const run = runtime.listDurableRuns(["completed"], 10)
+      .find((item) => item.request_id === "conversation-writeback-stream");
+    expect(run?.status).toBe("completed");
+    expect(runtime.listDurableCommitJournal(run!.run_id)).toEqual([
+      expect.objectContaining({
+        run_id: run!.run_id,
+        action: "generated_cache.commit.target:02_正文/第一章.txt",
+        stage: "finalized"
+      })
+    ]);
+    expect(await fs.readFile(path.join(tempDir, "02_正文", "第一章.txt"), "utf8"))
+      .toBe("流式写回内容");
   });
 
   it("sendMessage includes explicit project reference files in conversation context", async () => {

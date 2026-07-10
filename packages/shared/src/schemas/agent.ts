@@ -692,6 +692,9 @@ export const agentRecoverableRequestSchema = z.object({
   output_mode: z.string().optional(),
   action: z.string().optional(),
   skill_request_origin: z.string().optional(),
+  conversation_write_target: z.string().optional(),
+  conversation_write_mode: z.enum(["append", "replace"]).optional(),
+  conversation_confirm_write: z.boolean().optional(),
   suppress_conversation_record: z.boolean().optional()
 });
 

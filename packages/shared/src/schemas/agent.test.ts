@@ -450,11 +450,21 @@ describe("agent schemas", () => {
       request_id: "request-1",
       content: "继续写作",
       custom_prompt: "保留工作流提示",
+      conversation_write_target: "02_正文/第一章.txt",
+      conversation_write_mode: "append",
+      conversation_confirm_write: true,
       api_key: "must-not-persist",
       nested_private_payload: { token: "must-not-persist" }
     });
 
-    expect(request).toMatchObject({ request_id: "request-1", content: "继续写作", custom_prompt: "保留工作流提示" });
+    expect(request).toMatchObject({
+      request_id: "request-1",
+      content: "继续写作",
+      custom_prompt: "保留工作流提示",
+      conversation_write_target: "02_正文/第一章.txt",
+      conversation_write_mode: "append",
+      conversation_confirm_write: true
+    });
     expect(request).not.toHaveProperty("api_key");
     expect(request).not.toHaveProperty("nested_private_payload");
   });
