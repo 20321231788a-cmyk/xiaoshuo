@@ -200,6 +200,31 @@ describe("agent lifecycle routes", () => {
     });
   });
 
+  it("streams durable events after the requested sequence and ends after a terminal run", async () => {
+    const writeJson = vi.fn();
+    const responseValue = response();
+    const event = { event_id: "event-2", run_id: "run-stream", sequence: 2, event_type: "run.completed", step_id: "", payload: {}, created_at: "2026-07-10T04:00:02.000Z" };
+    runtime.getDurableRun.mockReturnValue(runState("run-stream", 2, "completed"));
+    runtime.listDurableRunEvents.mockReturnValueOnce([event]).mockReturnValueOnce([event]).mockReturnValueOnce([]);
+
+    await handleAgentRoutes(
+      request("GET"),
+      responseValue,
+      "/api/agent/runs/run-stream/events/stream",
+      context(),
+      deps(writeJson),
+      new URLSearchParams({ after: "1" })
+    );
+
+    expect(responseValue.writeHead).toHaveBeenCalledWith(200, expect.objectContaining({ "Content-Type": "application/x-ndjson; charset=utf-8" }));
+    expect(responseValue.write).toHaveBeenCalledWith(`${JSON.stringify({ type: "event", event })}\n`);
+    expect(responseValue.write).toHaveBeenCalledWith(expect.stringContaining('"type":"end"'));
+    expect(responseValue.end).toHaveBeenCalledOnce();
+    expect(runtime.listDurableRunEvents).toHaveBeenNthCalledWith(1, "run-stream", 0, 1);
+    expect(runtime.listDurableRunEvents).toHaveBeenNthCalledWith(2, "run-stream", 1, 200);
+    expect(runtime.listDurableRunEvents).toHaveBeenNthCalledWith(3, "run-stream", 2, 200);
+  });
+
   it("does not bind durable execution to an HTTP response lifecycle", async () => {
     const writeJson = vi.fn();
     const responseValue = response();
@@ -229,6 +254,7 @@ function response(): ServerResponse {
     writableEnded: false,
     destroyed: false,
     writeHead: vi.fn(),
+    write: vi.fn(() => true),
     end: vi.fn()
   });
   return value;

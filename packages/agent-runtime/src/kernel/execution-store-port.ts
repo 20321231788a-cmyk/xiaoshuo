@@ -388,6 +388,7 @@ export interface ExecutionStorePort {
   claimStaleRun(input: ClaimStaleRunInput): ExecutionCasResult<AgentRunState>;
   createCommitJournal(entry: ExecutionCommitJournalEntry): ExecutionCommitJournalEntry;
   getCommitJournal(journalId: string): ExecutionCommitJournalEntry | null;
+  listCommitJournal(runId?: string): ExecutionCommitJournalEntry[];
   listPendingCommitJournal(runId?: string): ExecutionCommitJournalEntry[];
   updateCommitJournal(input: UpdateCommitJournalInput): ExecutionCasResult<ExecutionCommitJournalEntry>;
 }

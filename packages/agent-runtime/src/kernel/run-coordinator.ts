@@ -601,6 +601,10 @@ export class RunCoordinator {
     return this.store.listEvents(runId, { after, limit });
   }
 
+  listCommitJournal(runId?: string) {
+    return this.store.listCommitJournal(runId);
+  }
+
   close(): void {
     if (this.closed) {
       return;

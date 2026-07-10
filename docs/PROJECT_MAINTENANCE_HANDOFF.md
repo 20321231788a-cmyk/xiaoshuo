@@ -2074,6 +2074,25 @@ npm test
 
 关键未完成项：CommitJournalService 尚未由 AgentFileOperationRunner、Skill/workflow 或 durable RunCoordinator 调用，故不能宣称真实写入已不可绕过；未实现认证长连接 NDJSON 和任务 UI E2E；发布 CI/RC/签名/installed smoke、长任务迁移和 Confirmation 完整生命周期仍未完成。`PRODUCT.md` 继续保留且不纳入提交。
 
+### 15.53 2026-07-10 P0 Durable 文件提交与认证事件流记录
+
+本轮把 F 的一条 durable 文件写入路径和 E 的认证实时订阅接入现有代码，仍不代表 F、E 或 P0 已验收。
+
+本轮实现：
+
+- durable `runAgent` 与 `streamAgentRun` 的 direct-save、batch-replace 会传递 run/step/attempt 到 `CommitJournalService`；提交记录保存身份、fencing token、备份和最终状态，非 durable 调用仍保持原有 DocumentService 路径；
+- `GET /api/agent/runs/{run_id}/events/stream?after=N` 在既有会话认证内提供 NDJSON 回放与增量补流，包含 retention gap、15 秒 heartbeat、背压处理、关闭清理和终态 `end`；断连不影响 run；
+- API client 公开 `streamAgentRunEvents`，解析 event/heartbeat/gap/end，供 Workbench 后续替换轮询订阅。
+
+本轮验证：
+
+- `npm run typecheck` 通过，所有 workspace 均为绿色；
+- `npm test` 通过：78 个测试文件、586 个测试；
+- `npm run build:workbench` 和 `npm run build:desktop` 通过；
+- `git diff --check` 通过。
+
+仍未验收：Workbench 尚未消费实时 stream，任务控制 E2E 未完成；journal 尚未覆盖全部 Skill/workflow 写入，Confirmation 仍缺完整生命周期；G 的长任务检查点、H 的发布门禁和 C 的 flag/副作用幂等仍未完成。`PRODUCT.md` 继续保留且不纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

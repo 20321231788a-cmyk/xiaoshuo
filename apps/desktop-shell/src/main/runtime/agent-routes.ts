@@ -116,6 +116,18 @@ export async function handleAgentRoutes(
         return true;
       }
 
+      if (runRoute?.action === "event-stream" && request.method === "GET") {
+        const initialRun = runtime.getDurableRun(runRoute.runId);
+        if (!initialRun) {
+          deps.writeJson(response, 404, { detail: "Agent 运行记录不存在", code: "RUN_NOT_FOUND" });
+          return true;
+        }
+
+        const after = clampInteger(searchParams.get("after"), 0, 0, Number.MAX_SAFE_INTEGER);
+        await streamDurableRunEvents(request, response, runtime, runRoute.runId, after);
+        return true;
+      }
+
       if (runRoute && request.method === "POST" && (runRoute.action === "pause" || runRoute.action === "cancel")) {
         const payload = agentRunControlRequestSchema.parse(await deps.readJsonBody(request));
         const run = runRoute.action === "pause"
@@ -306,7 +318,7 @@ export async function handleAgentRoutes(
 
 type AgentRunLifecycleRoute = {
   runId: string;
-  action?: "events" | "pause" | "resume" | "cancel" | "retry";
+  action?: "events" | "event-stream" | "pause" | "resume" | "cancel" | "retry";
   stepId?: string;
 };
 
@@ -314,6 +326,10 @@ function matchAgentRunLifecycleRoute(pathname: string): AgentRunLifecycleRoute |
   const retry = pathname.match(/^\/api\/agent\/runs\/([^/]+)\/steps\/([^/]+)\/retry$/);
   if (retry) {
     return { runId: decodeRoutePart(retry[1]!), stepId: decodeRoutePart(retry[2]!), action: "retry" };
+  }
+  const eventStream = pathname.match(/^\/api\/agent\/runs\/([^/]+)\/events\/stream$/);
+  if (eventStream) {
+    return { runId: decodeRoutePart(eventStream[1]!), action: "event-stream" };
   }
   const action = pathname.match(/^\/api\/agent\/runs\/([^/]+)\/(events|pause|resume|cancel)$/);
   if (action) {
@@ -378,4 +394,102 @@ function lifecycleErrorCode(error: unknown): string {
     }
   }
   return "AGENT_RUN_ERROR";
+}
+
+const DURABLE_EVENT_STREAM_POLL_MS = 250;
+const DURABLE_EVENT_STREAM_HEARTBEAT_MS = 15_000;
+const terminalRunStatuses = new Set(["failed", "cancelled", "completed"]);
+
+/**
+ * This is deliberately a read-only projection of the durable event journal.
+ * Transport loss only stops the projection; it never sends a control signal to
+ * the run that owns the events.
+ */
+async function streamDurableRunEvents(
+  request: IncomingMessage,
+  response: ServerResponse,
+  runtime: Pick<AgentRuntimeService, "getDurableRun" | "listDurableRunEvents">,
+  runId: string,
+  after: number
+): Promise<void> {
+  let cursor = after;
+  let closed = false;
+  let lastHeartbeatAt = Date.now();
+  const stop = () => {
+    closed = true;
+  };
+
+  request.once("aborted", stop);
+  response.once("close", stop);
+  response.writeHead(200, {
+    "Content-Type": "application/x-ndjson; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive"
+  });
+
+  try {
+    const earliestAvailableSequence = after > 0 ? runtime.listDurableRunEvents(runId, 0, 1)[0]?.sequence ?? 0 : 0;
+    if (earliestAvailableSequence > 0 && after < earliestAvailableSequence - 1) {
+      await writeNdjsonRecord(response, {
+        type: "gap",
+        run_id: runId,
+        after,
+        earliest_available_sequence: earliestAvailableSequence
+      });
+    }
+    while (!closed && canWriteResponse(response)) {
+      const events = runtime.listDurableRunEvents(runId, cursor, 200);
+      for (const event of events) {
+        if (closed || !canWriteResponse(response)) {
+          break;
+        }
+        await writeNdjsonRecord(response, { type: "event", event });
+        cursor = Math.max(cursor, event.sequence);
+      }
+
+      const current = runtime.getDurableRun(runId);
+      if (!current) {
+        if (!closed && canWriteResponse(response)) {
+          await writeNdjsonRecord(response, { type: "end", run_id: runId, after: cursor, reason: "run_not_found" });
+        }
+        break;
+      }
+      if (terminalRunStatuses.has(current.status) && events.length === 0) {
+        await writeNdjsonRecord(response, { type: "end", run_id: runId, after: cursor, status: current.status });
+        break;
+      }
+
+      const now = Date.now();
+      if (now - lastHeartbeatAt >= DURABLE_EVENT_STREAM_HEARTBEAT_MS) {
+        await writeNdjsonRecord(response, { type: "heartbeat", run_id: runId, after: cursor, at: new Date(now).toISOString() });
+        lastHeartbeatAt = now;
+      }
+      await delay(DURABLE_EVENT_STREAM_POLL_MS);
+    }
+  } finally {
+    request.off("aborted", stop);
+    response.off("close", stop);
+    if (canWriteResponse(response)) {
+      response.end();
+    }
+  }
+}
+
+async function writeNdjsonRecord(response: ServerResponse, payload: Record<string, unknown>): Promise<void> {
+  if (response.write(`${JSON.stringify(payload)}\n`) !== false) {
+    return;
+  }
+  await new Promise<void>((resolve) => {
+    const done = () => {
+      response.off("drain", done);
+      response.off("close", done);
+      resolve();
+    };
+    response.once("drain", done);
+    response.once("close", done);
+  });
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }

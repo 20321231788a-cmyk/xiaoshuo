@@ -49,6 +49,7 @@ import { getWorkflowHandler, isWorkflowSkillId } from "./workflows/registry.js";
 import type { WorkflowRunContext } from "./workflows/types.js";
 import { isCancellationError, throwIfAborted, type AgentRunOptions } from "./cancellation.js";
 import { RunCoordinator, RunRequestReplayError, type DurableRunExecution } from "./kernel/run-coordinator.js";
+import { CommitJournalService } from "./kernel/commit-journal-service.js";
 
 const TARGET_WORD_SKILL_IDS = new Set([
   "body_generate",
@@ -91,7 +92,12 @@ export class AgentRuntimeService {
     this.skillRunner = new PromptSkillRunner(options);
     this.skillDrafts = new SkillDraftService(options);
     this.chatRunner = new AgentChatRunner(options);
-    this.fileOperationRunner = new AgentFileOperationRunner({ planner: this.planner, projectRoot: options.projectRoot });
+    this.runCoordinator = new RunCoordinator({ projectRoot: options.projectRoot });
+    this.fileOperationRunner = new AgentFileOperationRunner({
+      planner: this.planner,
+      projectRoot: options.projectRoot,
+      commitJournal: new CommitJournalService({ store: this.runCoordinator.store, projectRoot: options.projectRoot })
+    });
     this.skills = new SkillService({ projectRoot: options.projectRoot });
     this.conversations = new ConversationService({ projectRoot: options.projectRoot });
     this.documents = new DocumentService({ projectRoot: options.projectRoot });
@@ -107,7 +113,6 @@ export class AgentRuntimeService {
       modelClient: this.modelClient
     });
     this.projectManifest = new ProjectManifestService(options.projectRoot);
-    this.runCoordinator = new RunCoordinator({ projectRoot: options.projectRoot });
     this.runCoordinator.recoverStaleRuns();
     activeAgentRuntimeServices.add(this);
   }
@@ -297,7 +302,7 @@ export class AgentRuntimeService {
     try {
       await this.addRoutingTrace(request, trace);
       const response = {
-        ...(await this.runAgentInternal(request, trace, runOptions)),
+        ...(await this.runAgentInternal(request, trace, runOptions, execution)),
         run_id: execution.run_id
       };
       this.addAgentResponseToTrace(trace, response);
@@ -333,7 +338,12 @@ export class AgentRuntimeService {
     }
   }
 
-  private async runAgentInternal(request: AgentRunRequest, trace?: AgentTraceRecorder, options: AgentRunOptions = {}): Promise<AgentRunResponse> {
+  private async runAgentInternal(
+    request: AgentRunRequest,
+    trace?: AgentTraceRecorder,
+    options: AgentRunOptions = {},
+    execution?: DurableRunExecution
+  ): Promise<AgentRunResponse> {
     throwIfAborted(options.signal);
     const skillManagementIntent = classifySkillManagementIntent(request.content || "");
     if (skillManagementIntent) {
@@ -358,7 +368,11 @@ export class AgentRuntimeService {
     const intent = await this.classifyIntent(request);
     trace?.mark("classified", { intent });
     if (intent === "file_operation") {
-      return this.fileOperationRunner.runAgent(request);
+      return this.fileOperationRunner.runAgent(request, execution && {
+        runId: execution.run_id,
+        stepId: execution.step_id,
+        attemptId: execution.attempt_id
+      });
     }
     if (intent === "skill") {
       const skillId = await this.resolveSkillId(request);
@@ -401,7 +415,7 @@ export class AgentRuntimeService {
     try {
       await this.addRoutingTrace(request, trace);
       let finalPayload: AgentRunResponse | null = null;
-      for await (const sourceEvent of this.streamAgentRunInternal(request, trace, runOptions)) {
+      for await (const sourceEvent of this.streamAgentRunInternal(request, trace, runOptions, execution)) {
         const event: AgentStreamEvent =
           sourceEvent.type === "start"
             ? { ...sourceEvent, run_id: execution.run_id }
@@ -448,7 +462,12 @@ export class AgentRuntimeService {
     }
   }
 
-  private async *streamAgentRunInternal(request: AgentRunRequest, trace?: AgentTraceRecorder, options: AgentRunOptions = {}): AsyncGenerator<AgentStreamEvent> {
+  private async *streamAgentRunInternal(
+    request: AgentRunRequest,
+    trace?: AgentTraceRecorder,
+    options: AgentRunOptions = {},
+    execution?: DurableRunExecution
+  ): AsyncGenerator<AgentStreamEvent> {
     throwIfAborted(options.signal);
     const skillManagementIntent = classifySkillManagementIntent(request.content || "");
     if (skillManagementIntent) {
@@ -475,7 +494,11 @@ export class AgentRuntimeService {
     const intent = await this.classifyIntent(request);
     trace?.mark("classified", { intent });
     if (intent === "file_operation") {
-      yield* this.fileOperationRunner.streamAgentRun(request);
+      yield* this.fileOperationRunner.streamAgentRun(request, execution && {
+        runId: execution.run_id,
+        stepId: execution.step_id,
+        attemptId: execution.attempt_id
+      });
       return;
     }
     if (intent === "skill") {
@@ -531,6 +554,10 @@ export class AgentRuntimeService {
 
   listDurableRunEvents(runId: string, after?: number, limit?: number) {
     return this.runCoordinator.listEvents(runId, after, limit);
+  }
+
+  listDurableCommitJournal(runId?: string) {
+    return this.runCoordinator.listCommitJournal(runId);
   }
 
   pauseDurableRun(runId: string, operationId?: string, expectedVersion?: number) {

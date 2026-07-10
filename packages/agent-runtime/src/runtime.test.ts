@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -687,6 +688,42 @@ describe("agent-runtime chat flow", () => {
     expect(result.reply).toContain("完成：批量替换 2 个文件，共 4 处。");
     expect(await fs.readFile(path.join(tempDir, "01_大纲", "人物设定.txt"), "utf8")).toContain("杨瑞");
     expect(await fs.readFile(path.join(tempDir, "02_正文", "第一章.txt"), "utf8")).not.toContain("林默");
+  });
+
+  it("routes durable direct saves through the commit journal with the active run identity", async () => {
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "unused"
+      }
+    });
+
+    const result = await runtime.runAgent({
+      conversation_id: "",
+      content: "保存到大纲：这是 durable 提交内容",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    });
+
+    const run = runtime.getDurableRun(result.run_id || "");
+    const journals = runtime.listDurableCommitJournal(result.run_id);
+    expect(run).not.toBeNull();
+    expect(journals).toHaveLength(1);
+    expect(journals[0]).toMatchObject({
+      run_id: result.run_id,
+      step_id: run?.steps[0]?.step_id,
+      action: "append_text",
+      stage: "finalized"
+    });
+    expect(journals[0]?.attempt_id).toMatch(/^attempt_/);
+    expect(journals[0]?.fencing_token).toBeGreaterThanOrEqual(1);
+    expect(existsSync(journals[0]?.backup_path || "")).toBe(true);
+    expect(await fs.readFile(journals[0]!.backup_path, "utf8")).toBe("这是测试大纲");
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toContain("这是 durable 提交内容");
   });
 
   it("limits batch replace to current document scope when requested", async () => {

@@ -927,6 +927,39 @@ describe("api-client", () => {
     expect(events).toEqual(["start:chat", "delta:你好", "final:你好，世界"]);
   });
 
+  it("consumes durable run event stream records after a sequence", async () => {
+    const received: string[] = [];
+    const requests: string[] = [];
+    const client = createApiClient({
+      baseUrl: "http://127.0.0.1:18452",
+      fetchFn: async (input) => {
+        requests.push(String(input));
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode([
+                JSON.stringify({ type: "event", event: { event_id: "event-4", run_id: "run-one", sequence: 4, event_type: "run.resumed", created_at: "2026-07-10T08:00:04.000Z" } }),
+                JSON.stringify({ type: "heartbeat", run_id: "run-one", after: 4, at: "2026-07-10T08:00:05.000Z" }),
+                JSON.stringify({ type: "end", run_id: "run-one", after: 4, status: "completed" })
+              ].join("\n")));
+              controller.close();
+            }
+          }),
+          { status: 200, headers: { "Content-Type": "application/x-ndjson" } }
+        );
+      }
+    });
+
+    await client.streamAgentRunEvents("run-one", {
+      onEvent: (event) => { received.push(`event:${event.sequence}`); },
+      onHeartbeat: (event) => { received.push(`heartbeat:${event.after}`); },
+      onEnd: (event) => { received.push(`end:${event.status}`); }
+    }, 3);
+
+    expect(received).toEqual(["event:4", "heartbeat:4", "end:completed"]);
+    expect(requests).toEqual(["http://127.0.0.1:18452/api/agent/runs/run-one/events/stream?after=3"]);
+  });
+
   it("posts conversation message payloads and parses the returned reply", async () => {
     const requests: Array<{ url: string; method: string; body: string }> = [];
     const client = createApiClient({

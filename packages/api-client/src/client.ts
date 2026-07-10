@@ -1,6 +1,8 @@
 import {
   type AgentStreamEvent,
+  type AgentRunEvent,
   agentStreamEventSchema,
+  agentRunEventSchema,
   agentConfirmationResolveRequestSchema,
   agentPlanResponseSchema,
   agentRunRequestSchema,
@@ -114,6 +116,20 @@ export type AgentStreamHandlers = {
   onFinal?: (event: AgentStreamFinalEvent) => void | Promise<void>;
   onError?: (event: AgentStreamErrorEvent) => void | Promise<void>;
 };
+
+export type AgentRunEventStreamHandlers = {
+  onEvent?: (event: AgentRunEvent) => void | Promise<void>;
+  onHeartbeat?: (event: { run_id: string; after: number; at: string }) => void | Promise<void>;
+  onGap?: (event: { run_id: string; after: number; earliest_available_sequence: number }) => void | Promise<void>;
+  onEnd?: (event: { run_id: string; after: number; status?: string; reason?: string }) => void | Promise<void>;
+};
+
+const agentRunEventStreamLineSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("event"), event: agentRunEventSchema }),
+  z.object({ type: z.literal("heartbeat"), run_id: z.string(), after: z.number().int().nonnegative(), at: z.string() }),
+  z.object({ type: z.literal("gap"), run_id: z.string(), after: z.number().int().nonnegative(), earliest_available_sequence: z.number().int().positive() }),
+  z.object({ type: z.literal("end"), run_id: z.string(), after: z.number().int().nonnegative(), status: z.string().optional(), reason: z.string().optional() })
+]);
 
 export function encodePathValue(value: string | number): string {
   return String(value)
@@ -491,6 +507,25 @@ export function createApiClient(options: ApiClientOptions) {
         pathParams: { run_id: runId },
         query: { after, limit }
       }),
+    streamAgentRunEvents: async (
+      runId: string,
+      handlers: AgentRunEventStreamHandlers,
+      after = 0,
+      signal?: AbortSignal
+    ) => {
+      const response = await fetchFn(
+        buildApiUrl(options.baseUrl, "/api/agent/runs/{run_id}/events/stream", { run_id: runId }, { after }),
+        { method: "GET", headers: { Accept: "application/x-ndjson" }, signal }
+      );
+      if (!response.ok) {
+        const text = await response.text();
+        throw new ApiError(extractErrorMessage(text) || response.statusText, response.status, parseErrorPayload(text));
+      }
+      if (!response.body) {
+        throw new Error("浏览器不支持流式响应");
+      }
+      await consumeNdjson(response.body, (line) => dispatchAgentRunEventStreamLine(line, handlers));
+    },
     pauseAgentRun: (runId: string, payload: z.input<typeof agentRunControlRequestSchema>) =>
       requestContract("pauseAgentRun", {
         pathParams: { run_id: runId },
@@ -787,4 +822,42 @@ async function dispatchAgentStreamLine(line: string, handlers: AgentStreamHandle
     return;
   }
   await handlers.onError?.(event);
+}
+
+async function dispatchAgentRunEventStreamLine(line: string, handlers: AgentRunEventStreamHandlers): Promise<void> {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return;
+  }
+  const event = agentRunEventStreamLineSchema.parse(JSON.parse(trimmed));
+  if (event.type === "event") {
+    await handlers.onEvent?.(event.event);
+  } else if (event.type === "heartbeat") {
+    await handlers.onHeartbeat?.(event);
+  } else if (event.type === "gap") {
+    await handlers.onGap?.(event);
+  } else {
+    await handlers.onEnd?.(event);
+  }
+}
+
+async function consumeNdjson(body: ReadableStream<Uint8Array>, dispatchLine: (line: string) => Promise<void>): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      await dispatchLine(line);
+    }
+    if (done) {
+      break;
+    }
+  }
+  if (buffer.trim()) {
+    await dispatchLine(buffer);
+  }
 }

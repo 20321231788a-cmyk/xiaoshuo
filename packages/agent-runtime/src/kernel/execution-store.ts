@@ -1930,6 +1930,16 @@ export class ExecutionStore implements ExecutionStorePort {
     return source ? mapCommitJournalRow(source) : null;
   }
 
+  listCommitJournal(runId?: string): ExecutionCommitJournalEntry[] {
+    this.assertOpen();
+    const result = runId
+      ? this.database
+          .prepare("SELECT * FROM agent_commit_journal WHERE run_id = ? ORDER BY created_at, journal_id")
+          .all(runId)
+      : this.database.prepare("SELECT * FROM agent_commit_journal ORDER BY created_at, journal_id").all();
+    return rows(result).map(mapCommitJournalRow);
+  }
+
   listPendingCommitJournal(runId?: string): ExecutionCommitJournalEntry[] {
     this.assertOpen();
     const result = runId

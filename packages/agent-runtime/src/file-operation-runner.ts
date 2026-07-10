@@ -11,12 +11,21 @@ import type {
   ConversationMessage,
   OperationResult
 } from "@xiaoshuo/shared";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
 import type { AgentPlanner } from "./planner.js";
+import { CommitJournalService } from "./kernel/commit-journal-service.js";
 
 type FileOperationRunnerOptions = {
   planner: AgentPlanner;
   projectRoot: string;
+  commitJournal?: CommitJournalService;
+};
+
+export type DurableFileOperationContext = {
+  runId: string;
+  stepId: string;
+  attemptId: string;
 };
 
 export class AgentFileOperationRunner {
@@ -24,21 +33,23 @@ export class AgentFileOperationRunner {
   private readonly documents: DocumentService;
   private readonly conversations: ConversationService;
   private readonly manifest: ProjectManifestService;
+  private readonly commitJournal?: CommitJournalService;
 
   constructor(options: FileOperationRunnerOptions) {
     this.planner = options.planner;
     this.documents = new DocumentService({ projectRoot: options.projectRoot });
     this.conversations = new ConversationService({ projectRoot: options.projectRoot });
     this.manifest = new ProjectManifestService(options.projectRoot);
+    this.commitJournal = options.commitJournal;
   }
 
-  async runAgent(request: AgentRunRequest): Promise<AgentRunResponse> {
-    const batchReplace = await this.runBatchReplaceOperation(request);
+  async runAgent(request: AgentRunRequest, durable?: DurableFileOperationContext): Promise<AgentRunResponse> {
+    const batchReplace = await this.runBatchReplaceOperation(request, durable);
     if (batchReplace) {
       return batchReplace;
     }
 
-    const directSave = await this.runDirectSaveOperation(request);
+    const directSave = await this.runDirectSaveOperation(request, durable);
     if (directSave) {
       return directSave;
     }
@@ -92,9 +103,9 @@ export class AgentFileOperationRunner {
     };
   }
 
-  async *streamAgentRun(request: AgentRunRequest): AsyncGenerator<AgentStreamEvent> {
+  async *streamAgentRun(request: AgentRunRequest, durable?: DurableFileOperationContext): AsyncGenerator<AgentStreamEvent> {
     try {
-      const response = await this.runAgent(request);
+      const response = await this.runAgent(request, durable);
       yield {
         type: "start",
         intent: "file_operation",
@@ -167,7 +178,7 @@ export class AgentFileOperationRunner {
     return nextDetail;
   }
 
-  private async runDirectSaveOperation(request: AgentRunRequest): Promise<AgentRunResponse | null> {
+  private async runDirectSaveOperation(request: AgentRunRequest, durable?: DurableFileOperationContext): Promise<AgentRunResponse | null> {
     const targetPath = this.resolveDirectSaveTarget(request.content || "");
     if (!targetPath) {
       return null;
@@ -199,10 +210,7 @@ export class AgentFileOperationRunner {
       warnings: [],
       can_execute: true
     };
-    const results = await this.documents.executeOperations(plan.operations, {
-      source: "agent",
-      summary: plan.summary
-    });
+    const results = await this.executeContentOperation(operation, plan.summary, durable);
     const reply = this.summarizeOperationResults(results);
     const conversation = await this.recordAgentExchange(request, reply);
     return {
@@ -298,7 +306,7 @@ export class AgentFileOperationRunner {
       throw new Error("保存内容为空，已阻止创建空文件。");
     }
     const target = await this.documents.resolveSafePath(targetPath, { allowMissing: true });
-    const exists = await import("node:fs/promises").then((fs) => fs.stat(target).then((stats) => stats.isFile()).catch(() => false));
+    const exists = await fs.stat(target).then((stats) => stats.isFile()).catch(() => false);
     if (!exists) {
       return {
         action: "create_file",
@@ -336,7 +344,7 @@ export class AgentFileOperationRunner {
     };
   }
 
-  private async runBatchReplaceOperation(request: AgentRunRequest): Promise<AgentRunResponse | null> {
+  private async runBatchReplaceOperation(request: AgentRunRequest, durable?: DurableFileOperationContext): Promise<AgentRunResponse | null> {
     const parsed = this.parseBatchReplaceRequest(request.content || "");
     if (!parsed) {
       return null;
@@ -366,7 +374,7 @@ export class AgentFileOperationRunner {
     }
 
     const scopePath = /(当前文档|当前文件|这篇|这章|打开的文档|正在编辑)/.test(request.content || "") ? (request.current_path || "").trim() : "";
-    const results = await this.executeBatchReplace(oldText, newText, scopePath);
+    const results = await this.executeBatchReplace(oldText, newText, scopePath, durable);
     const changed = results.filter((item) => item.ok && /替换\s*\d+\s*处/.test(item.message));
     const total = changed.reduce((sum, item) => {
       const match = item.message.match(/替换\s*(\d+)\s*处/);
@@ -461,7 +469,12 @@ export class AgentFileOperationRunner {
     return "";
   }
 
-  private async executeBatchReplace(oldText: string, newText: string, scopePath: string): Promise<OperationResult[]> {
+  private async executeBatchReplace(
+    oldText: string,
+    newText: string,
+    scopePath: string,
+    durable?: DurableFileOperationContext
+  ): Promise<OperationResult[]> {
     if (!oldText || !newText || oldText === newText) {
       return [{ action: "replace_text", path: scopePath || ".", ok: false, message: "没有找到可替换的内容。" }];
     }
@@ -478,10 +491,7 @@ export class AgentFileOperationRunner {
       if (count <= 0) {
         continue;
       }
-      await this.documents.saveDocument(docPath, content.split(oldText).join(newText), {
-        source: "agent",
-        summary: `批量替换：${oldText} -> ${newText}`
-      });
+      await this.saveContent(docPath, content.split(oldText).join(newText), "replace_text", `批量替换：${oldText} -> ${newText}`, durable);
       results.push({
         action: "replace_text",
         path: docPath,
@@ -490,6 +500,70 @@ export class AgentFileOperationRunner {
       });
     }
     return results.length ? results : [{ action: "replace_text", path: scopePath || ".", ok: false, message: "没有找到可替换的内容。" }];
+  }
+
+  private async executeContentOperation(
+    operation: FileOperation,
+    summary: string,
+    durable?: DurableFileOperationContext
+  ): Promise<OperationResult[]> {
+    if (!durable || !this.commitJournal) {
+      return this.documents.executeOperations([operation], { source: "agent", summary });
+    }
+
+    const content = await this.resolveOperationContent(operation);
+    await this.saveContent(operation.path, content, operation.action, summary, durable);
+    return [{ action: operation.action, path: operation.path, ok: true, message: "完成" }];
+  }
+
+  private async resolveOperationContent(operation: FileOperation): Promise<string> {
+    const current = await this.documents.readRawText(operation.path).catch(() => "");
+    if (operation.action === "create_file") {
+      const target = await this.documents.resolveSafePath(operation.path, { allowMissing: true });
+      if (await fs.stat(target).then((stats) => stats.isFile()).catch(() => false)) {
+        throw new Error("文件已存在，拒绝覆盖");
+      }
+      return operation.text || "";
+    }
+    if (operation.action === "append_text") {
+      return current + (operation.text || "");
+    }
+    if (operation.action === "replace_text") {
+      if (!operation.old_text) {
+        throw new Error("replace_text 缺少 old_text");
+      }
+      if (!current.includes(operation.old_text)) {
+        throw new Error("未找到要替换的原文");
+      }
+      return current.replace(operation.old_text, operation.new_text || "");
+    }
+    throw new Error(`操作不支持 durable 内容提交: ${operation.action}`);
+  }
+
+  private async saveContent(
+    targetPath: string,
+    content: string,
+    action: string,
+    summary: string,
+    durable?: DurableFileOperationContext
+  ): Promise<void> {
+    if (!durable || !this.commitJournal) {
+      await this.documents.saveDocument(targetPath, content, { source: "agent", summary });
+      return;
+    }
+    await this.commitJournal.write({
+      runId: durable.runId,
+      stepId: durable.stepId,
+      attemptId: durable.attemptId,
+      action,
+      targetPath,
+      content,
+      idempotencyKey: createHash("sha256")
+        .update(JSON.stringify({ run_id: durable.runId, step_id: durable.stepId, target_path: targetPath }))
+        .digest("hex"),
+      source: "agent",
+      summary
+    });
   }
 
   private formatNow(): string {
