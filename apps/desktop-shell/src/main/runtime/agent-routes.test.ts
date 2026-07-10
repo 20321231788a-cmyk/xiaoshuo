@@ -76,6 +76,23 @@ describe("agent lifecycle routes", () => {
     expect(writeJson).toHaveBeenNthCalledWith(2, expect.anything(), 200, run);
   });
 
+  it("retires the legacy raw file-operation endpoint without reading a request body", async () => {
+    const writeJson = vi.fn();
+    const routeDeps = deps(writeJson, {
+      operations: [{ action: "create_file", path: "02_正文/第一章.txt", text: "must not write" }]
+    });
+
+    const handled = await handleAgentRoutes(request("POST"), response(), "/api/agent/execute", context(), routeDeps);
+
+    expect(handled).toBe(true);
+    expect(routeDeps.readJsonBody).not.toHaveBeenCalled();
+    expect(routeDeps.ensureProjectSessionCurrent).not.toHaveBeenCalled();
+    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 410, {
+      detail: "旧 Agent 文件执行接口已退役，请改用 POST /api/agent/runs。",
+      code: "AGENT_EXECUTE_RETIRED"
+    });
+  });
+
   it("returns a stable conflict for a request id bound to different content", async () => {
     const writeJson = vi.fn();
     runtime.createDurableRun.mockRejectedValue(Object.assign(new Error("request id already used"), { code: "REQUEST_ID_REUSED" }));

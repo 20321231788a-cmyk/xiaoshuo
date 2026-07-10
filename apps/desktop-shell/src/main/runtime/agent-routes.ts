@@ -1,6 +1,4 @@
 import { AgentRuntimeService, encodeNdjsonEvent } from "@xiaoshuo/agent-runtime";
-import type { DocumentTimelineSession } from "@xiaoshuo/document-service";
-import { DocumentService } from "@xiaoshuo/document-service";
 import {
   agentConfirmationResolveRequestSchema,
   agentPlanRequestSchema,
@@ -8,9 +6,7 @@ import {
   agentRunRequestSchema,
   agentRunStatusSchema,
   agentStepRetryRequestSchema,
-  fileOperationSchema,
-  type CurrentProject,
-  type FileOperation
+  type CurrentProject
 } from "@xiaoshuo/shared";
 import { VectorIndex } from "@xiaoshuo/vector-service";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -32,11 +28,9 @@ type AbortableAgentRuntimeService = Omit<AgentRuntimeService, "plan" | "runAgent
 
 type RuntimeAgentRouteDeps = {
   ensureProjectSessionCurrent: (context: RuntimeContext) => Promise<CurrentProject>;
-  ensureDocumentSession: (sessions: Map<string, DocumentTimelineSession>, projectPath: string) => DocumentTimelineSession;
   readJsonBody: (request: IncomingMessage) => Promise<JsonRecord>;
   readRawBody: (request: IncomingMessage) => Promise<Buffer>;
   parseJsonRecord: (rawBody: Buffer) => JsonRecord;
-  booleanValue: (value: unknown) => boolean;
   rebuildProjectManifest: (projectPath: string) => Promise<void>;
   writeJson: (response: ServerResponse, status: number, payload: unknown) => void;
   writeNdjsonEvent: (response: ServerResponse, payload: Parameters<typeof encodeNdjsonEvent>[0]) => void;
@@ -202,45 +196,13 @@ export async function handleAgentRoutes(
   }
 
   if (pathname === "/api/agent/execute" && request.method === "POST") {
-    const currentProject = await deps.ensureProjectSessionCurrent(context);
-    if (!currentProject.path) {
-      deps.writeJson(response, 400, { detail: "尚未打开项目" });
-      return true;
-    }
-    const payload = await deps.readJsonBody(request);
-    const operations = Array.isArray(payload.operations)
-      ? payload.operations.map((operation) => fileOperationSchema.parse(operation) as FileOperation)
-      : [];
-    const documents = new DocumentService({ projectRoot: currentProject.path });
-    const results = await documents.executeOperations(operations, {
-      confirmDelete: deps.booleanValue(payload.confirm_delete ?? payload.confirmDelete),
-      source: "agent",
-      session: deps.ensureDocumentSession(context.documentSessions, currentProject.path)
+    // This endpoint wrote raw operations outside the durable run, confirmation,
+    // and commit-journal protocols. Keep the route explicit so old clients fail
+    // safely rather than silently performing an unaudited write.
+    deps.writeJson(response, 410, {
+      detail: "旧 Agent 文件执行接口已退役，请改用 POST /api/agent/runs。",
+      code: "AGENT_EXECUTE_RETIRED"
     });
-    if (results.some((result) => result.ok)) {
-      await deps.rebuildProjectManifest(currentProject.path);
-      const index = new VectorIndex(currentProject.path);
-      const upserts: string[] = [];
-      const deletes: string[] = [];
-      for (let i = 0; i < operations.length; i++) {
-        if (!results[i]?.ok) continue;
-        const op = operations[i]!;
-        if (op.action === "archive_file") {
-          deletes.push(op.path);
-        } else if (op.action === "move_file") {
-          deletes.push(op.path);
-          if (op.target_path) {
-            upserts.push(op.target_path);
-          }
-        } else {
-          upserts.push(op.path);
-        }
-      }
-      if (upserts.length) index.markChanged(upserts, "upsert");
-      if (deletes.length) index.markChanged(deletes, "delete");
-      index.close();
-    }
-    deps.writeJson(response, 200, results);
     return true;
   }
 

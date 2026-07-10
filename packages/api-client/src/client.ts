@@ -15,7 +15,6 @@ import {
   conversationAttachmentSchema,
   conversationDetailSchema,
   documentContentSchema,
-  executePlanResponseSchema,
   generatedCacheDetailSchema,
   generatedSaveResponseSchema,
   jobInfoSchema,
@@ -62,8 +61,6 @@ import {
   type AgentRunRequest,
   type AgentPlanRequest,
   type ConversationMessageRequest,
-  type ExecutePlanResponse,
-  type FileOperation,
   type GeneratedSaveResponse,
   type ApiResponseFor
 } from "@xiaoshuo/shared";
@@ -706,11 +703,6 @@ export function createApiClient(options: ApiClientOptions) {
       requestWithSchema("/api/jobs/{job_id}/cancel", jobInfoSchema, {
         method: "POST",
         pathParams: { job_id: jobId }
-      }),
-    executeOperations: (operations: FileOperation[], confirmDelete = false) =>
-      requestWithSchema("/api/agent/execute", executePlanResponseSchema, {
-        method: "POST",
-        body: JSON.stringify({ operations, confirm_delete: confirmDelete })
       }),
     saveGeneratedResult: (payload: {
       skill_id: string;

@@ -2233,7 +2233,7 @@ CI 必须保存 Eval Manifest、失败 case 摘要、性能基线和脱敏 Trace
 | C 状态机与幂等 | 实现中 | 状态机、idempotency、heartbeat/lease；feature flag registry/snapshot；main-process allowlist 持久覆盖和 `--safe-agent` 强制 off/禁用自动恢复已通过 | shadow 对照报告和更广泛的真实副作用幂等 |
 | D 最小恢复链路 | 实现中 | run/stream/Trace 同 ID、runtime registry、HTTP 订阅断连解耦；真实子进程强杀后同 ID 仅恢复第二步、第一步保持唯一完成 attempt 的 E2E，以及旧 `streamAgentRun` durable 回归已通过 | 实际 renderer 长连接订阅和完整旧入口矩阵回归 |
 | E API 与 UI | 实现中 | 查询/控制、分页/实时 replay、认证 NDJSON、Workbench trace 实时订阅；Confirmation 列表/批准/拒绝与批准后显式恢复 UI/API；隔离项目/run 的 Agent Trace 列表、详情、pause 控制和 Confirmation 批准后恢复/拒绝失败浏览器 E2E 已通过 | 端到端异常/恢复矩阵扩展 |
-| F 崩溃/并发/确认 | 实现中 | journal/lease/confirmation；durable direct-save/batch-replace 与拆书所有持久输出的 journal/hash 覆盖；Confirmation UI/API 及批准后显式恢复、拒绝失败浏览器 E2E 已通过 | 剩余 Skill/workflow 写入覆盖 |
+| F 崩溃/并发/确认 | 实现中 | journal/lease/confirmation；durable direct-save/batch-replace 与拆书所有持久输出的 journal/hash 覆盖；Confirmation UI/API 及批准后显式恢复、拒绝失败浏览器 E2E 已通过；旧 `/api/agent/execute` 已安全退役，不再允许原始操作绕过 durable/journal 协议 | 普通文件操作计划与剩余 Skill/workflow/缓存写入覆盖 |
 | G Job/长任务 | 实现中 | batch/disassemble SQLite checkpoint、batch 子进程 SIGKILL 后同 run 恢复 N+1 且无重复副作用、legacy JobManager 只读映射 API 已通过 | legacy 映射 UI/回归 |
 | H 安全/发布 | 实现中 | runtime token/IPC、CI/RC gate、terminal/permission hardening；项目作用域的 run audit 导出与终态受控删除 API 已通过 | GitHub environment/证书配置后的真实 RC、发布报告 |
 

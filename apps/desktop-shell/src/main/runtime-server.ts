@@ -223,11 +223,9 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
 
   if (await handleAgentRoutes(request, response, pathname, context, {
     ensureProjectSessionCurrent,
-    ensureDocumentSession,
     readJsonBody,
     readRawBody,
     parseJsonRecord,
-    booleanValue,
     rebuildProjectManifest,
     writeJson,
     writeNdjsonEvent,

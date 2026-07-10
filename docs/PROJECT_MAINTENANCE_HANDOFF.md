@@ -2162,6 +2162,14 @@ npm test
 
 本轮验证：`npm run typecheck`、`npm test`（85 files/622 tests）、`npm run build:workbench`、`npm run build:desktop`、`npx playwright test tests/e2e/project-entry.spec.ts --reporter=line --workers=1`（3 passed）和 `git diff --check` 通过。`PRODUCT.md` 未纳入提交。
 
+### 15.62 2026-07-10 P0 旧 Raw Execute 端点退役记录
+
+- `POST /api/agent/execute` 曾直接调用 `DocumentService.executeOperations`，绕过 durable run、Confirmation 与 CommitJournal；现固定返回 `410 AGENT_EXECUTE_RETIRED`，且不再读取请求体或打开项目；
+- 移除 API client 中未被仓内调用的 `executeOperations` 暴露，并清理该旧端点专用的 runtime 依赖；
+- 不把 raw operations 临时路由至 `runAgent`：当前普通文件操作计划仍需单独完成“先 Confirmation、后 journal 提交”以及 move/archive 协议，不能伪装为迁移完成。
+
+定向验证：`npx vitest run apps/desktop-shell/src/main/runtime/agent-routes.test.ts apps/desktop-shell/src/main/runtime/license-guarded-routes.test.ts`（2 files/20 tests）、`npm run typecheck -w @xiaoshuo/api-client`、`npm run typecheck -w @xiaoshuo/desktop-shell` 和 `git diff --check` 通过。P0-F 与 P0 均仍为实现中；`PRODUCT.md` 未纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：
