@@ -1921,6 +1921,33 @@ npm test
 - 本轮只修改文档，未重复运行代码测试；代码基线仍沿用上一轮已通过的 68 个测试文件、457 个测试用例。
 - 工作区原有未跟踪 `PRODUCT.md` 继续保留，未纳入提交。
 
+### 15.47 2026-07-10 Agent 优化方案第三次实施前冻结记录
+
+本轮在 P0 开始落地后暂停继续扩写代码，结合实际 runtime、JobManager、SQLite 驱动、Workbench 和两路独立子代理审查结果，再次修改现行 Agent 智能化实施手册。重点不是增加概念，而是冻结会直接影响数据库和恢复链路的实现语义。
+
+主要修订：
+
+- 冻结单一 `run_id`：同步响应、流式事件、Execution Store、Agent Trace 和会话必须使用同一 ID；恢复和步骤重试复用原 run。
+- 把 `AgentStepAttempt`、IntentResolution、协作模式、plan draft/approved/superseded、run/step/confirmation version、operation id 和稳定错误码补为正式契约。
+- 固定项目内 Execution Store 路径为 `00_设定集/.agent/agent_runs.sqlite3`，与向量库和桌面全局状态库分离；通过 adapter 支持现有 `better-sqlite3`/`node:sqlite` 驱动探测。
+- 新增 runtime instance heartbeat/lease、fencing token、Windows/Electron 生命周期矩阵和唯一 scheduler 规则，避免启动时无条件暂停或重复接管任务。
+- 明确 SQLite 与项目文件不具备跨资源 ACID，新增 commit journal、临时文件、原子替换、transactional outbox 和启动对账协议。
+- 明确 Agent Run 与旧 `JobManager` 的唯一事实源边界，批量正文/拆书进入持久内核，legacy crawler/index job 只做显式映射。
+- 增加 assist/plan/execute 协作模式、阻塞歧义与安全假设分类、计划执行前协商、主动建议冷却和默认无后台云调用。
+- 强化自然语言 Skill 创建为 SkillSpec + 正反例 + 权限 lint + 路由碰撞 + dry-run；增加作者主观质量建议的授权边界和 artifact feedback。
+- 增加 user override、memory revision 和纠正向会话摘要/向量/图谱/缓存传播的闭环，防止全量重建复活旧事实。
+- 评估增加 sealed holdout、统计协议、确定性故障注入、性能预算和 installed-build smoke；P7 是统一收口，不再允许前序版本延后发布门禁。
+- 将路线重排为 `0.5.0` 持久执行、`0.6.0` 模型与闭环规划、`0.7.0` 记忆上下文、`0.8.0` 质量交互、`0.9.0` 评估硬化；P0 第一批改为 A-H 垂直切片。
+- Feature Flag 改为 `off/shadow/on` 执行模式，run 固化 flag snapshot；安全基线不可由普通用户关闭，回滚增加 active run 排空和 schema reader/writer 兼容规则。
+
+本轮验证：
+
+- Markdown 标题层级与 P0-P7/Task A-H 编号检查通过。
+- Markdown 围栏数量为偶数，未发现未闭合代码块。
+- `git diff --check -- docs/AGENT_OPTIMIZATION_MODIFICATION_MANUAL.md docs/PROJECT_MAINTENANCE_HANDOFF.md` 通过。
+- 本轮只提交两份文档；工作区已有 P0 shared schema、状态机和 runtime Origin 校验草稿保留，未混入本次计划冻结提交。
+- 未跟踪 `PRODUCT.md` 继续保留，未纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：
