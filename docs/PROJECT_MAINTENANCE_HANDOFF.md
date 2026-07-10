@@ -2219,6 +2219,15 @@ npm test
 
 本轮验证：`npm run typecheck`、`npm test`（86 files / 663 tests）、`npm run build:workbench`、`npm run build:desktop`、`npx vitest run packages/agent-runtime/src/runtime.test.ts packages/agent-runtime/src/skill-runner.test.ts packages/agent-runtime/src/sectioned-generated-save.test.ts apps/desktop-shell/src/main/runtime/skill-routes.test.ts --reporter=dot`（4 files / 112 tests）和 `git diff --check` 通过；后续补充的 `runtime.test.ts` 流式 outer-run 回归也通过（82 tests）。Workbench 只有既有的 >500 kB chunk warning。P0-F 与 P0 继续为“实现中”；普通文件操作计划、chat 写回和 card draw 仍未统一 journal/confirmation；`PRODUCT.md` 未纳入提交。
 
+### 15.67 2026-07-10 P0 Stale Run 同 ID 自动恢复记录
+
+- 复核并确认 `AgentTraceView.tsx` 已在既有 P0 提交中修复；全仓 Workbench 类型检查再次通过，本板块没有重复修改该 UI 文件；
+- `AgentRuntimeService` 启动时不再止于 stale claim 的 `paused` 状态：可安全重放的请求会使用稳定恢复 operation 创建新 attempt，并沿用原 `run_id`、请求快照和事件时间线执行；
+- 增加真实 SQLite 交接回归：旧 runtime 的 chat attempt 被视为租约过期后，新 runtime 自动完成同一 `run_id`，历史 attempt 标为 `interrupted`，新 attempt 为 `done`；
+- 普通 `file_operation` 计划在 CommitJournal 尚未覆盖前保持 fail-closed：接管后仍为 `paused`，并写入 `run.recovery_deferred(FILE_OPERATION_JOURNAL_REQUIRED)`，不在应用启动时重放可能绕过 journal 的文件副作用。
+
+本轮定向验证：`npx vitest run packages/agent-runtime/src/runtime.test.ts packages/agent-runtime/src/kernel/run-coordinator.test.ts packages/agent-runtime/src/kernel/run-recovery.e2e.test.ts --reporter=dot`（3 files / 100 tests）、`npm run typecheck -w @xiaoshuo/agent-runtime` 和 `git diff --check` 通过。最终根级验证：`npm run typecheck`、`npm test`（86 files / 668 tests）通过。`PRODUCT.md` 未修改、未纳入提交；chat generated-save 的并发工作保持未暂存，未混入本提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

@@ -177,7 +177,7 @@ export class AgentRuntimeService {
     });
     this.projectManifest = new ProjectManifestService(options.projectRoot);
     if (options.autoRecoverStaleRuns !== false) {
-      this.runCoordinator.recoverStaleRuns();
+      this.recoverStaleDurableRuns();
     }
     activeAgentRuntimeServices.add(this);
   }
@@ -1105,6 +1105,49 @@ export class AgentRuntimeService {
     return this.startDurableRetry(runId, operationId, expectedVersion, stepId, "retry");
   }
 
+  /**
+   * Take over expired runs from a previous runtime instance and immediately
+   * continue them under the same durable run identity. File-operation plans
+   * stay paused until their CommitJournal path is complete.
+   */
+  recoverStaleDurableRuns(): AgentRunState[] {
+    const claimed = this.runCoordinator.recoverStaleRuns();
+    const recovered: AgentRunState[] = [];
+    for (const run of claimed) {
+      try {
+        const request = this.runCoordinator.getRecoveryRequest(run.run_id);
+        if (classifyAgentIntent(request.content || "", request.skill_id || "", []) === "file_operation") {
+          this.runCoordinator.store.appendEventInTransaction(run.run_id, {
+            event_type: "run.recovery_deferred",
+            step_id: run.current_step_id,
+            payload: { reason: "FILE_OPERATION_JOURNAL_REQUIRED" }
+          });
+          recovered.push(this.runCoordinator.getRun(run.run_id)!);
+          continue;
+        }
+        const execution = this.runCoordinator.resumeRun(
+          run.run_id,
+          staleRecoveryOperationId(run.run_id),
+          run.version,
+          { operationType: "resume" }
+        );
+        this.scheduleDurableExecution(request, execution);
+        recovered.push(this.runCoordinator.getRun(run.run_id)!);
+      } catch (error) {
+        this.runCoordinator.store.appendEventInTransaction(run.run_id, {
+          event_type: "run.recovery_deferred",
+          step_id: run.current_step_id,
+          payload: {
+            reason: "RECOVERY_RESUME_FAILED",
+            error: error instanceof Error ? error.message : String(error)
+          }
+        });
+        recovered.push(this.runCoordinator.getRun(run.run_id)!);
+      }
+    }
+    return recovered;
+  }
+
   resolveDurableConfirmation(
     confirmationId: string,
     status: "approved" | "rejected",
@@ -1131,16 +1174,20 @@ export class AgentRuntimeService {
       throw error;
     }
     const request = this.runCoordinator.getRecoveryRequest(runId);
+    this.scheduleDurableExecution(request, execution);
+    return this.runCoordinator.getRun(runId)!;
+  }
+
+  private scheduleDurableExecution(request: AgentRunRequest, execution: DurableRunExecution): void {
     if (isDurableSkillAgentRequest(request)) {
       void this.executeDurableSkillRun(
         request.skill_id || "",
         durableAgentRequestToSkillRequest(request),
         execution
       ).catch(() => undefined);
-    } else {
-      void this.executeDurableAgentRun(request, execution).catch(() => undefined);
+      return;
     }
-    return this.runCoordinator.getRun(runId)!;
+    void this.executeDurableAgentRun(request, execution).catch(() => undefined);
   }
 
   private async beginDurableRun(request: AgentRunRequest, options: AgentRunOptions): Promise<DurableRunExecution> {
@@ -3292,6 +3339,10 @@ function generatedCacheCommitResponse(cacheId: string, savedPaths: string[]): Ag
     saved_paths: savedPaths,
     requires_confirmation: false
   };
+}
+
+function staleRecoveryOperationId(runId: string): string {
+  return `op_stale_recovery_${sha256Text(runId).slice(0, 24)}`;
 }
 
 function buildDurableSkillAgentRequest(skillId: string, request: SkillRunRequest): AgentRunRequest {

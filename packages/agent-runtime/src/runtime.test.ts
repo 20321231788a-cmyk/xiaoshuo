@@ -11,6 +11,7 @@ import { ProjectManifestService } from "@xiaoshuo/project-manifest";
 import type { ChatCompletionMessage } from "@xiaoshuo/model-client";
 import type { AgentStreamEvent } from "@xiaoshuo/shared";
 import { getAgentTraceFilePath } from "./agent-trace.js";
+import { RunCoordinator } from "./kernel/run-coordinator.js";
 import { AgentRuntimeService, closeAllAgentRuntimeServices } from "./runtime.js";
 
 let tempDir = "";
@@ -60,8 +61,94 @@ async function waitForRunStatus(runtime: AgentRuntimeService, runId: string, sta
     }
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
-  throw new Error(`Run ${runId} did not reach ${status}`);
+  const current = runtime.getDurableRun(runId);
+  const events = runtime.listDurableRunEvents(runId).map((event) => event.event_type).join(",");
+  throw new Error(`Run ${runId} did not reach ${status}; current=${current?.status || "missing"}; error=${current?.error || "-"}; events=${events}`);
 }
+
+describe("agent-runtime stale run recovery", () => {
+  it("automatically resumes an expired chat run under the original run id", async () => {
+    const stale = new RunCoordinator({
+      projectRoot: tempDir,
+      runtimeInstanceId: "runtime-stale",
+      now: () => new Date("2020-01-01T00:00:00.000Z"),
+      autoHeartbeat: false
+    });
+    const request = {
+      request_id: "stale-chat-recovery",
+      conversation_id: "",
+      content: "继续讨论本章剧情",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    };
+    const original = stale.beginRun(request, { stepType: "chat", actionId: "agent.chat", retryable: true });
+
+    let modelCalls = 0;
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => {
+          modelCalls += 1;
+          return "已从中断处继续。";
+        }
+      }
+    });
+
+    await waitForRunStatus(runtime, original.run_id, "completed");
+
+    expect(modelCalls).toBe(1);
+    expect(runtime.getDurableRun(original.run_id)).toMatchObject({
+      run_id: original.run_id,
+      status: "completed",
+      recovery_reason: "RUNTIME_LEASE_EXPIRED"
+    });
+    expect(runtime.exportDurableRun(original.run_id).attempts).toEqual([
+      expect.objectContaining({ attempt: 1, status: "interrupted", error_code: "RUNTIME_LEASE_EXPIRED" }),
+      expect.objectContaining({ attempt: 2, status: "done" })
+    ]);
+    expect(runtime.listDurableRunEvents(original.run_id).map((event) => event.event_type)).toEqual(expect.arrayContaining([
+      "run.recovered",
+      "run.resume_started",
+      "run.completed"
+    ]));
+    stale.close();
+  });
+
+  it("keeps an expired file-operation run paused until its journal path is available", () => {
+    const stale = new RunCoordinator({
+      projectRoot: tempDir,
+      runtimeInstanceId: "runtime-stale-file-operation",
+      now: () => new Date("2020-01-01T00:00:00.000Z"),
+      autoHeartbeat: false
+    });
+    const original = stale.beginRun({
+      request_id: "stale-file-operation-recovery",
+      conversation_id: "",
+      content: "把当前文档里的林默替换为杨瑞",
+      current_path: "02_正文/第一章.txt",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    }, { stepType: "file_operation", actionId: "agent.file_operation", retryable: false });
+
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+
+    expect(runtime.getDurableRun(original.run_id)).toMatchObject({
+      run_id: original.run_id,
+      status: "paused",
+      recovery_reason: "RUNTIME_LEASE_EXPIRED"
+    });
+    expect(runtime.listDurableRunEvents(original.run_id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event_type: "run.recovery_deferred", payload: { reason: "FILE_OPERATION_JOURNAL_REQUIRED" } })
+    ]));
+    stale.close();
+  });
+});
 
 describe("agent-runtime generated cache commits", () => {
   it("commits a pending cache through a synthetic durable run", async () => {
