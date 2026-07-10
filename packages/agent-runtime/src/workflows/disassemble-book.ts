@@ -11,6 +11,7 @@ import {
   readDisassembleBookText,
   resolveDisassembleBookForRequest,
   resolveWorkflowSourceText,
+  writeDisassembleBookDocument,
   writeDisassembleBookManifest
 } from "./disassemble-library.js";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
@@ -162,18 +163,16 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
     }, { signal: context.signal });
     throwIfAborted(context.signal);
     const text = normalizeDisassembleOutput("lore", book.title || "当前拆书书籍", loreResult.result || "");
-    await context.documents.saveDocument(lorePath, text, {
-      source: "skill",
-      summary: "拆书写入设定"
+    await writeDisassembleBookDocument(lorePath, text, "拆书写入设定", context, {
+      writeKey: "lore.output"
     });
-    await context.documents.saveDocument(LEGACY_DISASSEMBLE_LORE_PATH, text, {
-      source: "skill",
-      summary: "拆书写入设定 legacy 同步"
+    await writeDisassembleBookDocument(LEGACY_DISASSEMBLE_LORE_PATH, text, "拆书写入设定 legacy 同步", context, {
+      writeKey: "lore.legacy_sync"
     });
     book = await writeDisassembleBookManifest({
       ...book,
       paths: { ...book.paths, lore: lorePath }
-    }, context);
+    }, context, { writeKey: "book.manifest.lore" });
     lore = { book, path: lorePath, legacy_path: LEGACY_DISASSEMBLE_LORE_PATH };
     context.checkpoint?.completeUnit({
       workflow_id: "disassemble_book",
@@ -205,18 +204,16 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
     }, { signal: context.signal });
     throwIfAborted(context.signal);
     const text = normalizeDisassembleOutput("reverse", book.title || "当前拆书书籍", reverseResult.result || "");
-    await context.documents.saveDocument(reversePath, text, {
-      source: "skill",
-      summary: "拆书写入反向细纲"
+    await writeDisassembleBookDocument(reversePath, text, "拆书写入反向细纲", context, {
+      writeKey: "reverse_outline.output"
     });
-    await context.documents.saveDocument(LEGACY_REVERSE_OUTLINE_PATH, text, {
-      source: "skill",
-      summary: "拆书写入反向细纲 legacy 同步"
+    await writeDisassembleBookDocument(LEGACY_REVERSE_OUTLINE_PATH, text, "拆书写入反向细纲 legacy 同步", context, {
+      writeKey: "reverse_outline.legacy_sync"
     });
     book = await writeDisassembleBookManifest({
       ...book,
       paths: { ...book.paths, reverse_outline: reversePath }
-    }, context);
+    }, context, { writeKey: "book.manifest.reverse_outline" });
     reverseOutline = { book, path: reversePath, legacy_path: LEGACY_REVERSE_OUTLINE_PATH };
     context.checkpoint?.completeUnit({
       workflow_id: "disassemble_book",

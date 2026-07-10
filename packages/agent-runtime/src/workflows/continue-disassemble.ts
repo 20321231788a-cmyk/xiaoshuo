@@ -7,6 +7,7 @@ import {
   readDisassembleBookText,
   resolveContinueDisassembleSource,
   resolveDisassembleBookForRequest,
+  writeDisassembleBookDocument,
   writeDisassembleBookManifest
 } from "./disassemble-library.js";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
@@ -42,19 +43,20 @@ export class ContinueDisassembleWorkflow implements WorkflowHandler {
         title: String((request as any).book_title || sourceBook?.title || "").trim() || (await inferDisassembleBookTitle(request, source)),
         sourceText: source,
         sourcePath: sourceBook?.source_path || request.current_path || "",
-        origin: sourceBook?.legacy ? "continue_disassemble:legacy" : "continue_disassemble"
+        origin: sourceBook?.legacy ? "continue_disassemble:legacy" : "continue_disassemble",
+        workflowId: this.id
       },
       context
     );
     throwIfAborted(context.signal);
     const detailPath = `${book.dir}/拆书细纲.txt`;
-    await context.documents.saveDocument(detailPath, result.result || "", {
-      source: "skill",
-      summary: "继续拆细纲"
+    await writeDisassembleBookDocument(detailPath, result.result || "", "继续拆细纲", context, {
+      workflowId: this.id,
+      writeKey: "detail_outline.output"
     });
-    await context.documents.saveDocument(LEGACY_DISASSEMBLE_DETAIL_PATH, result.result || "", {
-      source: "skill",
-      summary: "继续拆细纲 legacy 同步"
+    await writeDisassembleBookDocument(LEGACY_DISASSEMBLE_DETAIL_PATH, result.result || "", "继续拆细纲 legacy 同步", context, {
+      workflowId: this.id,
+      writeKey: "detail_outline.legacy_sync"
     });
     const updatedBook = await writeDisassembleBookManifest(
       {
@@ -65,7 +67,8 @@ export class ContinueDisassembleWorkflow implements WorkflowHandler {
           detail_outline: detailPath
         }
       },
-      context
+      context,
+      { workflowId: this.id, writeKey: "book.manifest.detail_outline" }
     );
 
     const savedPaths = [detailPath];

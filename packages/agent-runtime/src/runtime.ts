@@ -83,6 +83,7 @@ export class AgentRuntimeService {
   private readonly savePlanner: GeneratedSavePlanner;
   private readonly skillOrchestrator: SmartSkillOrchestrator;
   private readonly runCoordinator: RunCoordinator;
+  private readonly commitJournal: CommitJournalService;
   private readonly projectManifest: ProjectManifestService;
 
   constructor(options: AgentPlannerOptions) {
@@ -94,10 +95,11 @@ export class AgentRuntimeService {
     this.skillDrafts = new SkillDraftService(options);
     this.chatRunner = new AgentChatRunner(options);
     this.runCoordinator = new RunCoordinator({ projectRoot: options.projectRoot });
+    this.commitJournal = new CommitJournalService({ store: this.runCoordinator.store, projectRoot: options.projectRoot });
     this.fileOperationRunner = new AgentFileOperationRunner({
       planner: this.planner,
       projectRoot: options.projectRoot,
-      commitJournal: new CommitJournalService({ store: this.runCoordinator.store, projectRoot: options.projectRoot })
+      commitJournal: this.commitJournal
     });
     this.skills = new SkillService({ projectRoot: options.projectRoot });
     this.conversations = new ConversationService({ projectRoot: options.projectRoot });
@@ -663,6 +665,14 @@ export class AgentRuntimeService {
       skillRunner: this.skillRunner,
       trace,
       signal: options.signal,
+      durableExecution: execution
+        ? {
+            runId: execution.run_id,
+            stepId: execution.step_id,
+            attemptId: execution.attempt_id
+          }
+        : undefined,
+      commitJournal: execution ? this.commitJournal : undefined,
       checkpoint: execution
         ? new DurableWorkflowCheckpointStore(this.runCoordinator.store, {
             runId: execution.run_id,

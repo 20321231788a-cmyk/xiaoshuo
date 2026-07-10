@@ -2130,6 +2130,14 @@ npm test
 
 本轮根级验证：`npm run typecheck`、`npm test`（82 files/605 tests）、`npm run build:workbench`、`npm run build:desktop` 和 `git diff --check` 通过。P0 仍未验收；`PRODUCT.md` 未纳入提交。
 
+### 15.58 2026-07-10 P0 Batch 强杀恢复与 Electron 安全记录
+
+- batch checkpoint 在真实 child-process `SIGKILL` 后接管同一 run，只运行 N+1，测试精确断言前一单元没有重复模型或写入副作用；
+- terminal session 绑定创建 renderer，跨 renderer 的写入被拒绝、resize/kill 无效，输出仅投递所有者，窗口关闭会清理其 session；
+- Electron 默认拒绝 permission、webview 与不受信导航，外部窗口只允许受控 http(s) 链接。
+
+本轮根级验证：`npm run typecheck`、`npm test`（84 files/612 tests）、`npm run build:workbench`、`npm run build:desktop` 和 `git diff --check` 通过。P0 仍未验收；`PRODUCT.md` 未纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

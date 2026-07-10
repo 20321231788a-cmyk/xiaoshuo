@@ -191,6 +191,48 @@ describe("DisassembleBookWorkflow", () => {
     expect(await fs.readFile(path.join(tempDir, book?.dir || "", "原文.txt"), "utf8")).toContain("归档的拆书原文");
   });
 
+  it("commits every durable disassemble output with its run, step, and attempt identity", async () => {
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          const prompt = messages.map((message) => message.content).join("\n");
+          return prompt.includes("拆书设定提取.txt")
+            ? "## 人物设定\n林默：主角。"
+            : "## 逐章速览\n第 1 章：林默入宗门。";
+        }
+      }
+    });
+
+    const response = await runtime.runAgent({
+      request_id: "durable-disassemble-journal",
+      conversation_id: "",
+      content: "请拆书",
+      current_path: "",
+      selection: "林默从寒门少年一路成长为宗门天骄。",
+      project_context_hint: "",
+      skill_id: "disassemble_book",
+      attachment_ids: []
+    });
+    const journal = runtime.listDurableCommitJournal(response.run_id);
+    const actions = journal.map((entry) => entry.action).sort();
+
+    expect(journal).toHaveLength(8);
+    expect(journal).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "workflow.disassemble_book.book.source", run_id: response.run_id, stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.disassemble_book.book.manifest.initial", run_id: response.run_id, stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.disassemble_book.book.manifest.lore", run_id: response.run_id, stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.disassemble_book.book.manifest.reverse_outline", run_id: response.run_id, stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.disassemble_book.lore.output", run_id: response.run_id, stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.disassemble_book.lore.legacy_sync", run_id: response.run_id, stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.disassemble_book.reverse_outline.output", run_id: response.run_id, stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.disassemble_book.reverse_outline.legacy_sync", run_id: response.run_id, stage: "finalized" })
+    ]));
+    expect(actions).toHaveLength(8);
+    expect(new Set(journal.map((entry) => `${entry.run_id}:${entry.step_id}:${entry.attempt_id}`)).size).toBe(1);
+  });
+
   it("resumes the same durable run without recomputing its persisted lore output after a SQLite restart", async () => {
     const request = {
       request_id: "disassemble-checkpoint-recovery",

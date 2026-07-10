@@ -2234,8 +2234,8 @@ CI 必须保存 Eval Manifest、失败 case 摘要、性能基线和脱敏 Trace
 | D 最小恢复链路 | 实现中 | run/stream/Trace 同 ID、runtime registry、HTTP 订阅断连解耦；真实子进程强杀后同 ID 仅恢复第二步、第一步保持唯一完成 attempt 的 E2E，以及旧 `streamAgentRun` durable 回归已通过 | 实际 renderer 长连接订阅和完整旧入口矩阵回归 |
 | E API 与 UI | 实现中 | 查询/控制、分页/实时 replay、认证 NDJSON、Workbench trace 实时订阅；Confirmation 列表/批准/拒绝与批准后显式恢复 UI/API 已通过 | 任务列表/详情/控制浏览器 E2E |
 | F 崩溃/并发/确认 | 实现中 | journal/lease/confirmation；durable direct-save/batch-replace journal；Confirmation 等待、批准、拒绝、过期、取消、幂等决议和生产 UI/API 已通过 | 剩余 Skill/workflow 写入覆盖与浏览器 E2E |
-| G Job/长任务 | 实现中 | batch 与 disassemble 的 SQLite checkpoint/restart 测试；legacy JobManager 只读、不可恢复映射 API 已通过 | batch 强杀 E2E 与 legacy 映射 UI/回归 |
-| H 安全/发布 | 实现中 | runtime token/IPC；Windows PR CI、RC evidence、tag provenance gate、签名/installed smoke 脚本已落地 | GitHub environment/证书配置后的真实 RC、Electron/terminal 完整 hardening、保留/导出/删除和发布报告 |
+| G Job/长任务 | 实现中 | batch/disassemble SQLite checkpoint、batch 子进程 SIGKILL 后同 run 恢复 N+1 且无重复副作用、legacy JobManager 只读映射 API 已通过 | legacy 映射 UI/回归 |
+| H 安全/发布 | 实现中 | runtime token/IPC；Windows PR CI、RC evidence、tag provenance gate、签名/installed smoke 脚本；terminal renderer 所有权、权限/导航/webview deny 基线已落地 | GitHub environment/证书配置后的真实 RC、保留/导出/删除和发布报告 |
 
 E0 已修复当前 `AgentTraceView` 未定义符号并恢复根级绿色基线，不代表 E 已完成。A-C 的 `interrupted`、stable project UUID、状态迁移、stale attempt/resume、pause/断连语义和真实强杀集成测试已有实现与验证；仍须补 snapshot 白名单、adapter/迁移故障契约、两步恢复 fixture 和 E 的创建/补流/E2E，随后才能进入 F 真实写入链路。不得因为表结构和定向单测通过就跳到 P1。
 

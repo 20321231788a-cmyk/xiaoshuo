@@ -12,11 +12,12 @@ import {
   syncProjectLocalState,
   trackGeneratedCacheMetadata
 } from "./local-state.js";
-import { createTerminalSession, killAllTerminals, killTerminal, resizeTerminal, writeTerminal } from "./terminal.js";
+import { createTerminalSession, killAllTerminals, killTerminal, killTerminalsForOwner, resizeTerminal, writeTerminal } from "./terminal.js";
 import { registerRuntimeShell, runtimeUrl, startRuntimeServer, stopRuntimeServer, type RuntimeServerState } from "./runtime-server.js";
 import { UpdateService } from "./update-service.js";
 import { defaultProjectArchiveName, ensureZipExtension, exportProjectArchive, importProjectArchive } from "./project-archive.js";
 import { CloudProjectService } from "./cloud-projects.js";
+import { isSafeExternalUrl, isTrustedRendererUrl as hasTrustedRendererUrl } from "./renderer-security.js";
 import {
   cloudProjectDeleteRequestSchema,
   cloudProjectDownloadRequestSchema,
@@ -115,9 +116,18 @@ async function createWindow(): Promise<BrowserWindow> {
   });
 
   window.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
+    if (isSafeExternalUrl(url)) {
+      void shell.openExternal(url);
+    }
     return { action: "deny" };
   });
+  window.webContents.on("will-attach-webview", (event) => {
+    event.preventDefault();
+  });
+  window.webContents.session.setPermissionRequestHandler((_webContents, _permission, callback) => {
+    callback(false);
+  });
+  window.webContents.session.setPermissionCheckHandler(() => false);
   window.webContents.on("will-navigate", (event, url) => {
     if (!isTrustedRendererUrl(url)) {
       event.preventDefault();
@@ -125,6 +135,10 @@ async function createWindow(): Promise<BrowserWindow> {
   });
   window.webContents.on("did-finish-load", () => {
     window.setTitle(appDisplayTitle);
+  });
+  const windowWebContentsId = window.webContents.id;
+  window.on("closed", () => {
+    killTerminalsForOwner(windowWebContentsId);
   });
   window.webContents.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown" || !(input.control || input.meta)) {
@@ -272,15 +286,21 @@ function registerIpc(): void {
   ipcMain.handle(ipcChannels.localStateSyncProject, (_event, request) => syncProjectLocalState(request));
   ipcMain.handle(ipcChannels.localStatePatchSettings, (_event, request) => patchWorkbenchSettings(request));
   ipcMain.handle(ipcChannels.localStateTrackGeneratedCache, (_event, request) => trackGeneratedCacheMetadata(request));
-  ipcMain.handle(ipcChannels.terminalCreate, (_event, request) => createTerminalSession(request));
-  ipcMain.handle(ipcChannels.terminalWrite, (_event, request) => {
-    writeTerminal(request);
+  ipcMain.handle(ipcChannels.terminalCreate, (event, request) => {
+    assertTrustedTerminalRenderer(event);
+    return createTerminalSession(request, event.sender.id);
   });
-  ipcMain.handle(ipcChannels.terminalResize, (_event, request) => {
-    resizeTerminal(request);
+  ipcMain.handle(ipcChannels.terminalWrite, (event, request) => {
+    assertTrustedTerminalRenderer(event);
+    writeTerminal(request, event.sender.id);
   });
-  ipcMain.handle(ipcChannels.terminalKill, (_event, request) => {
-    killTerminal(request);
+  ipcMain.handle(ipcChannels.terminalResize, (event, request) => {
+    assertTrustedTerminalRenderer(event);
+    resizeTerminal(request, event.sender.id);
+  });
+  ipcMain.handle(ipcChannels.terminalKill, (event, request) => {
+    assertTrustedTerminalRenderer(event);
+    killTerminal(request, event.sender.id);
   });
   ipcMain.handle(ipcChannels.updatesGetStatus, () => updateService.getStatus());
   ipcMain.handle(ipcChannels.updatesCheck, () => updateService.checkForUpdates());
@@ -339,20 +359,18 @@ function isTrustedRuntimeRenderer(event: IpcMainInvokeEvent): boolean {
   );
 }
 
+function assertTrustedTerminalRenderer(event: IpcMainInvokeEvent): void {
+  if (!isTrustedRuntimeRenderer(event)) {
+    throw new Error("拒绝非受信任渲染进程访问本地终端");
+  }
+}
+
 function isTrustedRendererUrl(value: string): boolean {
-  if (value.startsWith("file:")) {
-    return true;
-  }
-  try {
-    const url = new URL(value);
-    if (url.origin === runtimeUrl) {
-      return true;
-    }
-    const rendererUrl = process.env.XIAOSHUO_RENDERER_URL;
-    return Boolean(rendererUrl && url.origin === new URL(rendererUrl).origin);
-  } catch {
-    return false;
-  }
+  return hasTrustedRendererUrl(value, {
+    runtimeUrl,
+    rendererUrl: process.env.XIAOSHUO_RENDERER_URL,
+    packagedWorkbenchIndex: path.join(process.resourcesPath, "workbench", "index.html")
+  });
 }
 
 app.whenReady().then(async () => {

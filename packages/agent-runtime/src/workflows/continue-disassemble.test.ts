@@ -96,4 +96,37 @@ describe("ContinueDisassembleWorkflow", () => {
     expect(result.saved_paths).toEqual([`${book?.dir}/拆书细纲.txt`]);
     expect(await fs.readFile(path.join(tempDir, "01_大纲", "拆书细纲.txt"), "utf8")).toContain("继续扩展");
   });
+
+  it("journals durable detail-outline, legacy-sync, and manifest writes", async () => {
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "第001章：继续扩展"
+      }
+    });
+    const response = await runtime.runAgent({
+      request_id: "durable-continue-disassemble-journal",
+      conversation_id: "",
+      content: "继续拆细纲",
+      current_path: "",
+      selection: "第一章：林默入宗门。",
+      project_context_hint: "",
+      skill_id: "continue_disassemble",
+      attachment_ids: []
+    });
+    const journal = runtime.listDurableCommitJournal(response.run_id);
+
+    expect(journal).toHaveLength(5);
+    expect(journal).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "workflow.continue_disassemble.book.source", stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.continue_disassemble.book.manifest.initial", stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.continue_disassemble.detail_outline.output", stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.continue_disassemble.detail_outline.legacy_sync", stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.continue_disassemble.book.manifest.detail_outline", stage: "finalized" })
+    ]));
+    expect(new Set(journal.map((entry) => `${entry.run_id}:${entry.step_id}:${entry.attempt_id}`))).toEqual(
+      new Set([journal.map((entry) => `${response.run_id}:${entry.step_id}:${entry.attempt_id}`)[0]])
+    );
+  });
 });

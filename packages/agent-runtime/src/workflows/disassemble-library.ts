@@ -1,5 +1,5 @@
 import type { AgentRunRequest } from "@xiaoshuo/shared";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { WorkflowRunContext } from "./types.js";
@@ -32,7 +32,7 @@ export type DisassembleBookManifest = {
 export type DisassembleBookWithLegacy = DisassembleBookManifest & { legacy?: boolean };
 
 export async function createDisassembleBook(
-  input: { title: string; sourceText: string; sourcePath: string; origin: string },
+  input: { title: string; sourceText: string; sourcePath: string; origin: string; workflowId?: string },
   context: WorkflowRunContext
 ): Promise<DisassembleBookManifest> {
   const createdAt = new Date().toISOString();
@@ -53,28 +53,75 @@ export async function createDisassembleBook(
     }
   };
   if (input.sourceText.trim()) {
-    await context.documents.saveDocument(`${dir}/原文.txt`, input.sourceText, {
-      source: "skill",
-      summary: `拆书原文：${manifest.title}`
+    await writeDisassembleBookDocument(`${dir}/原文.txt`, input.sourceText, `拆书原文：${manifest.title}`, context, {
+      workflowId: input.workflowId || "disassemble_book",
+      writeKey: "book.source"
     });
   }
-  await writeDisassembleBookManifest(manifest, context);
+  await writeDisassembleBookManifest(manifest, context, {
+    workflowId: input.workflowId || "disassemble_book",
+    writeKey: "book.manifest.initial"
+  });
   return manifest;
 }
 
 export async function writeDisassembleBookManifest(
   book: DisassembleBookManifest,
-  context: WorkflowRunContext
+  context: WorkflowRunContext,
+  options: DisassembleBookWriteOptions = {}
 ): Promise<DisassembleBookManifest> {
   const next: DisassembleBookManifest = {
     ...book,
     updated_at: new Date().toISOString()
   };
-  await context.documents.saveDocument(`${next.dir}/${BOOK_MANIFEST_PATH}`, `${JSON.stringify(next)}\n`, {
-    source: "skill",
-    summary: `拆书书籍 manifest：${next.title}`
+  await writeDisassembleBookDocument(`${next.dir}/${BOOK_MANIFEST_PATH}`, `${JSON.stringify(next)}\n`, `拆书书籍 manifest：${next.title}`, context, {
+    workflowId: options.workflowId || "disassemble_book",
+    writeKey: options.writeKey || "book.manifest"
   });
   return next;
+}
+
+export type DisassembleBookWriteOptions = {
+  workflowId?: string;
+  /** Stable per-run operation key: recovery replays the same write, later writes remain distinct. */
+  writeKey?: string;
+};
+
+export async function writeDisassembleBookDocument(
+  targetPath: string,
+  content: string,
+  summary: string,
+  context: WorkflowRunContext,
+  options: DisassembleBookWriteOptions = {}
+): Promise<void> {
+  const workflowId = String(options.workflowId || "disassemble_book").trim() || "disassemble_book";
+  const writeKey = String(options.writeKey || targetPath).trim() || targetPath;
+  const durable = context.durableExecution;
+  if (!durable || !context.commitJournal) {
+    await context.documents.saveDocument(targetPath, content, { source: "skill", summary });
+    return;
+  }
+
+  await context.commitJournal.write({
+    runId: durable.runId,
+    stepId: durable.stepId,
+    attemptId: durable.attemptId,
+    action: `workflow.${workflowId}.${writeKey}`,
+    targetPath,
+    content,
+    idempotencyKey: createHash("sha256")
+      .update(JSON.stringify({
+        kind: "workflow_document_write",
+        workflow_id: workflowId,
+        write_key: writeKey,
+        run_id: durable.runId,
+        step_id: durable.stepId,
+        target_path: targetPath
+      }), "utf8")
+      .digest("hex"),
+    source: "skill",
+    summary
+  });
 }
 
 export async function listDisassembleBooks(
