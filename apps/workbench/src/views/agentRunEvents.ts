@@ -8,6 +8,23 @@ export type AgentRunEventReplay = {
 
 export type LoadAgentRunEventPage = (after: number) => Promise<AgentRunEventReplayResponse>;
 
+/** Applies a live event using the same identity and cursor rules as a paged replay. */
+export function appendAgentRunEvent(
+  current: AgentRunEventReplay,
+  event: AgentRunEvent
+): AgentRunEventReplay {
+  return {
+    events: mergeAgentRunEvents(current.events, [event]),
+    nextSequence: Math.max(current.nextSequence, event.sequence),
+    gapDetected: current.gapDetected
+  };
+}
+
+/** A stream gap means the run detail is authoritative until a later replay completes. */
+export function markAgentRunEventGap(current: AgentRunEventReplay): AgentRunEventReplay {
+  return { ...current, gapDetected: true };
+}
+
 /** Replays every available page without allowing a malformed cursor to loop forever. */
 export async function replayAgentRunEvents(
   loadPage: LoadAgentRunEventPage,

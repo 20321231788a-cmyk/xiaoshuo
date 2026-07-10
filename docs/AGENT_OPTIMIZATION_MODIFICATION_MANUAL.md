@@ -2232,7 +2232,7 @@ CI 必须保存 Eval Manifest、失败 case 摘要、性能基线和脱敏 Trace
 | B Execution Store | 实现中 | SQLite 表、CRUD、WAL、CAS、outbox/lease/journal；最小 adapter/filesystem seam、只读高 schema 隔离、原子备份发布和损坏/磁盘/锁故障 fixture 已通过根级验证 | 迁移后逻辑校验、真实跨进程锁和运行期磁盘故障场景 |
 | C 状态机与幂等 | 实现中 | 状态机、idempotency、heartbeat/lease；pause `interrupted`、stale orphan 原子结算与 retry budget 定向测试已通过 | flag snapshot、真实副作用幂等、adapter/迁移故障 fixture |
 | D 最小恢复链路 | 实现中 | run/stream/Trace 同 ID、runtime registry、HTTP 订阅断连解耦；真实子进程强杀后同 ID 仅恢复第二步、第一步保持唯一完成 attempt 的 E2E，以及旧 `streamAgentRun` durable 回归已通过 | 实际 renderer 长连接订阅和完整旧入口矩阵回归 |
-| E API 与 UI | 实现中 | 查询/控制 route、`POST /runs` 201/200/409 幂等创建、有限 event replay 的分页/缺口契约、Workbench 基础控制 UI；客户端分页补流、`event_id` 去重、gap 后详情校准；认证 NDJSON event stream、心跳/背压/断连清理和 API client 已通过 | Workbench 消费实时流，以及任务列表/详情/控制 E2E |
+| E API 与 UI | 实现中 | 查询/控制 route、`POST /runs` 201/200/409 幂等创建、有限 event replay 的分页/缺口契约、Workbench 基础控制 UI；客户端分页补流、实时 stream 的 `event_id` 去重、gap 后详情校准及切换/卸载清理；认证 NDJSON event stream、心跳/背压/断连清理和 API client 已通过 | 任务列表/详情/控制 E2E |
 | F 崩溃/并发/确认 | 实现中 | store 已有 journal/lease/confirmation 表、CRUD 和部分 route 基础；`CommitJournalService` 已覆盖同卷临时写入、fencing、原子替换和基于 hash 的启动对账；durable direct-save/batch-replace 已传递 run/step/attempt 并走 journal | 将 CommitJournalService 接入剩余真实写入，以及 Confirmation 生产/过期/批准全链路 |
 | G Job/长任务 | 未开始 | 无可验收垂直链路 | 批量/拆书 N+1 恢复、legacy job 映射和唯一事实源 |
 | H 安全/发布 | 实现中 | 每进程 runtime session token、精确 Host/Origin、受信 IPC 注入和 Workbench 代理请求；现有 tag release workflow | Electron/terminal 完整 hardening、CI/RC/签名/installed smoke、保留/导出/删除和发布报告 |

@@ -3,7 +3,13 @@ import type { AgentRunEvent, AgentRunState, AgentRunTrace } from "@xiaoshuo/shar
 import { Pause, Play, RefreshCw, RotateCcw, Square } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { WorkbenchRuntime } from "../lib/runtime.js";
-import { mergeAgentRunEvents, replayAgentRunEvents, type AgentRunEventReplay } from "./agentRunEvents.js";
+import {
+  appendAgentRunEvent,
+  markAgentRunEventGap,
+  mergeAgentRunEvents,
+  replayAgentRunEvents,
+  type AgentRunEventReplay
+} from "./agentRunEvents.js";
 
 type ReplayState = AgentRunEventReplay & { events: AgentRunEvent[] };
 
@@ -22,8 +28,63 @@ export function AgentTraceView({ runtime }: { runtime: WorkbenchRuntime }) {
   const [eventGapDetected, setEventGapDetected] = useState(false);
   const replayStateRef = useRef(new Map<string, ReplayState>());
   const loadSequenceRef = useRef(0);
+  const streamAbortRef = useRef<AbortController | null>(null);
+
+  function stopEventStream() {
+    streamAbortRef.current?.abort();
+    streamAbortRef.current = null;
+  }
+
+  function startEventStream(runId: string, after: number, loadSequence: number) {
+    stopEventStream();
+    const controller = new AbortController();
+    streamAbortRef.current = controller;
+
+    void client.streamAgentRunEvents(runId, {
+      onEvent: (event) => {
+        if (controller.signal.aborted || loadSequence !== loadSequenceRef.current) {
+          return;
+        }
+        const current = replayStateRef.current.get(runId) || { events: [], nextSequence: after, gapDetected: false };
+        const next = appendAgentRunEvent(current, event);
+        const nextState: ReplayState = { ...next };
+        replayStateRef.current.set(runId, nextState);
+        setEvents(nextState.events);
+      },
+      onGap: async () => {
+        if (controller.signal.aborted || loadSequence !== loadSequenceRef.current) {
+          return;
+        }
+        const current = replayStateRef.current.get(runId) || { events: [], nextSequence: after, gapDetected: false };
+        const nextState: ReplayState = { ...markAgentRunEventGap(current) };
+        replayStateRef.current.set(runId, nextState);
+        setEventGapDetected(true);
+        try {
+          const correctedRun = await client.getAgentRun(runId);
+          if (!controller.signal.aborted && loadSequence === loadSequenceRef.current) {
+            setRunDetail(correctedRun);
+            setMessage("检测到事件保留缺口，已重新读取运行状态");
+          }
+        } catch (error) {
+          if (!controller.signal.aborted && loadSequence === loadSequenceRef.current) {
+            setMessage(error instanceof Error ? error.message : String(error));
+          }
+        }
+      },
+      onEnd: () => {
+        if (streamAbortRef.current === controller) {
+          streamAbortRef.current = null;
+        }
+      }
+    }, after, controller.signal).catch((error: unknown) => {
+      if (!controller.signal.aborted && loadSequence === loadSequenceRef.current) {
+        setMessage(error instanceof Error ? error.message : String(error));
+      }
+    });
+  }
 
   async function loadRun(runId: string, fallbackRun?: AgentRunState, fallbackTrace?: AgentRunTrace) {
+    stopEventStream();
     const loadSequence = ++loadSequenceRef.current;
     if (!runId) {
       setRunDetail(null);
@@ -72,6 +133,9 @@ export function AgentTraceView({ runtime }: { runtime: WorkbenchRuntime }) {
           }
           setRunDetail(correctedRun);
           setMessage("检测到事件保留缺口，已重新读取运行状态");
+        }
+        if (loadSequence === loadSequenceRef.current) {
+          startEventStream(runId, nextReplayState.nextSequence, loadSequence);
         }
       }
       if (nextRun.status === "rejected" && nextTrace.status === "rejected") {
@@ -124,6 +188,10 @@ export function AgentTraceView({ runtime }: { runtime: WorkbenchRuntime }) {
     void refreshTraces();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client]);
+
+  useEffect(() => () => {
+    stopEventStream();
+  }, []);
 
   const selectedTrace = detail || traces.find((trace) => trace.run_id === selectedRunId) || traces[0] || null;
   const selectedRun = runDetail || runs.find((run) => run.run_id === selectedRunId) || null;

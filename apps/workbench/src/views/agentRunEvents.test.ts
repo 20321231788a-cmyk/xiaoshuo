@@ -1,6 +1,11 @@
 import type { AgentRunEvent, AgentRunEventReplayResponse } from "@xiaoshuo/shared";
 import { describe, expect, it } from "vitest";
-import { mergeAgentRunEvents, replayAgentRunEvents } from "./agentRunEvents.js";
+import {
+  appendAgentRunEvent,
+  markAgentRunEventGap,
+  mergeAgentRunEvents,
+  replayAgentRunEvents
+} from "./agentRunEvents.js";
 
 function event(eventId: string, sequence: number): AgentRunEvent {
   return {
@@ -45,6 +50,24 @@ describe("agent run event replay", () => {
     const merged = mergeAgentRunEvents([event("event-2", 2), event("event-1", 1)], [event("event-2", 2), event("event-3", 3)]);
 
     expect(merged.map((item) => item.event_id)).toEqual(["event-1", "event-2", "event-3"]);
+  });
+
+  it("keeps the live stream cursor monotonic and deduplicates it against replay", () => {
+    const existing = { events: [event("event-2", 2)], nextSequence: 2, gapDetected: false };
+
+    const duplicate = appendAgentRunEvent(existing, event("event-2", 2));
+    const appended = appendAgentRunEvent(duplicate, event("event-3", 3));
+
+    expect(appended.events.map((item) => item.event_id)).toEqual(["event-2", "event-3"]);
+    expect(appended.nextSequence).toBe(3);
+  });
+
+  it("retains a live stream gap until the run detail is reloaded", () => {
+    expect(markAgentRunEventGap({ events: [], nextSequence: 4, gapDetected: false })).toEqual({
+      events: [],
+      nextSequence: 4,
+      gapDetected: true
+    });
   });
 
   it("retains a replay gap so the caller can reload the authoritative run detail", async () => {

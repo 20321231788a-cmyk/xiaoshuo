@@ -2093,6 +2093,16 @@ npm test
 
 仍未验收：Workbench 尚未消费实时 stream，任务控制 E2E 未完成；journal 尚未覆盖全部 Skill/workflow 写入，Confirmation 仍缺完整生命周期；G 的长任务检查点、H 的发布门禁和 C 的 flag/副作用幂等仍未完成。`PRODUCT.md` 继续保留且不纳入提交。
 
+### 15.54 2026-07-10 P0 Workbench 实时事件订阅记录
+
+本轮完成 E 的 Workbench 消费层，Task E 仍处于“实现中”。
+
+- Agent Trace 在分页回放后调用认证 API client 的实时订阅；按 `event_id` 去重并推进 sequence；
+- retention gap 时重新读取权威 run detail；刷新、切换 run 或卸载时中止对应 `AbortController`，避免遗留连接；
+- `agentRunEvents` 覆盖流状态辅助测试，Workbench typecheck 和生产构建通过。
+
+未完成项：任务列表/详情/暂停恢复控制的端到端用例仍未建立。`PRODUCT.md` 继续保留且不纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：
