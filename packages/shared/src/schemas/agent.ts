@@ -793,6 +793,9 @@ export const generatedCacheMetaSchema = z
     discarded_at: z.string().default(""),
     failed_at: z.string().default(""),
     saved_paths: z.array(z.string()).default([]),
+    commit_run_id: z.string().default(""),
+    commit_request_id: z.string().default(""),
+    commit_journal_ids: z.array(z.string()).default([]),
     error: z.string().default(""),
     transient: z.boolean().default(false),
     save_plan: generatedSavePlanSchema.optional()

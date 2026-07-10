@@ -79,6 +79,11 @@ export class CommitJournalService {
     const relativePath = this.documents.normalizeRelativePath(input.targetPath);
     const targetPath = await this.documents.resolveSafePath(relativePath, { allowMissing: true });
     const current = await this.documents.readRawText(relativePath).catch(() => "");
+    const requestedHash = contentHash(input.content);
+    const appliedReplay = await this.findAppliedReplay(input, relativePath, targetPath, requestedHash);
+    if (appliedReplay) {
+      return appliedReplay;
+    }
     const now = this.now();
     const owner = `${input.runId}:${input.stepId}:${input.attemptId}`;
     const lease = this.acquireLease(targetPath, owner, input, now);
@@ -95,7 +100,7 @@ export class CommitJournalService {
       action: input.action,
       target_path: targetPath,
       base_hash: contentHash(current),
-      new_hash: contentHash(input.content),
+      new_hash: requestedHash,
       temp_path: sidecarPath(targetPath, journalId, "tmp"),
       backup_path: sidecarPath(targetPath, journalId, "bak"),
       document_version: input.documentVersion ?? 0,
@@ -117,8 +122,28 @@ export class CommitJournalService {
       if (journal.stage !== "finalized") {
         await this.recoverJournal(journal);
       }
+      const recovered = this.requireJournal(journal.journal_id);
+      if (
+        recovered.run_id !== input.runId ||
+        recovered.step_id !== input.stepId ||
+        recovered.target_path !== targetPath ||
+        recovered.new_hash !== requestedHash
+      ) {
+        throw new CommitJournalError(
+          "IDEMPOTENCY_KEY_CONFLICT",
+          `提交幂等键已绑定到不同执行、内容或目标: ${relativePath}`
+        );
+      }
+      const actualHash = contentHash(await this.documents.readRawText(relativePath).catch(() => ""));
+      if (actualHash !== requestedHash || recovered.manifest.recovery === "file_matches_base_hash") {
+        const retryKey = retryIdempotencyKey(input.idempotencyKey, input.attemptId);
+        if (retryKey === input.idempotencyKey) {
+          throw new CommitJournalError("COMMIT_NOT_APPLIED", `此前提交未落盘，当前 attempt 也未能恢复: ${relativePath}`);
+        }
+        return this.write({ ...input, idempotencyKey: retryKey });
+      }
       const document = await this.documents.readDocument(relativePath);
-      return { journal: this.requireJournal(journal.journal_id), document, replayed: true };
+      return { journal: recovered, document, replayed: true };
     }
 
     let currentJournal = journal;
@@ -162,6 +187,48 @@ export class CommitJournalService {
       results.push(await this.recoverJournal(journal));
     }
     return results;
+  }
+
+  private async findAppliedReplay(
+    input: CommitJournalWriteInput,
+    relativePath: string,
+    targetPath: string,
+    requestedHash: string
+  ): Promise<CommitJournalWriteResult | null> {
+    const related = this.store.listCommitJournal(input.runId).filter((journal) =>
+      journal.target_path === targetPath &&
+      (
+        journal.idempotency_key === input.idempotencyKey ||
+        journal.idempotency_key.startsWith(`${input.idempotencyKey}:attempt:`)
+      )
+    );
+    if (!related.length) {
+      return null;
+    }
+    for (const journal of related) {
+      if (journal.stage !== "finalized") {
+        await this.recoverJournal(journal);
+      }
+    }
+    const actualHash = contentHash(await this.documents.readRawText(relativePath).catch(() => ""));
+    if (actualHash !== requestedHash) {
+      return null;
+    }
+    const applied = related
+      .map((journal) => this.requireJournal(journal.journal_id))
+      .find((journal) =>
+        journal.stage === "finalized" &&
+        journal.new_hash === requestedHash &&
+        journal.manifest.recovery !== "file_matches_base_hash"
+      );
+    if (!applied) {
+      return null;
+    }
+    return {
+      journal: applied,
+      document: await this.documents.readDocument(relativePath),
+      replayed: true
+    };
   }
 
   private async recoverJournal(journal: ExecutionCommitJournalEntry): Promise<CommitJournalRecoveryResult> {
@@ -298,6 +365,11 @@ export class CommitJournalService {
 
 function contentHash(content: string): string {
   return `sha256:${createHash("sha256").update(content, "utf8").digest("hex")}`;
+}
+
+function retryIdempotencyKey(idempotencyKey: string, attemptId: string): string {
+  const suffix = `:attempt:${attemptId}`;
+  return idempotencyKey.endsWith(suffix) ? idempotencyKey : `${idempotencyKey}${suffix}`;
 }
 
 function sidecarPath(targetPath: string, journalId: string, extension: "tmp" | "bak"): string {

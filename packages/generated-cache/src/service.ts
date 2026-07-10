@@ -73,8 +73,20 @@ export class GeneratedCacheService {
 
   async create(options: CreateCacheOptions): Promise<GeneratedCacheMeta> {
     await this.cleanupExpiredIfDue().catch(() => {});
+    return this.createAtId(this.idFactory(), options);
+  }
 
-    const cacheId = this.idFactory();
+  async createWithId(cacheId: string, options: CreateCacheOptions): Promise<GeneratedCacheMeta> {
+    await this.cleanupExpiredIfDue().catch(() => {});
+    const metaPath = this.getMetaPath(cacheId);
+    const exists = await fs.stat(metaPath).then((s) => s.isFile()).catch(() => false);
+    if (exists) {
+      return this.get(cacheId);
+    }
+    return this.createAtId(cacheId, options);
+  }
+
+  private async createAtId(cacheId: string, options: CreateCacheOptions): Promise<GeneratedCacheMeta> {
     const cacheDir = this.getCacheDir(cacheId);
     await fs.mkdir(cacheDir, { recursive: true });
 
@@ -101,6 +113,9 @@ export class GeneratedCacheService {
       discarded_at: "",
       failed_at: "",
       saved_paths: [],
+      commit_run_id: "",
+      commit_request_id: "",
+      commit_journal_ids: [],
       error: "",
       transient: options.transient ?? false,
       save_plan: options.save_plan ? generatedSavePlanSchema.parse(options.save_plan) : undefined
@@ -185,7 +200,7 @@ export class GeneratedCacheService {
     options: CommitOptions = {}
   ): Promise<PreparedGeneratedCacheCommit[]> {
     const meta = await this.ensurePending(cacheId);
-    const paths = this.normalizePaths(targetPaths || meta.target_paths || []);
+    const paths = this.normalizePaths(targetPaths || meta.target_paths || []).sort();
     if (!paths.length) {
       throw new Error("没有可写入的目标文件");
     }
@@ -202,12 +217,12 @@ export class GeneratedCacheService {
     }
 
     const mode = options.mode || meta.mode || "replace";
-    return Promise.all(paths.map(async (targetPath, index) => ({
+    return Promise.all(paths.map(async (targetPath) => ({
       cache_id: cacheId,
       target_path: targetPath,
       content: await this.composeTargetText(targetPath, content, mode, strip),
       mode,
-      action_key: `target:${index}`
+      action_key: `target:${targetPath}`
     })));
   }
 
@@ -266,6 +281,7 @@ export class GeneratedCacheService {
     const fallbackContent = await this.readContent(cacheId);
     const strip = options.stripContent ?? true;
     const commits: PreparedGeneratedCacheCommit[] = [];
+    const stagedContent = new Map<string, string>();
 
     for (const [index, segment] of segments.entries()) {
       let content = String(segment.content || "").trim();
@@ -276,7 +292,14 @@ export class GeneratedCacheService {
         throw new Error("生成内容为空，已阻止写入文件");
       }
       const mode = segment.mode || plan.mode || "replace";
-      const nextText = await this.composeTargetText(segment.target_path, content, mode, strip);
+      const nextText = await this.composeTargetText(
+        segment.target_path,
+        content,
+        mode,
+        strip,
+        stagedContent.get(segment.target_path)
+      );
+      stagedContent.set(segment.target_path, nextText);
       commits.push({
         cache_id: cacheId,
         target_path: segment.target_path,
@@ -288,20 +311,31 @@ export class GeneratedCacheService {
     return commits;
   }
 
-  async markCommitted(cacheId: string, savedPaths: string[], options: { cleanupContent?: boolean } = {}): Promise<GeneratedCacheMeta> {
+  async markCommitted(
+    cacheId: string,
+    savedPaths: string[],
+    options: {
+      cleanupContent?: boolean;
+      commitRunId?: string;
+      commitRequestId?: string;
+      commitJournalIds?: string[];
+    } = {}
+  ): Promise<GeneratedCacheMeta> {
     const meta = await this.get(cacheId);
     meta.status = "committed";
     meta.saved_paths = this.normalizePaths(savedPaths);
+    meta.commit_run_id = String(options.commitRunId || meta.commit_run_id || "");
+    meta.commit_request_id = String(options.commitRequestId || meta.commit_request_id || "");
+    meta.commit_journal_ids = [...new Set(options.commitJournalIds || meta.commit_journal_ids || [])];
     meta.committed_at = this.now();
     meta.updated_at = this.now();
     meta.error = "";
 
+    await this.writeMeta(cacheId, meta);
     const cleanup = options.cleanupContent ?? true;
     if (cleanup) {
-      await this.deleteContent(cacheId);
+      await this.deleteContent(cacheId).catch(() => undefined);
     }
-
-    await this.writeMeta(cacheId, meta);
     return meta;
   }
 
@@ -402,13 +436,21 @@ export class GeneratedCacheService {
     }
   }
 
-  private async composeTargetText(relPath: string, content: string, mode: string, strip: boolean): Promise<string> {
+  private async composeTargetText(
+    relPath: string,
+    content: string,
+    mode: string,
+    strip: boolean,
+    stagedExisting?: string
+  ): Promise<string> {
     if (mode === "append") {
-      let existing = "";
-      try {
-        existing = await this.documentService.readRawText(relPath);
-      } catch {
-        existing = "";
+      let existing = stagedExisting;
+      if (existing === undefined) {
+        try {
+          existing = await this.documentService.readRawText(relPath);
+        } catch {
+          existing = "";
+        }
       }
 
       if (strip) {

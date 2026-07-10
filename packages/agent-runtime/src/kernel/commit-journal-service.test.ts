@@ -112,6 +112,73 @@ describe("CommitJournalService", () => {
     expect(await fs.readFile(path.join(projectRoot, "02_正文", "第一章.txt"), "utf8")).toBe("old chapter");
     expect(store.getCommitJournal("journal-fenced")).toMatchObject({ stage: "recovery_required", error_code: "WRITE_FENCED" });
   });
+
+  it("creates an attempt-scoped retry when recovery proves the old content is still on disk", async () => {
+    const projectRoot = await temporaryProject();
+    const store = track(ExecutionStore.open(projectRoot));
+    store.createRun(makeRun(projectRoot));
+    const crashed = new CommitJournalService({
+      store,
+      projectRoot,
+      idFactory: () => "journal-old-content",
+      afterStage: (stage) => {
+        if (stage === "temp_written") {
+          throw new Error("simulated crash before replacement");
+        }
+      }
+    });
+
+    await expect(crashed.write(writeInput())).rejects.toThrow("simulated crash before replacement");
+    expect(await fs.readFile(path.join(projectRoot, "02_正文", "第一章.txt"), "utf8")).toBe("old chapter");
+
+    const recovered = await new CommitJournalService({
+      store,
+      projectRoot,
+      idFactory: () => "journal-retry"
+    }).write({
+      ...writeInput(),
+      attemptId: "attempt-2"
+    });
+
+    expect(recovered).toMatchObject({
+      replayed: false,
+      journal: {
+        journal_id: "journal-retry",
+        stage: "finalized",
+        idempotency_key: "commit-key-1:attempt:attempt-2"
+      }
+    });
+    expect(store.getCommitJournal("journal-old-content")).toMatchObject({
+      stage: "finalized",
+      manifest: expect.objectContaining({ recovery: "file_matches_base_hash" })
+    });
+    expect(await fs.readFile(path.join(projectRoot, "02_正文", "第一章.txt"), "utf8")).toBe("new chapter");
+  });
+
+  it("rejects a globally duplicated idempotency key that belongs to another run", async () => {
+    const projectRoot = await temporaryProject();
+    const store = track(ExecutionStore.open(projectRoot));
+    store.createRun(makeRun(projectRoot));
+    store.createRun({
+      ...makeRun(projectRoot),
+      run_id: "run-2",
+      request_id: "request-2"
+    });
+    let journalSequence = 0;
+    const service = new CommitJournalService({
+      store,
+      projectRoot,
+      idFactory: () => `journal-run-${++journalSequence}`
+    });
+    await service.write(writeInput());
+
+    await expect(service.write({
+      ...writeInput(),
+      runId: "run-2",
+      stepId: "step-2",
+      attemptId: "attempt-2"
+    })).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_CONFLICT" });
+  });
 });
 
 async function temporaryProject(): Promise<string> {

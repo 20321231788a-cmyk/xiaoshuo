@@ -21,7 +21,9 @@ import type {
   SkillDraftRequest,
   SkillDraftResponse,
   SkillDefinition,
-  SkillPatchResponse
+  SkillPatchResponse,
+  GeneratedSavePlan,
+  GeneratedCacheMeta
 } from "@xiaoshuo/shared";
 import { AgentChatRunner, type ChatContextAssemblyObserver } from "./chat-runner.js";
 import { classifyAgentIntent, classifySkillManagementIntent, hasSkillAction, isReadContextIntent, rankSkillRoutes, type SkillManagementIntent } from "./intent-router.js";
@@ -32,12 +34,12 @@ import { SkillService } from "@xiaoshuo/skill-service";
 import { AgentFileOperationRunner } from "./file-operation-runner.js";
 import { ConversationService } from "@xiaoshuo/conversation-service";
 import { DocumentService } from "@xiaoshuo/document-service";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { loadModelConfig, loadWebSearchConfig, type ConfigServiceOptions } from "@xiaoshuo/config-service";
 import { OpenAICompatibleClient, type ChatCompletionMessage } from "@xiaoshuo/model-client";
 import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
 import { ProjectManifestService } from "@xiaoshuo/project-manifest";
-import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
+import { GeneratedCacheService, type PreparedGeneratedCacheCommit } from "@xiaoshuo/generated-cache";
 import { DefaultWebSearchClient, formatWebSearchContext, shouldUseWebSearch, summarizeWebSearchSources, type WebSearchClient, type WebSearchSource } from "./web-search.js";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -73,6 +75,31 @@ export function closeAllAgentRuntimeServices(): void {
     runtime.close();
   }
 }
+
+export type GeneratedCacheCommitInput = {
+  cache_id?: string;
+  content?: string;
+  source?: string;
+  skill_id?: string;
+  mode?: "replace" | "append";
+  target_paths?: string[];
+  save_plan?: GeneratedSavePlan;
+  summary?: string;
+  cleanup_content?: boolean;
+};
+
+export type GeneratedCacheCommitResult = {
+  run_id: string;
+  cache_id: string;
+  saved_paths: string[];
+  journal_ids: string[];
+  replayed: boolean;
+  cache: GeneratedCacheMeta;
+};
+
+export type GeneratedCacheCommitOptions = AgentRunOptions & {
+  execution?: DurableRunExecution;
+};
 
 export class AgentRuntimeService {
   private readonly planner: AgentPlanner;
@@ -273,6 +300,199 @@ export class AgentRuntimeService {
       return Boolean(skillId) && (await this.skillRunner.canRunSkillLocally(skillId));
     }
     return intent === "chat" || intent === "read_context" || intent === "file_operation";
+  }
+
+  async commitGeneratedCache(
+    input: GeneratedCacheCommitInput,
+    options: GeneratedCacheCommitOptions = {}
+  ): Promise<GeneratedCacheCommitResult> {
+    throwIfAborted(options.signal);
+    const source = String(input.source || "generated_cache").trim() || "generated_cache";
+    const skillId = String(input.skill_id || "").trim();
+    const mode = input.mode === "append" ? "append" : "replace";
+    const requestedTargets = canonicalGeneratedPaths(input.target_paths || []);
+    const savePlan = input.save_plan ? canonicalGeneratedSavePlan(input.save_plan) : undefined;
+    let cacheId = String(input.cache_id || "").trim();
+
+    if (!cacheId) {
+      const content = String(input.content || "");
+      const rawIntent = {
+        schema_version: 1,
+        kind: "generated_cache_raw",
+        source,
+        skill_id: skillId,
+        mode,
+        target_paths: requestedTargets,
+        save_plan: savePlan || null,
+        content_hash: sha256Text(content)
+      };
+      cacheId = sha256Text(stableJson(rawIntent)).slice(0, 32);
+      const rawCache = await this.cache.createWithId(cacheId, {
+        source,
+        skill_id: skillId,
+        mode,
+        target_paths: requestedTargets,
+        summary: input.summary || "Generated content pending durable commit",
+        transient: true,
+        save_plan: savePlan
+      });
+      if (rawCache.status === "pending") {
+        const cachedContent = await this.cache.readContent(cacheId);
+        if (cachedContent && cachedContent !== content) {
+          throw codedRuntimeError("GENERATED_CACHE_CONTENT_CONFLICT", "确定性生成缓存已绑定到不同内容");
+        }
+        if (cachedContent !== content) {
+          await this.cache.replace(cacheId, content);
+        }
+      }
+    }
+
+    const meta = await this.cache.get(cacheId);
+    if (meta.status === "committed") {
+      return {
+        run_id: meta.commit_run_id,
+        cache_id: cacheId,
+        saved_paths: meta.saved_paths,
+        journal_ids: meta.commit_journal_ids,
+        replayed: true,
+        cache: meta
+      };
+    }
+    if (meta.status !== "pending") {
+      throw codedRuntimeError("GENERATED_CACHE_NOT_PENDING", `生成缓存状态为 ${meta.status}，不能提交`);
+    }
+
+    const cachedContent = await this.cache.readContent(cacheId);
+    const effectiveSavePlan = savePlan || (meta.save_plan ? canonicalGeneratedSavePlan(meta.save_plan) : undefined);
+    const effectiveTargets = requestedTargets.length
+      ? requestedTargets
+      : canonicalGeneratedPaths(effectiveSavePlan?.target_paths?.length ? effectiveSavePlan.target_paths : meta.target_paths);
+    const commitIntent = {
+      schema_version: 1,
+      kind: "generated_cache_commit",
+      cache_id: cacheId,
+      mode: input.mode || effectiveSavePlan?.mode || meta.mode || "replace",
+      target_paths: effectiveTargets,
+      save_plan: effectiveSavePlan || null,
+      content_hash: sha256Text(cachedContent)
+    };
+    const intentHash = sha256Text(stableJson(commitIntent));
+    const commits = effectiveSavePlan
+      ? await this.cache.prepareSavePlanCommit(cacheId, effectiveSavePlan, { mode: input.mode })
+      : await this.cache.prepareTargetCommit(cacheId, effectiveTargets, { mode: input.mode });
+    throwIfAborted(options.signal);
+
+    let execution = options.execution;
+    let ownsExecution = false;
+    let commitRequestId = execution?.request_id || "";
+    if (!execution) {
+      const requestId = `req_generated_cache_${intentHash.slice(0, 32)}`;
+      commitRequestId = requestId;
+      const request: AgentRunRequest = {
+        request_id: requestId,
+        autonomy_mode: "execute",
+        conversation_id: meta.conversation_id || "",
+        content: stableJson(commitIntent),
+        current_path: commits[0]?.target_path || "",
+        selection: "",
+        project_context_hint: "",
+        skill_id: "generated_cache_commit",
+        attachment_ids: [],
+        reference_paths: commits.map((commit) => commit.target_path),
+        confirmed_reference_paths: commits.map((commit) => commit.target_path),
+        disable_auto_references: true
+      };
+      try {
+        execution = this.runCoordinator.beginRun(request, {
+          projectId: await this.projectManifest.getProjectId(),
+          stepType: "file_operation",
+          actionId: "agent.generated_cache_commit",
+          skillId: "generated_cache_commit",
+          retryable: true,
+          requiresConfirmation: false,
+          signal: options.signal
+        });
+      } catch (error) {
+        if (!(error instanceof RunRequestReplayError)) {
+          throw error;
+        }
+        const replay = error.run;
+        if (replay.status === "completed") {
+          const savedPaths = this.runCoordinator.store
+            .listObservations(replay.run_id)
+            .flatMap((observation) => observation.saved_paths);
+          const committed = await this.cache.markCommitted(cacheId, savedPaths, {
+            cleanupContent: input.cleanup_content ?? true,
+            commitRunId: replay.run_id,
+            commitRequestId: requestId,
+            commitJournalIds: this.runCoordinator.listCommitJournal(replay.run_id).map((journal) => journal.journal_id)
+          });
+          return {
+            run_id: replay.run_id,
+            cache_id: cacheId,
+            saved_paths: committed.saved_paths,
+            journal_ids: this.runCoordinator.listCommitJournal(replay.run_id).map((journal) => journal.journal_id),
+            replayed: true,
+            cache: committed
+          };
+        }
+        if (replay.status !== "failed" && replay.status !== "paused") {
+          throw codedRuntimeError(
+            "GENERATED_CACHE_COMMIT_IN_PROGRESS",
+            `生成缓存提交任务 ${replay.run_id} 当前状态为 ${replay.status}`
+          );
+        }
+        execution = this.runCoordinator.resumeRun(
+          replay.run_id,
+          `op_generated_cache_${sha256Text(`${requestId}:${replay.version}`).slice(0, 24)}`,
+          replay.version,
+          { operationType: "retry", signal: options.signal }
+        );
+      }
+      ownsExecution = true;
+    }
+
+    const journalIds: string[] = [];
+    let replayed = commits.length > 0;
+    let syntheticRunCompleted = false;
+    try {
+      for (const commit of commits) {
+        throwIfAborted(execution.signal);
+        const result = await this.writePreparedGeneratedCacheCommit(
+          commit,
+          execution,
+          intentHash,
+          source,
+          input.summary
+        );
+        journalIds.push(result.journal.journal_id);
+        replayed = replayed && result.replayed;
+      }
+      const savedPaths = commits.map((commit) => commit.target_path);
+      if (ownsExecution) {
+        this.runCoordinator.completeRun(execution, generatedCacheCommitResponse(cacheId, savedPaths));
+        syntheticRunCompleted = true;
+      }
+      const committed = await this.cache.markCommitted(cacheId, savedPaths, {
+        cleanupContent: input.cleanup_content ?? true,
+        commitRunId: execution.run_id,
+        commitRequestId,
+        commitJournalIds: journalIds
+      });
+      return {
+        run_id: execution.run_id,
+        cache_id: cacheId,
+        saved_paths: savedPaths,
+        journal_ids: journalIds,
+        replayed,
+        cache: committed
+      };
+    } catch (error) {
+      if (ownsExecution && !syntheticRunCompleted) {
+        this.failDurableRun(execution, error);
+      }
+      throw error;
+    }
   }
 
   async runAgent(request: AgentRunRequest, options: AgentRunOptions = {}): Promise<AgentRunResponse> {
@@ -650,6 +870,46 @@ export class AgentRuntimeService {
       retryable: !writeRequested,
       requiresConfirmation: initialIntent === "file_operation",
       signal: options.signal
+    });
+  }
+
+  private async writePreparedGeneratedCacheCommit(
+    commit: PreparedGeneratedCacheCommit,
+    execution: DurableRunExecution,
+    intentHash: string,
+    source: string,
+    summary = ""
+  ) {
+    const idempotencyKey = sha256Text(stableJson({
+      schema_version: 1,
+      kind: "generated_cache_write",
+      cache_id: commit.cache_id,
+      action_key: commit.action_key,
+      target_path: commit.target_path,
+      intent_hash: intentHash,
+      run_id: execution.run_id,
+      step_id: execution.step_id
+    }));
+    const existing = this.runCoordinator
+      .listCommitJournal(execution.run_id)
+      .find((journal) => journal.idempotency_key === idempotencyKey);
+    let content = commit.content;
+    if (existing) {
+      const current = await this.documents.readRawText(commit.target_path).catch(() => "");
+      if (sha256ContentHash(current) === existing.new_hash) {
+        content = current;
+      }
+    }
+    return this.commitJournal.write({
+      runId: execution.run_id,
+      stepId: execution.step_id,
+      attemptId: execution.attempt_id,
+      action: `generated_cache.commit.${commit.action_key}`,
+      targetPath: commit.target_path,
+      content,
+      idempotencyKey,
+      source,
+      summary: summary || `Generated cache commit: ${commit.target_path}`
     });
   }
 
@@ -2602,6 +2862,70 @@ export type AgentRuntimeOptions = AgentPlannerOptions & {
   /** Safe mode keeps stale runs untouched until an operator explicitly exits it. */
   autoRecoverStaleRuns?: boolean;
 };
+
+function generatedCacheCommitResponse(cacheId: string, savedPaths: string[]): AgentRunResponse {
+  return {
+    intent: "file_operation",
+    reply: `Generated cache ${cacheId} committed`,
+    conversation: null,
+    plan: null,
+    results: [],
+    skill_result: null,
+    saved_paths: savedPaths,
+    requires_confirmation: false
+  };
+}
+
+function canonicalGeneratedPaths(paths: string[]): string[] {
+  return [...new Set(paths
+    .map((item) => String(item || "").trim().replace(/\\/g, "/"))
+    .filter(Boolean))]
+    .sort();
+}
+
+function canonicalGeneratedSavePlan(savePlan: GeneratedSavePlan): GeneratedSavePlan {
+  return {
+    ...savePlan,
+    target_paths: canonicalGeneratedPaths(savePlan.target_paths || []),
+    segments: (savePlan.segments || []).map((segment) => ({
+      ...segment,
+      target_path: String(segment.target_path || "").trim().replace(/\\/g, "/")
+    }))
+  };
+}
+
+function stableJson(value: unknown): string {
+  return JSON.stringify(sortJsonValue(value));
+}
+
+function sortJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sortJsonValue);
+  }
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+  const record = value as Record<string, unknown>;
+  const sorted: Record<string, unknown> = {};
+  for (const key of Object.keys(record).sort()) {
+    if (record[key] !== undefined) {
+      sorted[key] = sortJsonValue(record[key]);
+    }
+  }
+  return sorted;
+}
+
+function sha256Text(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
+}
+
+function sha256ContentHash(value: string): string {
+  return `sha256:${sha256Text(value)}`;
+}
+
+function codedRuntimeError(code: string, message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
+}
 
 function stringListFromUnknown(value: unknown): string[] {
   if (!Array.isArray(value)) {

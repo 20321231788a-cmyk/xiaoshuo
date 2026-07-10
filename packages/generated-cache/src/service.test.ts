@@ -109,7 +109,11 @@ describe("generated-cache-service", () => {
     const commits = await service.prepareTargetCommit(cache.cache_id);
 
     expect(commits).toEqual([
-      expect.objectContaining({ target_path: "02_正文/第一章.txt", content: "待 journal 提交的正文", action_key: "target:0" })
+      expect.objectContaining({
+        target_path: "02_正文/第一章.txt",
+        content: "待 journal 提交的正文",
+        action_key: "target:02_正文/第一章.txt"
+      })
     ]);
     await expect(fs.access(path.join(tempDir, "02_正文", "第一章.txt"))).rejects.toThrow();
     expect((await service.get(cache.cache_id)).status).toBe("pending");
@@ -168,6 +172,48 @@ describe("generated-cache-service", () => {
     expect(await fs.readFile(path.join(tempDir, "02_正文", "第二章.txt"), "utf8")).toBe("重复生成文本");
   });
 
+  it("creates deterministic cache entries idempotently", async () => {
+    const service = new GeneratedCacheService({ projectRoot: tempDir });
+    const cacheId = "1234567890abcdef1234567890abcdef";
+    const first = await service.createWithId(cacheId, {
+      source: "generated_route",
+      target_paths: ["02_正文/第一章.txt"],
+      mode: "replace"
+    });
+    await service.replace(cacheId, "确定性缓存内容");
+
+    const replay = await service.createWithId(cacheId, {
+      source: "generated_route",
+      target_paths: ["02_正文/第一章.txt"],
+      mode: "replace"
+    });
+
+    expect(first.cache_id).toBe(cacheId);
+    expect(replay.cache_id).toBe(cacheId);
+    expect(await service.readContent(cacheId)).toBe("确定性缓存内容");
+  });
+
+  it("orders prepared target commits by normalized path", async () => {
+    const service = new GeneratedCacheService({ projectRoot: tempDir });
+    const cache = await service.create({
+      source: "chat",
+      target_paths: ["02_正文/第二章.txt", "02_正文/第一章.txt"],
+      mode: "replace"
+    });
+    await service.replace(cache.cache_id, "稳定顺序");
+
+    const commits = await service.prepareTargetCommit(cache.cache_id);
+
+    expect(commits.map((commit) => commit.target_path)).toEqual([
+      "02_正文/第一章.txt",
+      "02_正文/第二章.txt"
+    ]);
+    expect(commits.map((commit) => commit.action_key)).toEqual([
+      "target:02_正文/第一章.txt",
+      "target:02_正文/第二章.txt"
+    ]);
+  });
+
   it("stores and commits an AI save plan", async () => {
     const service = new GeneratedCacheService({
       projectRoot: tempDir,
@@ -202,6 +248,31 @@ describe("generated-cache-service", () => {
     const saved = await service.commitSavePlan("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6");
     expect(saved).toEqual(["01_大纲/大纲.txt"]);
     expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("第一章\n\n---\n追加大纲\n");
+  });
+
+  it("stages repeated append segments for the same save-plan target", async () => {
+    const service = new GeneratedCacheService({ projectRoot: tempDir });
+    const cache = await service.create({ source: "chat" });
+    await service.replace(cache.cache_id, "fallback");
+
+    const commits = await service.prepareSavePlanCommit(cache.cache_id, {
+      action: "split_and_save",
+      mode: "append",
+      target_paths: ["01_大纲/大纲.txt"],
+      segments: [
+        { target_path: "01_大纲/大纲.txt", content: "第二章", mode: "append", reason: "first" },
+        { target_path: "01_大纲/大纲.txt", content: "第三章", mode: "append", reason: "second" }
+      ],
+      reason: "append two sections",
+      confidence: 1,
+      requires_confirmation: false,
+      should_auto_commit: true,
+      source: "chat",
+      skill_id: "chat_generated"
+    });
+
+    expect(commits[0]?.content).toBe("第一章\n\n---\n第二章\n");
+    expect(commits[1]?.content).toBe("第一章\n\n---\n第二章\n\n---\n第三章\n");
   });
 
   it("refuses to overwrite restricted file types or paths", async () => {

@@ -2178,6 +2178,23 @@ npm test
 
 定向验证：`npx vitest run packages/generated-cache/src/service.test.ts packages/agent-runtime/src/runtime.test.ts`（2 files/77 tests）、`npm run typecheck -w @xiaoshuo/generated-cache`、`npm run typecheck -w @xiaoshuo/agent-runtime` 和 `git diff --check` 通过。仍未覆盖聊天、Prompt Skill、HTTP 延后缓存提交和普通文件操作计划；P0-F 与 P0 均仍为实现中，`PRODUCT.md` 未纳入提交。
 
+### 15.64 2026-07-10 P0 GeneratedCache Synthetic Durable Commit 记录
+
+- `AgentRuntimeService.commitGeneratedCache()` 统一承接普通 cache/save-plan 与无 cache 的直接草稿保存；HTTP 延后保存会创建 `agent.generated_cache_commit` synthetic durable run，以 cache 内容和规范化提交意图派生稳定 request id，并逐目标调用 `CommitJournalService`；
+- 无 cache 的 raw draft 先映射为确定性 32-hex GeneratedCache，同一请求重放不会创建第二个 run、第二份 cache 或重复 append；已有 durable execution 也可复用同一提交器，供后续 chat/Prompt Skill 迁移；
+- synthetic run、request 与 journal id 会写回 cache 元数据，已 committed cache 的重复保存仍可返回原审计关联；跨 `/generated/save` 与兼容 commit 入口的 transport source/skill 不参与提交身份，失败后会恢复同一 run；
+- `GeneratedCacheService` 的普通 target prepare 改为稳定路径顺序和路径级 action key；save-plan segment 保留输入顺序和 index key，但同一目标的多段 append 会以上一段 staged content 继续合成。committed 元数据先原子落盘，再 best-effort 清理正文，避免先删正文后崩溃造成 pending cache 不可恢复；
+- CommitJournal 重放现在区分“新内容已落盘”和“磁盘仍是旧内容”：前者复用 finalized journal，后者保留原恢复记录并用当前 attempt 补写，解决多目标第二项在替换前失败后无法继续的问题；
+- `/api/agent/generated/save` 的普通 cache、save-plan 和 raw content 分支，以及 `/api/agent/generated/cache/{id}/commit` 的普通分支已改走 runtime；style/genre/lore 特殊分段保存仍是下一板块，未宣称整条路由完成。
+
+恢复与回滚：本轮没有新增 SQLite schema。失败时 cache 保持 pending，已完成 target journal 可在同 run retry 中重放；run 已完成但 cache 元数据未收口时，下一次相同请求从 observation 补齐 committed 状态。代码回滚不得删除已有 run、journal 或 deterministic cache，旧版本仍可读取目标文档和 cache 元数据。
+
+本轮验证：
+
+- 定向：`npx vitest run packages/generated-cache/src/service.test.ts packages/agent-runtime/src/runtime.test.ts packages/agent-runtime/src/kernel/commit-journal-service.test.ts apps/desktop-shell/src/main/runtime/generated-cache-routes.test.ts packages/shared/src/schemas/agent.test.ts --reporter=dot`，5 files / 111 tests；
+- 根级：`npm run typecheck`、`npm test`（85 files / 636 tests）、`npm run build:desktop`、`npm run build:workbench` 和 `git diff --check` 通过；Workbench 只有既有的 >500 kB chunk warning；
+- P0-F 与 P0 继续为“实现中”；`PRODUCT.md` 未修改、未纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

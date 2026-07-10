@@ -62,6 +62,158 @@ async function waitForRunStatus(runtime: AgentRuntimeService, runId: string, sta
   throw new Error(`Run ${runId} did not reach ${status}`);
 }
 
+describe("agent-runtime generated cache commits", () => {
+  it("commits a pending cache through a synthetic durable run", async () => {
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    const entry = await cache.create({
+      source: "chat",
+      skill_id: "chat_generated",
+      target_paths: ["02_正文/第一章.txt"],
+      mode: "replace"
+    });
+    await cache.replace(entry.cache_id, "journal 提交正文");
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+
+    const result = await runtime.commitGeneratedCache({
+      cache_id: entry.cache_id,
+      source: "generated_save_route",
+      skill_id: "chat_generated",
+      mode: "replace",
+      target_paths: ["02_正文/第一章.txt"]
+    });
+
+    expect(result.run_id).toMatch(/^run_/);
+    expect(result.saved_paths).toEqual(["02_正文/第一章.txt"]);
+    expect(result.cache.status).toBe("committed");
+    expect(runtime.getDurableRun(result.run_id)?.status).toBe("completed");
+    expect(runtime.exportDurableRun(result.run_id).steps[0]).toMatchObject({
+      type: "file_operation",
+      action_id: "agent.generated_cache_commit",
+      retryable: true,
+      requires_confirmation: false
+    });
+    expect(runtime.listDurableCommitJournal(result.run_id)).toEqual([
+      expect.objectContaining({
+        run_id: result.run_id,
+        action: "generated_cache.commit.target:02_正文/第一章.txt",
+        stage: "finalized"
+      })
+    ]);
+    expect(await fs.readFile(path.join(tempDir, "02_正文", "第一章.txt"), "utf8")).toBe("journal 提交正文");
+  });
+
+  it("replays the same raw append without duplicating the document side effect", async () => {
+    await fs.writeFile(path.join(tempDir, "01_大纲", "追加测试.txt"), "已有内容", "utf8");
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+    const input = {
+      content: "新增内容",
+      source: "generated_save_route",
+      skill_id: "chat_generated",
+      mode: "append" as const,
+      target_paths: ["01_大纲/追加测试.txt"]
+    };
+
+    const first = await runtime.commitGeneratedCache(input);
+    const replay = await runtime.commitGeneratedCache(input);
+
+    expect(first.saved_paths).toEqual(["01_大纲/追加测试.txt"]);
+    expect(replay.replayed).toBe(true);
+    expect(replay.run_id).toBe(first.run_id);
+    expect(replay.cache_id).toBe(first.cache_id);
+    expect(replay.journal_ids).toEqual(first.journal_ids);
+    expect(runtime.listDurableRuns(undefined, 20)).toHaveLength(1);
+    expect(runtime.listDurableCommitJournal()).toHaveLength(1);
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "追加测试.txt"), "utf8"))
+      .toBe("已有内容\n\n---\n新增内容\n");
+  });
+
+  it("repairs pending cache metadata from a completed synthetic run", async () => {
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    const entry = await cache.create({
+      source: "chat",
+      target_paths: ["02_正文/第一章.txt"],
+      mode: "replace"
+    });
+    await cache.replace(entry.cache_id, "已写入但元数据待收口");
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+    const runtimeCache = (runtime as unknown as { cache: GeneratedCacheService }).cache;
+    const markCommitted = runtimeCache.markCommitted.bind(runtimeCache);
+    let failMetadataCommit = true;
+    runtimeCache.markCommitted = async (...args) => {
+      if (failMetadataCommit) {
+        throw new Error("simulated metadata commit failure");
+      }
+      return markCommitted(...args);
+    };
+    const input = {
+      cache_id: entry.cache_id,
+      source: "generated_save_route",
+      mode: "replace" as const,
+      target_paths: ["02_正文/第一章.txt"]
+    };
+
+    await expect(runtime.commitGeneratedCache(input)).rejects.toThrow("simulated metadata commit failure");
+    const completedRun = runtime.listDurableRuns(["completed"], 10)[0];
+    expect(completedRun?.status).toBe("completed");
+    expect((await cache.get(entry.cache_id)).status).toBe("pending");
+
+    failMetadataCommit = false;
+    const repaired = await runtime.commitGeneratedCache(input);
+
+    expect(repaired.run_id).toBe(completedRun?.run_id);
+    expect(repaired.replayed).toBe(true);
+    expect(runtime.listDurableCommitJournal(repaired.run_id)).toHaveLength(1);
+    expect((await cache.get(entry.cache_id)).status).toBe("committed");
+  });
+
+  it("retries a failed multi-target commit on the same run without rewriting finalized targets", async () => {
+    const blockedParent = path.join(tempDir, "blocked");
+    await fs.writeFile(blockedParent, "not a directory", "utf8");
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    const entry = await cache.create({
+      source: "chat",
+      target_paths: ["blocked/第二章.txt", "02_正文/第一章.txt"],
+      mode: "append"
+    });
+    await cache.replace(entry.cache_id, "多目标正文");
+    await fs.writeFile(path.join(tempDir, "02_正文", "第一章.txt"), "已有第一章", "utf8");
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+    const input = {
+      cache_id: entry.cache_id,
+      source: "generated_save_route",
+      mode: "append" as const,
+      target_paths: ["blocked/第二章.txt", "02_正文/第一章.txt"]
+    };
+
+    await expect(runtime.commitGeneratedCache(input)).rejects.toThrow();
+    const failedRun = runtime.listDurableRuns(["failed"], 10)[0];
+    expect(failedRun?.status).toBe("failed");
+    expect((await cache.get(entry.cache_id)).status).toBe("pending");
+    expect(await fs.readFile(path.join(tempDir, "02_正文", "第一章.txt"), "utf8"))
+      .toBe("已有第一章\n\n---\n多目标正文\n");
+    expect(runtime.listDurableCommitJournal(failedRun?.run_id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ target_path: expect.stringContaining("第一章.txt"), stage: "finalized" }),
+      expect.objectContaining({ target_path: expect.stringContaining("第二章.txt"), stage: "recovery_required" })
+    ]));
+
+    await fs.rm(blockedParent);
+    await fs.mkdir(blockedParent);
+    const recovered = await runtime.commitGeneratedCache({
+      ...input,
+      source: "generated_cache_commit_route"
+    });
+
+    expect(recovered.run_id).toBe(failedRun?.run_id);
+    expect(runtime.getDurableRun(recovered.run_id)?.status).toBe("completed");
+    expect(runtime.exportDurableRun(recovered.run_id).attempts).toHaveLength(2);
+    expect(runtime.listDurableCommitJournal(recovered.run_id)).toHaveLength(3);
+    expect(await fs.readFile(path.join(tempDir, "02_正文", "第一章.txt"), "utf8"))
+      .toBe("已有第一章\n\n---\n多目标正文\n");
+    expect(await fs.readFile(path.join(blockedParent, "第二章.txt"), "utf8")).toBe("多目标正文\n");
+    expect((await cache.get(entry.cache_id)).status).toBe("committed");
+  });
+});
+
 describe("agent-runtime chat flow", () => {
   it("runs read-context chat locally and persists the conversation", async () => {
     let capturedMessages: ChatCompletionMessage[] = [];

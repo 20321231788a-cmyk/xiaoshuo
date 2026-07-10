@@ -1,9 +1,9 @@
 import { PromptSkillRunner } from "@xiaoshuo/agent-runtime";
-import { DocumentService } from "@xiaoshuo/document-service";
 import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
 import { generatedSaveRequestSchema, type CurrentProject } from "@xiaoshuo/shared";
 import { VectorIndex } from "@xiaoshuo/vector-service";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { getProjectAgentRuntime } from "./agent-runtime-registry.js";
 import type { RuntimeContext } from "./types.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -73,30 +73,31 @@ export async function handleGeneratedCacheRoutes(
 
     let savedPaths: string[] = [];
     if (payload.cache_id) {
-      savedPaths = payload.save_plan
-        ? await cacheService.commitSavePlan(payload.cache_id, payload.save_plan, {
-            mode: payload.mode,
-            cleanupContent: true
-          })
-        : await cacheService.commitToTargets(payload.cache_id, payload.target_paths, {
-            mode: payload.mode,
-            cleanupContent: true
-          });
+      savedPaths = (await getProjectAgentRuntime(context, currentProject.path).commitGeneratedCache({
+        cache_id: payload.cache_id,
+        source: "generated_save_route",
+        skill_id: skillId,
+        mode: payload.mode,
+        target_paths: payload.target_paths,
+        save_plan: payload.save_plan,
+        summary: "Generated result confirmed by user",
+        cleanup_content: true
+      })).saved_paths;
     } else {
       const paths = payload.target_paths.length ? payload.target_paths : (payload.target_path ? [payload.target_path] : []);
       if (!paths.length) {
         deps.writeJson(response, 400, { detail: "没有可写入的目标文件" });
         return true;
       }
-      const documentService = new DocumentService({ projectRoot: currentProject.path });
-      for (const relPath of paths) {
-        if (payload.mode === "append") {
-          await documentService.appendDocument(relPath, payload.content);
-        } else {
-          await documentService.saveDocument(relPath, payload.content);
-        }
-        savedPaths.push(relPath);
-      }
+      savedPaths = (await getProjectAgentRuntime(context, currentProject.path).commitGeneratedCache({
+        content: payload.content,
+        source: "generated_save_route",
+        skill_id: skillId,
+        mode: payload.mode,
+        target_paths: paths,
+        summary: "Generated draft saved by user",
+        cleanup_content: true
+      })).saved_paths;
     }
 
     if (savedPaths.length) {
@@ -155,15 +156,16 @@ export async function handleGeneratedCacheRoutes(
       : (payload.target_path ? [String(payload.target_path)] : undefined);
 
     const savePlan = payload.save_plan && typeof payload.save_plan === "object" ? payload.save_plan as any : undefined;
-    const savedPaths = savePlan
-      ? await cacheService.commitSavePlan(cacheId, savePlan, {
-          mode,
-          cleanupContent: true
-        })
-      : await cacheService.commitToTargets(cacheId, targetPaths, {
-          mode,
-          cleanupContent: true
-        });
+    const savedPaths = (await getProjectAgentRuntime(context, currentProject.path).commitGeneratedCache({
+      cache_id: cacheId,
+      source: "generated_cache_commit_route",
+      skill_id: skillId,
+      mode,
+      target_paths: targetPaths,
+      save_plan: savePlan,
+      summary: "Generated cache committed by user",
+      cleanup_content: true
+    })).saved_paths;
     if (savedPaths.length) {
       await deps.rebuildProjectManifest(currentProject.path);
       const index = new VectorIndex(currentProject.path);
