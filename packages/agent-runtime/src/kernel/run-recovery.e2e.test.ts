@@ -16,7 +16,7 @@ beforeAll(() => {
 }, 60_000);
 
 describe("durable run recovery e2e", () => {
-  it("takes over an orphaned attempt after a forced child-process kill and completes the same run id", async () => {
+  it("takes over only the second orphaned step after a forced child-process kill and completes the same run id", async () => {
     const projectRoot = await fs.mkdtemp(path.join(os.tmpdir(), "arcwriter-durable-recovery-"));
     let recovery: RunCoordinator | null = null;
     let child: ChildProcess | null = null;
@@ -28,7 +28,11 @@ describe("durable run recovery e2e", () => {
       });
       const message = await waitForReady(child);
       const runId = String(message.run_id || "");
+      const firstStepId = String(message.first_step_id || "");
+      const secondStepId = String(message.second_step_id || "");
       expect(runId).toMatch(/^run_/);
+      expect(firstStepId).toBe("step_fixture_prepare");
+      expect(secondStepId).toMatch(/^step_/);
 
       child.kill("SIGKILL");
       await once(child, "exit");
@@ -42,11 +46,19 @@ describe("durable run recovery e2e", () => {
       });
       const [paused] = recovery.recoverStaleRuns();
       expect(paused).toMatchObject({ run_id: runId, status: "paused", recovery_reason: "RUNTIME_LEASE_EXPIRED" });
-      expect(recovery.store.listAttempts(runId)).toMatchObject([
+      expect(recovery.store.listAttempts(runId, firstStepId)).toMatchObject([
+        expect.objectContaining({ attempt: 1, status: "done" })
+      ]);
+      expect(recovery.store.listAttempts(runId, secondStepId)).toMatchObject([
         expect.objectContaining({ attempt: 1, status: "interrupted", error_code: "RUNTIME_LEASE_EXPIRED" })
       ]);
+      expect(recovery.getRun(runId)?.steps).toEqual(expect.arrayContaining([
+        expect.objectContaining({ step_id: firstStepId, status: "done", attempts: 1 }),
+        expect.objectContaining({ step_id: secondStepId, status: "pending", attempts: 1 })
+      ]));
 
       const resumed = recovery.resumeRun(runId, "resume-after-forced-kill", paused!.version);
+      expect(resumed).toMatchObject({ run_id: runId, step_id: secondStepId });
       const completed = recovery.completeRun(resumed, {
         intent: "chat",
         reply: "resumed successfully",
@@ -59,10 +71,11 @@ describe("durable run recovery e2e", () => {
       });
 
       expect(completed).toMatchObject({ run_id: runId, status: "completed" });
-      expect(recovery.store.listAttempts(runId)).toMatchObject([
+      expect(recovery.store.listAttempts(runId, secondStepId)).toMatchObject([
         expect.objectContaining({ attempt: 1, status: "interrupted" }),
         expect.objectContaining({ attempt: 2, status: "done" })
       ]);
+      expect(recovery.store.listAttempts(runId, firstStepId)).toHaveLength(1);
     } finally {
       if (child?.exitCode === null && !child.killed) {
         child.kill("SIGKILL");
@@ -74,7 +87,7 @@ describe("durable run recovery e2e", () => {
   }, 30_000);
 });
 
-async function waitForReady(child: ChildProcess): Promise<{ run_id?: unknown }> {
+async function waitForReady(child: ChildProcess): Promise<{ run_id?: unknown; first_step_id?: unknown; second_step_id?: unknown }> {
   let stderr = "";
   child.stderr?.on("data", (chunk: Buffer) => {
     stderr += chunk.toString("utf8");
@@ -88,7 +101,7 @@ async function waitForReady(child: ChildProcess): Promise<{ run_id?: unknown }> 
   if (!message || typeof message !== "object" || Array.isArray(message)) {
     throw new Error("Recovery fixture returned an invalid readiness message");
   }
-  return message as { run_id?: unknown };
+  return message as { run_id?: unknown; first_step_id?: unknown; second_step_id?: unknown };
 }
 
 function delay(milliseconds: number): Promise<void> {

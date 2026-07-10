@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type IpcMainInvokeEvent } from "electron";
 import contextMenu from "electron-context-menu";
 import { download } from "electron-dl";
 import path from "node:path";
@@ -22,7 +22,8 @@ import {
   cloudProjectDownloadRequestSchema,
   cloudProjectUploadRequestSchema,
   desktopProjectExportRequestSchema,
-  ipcChannels
+  ipcChannels,
+  runtimeRequestSchema
 } from "../shared/channels.js";
 
 const runtimeState: RuntimeServerState = {};
@@ -117,6 +118,11 @@ async function createWindow(): Promise<BrowserWindow> {
     void shell.openExternal(url);
     return { action: "deny" };
   });
+  window.webContents.on("will-navigate", (event, url) => {
+    if (!isTrustedRendererUrl(url)) {
+      event.preventDefault();
+    }
+  });
   window.webContents.on("did-finish-load", () => {
     window.setTitle(appDisplayTitle);
   });
@@ -199,6 +205,7 @@ function registerIpc(): void {
     });
     return { ready: true, url: runtimeUrl, pid: undefined };
   });
+  ipcMain.handle(ipcChannels.runtimeRequest, async (event, request) => proxyRuntimeRequest(event, request));
 
   ipcMain.handle(ipcChannels.shellCapabilities, () => getShellCapabilities());
   ipcMain.handle(ipcChannels.shellPickProjectDirectory, async () => {
@@ -285,6 +292,67 @@ function registerIpc(): void {
       window.webContents.send(ipcChannels.updatesStatus, status);
     }
   });
+}
+
+async function proxyRuntimeRequest(event: IpcMainInvokeEvent, request: unknown) {
+  if (!isTrustedRuntimeRenderer(event)) {
+    throw new Error("拒绝非受信任渲染进程访问本地运行时");
+  }
+  const payload = runtimeRequestSchema.parse(request);
+  const target = new URL(payload.url);
+  if (target.origin !== runtimeUrl) {
+    throw new Error("桌面运行时代理仅允许访问本地 ArcWriter API");
+  }
+  if (!runtimeState.sessionToken) {
+    throw new Error("本地运行时尚未就绪");
+  }
+
+  const headers = new Headers(payload.headers);
+  headers.delete("authorization");
+  headers.delete("host");
+  headers.set("Authorization", `Bearer ${runtimeState.sessionToken}`);
+  const response = await fetch(target, {
+    method: payload.method,
+    headers,
+    body: payload.body ?? undefined
+  });
+  const body = response.status === 204 || response.status === 304 ? null : new Uint8Array(await response.arrayBuffer());
+  const responseHeaders: Record<string, string> = {};
+  response.headers.forEach((value, name) => {
+    responseHeaders[name] = value;
+  });
+  return {
+    status: response.status,
+    statusText: response.statusText,
+    headers: responseHeaders,
+    body
+  };
+}
+
+function isTrustedRuntimeRenderer(event: IpcMainInvokeEvent): boolean {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  return Boolean(
+    window &&
+      event.senderFrame === event.sender.mainFrame &&
+      event.senderFrame.url === event.sender.getURL() &&
+      isTrustedRendererUrl(event.senderFrame.url)
+  );
+}
+
+function isTrustedRendererUrl(value: string): boolean {
+  if (value.startsWith("file:")) {
+    return true;
+  }
+  try {
+    const url = new URL(value);
+    if (url.origin === runtimeUrl) {
+      return true;
+    }
+    const rendererUrl = process.env.XIAOSHUO_RENDERER_URL;
+    return Boolean(rendererUrl && url.origin === new URL(rendererUrl).origin);
+  } catch {
+    return false;
+  }
 }
 
 app.whenReady().then(async () => {

@@ -8,7 +8,7 @@ import { mergeAgentRunEvents, replayAgentRunEvents, type AgentRunEventReplay } f
 type ReplayState = AgentRunEventReplay & { events: AgentRunEvent[] };
 
 export function AgentTraceView({ runtime }: { runtime: WorkbenchRuntime }) {
-  const client = useMemo(() => createApiClient({ baseUrl: runtime.apiBase }), [runtime.apiBase]);
+  const client = useMemo(() => createApiClient({ baseUrl: runtime.apiBase, fetchFn: runtime.fetchFn }), [runtime.apiBase, runtime.fetchFn]);
   const [runs, setRuns] = useState<AgentRunState[]>([]);
   const [traces, setTraces] = useState<AgentRunTrace[]>([]);
   const [selectedRunId, setSelectedRunId] = useState("");

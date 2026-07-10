@@ -2054,6 +2054,26 @@ npm test
 
 仍未满足的 P0 退出条件：C 的 feature-flag snapshot 与真实副作用幂等；D 的两步恢复和旧入口回归；E 的认证长连接及任务 UI E2E；F 的真实 CommitJournal/Confirmation 接线；G 的长任务检查点迁移；H 的会话令牌、Electron 安全与发布门禁。`PRODUCT.md` 继续保留且不纳入提交。
 
+### 15.52 2026-07-10 P0 恢复、文件提交与 runtime 认证记录
+
+本轮继续并行推进 D、F、H；所有 Task 仍为“实现中”，P0 不具备发布条件。
+
+本轮实现：
+
+- 强杀恢复 E2E 改为两步骤检查点：第一步保留唯一完成 attempt，重启后仅结算、恢复并完成第二步，`run_id` 不变；旧 `streamAgentRun` 入口也有 durable run 回归；
+- 新增 `CommitJournalService`，通过 `DocumentService` 执行同卷临时文件、备份、原子替换、hash 校验和 write-lease fencing；未终结 journal 会依据磁盘内容与 base/new hash 对账；
+- runtime 每次启动生成 32-byte 会话 token。health 以外请求同时受精确 Host、Origin 与恒定时间 Bearer 校验保护；受信 Electron IPC 代理剥离 renderer 提供的认证头并在主进程注入 token，Workbench 全部 API client 通过该代理请求；
+- Electron 阻止不受信导航，测试覆盖认证缺失、错误 Host/Origin 和 health 放行。
+
+本轮验证：
+
+- `npm run typecheck` 通过，所有 workspace 均为绿色；
+- `npm test` 通过：78 个测试文件、583 个测试；
+- `npm run build:workbench` 和 `npm run build:desktop` 通过；
+- `git diff --check` 通过。
+
+关键未完成项：CommitJournalService 尚未由 AgentFileOperationRunner、Skill/workflow 或 durable RunCoordinator 调用，故不能宣称真实写入已不可绕过；未实现认证长连接 NDJSON 和任务 UI E2E；发布 CI/RC/签名/installed smoke、长任务迁移和 Confirmation 完整生命周期仍未完成。`PRODUCT.md` 继续保留且不纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

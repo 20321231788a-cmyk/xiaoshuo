@@ -16,4 +16,5 @@ export * from "./kernel/execution-state-machine.js";
 export * from "./kernel/idempotency.js";
 export * from "./kernel/execution-store-port.js";
 export * from "./kernel/execution-store.js";
+export * from "./kernel/commit-journal-service.js";
 export * from "./kernel/run-coordinator.js";

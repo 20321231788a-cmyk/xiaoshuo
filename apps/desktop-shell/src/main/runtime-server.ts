@@ -13,7 +13,7 @@ import {
   cardDrawSelectRequestSchema,
   type CurrentProject
 } from "@xiaoshuo/shared";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import path from "node:path";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
@@ -37,7 +37,7 @@ import {
   handleVectorRoutes,
   handleGraphRoutes,
   handleWebsiteAiRoutes,
-  isAllowedRuntimeOrigin,
+  runtimeRequestAccessStatus,
   listRuntimeJobs,
   matchCardDrawRoute,
   matchConversationRoute,
@@ -89,10 +89,13 @@ export async function startRuntimeServer(options: RuntimeServerOptions): Promise
   const projectIdentityRegistry = options.state.projectIdentityRegistry || new ProjectIdentityRegistry(
     options.projectIdentityRegistryPath || path.join(path.dirname(options.stateFilePath), "project-identities.json")
   );
+  const sessionToken = randomBytes(32).toString("base64url");
+  const allowedOrigins = runtimeAllowedOrigins();
   options.state.jobManager = jobManager;
   options.state.documentSessions = documentSessions;
   options.state.agentRuntimes = agentRuntimes;
   options.state.projectIdentityRegistry = projectIdentityRegistry;
+  options.state.sessionToken = sessionToken;
   const restoredProject = await projectSession.getCurrentProject();
   if (restoredProject.path) {
     startDocumentSession(documentSessions, restoredProject.path);
@@ -105,7 +108,9 @@ export async function startRuntimeServer(options: RuntimeServerOptions): Promise
       projectSession,
       documentSessions,
       agentRuntimes,
-      projectIdentityRegistry
+      projectIdentityRegistry,
+      sessionToken,
+      allowedOrigins
     }).catch((error) => {
       options.state.lastError = error instanceof Error ? error.message : String(error);
       if (error instanceof ProjectIdentityRegistryError) {
@@ -130,6 +135,7 @@ export async function startRuntimeServer(options: RuntimeServerOptions): Promise
 export async function stopRuntimeServer(state: RuntimeServerState): Promise<void> {
   closeProjectAgentRuntimes(state.agentRuntimes);
   state.agentRuntimes = undefined;
+  state.sessionToken = undefined;
   const server = state.server;
   state.server = undefined;
   state.ready = false;
@@ -143,19 +149,27 @@ export async function stopRuntimeServer(state: RuntimeServerState): Promise<void
 
 async function handleRuntimeRequest(request: IncomingMessage, response: ServerResponse, context: RuntimeContext): Promise<void> {
   const origin = Array.isArray(request.headers.origin) ? request.headers.origin[0] || "" : request.headers.origin || "";
-  if (!isAllowedRuntimeOrigin(origin)) {
-    writeJson(response, 403, { detail: "拒绝非本机来源访问 ArcWriter 本地服务" });
+  const url = new URL(request.url || "/", runtimeUrl);
+  const pathname = stripTrailingSlash(url.pathname);
+  const accessStatus = runtimeRequestAccessStatus(request, pathname, {
+    expectedHost: `${runtimeHost}:${runtimePort}`,
+    allowedOrigins: context.allowedOrigins || [],
+    sessionToken: context.sessionToken || ""
+  });
+  if (accessStatus === 403) {
+    writeJson(response, 403, { detail: "拒绝非本机来源或主机访问 ArcWriter 本地服务" });
     return;
   }
-  addCorsHeaders(response, origin);
+  if (accessStatus === 401) {
+    writeJson(response, 401, { detail: "本地运行时会话未认证", code: "RUNTIME_SESSION_REQUIRED" });
+    return;
+  }
+  addCorsHeaders(response, origin, context.allowedOrigins || []);
   if (request.method === "OPTIONS") {
     response.writeHead(204);
     response.end();
     return;
   }
-
-  const url = new URL(request.url || "/", runtimeUrl);
-  const pathname = stripTrailingSlash(url.pathname);
 
   if (await handleBaseRuntimeRoutes(request, response, pathname, context, { readJsonBody, writeJson })) {
     return;
@@ -336,4 +350,17 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
   }
 
   writeJson(response, 404, { detail: `未找到该接口: ${request.method} ${pathname}` });
+}
+
+function runtimeAllowedOrigins(): string[] {
+  const origins = [runtimeUrl];
+  const rendererUrl = process.env.XIAOSHUO_RENDERER_URL;
+  if (rendererUrl) {
+    try {
+      origins.push(new URL(rendererUrl).origin);
+    } catch {
+      // Invalid renderer URLs are rejected by BrowserWindow loading before any request can be trusted.
+    }
+  }
+  return [...new Set(origins)];
 }

@@ -50,6 +50,19 @@ export type SaveDocumentOptions = {
   baseUpdatedAt?: string;
   baseUpdatedAtMs?: number;
   force?: boolean;
+  /**
+   * Reserved for durable callers that record a filesystem commit journal.
+   * The paths must be siblings of the document so rename stays on one volume.
+   */
+  atomicWrite?: DocumentAtomicWriteOptions;
+};
+
+export type DocumentAtomicWriteStage = "temp_written" | "before_replace" | "file_replaced";
+
+export type DocumentAtomicWriteOptions = {
+  tempPath: string;
+  backupPath: string;
+  onStage?: (stage: DocumentAtomicWriteStage) => void | Promise<void>;
 };
 
 export class DocumentSaveConflictError extends Error {
@@ -160,7 +173,11 @@ export class DocumentService {
     const beforeChange = await this.snapshotChange(normalized, "save_document");
 
     await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.writeFile(target, nextContent, "utf8");
+    if (options.atomicWrite) {
+      await this.writeTextAtomically(target, nextContent, options.atomicWrite);
+    } else {
+      await fs.writeFile(target, nextContent, "utf8");
+    }
 
     const afterChange = await this.completeChange(beforeChange);
     await this.appendTimelineEvent({
@@ -544,6 +561,35 @@ export class DocumentService {
     const target = await this.resolveSafePath(relativePath, { allowMissing: true });
     await fs.mkdir(path.dirname(target), { recursive: true });
     await fs.writeFile(target, content, "utf8");
+  }
+
+  private async writeTextAtomically(
+    target: string,
+    content: string,
+    options: DocumentAtomicWriteOptions
+  ): Promise<void> {
+    const targetDirectory = path.dirname(target);
+    const tempPath = path.resolve(options.tempPath);
+    const backupPath = path.resolve(options.backupPath);
+    if (
+      path.dirname(tempPath) !== targetDirectory ||
+      path.dirname(backupPath) !== targetDirectory ||
+      tempPath === target ||
+      backupPath === target ||
+      tempPath === backupPath
+    ) {
+      throw new Error("原子保存临时文件必须与目标文件位于同一目录");
+    }
+
+    const current = await fs.stat(target).catch(() => null);
+    if (current?.isFile()) {
+      await fs.copyFile(target, backupPath);
+    }
+    await fs.writeFile(tempPath, content, "utf8");
+    await options.onStage?.("temp_written");
+    await options.onStage?.("before_replace");
+    await fs.rename(tempPath, target);
+    await options.onStage?.("file_replaced");
   }
 
   private async assertSaveBaseIsCurrent(target: string, options: SaveDocumentOptions): Promise<void> {

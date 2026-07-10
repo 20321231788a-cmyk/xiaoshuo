@@ -425,7 +425,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const lastConfigSignatureRef = useRef("");
   const configDraftDirtyRef = useRef(false);
   const websiteAiRefreshKeyRef = useRef("");
-  const client = useMemo(() => createApiClient({ baseUrl: runtime.apiBase }), [runtime.apiBase]);
+  const client = useMemo(() => createApiClient({ baseUrl: runtime.apiBase, fetchFn: runtime.fetchFn }), [runtime.apiBase, runtime.fetchFn]);
 
   useEffect(() => {
     let cancelled = false;

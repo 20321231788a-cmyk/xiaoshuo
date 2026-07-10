@@ -449,6 +449,16 @@ describe("agent-runtime chat flow", () => {
         reply: "第一句第二句"
       }
     });
+    const streamRunId = (events[0] as Extract<AgentStreamEvent, { type: "start" }>).run_id;
+    expect(streamRunId).toMatch(/^run_/);
+    if (!streamRunId) {
+      throw new Error("Stream start event did not include a durable run id");
+    }
+    expect(runtime.getDurableRun(streamRunId)).toMatchObject({
+      run_id: streamRunId,
+      status: "completed",
+      steps: [expect.objectContaining({ status: "done", attempts: 1 })]
+    });
 
     expect(capturedMessages[1]?.content).toContain("【source.txt】");
     expect(capturedMessages.at(-1)?.content).toContain("当前文档：01_大纲/大纲.txt");

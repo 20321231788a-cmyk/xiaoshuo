@@ -18,6 +18,7 @@ export type RuntimeServerState = {
   documentSessions?: Map<string, DocumentTimelineSession>;
   agentRuntimes?: Map<string, AgentRuntimeService>;
   projectIdentityRegistry?: ProjectIdentityRegistry;
+  sessionToken?: string;
 };
 
 export type RuntimeServerOptions = {
@@ -34,4 +35,6 @@ export type RuntimeContext = {
   documentSessions: Map<string, DocumentTimelineSession>;
   agentRuntimes?: Map<string, AgentRuntimeService>;
   projectIdentityRegistry?: ProjectIdentityRegistry;
+  sessionToken?: string;
+  allowedOrigins?: readonly string[];
 };

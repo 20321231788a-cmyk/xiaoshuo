@@ -1,4 +1,5 @@
 import { encodeNdjsonEvent } from "@xiaoshuo/agent-runtime";
+import { timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 
 export type JsonRecord = Record<string, unknown>;
@@ -111,10 +112,10 @@ export function writeNdjsonEvent(response: ServerResponse, payload: Parameters<t
   response.write(encodeNdjsonEvent(payload));
 }
 
-export function addCorsHeaders(response: ServerResponse, origin = ""): void {
+export function addCorsHeaders(response: ServerResponse, origin = "", allowedOrigins: readonly string[] = []): void {
   if (!response.hasHeader("Access-Control-Allow-Origin")) {
     const normalizedOrigin = origin.trim();
-    if (normalizedOrigin && isAllowedRuntimeOrigin(normalizedOrigin)) {
+    if (normalizedOrigin && isAllowedRuntimeOrigin(normalizedOrigin, allowedOrigins)) {
       response.setHeader("Access-Control-Allow-Origin", normalizedOrigin);
       response.setHeader("Vary", "Origin");
     }
@@ -123,20 +124,48 @@ export function addCorsHeaders(response: ServerResponse, origin = ""): void {
   response.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
 
-export function isAllowedRuntimeOrigin(origin: string): boolean {
+export function isAllowedRuntimeOrigin(origin: string, allowedOrigins: readonly string[] = []): boolean {
   const normalized = String(origin || "").trim();
   if (!normalized || normalized === "null") {
     return true;
   }
-  try {
-    const url = new URL(normalized);
-    return (
-      (url.protocol === "http:" || url.protocol === "https:") &&
-      (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]")
-    );
-  } catch {
+  return allowedOrigins.some((candidate) => candidate === normalized);
+}
+
+export function isExpectedRuntimeHost(host: string | string[] | undefined, expectedHost: string): boolean {
+  const normalized = Array.isArray(host) ? host[0] || "" : host || "";
+  return normalized.trim().toLowerCase() === expectedHost.trim().toLowerCase();
+}
+
+export function isAuthorizedRuntimeRequest(request: IncomingMessage, sessionToken: string): boolean {
+  if (!sessionToken) {
     return false;
   }
+  const authorization = Array.isArray(request.headers.authorization)
+    ? request.headers.authorization[0] || ""
+    : request.headers.authorization || "";
+  const expected = `Bearer ${sessionToken}`;
+  const actualBuffer = Buffer.from(authorization, "utf8");
+  const expectedBuffer = Buffer.from(expected, "utf8");
+  return actualBuffer.length === expectedBuffer.length && timingSafeEqual(actualBuffer, expectedBuffer);
+}
+
+export function runtimeRequestAccessStatus(
+  request: IncomingMessage,
+  pathname: string,
+  options: { expectedHost: string; allowedOrigins: readonly string[]; sessionToken: string }
+): 401 | 403 | null {
+  if (!isExpectedRuntimeHost(request.headers.host, options.expectedHost)) {
+    return 403;
+  }
+  const origin = Array.isArray(request.headers.origin) ? request.headers.origin[0] || "" : request.headers.origin || "";
+  if (!isAllowedRuntimeOrigin(origin, options.allowedOrigins)) {
+    return 403;
+  }
+  if (pathname === "/health" || pathname === "/api/health") {
+    return null;
+  }
+  return isAuthorizedRuntimeRequest(request, options.sessionToken) ? null : 401;
 }
 
 export function stripTrailingSlash(pathname: string): string {

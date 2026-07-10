@@ -4,6 +4,7 @@ export const desktopIpcChannels = {
   appVersions: "app:versions",
   backendStatus: "backend:status",
   backendRestart: "backend:restart",
+  runtimeRequest: "runtime:request",
   appOpenTutorial: "app:open-tutorial",
   appRequestRefresh: "app:request-refresh",
   appRequestRun: "app:request-run",
@@ -48,6 +49,20 @@ export const desktopBackendStatusSchema = z.object({
   url: z.string(),
   pid: z.number().optional(),
   error: z.string().optional()
+});
+
+export const desktopRuntimeRequestSchema = z.object({
+  url: z.string().url(),
+  method: z.string().min(1).max(16).default("GET"),
+  headers: z.record(z.string()).default({}),
+  body: z.instanceof(Uint8Array).nullable().optional()
+});
+
+export const desktopRuntimeResponseSchema = z.object({
+  status: z.number().int().min(100).max(599),
+  statusText: z.string(),
+  headers: z.record(z.string()),
+  body: z.instanceof(Uint8Array).nullable()
 });
 
 export const desktopShellCapabilitiesSchema = z.object({
@@ -308,6 +323,8 @@ export const desktopUpdateStatusSchema = z.object({
 export type DesktopIpcChannel = (typeof desktopIpcChannels)[keyof typeof desktopIpcChannels];
 export type DesktopVersions = z.infer<typeof desktopVersionsSchema>;
 export type DesktopBackendStatus = z.infer<typeof desktopBackendStatusSchema>;
+export type DesktopRuntimeRequest = z.input<typeof desktopRuntimeRequestSchema>;
+export type DesktopRuntimeResponse = z.infer<typeof desktopRuntimeResponseSchema>;
 export type DesktopShellCapabilities = z.infer<typeof desktopShellCapabilitiesSchema>;
 export type DesktopProjectPickerResponse = z.infer<typeof desktopProjectPickerResponseSchema>;
 export type DesktopProjectExportRequest = z.input<typeof desktopProjectExportRequestSchema>;
@@ -343,6 +360,7 @@ export type XiaoShuoDesktopApi = {
   versions: () => Promise<DesktopVersions>;
   backendStatus: () => Promise<DesktopBackendStatus>;
   restartBackend: () => Promise<DesktopBackendStatus>;
+  runtimeRequest: (request: DesktopRuntimeRequest) => Promise<DesktopRuntimeResponse>;
   onOpenTutorial: (callback: () => void) => () => void;
   onRequestRefresh: (callback: () => void) => () => void;
   onRequestRun: (callback: () => void) => () => void;

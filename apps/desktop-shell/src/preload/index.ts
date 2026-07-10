@@ -19,6 +19,8 @@ import {
   localStateSnapshotSchema,
   localStateSyncProjectRequestSchema,
   localStateTrackGeneratedCacheRequestSchema,
+  runtimeRequestSchema,
+  runtimeResponseSchema,
   desktopUpdateStatusSchema,
   terminalDataEventSchema,
   terminalExitEventSchema,
@@ -32,6 +34,8 @@ const desktopApi: XiaoShuoDesktopApi = {
   versions: async () => desktopVersionsSchema.parse(await ipcRenderer.invoke(ipcChannels.appVersions)),
   backendStatus: async () => backendStatusSchema.parse(await ipcRenderer.invoke(ipcChannels.backendStatus)),
   restartBackend: async () => backendStatusSchema.parse(await ipcRenderer.invoke(ipcChannels.backendRestart)),
+  runtimeRequest: async (request) =>
+    runtimeResponseSchema.parse(await ipcRenderer.invoke(ipcChannels.runtimeRequest, runtimeRequestSchema.parse(request))),
   onOpenTutorial: (callback) => {
     const listener = () => {
       callback();

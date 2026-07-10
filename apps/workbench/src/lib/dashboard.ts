@@ -83,7 +83,7 @@ function settledValue<T>(result: PromiseSettledResult<T>, fallback: T): T {
 }
 
 export async function loadDashboardSnapshot(runtime: WorkbenchRuntime): Promise<DashboardSnapshot> {
-  const client = createApiClient({ baseUrl: runtime.apiBase });
+  const client = createApiClient({ baseUrl: runtime.apiBase, fetchFn: runtime.fetchFn });
   const [desktopBackend, desktopCapabilities] =
     runtime.isDesktopShell && window.xiaoshuoDesktop
       ? await Promise.all([window.xiaoshuoDesktop.backendStatus(), window.xiaoshuoDesktop.capabilities()])

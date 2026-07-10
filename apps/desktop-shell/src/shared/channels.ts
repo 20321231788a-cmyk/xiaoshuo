@@ -4,6 +4,7 @@ export const ipcChannels = {
   appVersions: "app:versions",
   backendStatus: "backend:status",
   backendRestart: "backend:restart",
+  runtimeRequest: "runtime:request",
   appOpenTutorial: "app:open-tutorial",
   appRequestRefresh: "app:request-refresh",
   appRequestRun: "app:request-run",
@@ -48,6 +49,20 @@ export const backendStatusSchema = z.object({
   url: z.string(),
   pid: z.number().optional(),
   error: z.string().optional()
+});
+
+export const runtimeRequestSchema = z.object({
+  url: z.string().url(),
+  method: z.string().min(1).max(16).default("GET"),
+  headers: z.record(z.string()).default({}),
+  body: z.instanceof(Uint8Array).nullable().optional()
+});
+
+export const runtimeResponseSchema = z.object({
+  status: z.number().int().min(100).max(599),
+  statusText: z.string(),
+  headers: z.record(z.string()),
+  body: z.instanceof(Uint8Array).nullable()
 });
 
 export const desktopShellCapabilitiesSchema = z.object({
@@ -307,6 +322,8 @@ export const desktopUpdateStatusSchema = z.object({
 
 export type IpcChannel = (typeof ipcChannels)[keyof typeof ipcChannels];
 export type BackendStatus = z.infer<typeof backendStatusSchema>;
+export type RuntimeRequest = z.input<typeof runtimeRequestSchema>;
+export type RuntimeResponse = z.infer<typeof runtimeResponseSchema>;
 export type DesktopShellCapabilities = z.infer<typeof desktopShellCapabilitiesSchema>;
 export type DesktopProjectPickerResponse = z.infer<typeof desktopProjectPickerResponseSchema>;
 export type DesktopProjectExportRequest = z.input<typeof desktopProjectExportRequestSchema>;
@@ -340,6 +357,7 @@ export type XiaoShuoDesktopApi = {
   versions: () => Promise<DesktopVersions>;
   backendStatus: () => Promise<BackendStatus>;
   restartBackend: () => Promise<BackendStatus>;
+  runtimeRequest: (request: RuntimeRequest) => Promise<RuntimeResponse>;
   onOpenTutorial: (callback: () => void) => () => void;
   onRequestRefresh: (callback: () => void) => () => void;
   onRequestRun: (callback: () => void) => () => void;

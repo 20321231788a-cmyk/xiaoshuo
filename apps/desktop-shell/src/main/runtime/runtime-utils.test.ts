@@ -4,11 +4,14 @@ import { describe, expect, it } from "vitest";
 import {
   booleanValue,
   createRequestAbortSignal,
+  isAuthorizedRuntimeRequest,
   isAllowedRuntimeOrigin,
+  isExpectedRuntimeHost,
   parseJsonRecord,
   parseMultipartFile,
   readBooleanQuery,
   readIntQuery,
+  runtimeRequestAccessStatus,
   stringValue,
   stripTrailingSlash
 } from "./http-utils.js";
@@ -67,14 +70,56 @@ describe("runtime http utils", () => {
     expect(stripTrailingSlash("/api/skills/")).toBe("/api/skills");
   });
 
-  it("only allows local workbench origins", () => {
+  it("only allows explicitly configured runtime origins", () => {
     expect(isAllowedRuntimeOrigin("")).toBe(true);
     expect(isAllowedRuntimeOrigin("null")).toBe(true);
-    expect(isAllowedRuntimeOrigin("http://127.0.0.1:4180")).toBe(true);
-    expect(isAllowedRuntimeOrigin("http://localhost:4173")).toBe(true);
+    expect(isAllowedRuntimeOrigin("http://127.0.0.1:18453", ["http://127.0.0.1:18453"])).toBe(true);
+    expect(isAllowedRuntimeOrigin("http://127.0.0.1:4180", ["http://127.0.0.1:18453"])).toBe(false);
+    expect(isAllowedRuntimeOrigin("http://localhost:4173", ["http://127.0.0.1:18453"])).toBe(false);
     expect(isAllowedRuntimeOrigin("https://example.com")).toBe(false);
     expect(isAllowedRuntimeOrigin("file:///D:/xiaoshuo/index.html")).toBe(false);
     expect(isAllowedRuntimeOrigin("not-a-url")).toBe(false);
+  });
+
+  it("requires the exact local Host and a session token for non-health API routes", () => {
+    const token = "session-token";
+    const allowedOrigins = ["http://127.0.0.1:18453"];
+    const request = (headers: Record<string, string>): IncomingMessage => ({ headers } as IncomingMessage);
+
+    expect(isExpectedRuntimeHost("127.0.0.1:18453", "127.0.0.1:18453")).toBe(true);
+    expect(isExpectedRuntimeHost("localhost:18453", "127.0.0.1:18453")).toBe(false);
+    expect(isExpectedRuntimeHost("127.0.0.1", "127.0.0.1:18453")).toBe(false);
+    expect(isExpectedRuntimeHost("[::1]:18453", "127.0.0.1:18453")).toBe(false);
+    expect(isAuthorizedRuntimeRequest(request({ authorization: "Bearer session-token" }), token)).toBe(true);
+    expect(isAuthorizedRuntimeRequest(request({ authorization: "Bearer stale-token" }), token)).toBe(false);
+    expect(
+      runtimeRequestAccessStatus(request({ host: "127.0.0.1:18453" }), "/api/config", {
+        expectedHost: "127.0.0.1:18453",
+        allowedOrigins,
+        sessionToken: token
+      })
+    ).toBe(401);
+    expect(
+      runtimeRequestAccessStatus(request({ host: "127.0.0.1:18453", origin: "http://localhost:4173" }), "/api/config", {
+        expectedHost: "127.0.0.1:18453",
+        allowedOrigins,
+        sessionToken: token
+      })
+    ).toBe(403);
+    expect(
+      runtimeRequestAccessStatus(request({ host: "127.0.0.1:18453" }), "/api/health", {
+        expectedHost: "127.0.0.1:18453",
+        allowedOrigins,
+        sessionToken: token
+      })
+    ).toBeNull();
+    expect(
+      runtimeRequestAccessStatus(request({ host: "127.0.0.1:18453", authorization: "Bearer session-token" }), "/api/config", {
+        expectedHost: "127.0.0.1:18453",
+        allowedOrigins,
+        sessionToken: token
+      })
+    ).toBeNull();
   });
 
   it("parses multipart file payloads", () => {
