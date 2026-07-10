@@ -278,6 +278,7 @@ export class RunCoordinator {
         saved_paths: response.saved_paths || [],
         warnings: [],
         verification: { passed: true, severity: "none", checks: [] },
+        ...(response.skill_result ? { skill_response: response.skill_result } : {}),
         created_at: this.timestamp()
       })
     );

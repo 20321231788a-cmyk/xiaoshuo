@@ -194,6 +194,7 @@ export const skillOpenFolderResponseSchema = z
 
 export const skillRunRequestSchema = z
   .object({
+    request_id: z.string().default(""),
     text: z.string().default(""),
     chapter: z.number().int().min(0).default(0),
     end_chapter: z.number().int().min(0).default(0),
@@ -241,6 +242,7 @@ export type SkillRollbackRequest = z.infer<typeof skillRollbackRequestSchema>;
 export type SkillImportDraftRequest = z.infer<typeof skillImportDraftRequestSchema>;
 export type SkillOpenFolderResponse = z.infer<typeof skillOpenFolderResponseSchema>;
 export type SkillRunRequest = {
+  request_id?: string;
   text: string;
   chapter: number;
   end_chapter: number;

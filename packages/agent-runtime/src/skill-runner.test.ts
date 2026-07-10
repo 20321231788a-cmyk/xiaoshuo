@@ -98,6 +98,48 @@ describe("prompt-skill-runner", () => {
     expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("可直接写入的大纲");
   });
 
+  it("defers an otherwise automatic prompt-skill commit without writing its target", async () => {
+    const runner = new PromptSkillRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "等待 journal 提交的大纲"
+      }
+    });
+
+    const result = await runner.runSkill("outline_generate", {
+      text: "直接生成",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: true,
+      attachment_ids: []
+    }, { deferAutoCommit: true });
+
+    expect(result.saved_path).toBe("");
+    expect(result.data).toMatchObject({
+      pending_save: true,
+      saved_paths: [],
+      target_path: "01_大纲/大纲.txt",
+      deferred_commit: {
+        kind: "prompt_skill_generated_cache",
+        skill_id: "outline_generate",
+        mode: "replace",
+        target_paths: ["01_大纲/大纲.txt"],
+        source: "prompt_skill",
+        requires_confirmation: false
+      }
+    });
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("旧大纲");
+
+    const cacheService = new GeneratedCacheService({ projectRoot: tempDir });
+    expect(await cacheService.readContent(String(result.data.cache_id || ""))).toBe("等待 journal 提交的大纲");
+  });
+
   it("uses conversation attachments as source input when text is empty", async () => {
     let capturedPrompt = "";
     const conversations = new ConversationService({ projectRoot: tempDir });
@@ -274,6 +316,178 @@ describe("prompt-skill-runner", () => {
     expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toBe("风格规则");
     expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "风格示例.txt"), "utf8")).toBe("示例特征");
     expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "参考素材.txt"), "utf8")).toBe("素材摘要");
+  });
+
+  it("defers sectioned skill writes while preserving their generated save plan", async () => {
+    const runner = new PromptSkillRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "【写作风格】\n风格规则\n\n【风格示例】\n示例特征\n\n【参考素材】\n素材摘要"
+      }
+    });
+
+    const result = await runner.runSkill("style_extract", {
+      text: "样文",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "提取风格并写入",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: true,
+      attachment_ids: []
+    }, { deferAutoCommit: true });
+
+    expect(result.data).toMatchObject({
+      pending_save: true,
+      saved_paths: [],
+      deferred_commit: {
+        skill_id: "style_extract",
+        target_paths: [
+          "00_设定集/风格库/写作风格.txt",
+          "00_设定集/风格库/风格示例.txt",
+          "00_设定集/风格库/参考素材.txt"
+        ]
+      }
+    });
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toBe("克制冷静");
+    await expect(fs.access(path.join(tempDir, "00_设定集", "风格库", "风格示例.txt"))).rejects.toThrow();
+    await expect(fs.access(path.join(tempDir, "00_设定集", "风格库", "参考素材.txt"))).rejects.toThrow();
+  });
+
+  it("defers auto-commit after a streamed skill result", async () => {
+    const runner = new PromptSkillRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "流式延后提交的大纲"
+      }
+    });
+    const events = [];
+    for await (const event of runner.streamSkill("outline_generate", {
+      text: "流式生成",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: true,
+      attachment_ids: []
+    }, { deferAutoCommit: true })) {
+      events.push(event);
+    }
+
+    const final = events.find((event) => event.type === "final");
+    expect(final).toMatchObject({
+      type: "final",
+      payload: {
+        skill_result: {
+          data: {
+            pending_save: true,
+            deferred_commit: expect.objectContaining({ skill_id: "outline_generate" })
+          }
+        }
+      }
+    });
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("旧大纲");
+  });
+
+  it("reuses a finalized deterministic deferred cache without another model call", async () => {
+    let calls = 0;
+    const runner = new PromptSkillRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => {
+          calls += 1;
+          return "确定性缓存结果";
+        }
+      }
+    });
+    const payload = {
+      text: "生成大纲",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: true,
+      attachment_ids: []
+    };
+
+    const first = await runner.runSkill("outline_generate", payload, {
+      deferAutoCommit: true,
+      deterministicCacheId: "11111111111111111111111111111111"
+    });
+    const replay = await runner.runSkill("outline_generate", payload, {
+      deferAutoCommit: true,
+      deterministicCacheId: "11111111111111111111111111111111"
+    });
+
+    expect(calls).toBe(1);
+    expect(replay.result).toBe("确定性缓存结果");
+    expect(replay.data).toMatchObject({
+      cache_id: first.data.cache_id,
+      pending_save: true,
+      deferred_commit: expect.objectContaining({ skill_id: "outline_generate" })
+    });
+  });
+
+  it("restarts an unfinished deterministic stream cache and replays a finalized one", async () => {
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    await cache.createWithId("22222222222222222222222222222222", {
+      source: "skill_stream",
+      skill_id: "outline_generate",
+      target_paths: ["01_大纲/大纲.txt"],
+      mode: "replace"
+    });
+    await cache.replace("22222222222222222222222222222222", "partial output");
+
+    let calls = 0;
+    const runner = new PromptSkillRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => {
+          calls += 1;
+          return "重新开始后的完整结果";
+        }
+      }
+    });
+    const payload = {
+      text: "流式生成",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: true,
+      attachment_ids: []
+    };
+    const readFinal = async () => {
+      const events = [];
+      for await (const event of runner.streamSkill("outline_generate", payload, {
+        deferAutoCommit: true,
+        deterministicCacheId: "22222222222222222222222222222222"
+      })) events.push(event);
+      return events.find((event) => event.type === "final");
+    };
+
+    const first = await readFinal();
+    const replay = await readFinal();
+
+    expect(calls).toBe(1);
+    expect(await cache.readContent("22222222222222222222222222222222")).toBe("重新开始后的完整结果");
+    expect(first).toMatchObject({ type: "final", payload: { skill_result: { data: { pending_save: true } } } });
+    expect(replay).toMatchObject({ type: "final", payload: { skill_result: { result: "重新开始后的完整结果" } } });
   });
 
   it("runs detail outline skill locally and applies default deslop cleanup", async () => {

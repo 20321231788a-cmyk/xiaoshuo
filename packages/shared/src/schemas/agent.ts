@@ -691,6 +691,7 @@ export const agentRecoverableRequestSchema = z.object({
   genre_hint: z.string().optional(),
   output_mode: z.string().optional(),
   action: z.string().optional(),
+  skill_request_origin: z.string().optional(),
   suppress_conversation_record: z.boolean().optional()
 });
 

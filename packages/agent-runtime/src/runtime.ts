@@ -25,6 +25,7 @@ import type {
   GeneratedSavePlan,
   GeneratedCacheMeta
 } from "@xiaoshuo/shared";
+import { generatedSavePlanSchema, skillRunRequestSchema, skillRunResponseSchema } from "@xiaoshuo/shared";
 import { AgentChatRunner, type ChatContextAssemblyObserver } from "./chat-runner.js";
 import { classifyAgentIntent, classifySkillManagementIntent, hasSkillAction, isReadContextIntent, rankSkillRoutes, type SkillManagementIntent } from "./intent-router.js";
 import { AgentPlanner, type AgentPlannerOptions } from "./planner.js";
@@ -63,6 +64,8 @@ import { DurableWorkflowCheckpointStore } from "./kernel/workflow-checkpoint.js"
 import {
   buildSectionedGeneratedSavePlan,
   isSectionedGeneratedSkillId,
+  mergeLoreSectionText,
+  LORE_SECTION_TARGETS,
   type SectionedGeneratedSkillId
 } from "./sectioned-generated-save.js";
 
@@ -104,7 +107,25 @@ export type GeneratedCacheCommitResult = {
 
 export type GeneratedCacheCommitOptions = AgentRunOptions & {
   execution?: DurableRunExecution;
+  sectioned?: {
+    loreMergeExisting?: boolean;
+  };
 };
+
+type DeferredPromptSkillCommit = {
+  kind: "prompt_skill_generated_cache";
+  cache_id: string;
+  skill_id: string;
+  mode: "replace" | "append";
+  target_paths: string[];
+  save_plan: GeneratedSavePlan;
+  source: string;
+  summary: string;
+  requires_confirmation: boolean;
+  lore_merge_existing: boolean;
+};
+
+const DIRECT_SKILL_REQUEST_ORIGIN = "skill_api";
 
 export class AgentRuntimeService {
   private readonly planner: AgentPlanner;
@@ -220,6 +241,156 @@ export class AgentRuntimeService {
       }
       throw error;
     }
+  }
+
+  async runDurableSkill(
+    skillId: string,
+    request: SkillRunRequest,
+    options: AgentRunOptions = {}
+  ): Promise<SkillRunResponse> {
+    throwIfAborted(options.signal);
+    const skill = await this.skills.getSkill(skillId).catch(() => null);
+    if (!skill) {
+      throw new Error(`未知 skill: ${skillId}`);
+    }
+    if (skill.disabled) {
+      throw new Error(`默认技能已禁用：${skill.name || skillId}。请先恢复后再执行。`);
+    }
+    if (skill.handler_type !== "prompt" || !(await this.skillRunner.canRunSkillLocally(skillId))) {
+      throw codedRuntimeError("DURABLE_SKILL_UNSUPPORTED", `该 skill 不支持 durable Prompt Skill 执行：${skillId}`);
+    }
+
+    const durableRequest = buildDurableSkillAgentRequest(skillId, request);
+    let execution: DurableRunExecution;
+    let effectiveRequest = request;
+    try {
+      execution = await this.beginDurableSkillRun(skillId, durableRequest, options);
+    } catch (error) {
+      if (!(error instanceof RunRequestReplayError)) {
+        throw error;
+      }
+      if (error.run.status === "completed") {
+        return this.replayDurableSkillResponse(error.run);
+      }
+      if (error.run.status !== "failed" && error.run.status !== "paused") {
+        throw codedRuntimeError(
+          "DURABLE_SKILL_IN_PROGRESS",
+          `Prompt Skill run ${error.run.run_id} 当前状态为 ${error.run.status}`
+        );
+      }
+      execution = this.runCoordinator.resumeRun(
+        error.run.run_id,
+        `op_skill_api_${sha256Text(`${error.run.request_id}:${error.run.version}`).slice(0, 24)}`,
+        error.run.version,
+        { operationType: "retry", signal: options.signal }
+      );
+      effectiveRequest = durableAgentRequestToSkillRequest(
+        this.runCoordinator.getRecoveryRequest(error.run.run_id)
+      );
+    }
+
+    return this.executeDurableSkillRun(skillId, effectiveRequest, execution, options);
+  }
+
+  private async beginDurableSkillRun(
+    skillId: string,
+    request: AgentRunRequest,
+    options: AgentRunOptions
+  ): Promise<DurableRunExecution> {
+    return this.runCoordinator.beginRun(request, {
+      projectId: await this.projectManifest.getProjectId(),
+      stepType: "skill",
+      actionId: `skill.${skillId}.run`,
+      skillId,
+      retryable: true,
+      requiresConfirmation: false,
+      signal: options.signal
+    });
+  }
+
+  private async executeDurableSkillRun(
+    skillId: string,
+    request: SkillRunRequest,
+    execution: DurableRunExecution,
+    options: AgentRunOptions = {}
+  ): Promise<SkillRunResponse> {
+    const runOptions = { ...options, signal: execution.signal };
+    const trace = this.createTraceRecorder({
+      conversationId: request.conversation_id || "",
+      skillId,
+      content: request.instruction || request.text || "",
+      runId: execution.run_id,
+      requestId: execution.request_id
+    });
+    const startedAt = Date.now();
+    this.addSkillRequestContextToTrace(trace, request);
+    try {
+      trace.mark("workflow_started", { selected_skill_id: skillId });
+      const prepared = await this.skillRunner.runSkill(skillId, request, {
+        ...runOptions,
+        deferAutoCommit: true,
+        deterministicCacheId: deterministicPromptSkillCacheId(execution, skillId)
+      });
+      const result = await this.commitDeferredPromptSkillResult(
+        skillId,
+        prepared,
+        execution,
+        runOptions
+      );
+      this.addSkillResultToTrace(trace, result);
+      await this.addModelCallSummaryToTrace(trace, {
+        inputChars: skillRequestInputChars(request),
+        outputChars: String(result.result || "").length,
+        durationMs: Date.now() - startedAt,
+        streaming: false
+      });
+      this.runCoordinator.completeRun(execution, durableSkillAgentResponse(skillId, result));
+      await this.finalizeDeferredPromptSkillCache(result, execution.run_id, execution.request_id);
+      await trace.finish({ saved_paths: this.resolveSavedPaths(result) });
+      return result;
+    } catch (error) {
+      const durableState = this.failDurableRun(execution, error);
+      await this.addModelCallSummaryToTrace(trace, {
+        inputChars: skillRequestInputChars(request),
+        outputChars: 0,
+        durationMs: Date.now() - startedAt,
+        streaming: false,
+        error
+      });
+      if (durableState === "paused") {
+        trace.mark("workflow_completed", { cancelled: false, durable_status: "paused" });
+        await trace.finish({ cancelled: false });
+      } else if (durableState === "cancelled" || isCancellationError(error, runOptions.signal)) {
+        trace.mark("workflow_completed", { cancelled: true, durable_status: durableState });
+        await trace.finish({ cancelled: true });
+      } else {
+        trace.fail(error);
+        await trace.finish();
+      }
+      throw error;
+    }
+  }
+
+  private async replayDurableSkillResponse(run: AgentRunState): Promise<SkillRunResponse> {
+    const step = this.runCoordinator.store.getStep(run.run_id, run.current_step_id);
+    const observation = step?.observation_id
+      ? this.runCoordinator.store.getObservation(step.observation_id)
+      : null;
+    const stored = isRecord(observation) ? observation.skill_response : undefined;
+    if (!stored) {
+      throw codedRuntimeError(
+        "DURABLE_SKILL_RESULT_MISSING",
+        `Prompt Skill run ${run.run_id} 已完成，但缺少可重放结果`
+      );
+    }
+    const result = skillRunResponseSchema.parse(stored);
+    await this.finalizeDeferredPromptSkillCache(result, run.run_id, run.request_id);
+    return withDurableSkillIdentity(
+      result,
+      run.run_id,
+      run.request_id,
+      true
+    );
   }
 
   private async runSkillInternal(skillId: string, request: SkillRunRequest, options: AgentRunOptions = {}): Promise<SkillRunResponse> {
@@ -445,9 +616,26 @@ export class AgentRuntimeService {
       content_hash: sha256Text(cachedContent)
     };
     const intentHash = sha256Text(stableJson(commitIntent));
-    const preparedCommits = effectiveSavePlan
+    let preparedCommits = effectiveSavePlan
       ? await this.cache.prepareSavePlanCommit(cacheId, effectiveSavePlan, { mode: input.mode })
       : await this.cache.prepareTargetCommit(cacheId, effectiveTargets, { mode: input.mode });
+    if (
+      effectiveSkillId === "lore_extract"
+      && sectionedMode === "replace"
+      && options.sectioned?.loreMergeExisting
+    ) {
+      preparedCommits = await Promise.all(preparedCommits.map(async (commit) => {
+        const title = loreSectionTitleForPath(commit.target_path);
+        if (!title) {
+          return commit;
+        }
+        const existing = await this.documents.readRawText(commit.target_path).catch(() => "");
+        return {
+          ...commit,
+          content: mergeLoreSectionText(title, existing, commit.content)
+        };
+      }));
+    }
     const sectionedCommitMetadata = sectionedSavePlan && isSectionedGeneratedSkillId(effectiveSkillId)
       ? new Map(sectionedSavePlan.segments.map((segment) => [
           segment.target_path,
@@ -558,12 +746,14 @@ export class AgentRuntimeService {
         this.runCoordinator.completeRun(execution, generatedCacheCommitResponse(cacheId, savedPaths));
         syntheticRunCompleted = true;
       }
-      const committed = await this.cache.markCommitted(cacheId, savedPaths, {
-        cleanupContent: input.cleanup_content ?? true,
-        commitRunId: execution.run_id,
-        commitRequestId,
-        commitJournalIds: journalIds
-      });
+      const committed = ownsExecution
+        ? await this.cache.markCommitted(cacheId, savedPaths, {
+            cleanupContent: input.cleanup_content ?? true,
+            commitRunId: execution.run_id,
+            commitRequestId,
+            commitJournalIds: journalIds
+          })
+        : await this.cache.get(cacheId);
       return {
         run_id: execution.run_id,
         cache_id: cacheId,
@@ -630,6 +820,11 @@ export class AgentRuntimeService {
         streaming: false
       });
       this.runCoordinator.completeRun(execution, response);
+      await this.finalizeDeferredPromptSkillCache(
+        response.skill_result,
+        execution.run_id,
+        execution.request_id
+      );
       await trace.finish({ saved_paths: response.saved_paths || [] });
       return response;
     } catch (error) {
@@ -704,7 +899,7 @@ export class AgentRuntimeService {
         throw new Error(`TS runtime 尚未接管该意图：${intent}`);
       }
       trace?.mark("workflow_started", { selected_skill_id: skillId });
-      return this.runLocalSkillIntent(skillId, request, options);
+      return this.runLocalSkillIntent(skillId, request, options, execution);
     }
     if (intent !== "chat" && intent !== "read_context") {
       throw new Error(`TS runtime 尚未接管该意图：${intent}`);
@@ -755,6 +950,11 @@ export class AgentRuntimeService {
         streaming: true
       });
       this.runCoordinator.completeRun(execution, finalPayload);
+      await this.finalizeDeferredPromptSkillCache(
+        finalPayload.skill_result,
+        execution.run_id,
+        execution.request_id
+      );
       await trace.finish({ saved_paths: finalPayload?.saved_paths || [] });
     } catch (error) {
       const durableState = this.failDurableRun(execution, error);
@@ -832,7 +1032,7 @@ export class AgentRuntimeService {
         throw new Error(`TS runtime 尚未接管该意图：${intent}`);
       }
       trace?.mark("workflow_started", { selected_skill_id: skillId });
-      yield* this.streamLocalSkillIntent(skillId, request, options);
+      yield* this.streamLocalSkillIntent(skillId, request, options, execution);
       return;
     }
     if (intent !== "chat" && intent !== "read_context") {
@@ -931,7 +1131,15 @@ export class AgentRuntimeService {
       throw error;
     }
     const request = this.runCoordinator.getRecoveryRequest(runId);
-    void this.executeDurableAgentRun(request, execution).catch(() => undefined);
+    if (isDurableSkillAgentRequest(request)) {
+      void this.executeDurableSkillRun(
+        request.skill_id || "",
+        durableAgentRequestToSkillRequest(request),
+        execution
+      ).catch(() => undefined);
+    } else {
+      void this.executeDurableAgentRun(request, execution).catch(() => undefined);
+    }
     return this.runCoordinator.getRun(runId)!;
   }
 
@@ -1664,7 +1872,12 @@ export class AgentRuntimeService {
     };
   }
 
-  private async *streamLocalSkillIntent(skillId: string, request: AgentRunRequest, options: AgentRunOptions = {}): AsyncGenerator<AgentStreamEvent> {
+  private async *streamLocalSkillIntent(
+    skillId: string,
+    request: AgentRunRequest,
+    options: AgentRunOptions = {},
+    execution?: DurableRunExecution
+  ): AsyncGenerator<AgentStreamEvent> {
     throwIfAborted(options.signal);
     request = { ...request, skill_id: skillId };
     yield {
@@ -1674,13 +1887,26 @@ export class AgentRuntimeService {
       skill_id: skillId
     };
     const skillRequest = this.buildSkillRequest(skillId, request);
-    for await (const event of this.skillRunner.streamSkill(skillId, skillRequest, options)) {
+    for await (const event of this.skillRunner.streamSkill(skillId, skillRequest, {
+      ...options,
+      deferAutoCommit: Boolean(execution),
+      ...(execution
+        ? { deterministicCacheId: deterministicPromptSkillCacheId(execution, skillId) }
+        : {})
+    })) {
       throwIfAborted(options.signal);
       if (event.type !== "final") {
         yield event;
         continue;
       }
-      const result = event.payload.skill_result!;
+      const result = execution
+        ? await this.commitDeferredPromptSkillResult(
+            skillId,
+            event.payload.skill_result!,
+            execution,
+            options
+          )
+        : event.payload.skill_result!;
       const savedPaths = this.resolveSavedPaths(result);
       const reply = savedPaths.length ? `已写入 ${savedPaths.length} 个文件：\n${savedPaths.join("\n")}` : result.result || "技能已完成。";
       yield {
@@ -2007,11 +2233,118 @@ export class AgentRuntimeService {
     };
   }
 
-  private async runLocalSkillIntent(skillId: string, request: AgentRunRequest, options: AgentRunOptions = {}): Promise<AgentRunResponse> {
+  private async commitDeferredPromptSkillResult(
+    skillId: string,
+    result: SkillRunResponse,
+    execution: DurableRunExecution,
+    options: AgentRunOptions = {}
+  ): Promise<SkillRunResponse> {
+    const deferred = parseDeferredPromptSkillCommit(result.data?.deferred_commit, skillId);
+    if (!deferred || deferred.requires_confirmation) {
+      return withDurableSkillIdentity(result, execution.run_id, execution.request_id, false);
+    }
+
+    const committed = await this.commitGeneratedCache({
+      cache_id: deferred.cache_id,
+      source: deferred.source,
+      skill_id: deferred.skill_id,
+      mode: deferred.mode,
+      target_paths: deferred.target_paths,
+      save_plan: deferred.save_plan,
+      summary: deferred.summary,
+      cleanup_content: false
+    }, {
+      ...options,
+      execution,
+      sectioned: {
+        loreMergeExisting: deferred.lore_merge_existing
+      }
+    });
+    const data = { ...(result.data || {}) };
+    delete data.deferred_commit;
+    delete data.pending_save;
+    delete data.target_path;
+    delete data.target_paths;
+    delete data.default_mode;
+    delete data.cache_path;
+    delete data.cache_chars;
+    data.cache_id = committed.cache_id;
+    data.saved_paths = committed.saved_paths;
+    data.journal_ids = committed.journal_ids;
+    data.run_id = execution.run_id;
+    data.request_id = execution.request_id;
+    data.replayed = committed.replayed;
+    return skillRunResponseSchema.parse({
+      ...result,
+      saved_path: committed.saved_paths[0] || "",
+      data
+    });
+  }
+
+  private async finalizeDeferredPromptSkillCache(
+    result: SkillRunResponse | null | undefined,
+    runId: string,
+    requestId: string
+  ): Promise<void> {
+    const data = isRecord(result?.data) ? result.data : {};
+    const cacheId = String(data.cache_id || "").trim();
+    const savedPaths = canonicalGeneratedPaths([
+      ...stringListFromUnknown(data.saved_paths),
+      result?.saved_path || ""
+    ]);
+    const journalIds = stringListFromUnknown(data.journal_ids);
+    if (!cacheId || !savedPaths.length || !journalIds.length) {
+      return;
+    }
+
+    try {
+      const journalById = new Map(
+        this.runCoordinator
+          .listCommitJournal(runId)
+          .map((journal) => [journal.journal_id, journal] as const)
+      );
+      if (!journalIds.every((journalId) => journalById.get(journalId)?.stage === "finalized")) {
+        return;
+      }
+
+      const meta = await this.cache.get(cacheId);
+      if (meta.status !== "pending" && meta.status !== "committed") {
+        return;
+      }
+      if (meta.commit_run_id && meta.commit_run_id !== runId) {
+        return;
+      }
+      await this.cache.markCommitted(cacheId, savedPaths, {
+        cleanupContent: true,
+        commitRunId: runId,
+        commitRequestId: requestId,
+        commitJournalIds: journalIds
+      });
+    } catch {
+      // The outer run already owns the durable result. A completed-request
+      // replay will retry this metadata/content cleanup without rerunning the model.
+    }
+  }
+
+  private async runLocalSkillIntent(
+    skillId: string,
+    request: AgentRunRequest,
+    options: AgentRunOptions = {},
+    execution?: DurableRunExecution
+  ): Promise<AgentRunResponse> {
     throwIfAborted(options.signal);
     request = { ...request, skill_id: skillId };
     const skillRequest = this.buildSkillRequest(skillId, request);
-    const result = await this.skillRunner.runSkill(skillId, skillRequest, options);
+    const prepared = await this.skillRunner.runSkill(skillId, skillRequest, {
+      ...options,
+      deferAutoCommit: Boolean(execution),
+      ...(execution
+        ? { deterministicCacheId: deterministicPromptSkillCacheId(execution, skillId) }
+        : {})
+    });
+    const result = execution
+      ? await this.commitDeferredPromptSkillResult(skillId, prepared, execution, options)
+      : prepared;
     throwIfAborted(options.signal);
     const savedPaths = this.resolveSavedPaths(result);
 
@@ -2959,6 +3292,146 @@ function generatedCacheCommitResponse(cacheId: string, savedPaths: string[]): Ag
     saved_paths: savedPaths,
     requires_confirmation: false
   };
+}
+
+function buildDurableSkillAgentRequest(skillId: string, request: SkillRunRequest): AgentRunRequest {
+  return {
+    request_id: String(request.request_id || "").trim(),
+    autonomy_mode: "execute",
+    conversation_id: request.conversation_id || "",
+    content: request.instruction || request.text || `运行技能 ${skillId}`,
+    current_path: request.source_path || "",
+    selection: request.text || "",
+    project_context_hint: "",
+    skill_id: skillId,
+    attachment_ids: request.attachment_ids || [],
+    reference_paths: request.reference_paths || [],
+    confirmed_reference_paths: request.confirmed_reference_paths || [],
+    disable_auto_references: Boolean(request.disable_auto_references),
+    skill_request_origin: DIRECT_SKILL_REQUEST_ORIGIN,
+    instruction: request.instruction || "",
+    text: request.text || "",
+    chapter: request.chapter || undefined,
+    end_chapter: request.end_chapter || undefined,
+    target_words: request.target_words || undefined,
+    source_path: request.source_path || "",
+    target_path: request.target_path || "",
+    write_result: Boolean(request.write_result)
+  };
+}
+
+function durableAgentRequestToSkillRequest(request: AgentRunRequest): SkillRunRequest {
+  return skillRunRequestSchema.parse({
+    request_id: request.request_id || "",
+    text: String(request.text ?? request.selection ?? ""),
+    chapter: Number(request.chapter || 0),
+    end_chapter: Number(request.end_chapter || 0),
+    target_words: Number(request.target_words || 2500),
+    instruction: String(request.instruction ?? request.content ?? ""),
+    target_path: String(request.target_path || ""),
+    conversation_id: request.conversation_id || "",
+    source_path: String(request.source_path ?? request.current_path ?? ""),
+    write_result: Boolean(request.write_result),
+    attachment_ids: request.attachment_ids || [],
+    reference_paths: request.reference_paths || [],
+    confirmed_reference_paths: request.confirmed_reference_paths || [],
+    disable_auto_references: Boolean(request.disable_auto_references)
+  });
+}
+
+function isDurableSkillAgentRequest(request: AgentRunRequest): boolean {
+  return String(request.skill_request_origin || "") === DIRECT_SKILL_REQUEST_ORIGIN
+    && Boolean(String(request.skill_id || "").trim());
+}
+
+function deterministicPromptSkillCacheId(
+  execution: DurableRunExecution,
+  skillId: string,
+  scope = "direct"
+): string {
+  return sha256Text(stableJson({
+    schema_version: 1,
+    kind: "prompt_skill_generation",
+    run_id: execution.run_id,
+    step_id: execution.step_id,
+    skill_id: skillId,
+    scope
+  })).slice(0, 32);
+}
+
+function parseDeferredPromptSkillCommit(
+  value: unknown,
+  expectedSkillId: string
+): DeferredPromptSkillCommit | null {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  if (!isRecord(value) || value.kind !== "prompt_skill_generated_cache") {
+    throw codedRuntimeError("PROMPT_SKILL_DEFERRED_COMMIT_INVALID", "Prompt Skill 延迟提交描述无效");
+  }
+  const cacheId = String(value.cache_id || "").trim();
+  const skillId = String(value.skill_id || "").trim();
+  const mode = value.mode === "append" ? "append" : value.mode === "replace" ? "replace" : "";
+  if (!cacheId || !skillId || skillId !== expectedSkillId || !mode) {
+    throw codedRuntimeError(
+      "PROMPT_SKILL_DEFERRED_COMMIT_INVALID",
+      "Prompt Skill 延迟提交描述与当前技能不匹配"
+    );
+  }
+  return {
+    kind: "prompt_skill_generated_cache",
+    cache_id: cacheId,
+    skill_id: skillId,
+    mode,
+    target_paths: stringListFromUnknown(value.target_paths),
+    save_plan: generatedSavePlanSchema.parse(value.save_plan || {}),
+    source: String(value.source || "prompt_skill").trim() || "prompt_skill",
+    summary: String(value.summary || `Prompt Skill auto-commit: ${skillId}`),
+    requires_confirmation: value.requires_confirmation === true,
+    lore_merge_existing: value.lore_merge_existing === true
+  };
+}
+
+function withDurableSkillIdentity(
+  result: SkillRunResponse,
+  runId: string,
+  requestId: string,
+  replayed: boolean
+): SkillRunResponse {
+  return skillRunResponseSchema.parse({
+    ...result,
+    data: {
+      ...(result.data || {}),
+      run_id: runId,
+      request_id: requestId,
+      replayed
+    }
+  });
+}
+
+function durableSkillAgentResponse(skillId: string, result: SkillRunResponse): AgentRunResponse {
+  const savedPaths = Array.isArray(result.data?.saved_paths)
+    ? result.data.saved_paths.map(String).filter(Boolean)
+    : result.saved_path
+      ? [result.saved_path]
+      : [];
+  return {
+    intent: "skill",
+    reply: savedPaths.length
+      ? `已写入 ${savedPaths.length} 个文件：\n${savedPaths.join("\n")}`
+      : result.result || "技能已完成。",
+    results: [],
+    skill_result: result,
+    saved_paths: savedPaths,
+    requires_confirmation: false,
+    current_skill: skillId
+  };
+}
+
+function loreSectionTitleForPath(targetPath: string): string {
+  const normalized = String(targetPath || "").replace(/\\/g, "/");
+  return Object.entries(LORE_SECTION_TARGETS)
+    .find(([, candidate]) => candidate === normalized)?.[0] || "";
 }
 
 function canonicalGeneratedPaths(paths: string[]): string[] {

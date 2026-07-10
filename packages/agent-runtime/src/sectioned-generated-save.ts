@@ -110,6 +110,43 @@ export function isEmptyLoreBody(text: string): boolean {
   return !cleaned || ["无", "暂无", "未提取", "未发现", "没有内容"].includes(cleaned);
 }
 
+export function mergeLoreSectionText(title: string, existing: string, incoming: string): string {
+  const existingBlocks = loreMergeBlocks(existing, title);
+  const incomingBlocks = loreMergeBlocks(incoming, title);
+  const merged: string[] = [];
+  const keyToIndex = new Map<string, number>();
+
+  for (const block of existingBlocks) {
+    const key = loreMergeKey(block);
+    if (key) {
+      keyToIndex.set(key, merged.length);
+    }
+    merged.push(block);
+  }
+
+  for (const block of incomingBlocks) {
+    const key = loreMergeKey(block);
+    if (key && keyToIndex.has(key)) {
+      const index = keyToIndex.get(key)!;
+      merged[index] = mergeLoreDuplicate(merged[index] || "", block);
+      continue;
+    }
+    if (merged.some((item) => sameLoreDetail(item, block))) {
+      continue;
+    }
+    if (key) {
+      keyToIndex.set(key, merged.length);
+    }
+    merged.push(block);
+  }
+
+  return merged
+    .map((block) => block.trim())
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+}
+
 function sectionTargets(skillId: SectionedGeneratedSkillId): Readonly<Record<string, string>> {
   if (skillId === "style_extract") {
     return STYLE_SECTION_TARGETS;
@@ -338,4 +375,78 @@ function classifyLoreBlock(text: string): keyof typeof LORE_SECTION_TARGETS {
     return "体系设定";
   }
   return "体系设定";
+}
+
+function loreMergeBlocks(text: string, sectionTitle: string): string[] {
+  const blocks: string[] = [];
+  const current: string[] = [];
+  const headingPattern = new RegExp(`^\\s*(?:[【\\[])?${escapeRegExp(sectionTitle)}(?:[】\\]])?\\s*[:：]?\\s*$`);
+  const flush = () => {
+    const block = current.join("\n").trim();
+    current.length = 0;
+    if (block && !isEmptyLoreBody(block)) {
+      blocks.push(block);
+    }
+  };
+  for (const rawLine of String(text || "").split(/\r?\n/)) {
+    const stripped = rawLine.replace(/\s+$/, "").trim();
+    if (!stripped || stripped === "---" || /^【自动提取[^】]*】$/.test(stripped) || headingPattern.test(stripped)) {
+      flush();
+      continue;
+    }
+    if (startsNewLoreItem(stripped) && current.length) {
+      flush();
+    }
+    current.push(stripped);
+  }
+  flush();
+  return blocks;
+}
+
+function startsNewLoreItem(line: string): boolean {
+  return /^[-*•]\s*\S{1,32}[：:]/.test(line) || /^\d+[.、]\s*\S{1,32}[：:]/.test(line) || /^\S{1,32}[：:]/.test(line);
+}
+
+function loreMergeKey(block: string): string {
+  const first = String(block || "").split(/\r?\n/).map((line) => line.trim()).find(Boolean) || "";
+  const cleaned = first.replace(/^[-*•\d.、\s]+/, "");
+  const match = /^([^：:\n]{1,32})[：:]/.exec(cleaned);
+  return match ? match[1]!.replace(/\s+/g, "").toLowerCase() : cleaned.replace(/\W+/gu, "").slice(0, 40).toLowerCase();
+}
+
+function mergeLoreDuplicate(existing: string, incoming: string): string {
+  const [oldKey, oldDetail] = splitLoreItem(existing);
+  const [newKey, newDetail] = splitLoreItem(incoming);
+  if (oldKey && newKey && oldKey === newKey) {
+    const details: string[] = [];
+    for (const detail of [oldDetail, newDetail]) {
+      for (const part of splitLoreDetailParts(detail)) {
+        if (!details.some((item) => sameLoreDetail(part, item))) details.push(part);
+      }
+    }
+    return details.length ? `${newKey}：${details.join("；")}` : incoming.trim();
+  }
+  if (sameLoreDetail(existing, incoming)) return existing.trim().length >= incoming.trim().length ? existing.trim() : incoming.trim();
+  return `${existing.trim()}\n${incoming.trim()}`.trim();
+}
+
+function splitLoreItem(block: string): [string, string] {
+  const text = String(block || "").trim().replace(/^[-*•\d.、\s]+/, "");
+  const match = /^([^：:\n]{1,32})[：:]\s*(.*)$/s.exec(text);
+  return match ? [match[1]!.replace(/\s+/g, "").trim(), match[2]!.trim()] : ["", text];
+}
+
+function splitLoreDetailParts(detail: string): string[] {
+  const parts = String(detail || "").split(/[；;]\s*|\n+/).map((part) => part.trim().replace(/[。；;]+$/g, "")).filter(Boolean);
+  return parts.length ? parts : String(detail || "").trim() ? [String(detail).trim()] : [];
+}
+
+function sameLoreDetail(left: string, right: string): boolean {
+  const leftNorm = String(left || "").replace(/\s+/g, "");
+  const rightNorm = String(right || "").replace(/\s+/g, "");
+  return Boolean(leftNorm && rightNorm && (leftNorm.includes(rightNorm) || rightNorm.includes(leftNorm)));
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

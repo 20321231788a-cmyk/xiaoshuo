@@ -2210,6 +2210,15 @@ npm test
 - 根级：`npm run typecheck`、`npm test`（86 files / 650 tests）、`npm run build:desktop`、`npm run build:workbench` 和 `git diff --check` 通过；Workbench 只有既有的 >500 kB chunk warning；
 - P0-F 与 P0 继续为“实现中”；Prompt Skill 自动提交、chat 写回、普通文件操作计划和 card draw 仍是未完成旁路；`PRODUCT.md` 未修改、未纳入提交。
 
+### 15.66 2026-07-10 P0 Prompt Skill Durable Commit 记录
+
+- PromptSkillRunner 在 durable 调用中只生成稳定 cache、保存计划和 deferred commit 描述；runtime 承担目标文件副作用，单独拥有 CommitJournal 写入和 cache `markCommitted`，避免分段 writer 或普通 save plan 再次直写、重复收口；
+- `runAgent`、`streamAgentRun` 的本地 Prompt Skill 路径传递同一 durable execution；`/api/skills/:id/run` 对 writable 或显式 `write_result` 的 prompt skill 调用 `runDurableSkill`，运行时不可用时以 `503 DURABLE_SKILL_RUNTIME_UNAVAILABLE` fail-closed；
+- durable 直接运行以 request id 重放结果，最终 SkillRunResponse 写入 observation；同请求不会再次调用模型或重复文件副作用。style/genre 保留固定分段目标；Lore replace 的 merge-existing 在 journal 前合成最终内容，保留已有条目并合并新信息；
+- 本板块没有新增 SQLite schema。回滚代码不得删除 durable run、journal 或 pending cache；旧二进制只能继续读取现有 cache/目标文档，不能对已创建 durable run 重新走直写路径。
+
+本轮验证：`npm run typecheck`、`npm test`（86 files / 663 tests）、`npm run build:workbench`、`npm run build:desktop`、`npx vitest run packages/agent-runtime/src/runtime.test.ts packages/agent-runtime/src/skill-runner.test.ts packages/agent-runtime/src/sectioned-generated-save.test.ts apps/desktop-shell/src/main/runtime/skill-routes.test.ts --reporter=dot`（4 files / 112 tests）和 `git diff --check` 通过；后续补充的 `runtime.test.ts` 流式 outer-run 回归也通过（82 tests）。Workbench 只有既有的 >500 kB chunk warning。P0-F 与 P0 继续为“实现中”；普通文件操作计划、chat 写回和 card draw 仍未统一 journal/confirmation；`PRODUCT.md` 未纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

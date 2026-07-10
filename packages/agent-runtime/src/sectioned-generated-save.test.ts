@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildSectionedGeneratedSavePlan,
+  mergeLoreSectionText,
   prepareSectionedGeneratedSave,
   sectionedGeneratedTargetPaths
 } from "./sectioned-generated-save.js";
@@ -130,5 +131,13 @@ describe("sectioned generated save planning", () => {
       segments: [],
       should_auto_commit: false
     });
+  });
+
+  it("merges lore replacements without duplicating known item details", () => {
+    expect(mergeLoreSectionText(
+      "人物设定",
+      "林烬：流亡剑修；佩剑旧缺\n\n顾霜：边军斥候",
+      "林烬：佩剑旧缺；师承不明\n\n沈河：药师"
+    )).toBe("林烬：流亡剑修；佩剑旧缺；师承不明\n\n顾霜：边军斥候\n\n沈河：药师");
   });
 });

@@ -5,7 +5,7 @@ import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
 import { OpenAICompatibleClient, type ChatCompletionMessage } from "@xiaoshuo/model-client";
 import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
 import { SkillService } from "@xiaoshuo/skill-service";
-import { skillRunResponseSchema, skillDraftFromUrlRequestSchema, skillDraftResponseSchema, type AgentStreamEvent, type SkillDefinition, type SkillRunRequest, type SkillRunResponse, type SkillDraftFromUrlRequest, type SkillDraftResponse } from "@xiaoshuo/shared";
+import { skillRunResponseSchema, skillDraftFromUrlRequestSchema, skillDraftResponseSchema, type AgentStreamEvent, type GeneratedSavePlan, type SkillDefinition, type SkillRunRequest, type SkillRunResponse, type SkillDraftFromUrlRequest, type SkillDraftResponse } from "@xiaoshuo/shared";
 import path from "node:path";
 import { HUMANIZER_SYSTEM_PROMPT, applyHumanizerIfEnabled } from "./humanizer.js";
 import { GeneratedSavePlanner } from "./generated-save-planner.js";
@@ -13,7 +13,7 @@ import { assembleContext } from "./kernel/context-assembler.js";
 import type { ContextBlock } from "./kernel/context-block.js";
 import { ProjectFileResolver } from "./kernel/project-file-resolver.js";
 import {
-  isEmptyLoreBody,
+  mergeLoreSectionText,
   prepareSectionedGeneratedSave,
   sectionedGeneratedTargetPaths
 } from "./sectioned-generated-save.js";
@@ -73,6 +73,15 @@ export type PromptSkillRunnerOptions = {
   modelClient?: StreamingModelClient;
 };
 
+/**
+ * Keeps generation and its pending cache intact while leaving a durable caller
+ * responsible for committing document side effects through its journal.
+ */
+export type PromptSkillRunOptions = AgentRunOptions & {
+  deferAutoCommit?: boolean;
+  deterministicCacheId?: string;
+};
+
 export class PromptSkillRunner {
   private readonly projectRoot: string;
   private readonly config: ConfigServiceOptions;
@@ -105,7 +114,7 @@ export class PromptSkillRunner {
     return Boolean(skill && skill.handler_type === "prompt" && !LOCAL_BLOCKED_SKILLS.has(skill.id));
   }
 
-  async runSkill(skillId: string, payload: SkillRunRequest, options: AgentRunOptions = {}): Promise<SkillRunResponse> {
+  async runSkill(skillId: string, payload: SkillRunRequest, options: PromptSkillRunOptions = {}): Promise<SkillRunResponse> {
     throwIfAborted(options.signal);
     const skill = await this.skills.getSkill(skillId);
     if (!skill) {
@@ -113,13 +122,18 @@ export class PromptSkillRunner {
     }
     if (skill.handler_type !== "prompt" || LOCAL_BLOCKED_SKILLS.has(skill.id)) {
       throw new Error(`TS runtime 尚未接管该 skill: ${skillId}`);
+    }
+
+    const restored = await this.restoreDeferredSkillResult(skill, payload, options);
+    if (restored) {
+      return restored;
     }
 
     const result = await this.runPromptSkill(skill, payload, options);
     return this.finalizePromptSkill(skill, payload, result, undefined, options);
   }
 
-  async *streamSkill(skillId: string, payload: SkillRunRequest, options: AgentRunOptions = {}): AsyncGenerator<AgentStreamEvent> {
+  async *streamSkill(skillId: string, payload: SkillRunRequest, options: PromptSkillRunOptions = {}): AsyncGenerator<AgentStreamEvent> {
     throwIfAborted(options.signal);
     const skill = await this.skills.getSkill(skillId);
     if (!skill) {
@@ -127,6 +141,15 @@ export class PromptSkillRunner {
     }
     if (skill.handler_type !== "prompt" || LOCAL_BLOCKED_SKILLS.has(skill.id)) {
       throw new Error(`TS runtime 尚未接管该 skill: ${skillId}`);
+    }
+
+    const restored = await this.restoreDeferredSkillResult(skill, payload, options);
+    if (restored) {
+      yield {
+        type: "final",
+        payload: await this.skillResponseToAgentResponse(skill, payload, restored)
+      };
+      return;
     }
 
     const config = await loadModelConfig(this.config, "primary");
@@ -141,14 +164,18 @@ export class PromptSkillRunner {
     const compactMessages = this.buildMessages(skill, systemPrompt, context, sourceText || payload.text, payload.instruction, true);
     const session = new StreamingGenerationSession(this.cache);
     const initialTargets = this.pendingSaveTargets(skill, payload);
-    const initial = await session.start({
-      source: "skill_stream",
-      target_paths: initialTargets,
-      skill_id: skill.id,
-      mode: "replace",
-      conversation_id: payload.conversation_id,
-      summary: `Skill 流式缓存：${skill.name}`
-    });
+    const deterministicCacheId = String(options.deterministicCacheId || "").trim();
+    let deterministicText = "";
+    const initial = deterministicCacheId
+      ? await this.startDeterministicStreamCache(deterministicCacheId, skill, payload, initialTargets)
+      : await session.start({
+        source: "skill_stream",
+        target_paths: initialTargets,
+        skill_id: skill.id,
+        mode: "replace",
+        conversation_id: payload.conversation_id,
+        summary: `Skill 流式缓存：${skill.name}`
+      });
 
     try {
       for await (const chunk of streamModelText({
@@ -160,7 +187,12 @@ export class PromptSkillRunner {
         signal: options.signal
       })) {
         throwIfAborted(options.signal);
-        await session.append(chunk);
+        if (deterministicCacheId) {
+          deterministicText += chunk;
+          await this.cache.append(deterministicCacheId, chunk);
+        } else {
+          await session.append(chunk);
+        }
         yield {
           type: "delta",
           text: chunk,
@@ -171,11 +203,14 @@ export class PromptSkillRunner {
           append_mode: "replace"
         };
       }
-      const raw = await session.finalize();
+      const raw = deterministicCacheId
+        ? await this.cache.get(deterministicCacheId)
+        : await session.finalize();
       throwIfAborted(options.signal);
-      const finalText = await this.applyDefaultDeslop(skill.id, session.text || "", options);
+      const streamedText = deterministicCacheId ? deterministicText : session.text || "";
+      const finalText = await this.applyDefaultDeslop(skill.id, streamedText, options);
       throwIfAborted(options.signal);
-      if (finalText.trim() !== (session.text || "").trim()) {
+      if (finalText.trim() !== streamedText.trim()) {
         await this.cache.replace(initial.cache_id, finalText);
       }
       yield {
@@ -191,7 +226,11 @@ export class PromptSkillRunner {
         )
       };
     } catch (error) {
-      await session.fail(error);
+      if (deterministicCacheId) {
+        await this.cache.markFailed(deterministicCacheId, error instanceof Error ? error.message : String(error));
+      } else {
+        await session.fail(error);
+      }
       if (isCancellationError(error, options.signal)) {
         throw error;
       }
@@ -200,6 +239,31 @@ export class PromptSkillRunner {
         message: error instanceof Error ? error.message : String(error)
       };
     }
+  }
+
+  private async startDeterministicStreamCache(
+    cacheId: string,
+    skill: SkillDefinition,
+    payload: SkillRunRequest,
+    targetPaths: string[]
+  ): Promise<{ cache_id: string; cache_path: string; chars: number }> {
+    const existing = await this.cache.get(cacheId).catch(() => null);
+    if (existing && existing.status !== "pending") {
+      throw new Error(`确定性 Skill 流式缓存状态为 ${existing.status}，不能重新开始`);
+    }
+    const meta = existing || await this.cache.createWithId(cacheId, {
+      source: "skill_stream",
+      target_paths: targetPaths,
+      skill_id: skill.id,
+      mode: "replace",
+      conversation_id: payload.conversation_id,
+      summary: `Skill 流式缓存：${skill.name}`
+    });
+    if (meta.skill_id && meta.skill_id !== skill.id) {
+      throw new Error(`确定性 Skill 缓存已绑定到 ${meta.skill_id}`);
+    }
+    await this.cache.replace(cacheId, "");
+    return { cache_id: cacheId, cache_path: meta.cache_path, chars: 0 };
   }
 
   private async runPromptSkill(skill: SkillDefinition, payload: SkillRunRequest, options: AgentRunOptions = {}): Promise<string> {
@@ -363,12 +427,74 @@ export class PromptSkillRunner {
     }
   }
 
+  private async restoreDeferredSkillResult(
+    skill: SkillDefinition,
+    payload: SkillRunRequest,
+    options: PromptSkillRunOptions
+  ): Promise<SkillRunResponse | null> {
+    const cacheId = String(options.deterministicCacheId || "").trim();
+    if (!cacheId || !options.deferAutoCommit) {
+      return null;
+    }
+    const meta = await this.cache.get(cacheId).catch(() => null);
+    if (!meta || meta.status !== "pending" || meta.skill_id !== skill.id || !meta.save_plan) {
+      return null;
+    }
+    const result = await this.cache.readContent(cacheId).catch(() => "");
+    if (!result.trim()) {
+      return null;
+    }
+    const savePlan = meta.save_plan;
+    const targetPaths = savePlan.target_paths.length ? savePlan.target_paths : this.pendingSaveTargets(skill, payload);
+    return skillRunResponseSchema.parse({
+      result,
+      saved_path: "",
+      data: {
+        skill_id: skill.id,
+        saved_paths: [],
+        pending_save: true,
+        target_paths: targetPaths,
+        target_path: targetPaths[0] || "",
+        result,
+        default_mode: savePlan.mode,
+        cache_id: cacheId,
+        cache_path: meta.cache_path,
+        cache_chars: meta.chars,
+        save_plan: savePlan,
+        deferred_commit: this.deferredCommitDescription(skill, payload, cacheId, savePlan, targetPaths)
+      }
+    });
+  }
+
+  private deferredCommitDescription(
+    skill: SkillDefinition,
+    payload: SkillRunRequest,
+    cacheId: string,
+    savePlan: GeneratedSavePlan,
+    targetPaths: string[]
+  ): Record<string, unknown> {
+    return {
+      kind: "prompt_skill_generated_cache",
+      cache_id: cacheId,
+      skill_id: skill.id,
+      mode: savePlan.mode,
+      target_paths: targetPaths,
+      save_plan: savePlan,
+      source: "prompt_skill",
+      summary: `Prompt Skill auto-commit: ${skill.name || skill.id}`,
+      requires_confirmation: Boolean(savePlan.requires_confirmation),
+      ...(skill.id === "lore_extract"
+        ? { lore_merge_existing: !shouldOverwriteLore(payload.instruction) }
+        : {})
+    };
+  }
+
   private async finalizePromptSkill(
     skill: SkillDefinition,
     payload: SkillRunRequest,
     result: string,
     existingCache?: { cacheId: string; cachePath?: string; cacheChars?: number },
-    options: AgentRunOptions = {}
+    options: PromptSkillRunOptions = {}
   ): Promise<SkillRunResponse> {
     throwIfAborted(options.signal);
     const humanized = await applyHumanizerIfEnabled({
@@ -421,7 +547,17 @@ export class PromptSkillRunner {
       throwIfAborted(options.signal);
       const entry = existingCache?.cacheId
         ? await this.cache.get(existingCache.cacheId)
-        : await this.cache.create({
+          : options.deterministicCacheId
+            ? await this.cache.createWithId(options.deterministicCacheId, {
+                source: "skill_result",
+                target_paths: targetPaths,
+                skill_id: skill.id,
+                mode: savePlan.mode,
+                conversation_id: payload.conversation_id,
+                summary: `Skill 结果缓存：${skill.name}`,
+                save_plan: savePlan
+              })
+            : await this.cache.create({
             source: "skill_result",
             target_paths: targetPaths,
             skill_id: skill.id,
@@ -429,12 +565,13 @@ export class PromptSkillRunner {
             conversation_id: payload.conversation_id,
             summary: `Skill 结果缓存：${skill.name}`,
             save_plan: savePlan
-          });
+              });
       if (!existingCache?.cacheId) {
         await this.cache.replace(entry.cache_id, finalResult);
       }
 
-      if (await this.savePlanner.shouldAutoCommit(savePlan)) {
+      const shouldAutoCommit = await this.savePlanner.shouldAutoCommit(savePlan);
+      if (shouldAutoCommit && !options.deferAutoCommit) {
         throwIfAborted(options.signal);
         savedPaths =
           skill.id === "style_extract"
@@ -467,6 +604,9 @@ export class PromptSkillRunner {
         data.cache_path = meta.cache_path;
         data.cache_chars = meta.chars;
         data.save_plan = meta.save_plan || savePlan;
+        if (shouldAutoCommit && options.deferAutoCommit) {
+          data.deferred_commit = this.deferredCommitDescription(skill, payload, entry.cache_id, meta.save_plan || savePlan, targetPaths);
+        }
       }
     }
 
@@ -896,136 +1036,6 @@ function shouldOverwriteLore(instruction: string): boolean {
   return /(覆盖|替换|清空.*重写|重写|改写).{0,12}(当前内容|原内容|设定集|设定卡|人物设定|体系设定|地图设定|道具设定)?/.test(
     instruction || ""
   );
-}
-
-function mergeLoreSectionText(title: string, existing: string, incoming: string): string {
-  const existingBlocks = loreMergeBlocks(existing, title);
-  const incomingBlocks = loreMergeBlocks(incoming, title);
-  const merged: string[] = [];
-  const keyToIndex = new Map<string, number>();
-
-  for (const block of existingBlocks) {
-    const key = loreMergeKey(block);
-    if (key) {
-      keyToIndex.set(key, merged.length);
-    }
-    merged.push(block);
-  }
-
-  for (const block of incomingBlocks) {
-    const key = loreMergeKey(block);
-    if (key && keyToIndex.has(key)) {
-      const index = keyToIndex.get(key)!;
-      merged[index] = mergeLoreDuplicate(merged[index] || "", block);
-      continue;
-    }
-    if (merged.some((item) => sameLoreDetail(item, block))) {
-      continue;
-    }
-    if (key) {
-      keyToIndex.set(key, merged.length);
-    }
-    merged.push(block);
-  }
-
-  return merged
-    .map((block) => block.trim())
-    .filter(Boolean)
-    .join("\n\n")
-    .trim();
-}
-
-function loreMergeBlocks(text: string, sectionTitle: string): string[] {
-  const blocks: string[] = [];
-  const current: string[] = [];
-  const headingPattern = new RegExp(`^\\s*(?:[【\\[])?${escapeRegExp(sectionTitle)}(?:[】\\]])?\\s*[:：]?\\s*$`);
-
-  const flush = () => {
-    const block = current.join("\n").trim();
-    current.length = 0;
-    if (block && !isEmptyLoreBody(block)) {
-      blocks.push(block);
-    }
-  };
-
-  for (const rawLine of String(text || "").split(/\r?\n/)) {
-    const line = rawLine.replace(/\s+$/, "");
-    const stripped = line.trim();
-    if (!stripped || stripped === "---" || /^【自动提取[^】]*】$/.test(stripped) || headingPattern.test(stripped)) {
-      flush();
-      continue;
-    }
-    if (startsNewLoreItem(stripped) && current.length) {
-      flush();
-    }
-    current.push(stripped);
-  }
-  flush();
-  return blocks;
-}
-
-function startsNewLoreItem(line: string): boolean {
-  return /^[-*•]\s*\S{1,32}[：:]/.test(line) || /^\d+[.、]\s*\S{1,32}[：:]/.test(line) || /^\S{1,32}[：:]/.test(line);
-}
-
-function loreMergeKey(block: string): string {
-  const first = String(block || "")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find(Boolean) || "";
-  const cleaned = first.replace(/^[-*•\d.、\s]+/, "");
-  const match = /^([^：:\n]{1,32})[：:]/.exec(cleaned);
-  if (match) {
-    return match[1]!.replace(/\s+/g, "").toLowerCase();
-  }
-  return cleaned.replace(/\W+/gu, "").slice(0, 40).toLowerCase();
-}
-
-function mergeLoreDuplicate(existing: string, incoming: string): string {
-  const [oldKey, oldDetail] = splitLoreItem(existing);
-  const [newKey, newDetail] = splitLoreItem(incoming);
-  if (oldKey && newKey && oldKey === newKey) {
-    const details: string[] = [];
-    for (const detail of [oldDetail, newDetail]) {
-      for (const part of splitLoreDetailParts(detail)) {
-        if (!details.some((item) => sameLoreDetail(part, item))) {
-          details.push(part);
-        }
-      }
-    }
-    return details.length ? `${newKey}：${details.join("；")}` : incoming.trim();
-  }
-  if (sameLoreDetail(existing, incoming)) {
-    return existing.trim().length >= incoming.trim().length ? existing.trim() : incoming.trim();
-  }
-  return `${existing.trim()}\n${incoming.trim()}`.trim();
-}
-
-function splitLoreItem(block: string): [string, string] {
-  const text = String(block || "").trim().replace(/^[-*•\d.、\s]+/, "");
-  const match = /^([^：:\n]{1,32})[：:]\s*(.*)$/s.exec(text);
-  if (!match) {
-    return ["", text];
-  }
-  return [match[1]!.replace(/\s+/g, "").trim(), match[2]!.trim()];
-}
-
-function splitLoreDetailParts(detail: string): string[] {
-  const parts = String(detail || "")
-    .split(/[；;]\s*|\n+/)
-    .map((part) => part.trim().replace(/[。；;]+$/g, ""))
-    .filter(Boolean);
-  return parts.length ? parts : String(detail || "").trim() ? [String(detail).trim()] : [];
-}
-
-function sameLoreDetail(left: string, right: string): boolean {
-  const leftNorm = String(left || "").replace(/\s+/g, "");
-  const rightNorm = String(right || "").replace(/\s+/g, "");
-  return Boolean(leftNorm && rightNorm && (leftNorm.includes(rightNorm) || rightNorm.includes(leftNorm)));
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 const MAX_SKILL_TEXT_CHARS = 120000;
