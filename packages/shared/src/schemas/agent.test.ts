@@ -203,7 +203,18 @@ describe("agent schemas", () => {
         attachment_refs: [],
         selected_file_refs: [],
         settings_snapshot: {},
-        feature_flag_snapshot: {}
+        feature_flag_snapshot: {
+          schema_version: 1,
+          agent_execution_v2_mode: "off",
+          model_gateway_v2: false,
+          agent_replanning_v2: false,
+          context_budget_v2: false,
+          memory_v2: false,
+          memory_context_selector_v2: false,
+          quality_gate_v2: false,
+          agent_event_stream_v2: false,
+          agent_inline_plan_ui: false
+        }
       }
     });
     expect(goal.request_snapshot).not.toHaveProperty("api_key");
@@ -410,7 +421,18 @@ describe("agent schemas", () => {
       attachment_refs: ["attachment-1"],
       selected_file_refs: ["01_正文/第1章.md"],
       settings_snapshot: {},
-      feature_flag_snapshot: {}
+      feature_flag_snapshot: {
+        schema_version: 1,
+        agent_execution_v2_mode: "off",
+        model_gateway_v2: false,
+        agent_replanning_v2: false,
+        context_budget_v2: false,
+        memory_v2: false,
+        memory_context_selector_v2: false,
+        quality_gate_v2: false,
+        agent_event_stream_v2: false,
+        agent_inline_plan_ui: false
+      }
     });
     expect(run.budget.max_steps).toBe(3);
     expect(agentRunStateSchema.parse({ ...run, error_code: "RUN_RECOVERY_FAILED", error: "recovery failed" })).toMatchObject({
@@ -435,6 +457,35 @@ describe("agent schemas", () => {
     expect(request).toMatchObject({ request_id: "request-1", content: "继续写作", custom_prompt: "保留工作流提示" });
     expect(request).not.toHaveProperty("api_key");
     expect(request).not.toHaveProperty("nested_private_payload");
+  });
+
+  it("requires a complete strict feature flag snapshot", () => {
+    expect(() =>
+      agentGoalSchema.parse({
+        request_snapshot: {
+          feature_flag_snapshot: { schema_version: 1, agent_execution_v2_mode: "on" }
+        }
+      })
+    ).toThrow();
+    expect(() =>
+      agentGoalSchema.parse({
+        request_snapshot: {
+          feature_flag_snapshot: {
+            schema_version: 1,
+            agent_execution_v2_mode: "on",
+            model_gateway_v2: false,
+            agent_replanning_v2: false,
+            context_budget_v2: false,
+            memory_v2: false,
+            memory_context_selector_v2: false,
+            quality_gate_v2: false,
+            agent_event_stream_v2: false,
+            agent_inline_plan_ui: false,
+            unknown_flag: true
+          }
+        }
+      })
+    ).toThrow();
   });
 
   it("parses run lifecycle API envelopes and command requests", () => {

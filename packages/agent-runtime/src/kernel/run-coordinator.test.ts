@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openExecutionStore } from "./execution-store.js";
+import { InMemoryAgentFeatureFlagRegistry } from "./feature-flag-registry.js";
 import { RunCoordinator, RunRequestReplayError } from "./run-coordinator.js";
 
 let tempDir = "";
@@ -142,6 +143,31 @@ describe("RunCoordinator", () => {
     expect(storedRequest.custom_prompt).toBe("保留这个扩展字段");
     expect(storedRequest.transient_private_payload).toBeUndefined();
     expect(run.goal.request_snapshot.selected_file_refs).toEqual(["02_正文/第001章.txt"]);
+  });
+
+  it("keeps the feature flag snapshot when registry configuration changes after creation", () => {
+    const flags = new InMemoryAgentFeatureFlagRegistry({
+      agent_execution_v2_mode: "on",
+      agent_event_stream_v2: true
+    });
+    const coordinator = new RunCoordinator({
+      projectRoot: tempDir,
+      runtimeInstanceId: "runtime-flags",
+      autoHeartbeat: false,
+      idFactory: sequenceFactory("flags"),
+      featureFlags: flags
+    });
+    coordinators.push(coordinator);
+
+    const execution = coordinator.beginRun(request());
+    flags.update({ agent_execution_v2_mode: "off" });
+
+    expect(coordinator.getRun(execution.run_id)?.goal.request_snapshot.feature_flag_snapshot).toMatchObject({
+      schema_version: 1,
+      agent_execution_v2_mode: "on",
+      agent_event_stream_v2: true
+    });
+    expect(flags.snapshot().agent_execution_v2_mode).toBe("off");
   });
 
   it("claims an expired runtime lease and pauses the stale run", () => {

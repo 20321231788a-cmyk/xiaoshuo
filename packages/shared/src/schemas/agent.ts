@@ -430,13 +430,49 @@ export const agentRunBudgetSchema = z
 
 export const agentAutonomyModeSchema = z.enum(["assist", "plan", "execute"]);
 
-export const agentGoalRequestSnapshotSchema = z.object({
-  content: z.string().default(""),
-  attachment_refs: z.array(z.string()).default([]),
-  selected_file_refs: z.array(z.string()).default([]),
-  settings_snapshot: z.record(z.unknown()).default({}),
-  feature_flag_snapshot: z.record(z.unknown()).default({})
-});
+export const agentExecutionV2ModeSchema = z.enum(["off", "shadow", "on"]);
+
+export const DEFAULT_AGENT_FEATURE_FLAG_SNAPSHOT = {
+  schema_version: 1,
+  agent_execution_v2_mode: "off",
+  model_gateway_v2: false,
+  agent_replanning_v2: false,
+  context_budget_v2: false,
+  memory_v2: false,
+  memory_context_selector_v2: false,
+  quality_gate_v2: false,
+  agent_event_stream_v2: false,
+  agent_inline_plan_ui: false
+} as const;
+
+const agentFeatureFlagSnapshotV1Schema = z
+  .object({
+    schema_version: z.literal(1),
+    agent_execution_v2_mode: agentExecutionV2ModeSchema,
+    model_gateway_v2: z.boolean(),
+    agent_replanning_v2: z.boolean(),
+    context_budget_v2: z.boolean(),
+    memory_v2: z.boolean(),
+    memory_context_selector_v2: z.boolean(),
+    quality_gate_v2: z.boolean(),
+    agent_event_stream_v2: z.boolean(),
+    agent_inline_plan_ui: z.boolean()
+  })
+  .strict();
+
+export const agentFeatureFlagSnapshotSchema = z.preprocess(
+  (value) => (isEmptyObject(value) ? undefined : value),
+  agentFeatureFlagSnapshotV1Schema.default(DEFAULT_AGENT_FEATURE_FLAG_SNAPSHOT)
+);
+
+export const agentGoalRequestSnapshotSchema = z
+  .object({
+    content: z.string().default(""),
+    attachment_refs: z.array(z.string()).default([]),
+    selected_file_refs: z.array(z.string()).default([]),
+    settings_snapshot: z.record(z.unknown()).default({}),
+    feature_flag_snapshot: agentFeatureFlagSnapshotSchema
+  });
 
 export const agentGoalSchema = z
   .object({
@@ -773,6 +809,8 @@ export type AgentStepAttempt = z.infer<typeof agentStepAttemptSchema>;
 export type AgentObservation = z.infer<typeof agentObservationSchema>;
 export type AgentRunBudget = z.infer<typeof agentRunBudgetSchema>;
 export type AgentAutonomyMode = z.infer<typeof agentAutonomyModeSchema>;
+export type AgentExecutionV2Mode = z.infer<typeof agentExecutionV2ModeSchema>;
+export type AgentFeatureFlagSnapshot = z.infer<typeof agentFeatureFlagSnapshotSchema>;
 export type AgentGoalRequestSnapshot = z.infer<typeof agentGoalRequestSnapshotSchema>;
 export type AgentGoal = z.infer<typeof agentGoalSchema>;
 export type AgentConfirmation = z.infer<typeof agentConfirmationSchema>;
@@ -808,3 +846,7 @@ export type GeneratedSavePlan = z.infer<typeof generatedSavePlanSchema>;
 export type GeneratedCacheMeta = z.infer<typeof generatedCacheMetaSchema>;
 export type GeneratedCacheDetail = z.infer<typeof generatedCacheDetailSchema>;
 export type GeneratedSaveRequest = z.infer<typeof generatedSaveRequestSchema>;
+
+function isEmptyObject(value: unknown): boolean {
+  return Boolean(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0);
+}

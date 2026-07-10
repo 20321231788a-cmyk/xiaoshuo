@@ -1,5 +1,6 @@
 import {
   agentExecutionStepSchema,
+  type AgentFeatureFlagSnapshot,
   agentObservationSchema,
   agentRecoverableRequestSchema,
   agentRunRequestSchema,
@@ -15,6 +16,7 @@ import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { isCancellationError } from "../cancellation.js";
 import { openExecutionStore } from "./execution-store.js";
+import { InMemoryAgentFeatureFlagRegistry, type AgentFeatureFlagRegistry } from "./feature-flag-registry.js";
 import type {
   ExecutionControlOperation,
   ExecutionRuntimeInstance,
@@ -39,6 +41,7 @@ export type RunCoordinatorOptions = {
   heartbeatIntervalMs?: number;
   leaseTtlMs?: number;
   autoHeartbeat?: boolean;
+  featureFlags?: AgentFeatureFlagRegistry;
 };
 
 export type BeginRunOptions = {
@@ -95,6 +98,7 @@ export class RunCoordinator {
   private readonly heartbeatIntervalMs: number;
   private readonly leaseTtlMs: number;
   private readonly ownsStore: boolean;
+  private readonly featureFlags: AgentFeatureFlagRegistry;
   private readonly active = new Map<string, ActiveExecution>();
   private runtimeInstance: ExecutionRuntimeInstance;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -109,6 +113,7 @@ export class RunCoordinator {
     this.leaseTtlMs = positiveInterval(options.leaseTtlMs, DEFAULT_LEASE_TTL_MS);
     this.store = options.store ?? openExecutionStore(this.projectRoot);
     this.ownsStore = !options.store;
+    this.featureFlags = options.featureFlags ?? new InMemoryAgentFeatureFlagRegistry();
 
     const timestamp = this.timestamp();
     this.runtimeInstance = this.store.registerRuntimeInstance({
@@ -137,6 +142,7 @@ export class RunCoordinator {
     const attemptId = `attempt_${this.idFactory()}`;
     const createdAt = this.timestamp();
     const requestSnapshot = sanitizeRequestSnapshot(request);
+    const featureFlagSnapshot = this.featureFlags.snapshot();
     const step = this.createRootStep(runId, stepId, request, options);
     const state = agentRunStateSchema.parse({
       schema_version: this.store.schemaVersion,
@@ -162,7 +168,7 @@ export class RunCoordinator {
             ...(request.confirmed_reference_paths || [])
           ]),
           settings_snapshot: { agent_request: requestSnapshot },
-          feature_flag_snapshot: {}
+          feature_flag_snapshot: featureFlagSnapshot
         }
       },
       goal_revision: 1,

@@ -2103,6 +2103,17 @@ npm test
 
 未完成项：任务列表/详情/暂停恢复控制的端到端用例仍未建立。`PRODUCT.md` 继续保留且不纳入提交。
 
+### 15.55 2026-07-10 P0 Feature Flag Snapshot 记录
+
+本轮完成 C 的最小可执行 registry 与 run snapshot，Task C 仍为“实现中”。
+
+- 新增版本化的 P0 feature flag 定义与 metadata；`agent_execution_v2_mode` 支持 `off/shadow/on`，其他路线 flag 默认 fail-closed；
+- registry 在依赖不满足时归一化到安全组合，RunCoordinator 只在创建时读取一次并固化到 `goal.request_snapshot.feature_flag_snapshot`；
+- shared schema 对 v1 snapshot 严格校验，同时把既有空对象视为 legacy 默认值，避免旧 run 数据失效；
+- 测试证明运行创建后的 registry 变更不会改变原有 run snapshot。
+
+仍未验收：受控的 desktop 持久覆盖与 safe-mode、shadow 对照报告、真实副作用幂等和完整发布门禁尚未完成。`PRODUCT.md` 继续保留且不纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

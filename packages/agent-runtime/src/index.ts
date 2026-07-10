@@ -14,6 +14,7 @@ export * from "./kernel/project-file-resolver.js";
 export * from "./kernel/reference-context.js";
 export * from "./kernel/execution-state-machine.js";
 export * from "./kernel/idempotency.js";
+export * from "./kernel/feature-flag-registry.js";
 export * from "./kernel/execution-store-port.js";
 export * from "./kernel/execution-store.js";
 export * from "./kernel/commit-journal-service.js";
