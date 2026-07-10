@@ -1948,6 +1948,47 @@ npm test
 - 本轮只提交两份文档；工作区已有 P0 shared schema、状态机和 runtime Origin 校验草稿保留，未混入本次计划冻结提交。
 - 未跟踪 `PRODUCT.md` 继续保留，未纳入提交。
 
+### 15.48 2026-07-10 Agent 优化方案第四次实现校准记录
+
+本轮按用户要求再次修改现行优化计划。主线程对照当前 P0 工作树、CI/release 能力和三路独立子代理审查，重点把“已有代码”与“已经验收”分开，并修正会直接造成恢复、安全和智能质量偏差的契约。
+
+主要修订：
+
+- 增加 P0 实施台账：Task A-F、H 标记为“实现中”，Task G 标记为“未开始”；F/H 仅有 store/Origin 等基础，尚未进入可验收生产链路。明确 P0 当前不可发布，也不得提前进入 P1。
+- shared 契约补入 `chat/file_operation` step、`chat_answer` artifact 和 `interrupted` attempt；暂停不再作为普通失败或消耗重试预算。
+- 明确 stale run 接管必须结算孤儿 attempt，renderer/HTTP 断连只结束事件订阅，只有显式 pause/cancel API 能改变 run。
+- `request_snapshot` 改为版本化字段白名单 `AgentRecoverableRequest`，模型 attempt 单独记录实际出站数据分类和 policy/consent receipt，禁止把任意请求塞进 settings snapshot 后仅靠字段名脱敏。
+- `project_id` 从 P0 起改为项目 manifest 的稳定 UUID，项目移动后仍可关联旧 run；canonical path 只作为可更新定位信息，重复 UUID 路径先隔离写入。
+- commit journal 的 `RECOVERY_REQUIRED` 统一表示为 `paused + error_code`；v2 任何真实文件写入必须经 `CommitJournalService -> DocumentService`，只建表/CRUD 不算 Task F 完成。
+- 认证计划补齐 runtime token 的生成、轮换、401/403、Host/Origin、packaged `file://`、preload/IPC 注入，以及 Electron CSP、导航、权限、IPC sender 和 terminal 高权限边界。
+- 发布门禁按仓库现状重写：当前 tag workflow 不能证明 CI 阻断；P0 必须新增 Windows PR CI、nightly/RC、签名、真实安装/升级/卸载 smoke 和 tag 对同 commit RC 证据的不可绕过依赖。
+- 增加持续评估轨道 G0，以任务完成率、可用初稿率、采用/丢弃、编辑保留、人工介入、完成时间、引用正确率和每成功任务成本衡量“更智能”，P7 只负责统一收口。
+- 0.7.0 顺序调整为 `P4a token/语义分块 -> P3 时序化 canon -> P4b memory-aware 选择`；新增带剧情时间、有效区间、视角、项目 UUID 和来源版本的 `CanonClaim`。
+- P5 增加 Artifact Policy Matrix 和“反馈聚合 -> 偏好候选 -> 用户确认 -> 版本化应用 -> 回归评估 -> 可撤销”的本地提升闭环，禁止把记录反馈直接称为学习。
+- 增加阶段依赖/最小 UI/非目标矩阵；移除缺乏基础设施依据的固定人日和 100/500 beta run 承诺，以可复现退出证据驱动版本发布。
+- 最终一致性复核补齐：step `running -> pending` 的唯一恢复事务和 attempt 计数、有限 JSON replay/长连接 NDJSON 双事件端点、P4a/P4b 独立 flags、稳定 project UUID 的具体模块归属、P0 outbound disclosure、可排序 NarrativeCoordinate、P5 feedback/preference 持久 schema，以及 G0 固定任务配额和 Holm-Bonferroni 判定协议。
+
+审查期间的实现状态证据：
+
+- P0 定向测试 118/118 通过，agent-runtime 与 desktop-shell typecheck 通过；
+- Workbench typecheck 当前失败 7 处，`AgentTraceView.tsx` 尚缺 `RunControls`、operation ID 和状态格式化等符号，因此 Task E 仍为实现中；
+- 当前恢复逻辑只把 stale run 设为 paused，未结算 running step/attempt，尚不能完成真实同 ID resume；
+- commit journal、lease/fencing 和 Confirmation 目前主要停留在 store/route 基础，未贯通真实文件副作用；
+- runtime 当前只有 Origin 基础校验，桌面会话令牌、Feature Flag registry、CI/RC/签名/installed smoke 尚未实现。
+
+本轮文档提交边界：
+
+- 只提交 `docs/AGENT_OPTIMIZATION_MODIFICATION_MANUAL.md` 和本维护文档；
+- 保留工作区所有 P0 实现草稿，不回退、不混入本次文档提交；
+- 未跟踪 `PRODUCT.md` 保留，不纳入提交。
+
+本轮文档验证：
+
+- Markdown 围栏共 96 个，为偶数；P0-P7、P4a/P4b、Task A-H 和新增小节编号检查通过；
+- 旧 `agent_execution_v2`、`context_selector_v2`、固定 100/500 beta run 和模糊 `recovery_required` run 状态引用已清理；
+- `git diff --check -- docs/AGENT_OPTIMIZATION_MODIFICATION_MANUAL.md docs/PROJECT_MAINTENANCE_HANDOFF.md` 通过；
+- 本轮未重新运行完整代码测试，118/118 和 typecheck 结果来自三路审查中的当前工作树定向验证；Workbench 失败被保留为实施台账阻塞项，没有伪报绿色。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：
