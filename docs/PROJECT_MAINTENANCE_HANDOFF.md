@@ -1873,6 +1873,31 @@ npm run build -w @xiaoshuo/desktop-shell
 - GitHub Actions 运行 `28925684476` 已成功完成，Release 页面已生成 `ArcWriter-Setup-0.4.0.exe`、`ArcWriter-Setup-0.4.0.exe.blockmap` 和 `latest.yml`。
 - 本地 `release/` 下旧安装包产物没有手工修改；0.4.0 安装包由 GitHub Actions 从 `v0.4.0` 标签构建生成。
 
+### 15.45 2026-07-10 Agent 智能化优化手册换版记录
+
+本轮先对 ArcWriter 0.4.0 的 Agent Runtime、模型调用、上下文、记忆、图谱、任务、Trace、Workbench 交互和测试体系进行只读审阅，再用当前审阅结论完整覆盖旧版 Agent 优化手册。
+
+主要结论：
+
+- 当前系统已具备规则/模型混合路由、技能串行编排、文件引用、向量/图谱上下文、安全保存、取消、Trace 和 Skill 版本能力，属于可控自动化型 Agent。
+- 主要智能化缺口是任务状态不持久、失败后不能从步骤恢复、规划缺少 Observe/Replan、模型调用治理不足、会话记忆偏文本摘录、上下文仍按字符裁剪，以及质量门和聊天内 Agent 控制尚未统一。
+- 新版 `docs/AGENT_OPTIMIZATION_MODIFICATION_MANUAL.md` 完整取代 2026-07-07 旧方案，以 0.4.0 为基线，重新定义 P0-P7：持久执行、Model Gateway、Plan-Act-Observe-Replan、分层记忆、Token 上下文、质量门、Agent 交互和 Eval 发布门禁。
+- 新方案明确暂缓多 Agent、任意 shell 和无预算自治，先完成单 Agent 的可恢复、可验证闭环。
+
+本轮审阅基线验证：
+
+```powershell
+npm run typecheck
+npm test
+```
+
+验收结果：
+
+- 全 workspace 类型检查通过。
+- 68 个测试文件、457 个测试用例通过。
+- 本轮只替换设计与维护文档，没有修改运行时代码。
+- 工作区原有未跟踪 `PRODUCT.md` 未纳入本轮变更。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：
