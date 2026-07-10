@@ -113,6 +113,16 @@ describe("RunCoordinator", () => {
     expect(coordinator.listRuns()[0]?.run_id).toBe(first.run_id);
   });
 
+  it("rejects a request id reused with a different recoverable request", () => {
+    const coordinator = createCoordinator("runtime-request-conflict");
+    coordinator.beginRun(request({ request_id: "same-request", content: "first request" }));
+
+    expect(() => coordinator.beginRun(request({ request_id: "same-request", content: "different request" }))).toThrow(
+      expect.objectContaining({ code: "REQUEST_ID_REUSED" })
+    );
+    expect(coordinator.listRuns()).toHaveLength(1);
+  });
+
   it("stores a controlled recovery snapshot without credential fields", () => {
     const coordinator = createCoordinator("runtime-snapshot");
     const execution = coordinator.beginRun(

@@ -1,6 +1,7 @@
 import type {
   AgentRunRequest,
   AgentRunResponse,
+  AgentRunState,
   AgentPlanRequest,
   AgentPlanResponse,
   AgentStreamEvent,
@@ -261,6 +262,21 @@ export class AgentRuntimeService {
     throwIfAborted(options.signal);
     const execution = await this.beginDurableRun(request, options);
     return this.executeDurableAgentRun(request, execution, options);
+  }
+
+  async createDurableRun(request: AgentRunRequest): Promise<{ run: AgentRunState; created: boolean }> {
+    let execution: DurableRunExecution;
+    try {
+      execution = await this.beginDurableRun(request, {});
+    } catch (error) {
+      if (error instanceof RunRequestReplayError) {
+        return { run: error.run, created: false };
+      }
+      throw error;
+    }
+    const run = this.runCoordinator.getRun(execution.run_id)!;
+    void this.executeDurableAgentRun(request, execution).catch(() => undefined);
+    return { run, created: true };
   }
 
   private async executeDurableAgentRun(

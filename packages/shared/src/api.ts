@@ -71,6 +71,7 @@ export const apiContracts = {
   conversation: { method: "GET", path: "/api/conversations/{conversation_id}", response: conversationDetailSchema },
   skills: { method: "GET", path: "/api/skills", response: z.array(skillDefinitionSchema) },
   agentPlan: { method: "POST", path: "/api/agent/plan", response: agentPlanResponseSchema },
+  createAgentRun: { method: "POST", path: "/api/agent/runs", response: agentRunStateContractSchema },
   agentRuns: { method: "GET", path: "/api/agent/runs", response: agentRunListContractSchema },
   agentRun: { method: "GET", path: "/api/agent/runs/{run_id}", response: agentRunStateContractSchema },
   agentRunEvents: { method: "GET", path: "/api/agent/runs/{run_id}/events", response: agentRunEventReplayContractSchema },

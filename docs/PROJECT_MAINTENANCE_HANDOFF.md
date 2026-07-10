@@ -2014,6 +2014,25 @@ npm test
 
 本轮提交边界：提交 P0 shared/store/coordinator/runtime/route/API/Workbench/manifest 基础实现、测试与本维护记录；未跟踪 `PRODUCT.md` 保留且不纳入提交。
 
+### 15.50 2026-07-10 P0 Durable Run API 核心记录
+
+本轮在 15.49 的 durable execution 基础上补齐 E 的创建和有限回放 API 核心，仍不代表 Task E 或 P0 已验收。
+
+本轮实现：
+
+- `POST /api/agent/runs` 以 `request_id` 作为创建幂等键：首次返回 `201` 并后台启动 durable run；相同规范化请求返回原 run 与 `200`，不同请求摘要返回 `409 REQUEST_ID_REUSED`；
+- API client 和 shared contract 同步公开创建接口，后台执行路径有运行时回归测试；
+- 有限 `/events` replay 支持 `limit <= 1000`，返回 `next_sequence`、`has_more`、`earliest_available_sequence` 和 `gap_detected`，保留兼容字段 `next_after`；
+- UI/后续订阅方可在 `gap_detected=true` 时回读 run detail，避免静默跳过已被保留策略清理的事件。
+
+本轮定向验证：
+
+- shared、API client、desktop shell 类型检查通过；
+- shared schema、API client、runtime coordinator/runtime 和 desktop route 共 104 个相关测试通过；
+- `git diff --check` 通过。
+
+下一步：完成认证长连接 event stream、客户端 sequence 补流/详情校准和 E2E；在此之前 Task E 继续维持“实现中”。`PRODUCT.md` 继续不纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

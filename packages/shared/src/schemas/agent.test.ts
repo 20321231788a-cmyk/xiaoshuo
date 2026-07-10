@@ -445,9 +445,17 @@ describe("agent schemas", () => {
       next_cursor: null
     });
 
-    const replay = agentRunEventReplayResponseSchema.parse({ events: [event], next_after: 3 });
+    const replay = agentRunEventReplayResponseSchema.parse({
+      events: [event],
+      next_after: 3,
+      next_sequence: 3,
+      has_more: true,
+      earliest_available_sequence: 2,
+      gap_detected: true
+    });
     expect(replay.events[0]).toMatchObject({ sequence: 3, step_id: "", payload: {} });
     expect(replay.next_after).toBe(3);
+    expect(replay).toMatchObject({ next_sequence: 3, has_more: true, earliest_available_sequence: 2, gap_detected: true });
 
     const command = { operation_id: "operation-1", expected_version: 4 };
     expect(agentRunControlRequestSchema.parse(command)).toEqual(command);

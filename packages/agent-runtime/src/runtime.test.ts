@@ -51,6 +51,16 @@ async function readAgentRunTraces() {
     .map((line) => JSON.parse(line));
 }
 
+async function waitForRunStatus(runtime: AgentRuntimeService, runId: string, status: string): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if (runtime.getDurableRun(runId)?.status === status) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Run ${runId} did not reach ${status}`);
+}
+
 describe("agent-runtime chat flow", () => {
   it("runs read-context chat locally and persists the conversation", async () => {
     let capturedMessages: ChatCompletionMessage[] = [];
@@ -180,6 +190,38 @@ describe("agent-runtime chat flow", () => {
       })
     ]);
     expect(trace.duration_ms).toEqual(expect.any(Number));
+  });
+
+  it("creates one durable run for a request id and executes it in the background", async () => {
+    let resolveReply: ((value: string) => void) | undefined;
+    const reply = new Promise<string>((resolve) => {
+      resolveReply = resolve;
+    });
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => reply
+      }
+    });
+    const request = {
+      request_id: "background-created-run",
+      conversation_id: "",
+      content: "请总结当前项目",
+      current_path: "01_大纲/大纲.txt",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    };
+
+    const created = await runtime.createDurableRun(request);
+    const replay = await runtime.createDurableRun(request);
+
+    expect(created).toMatchObject({ created: true, run: { status: "running", request_id: request.request_id } });
+    expect(replay).toEqual({ created: false, run: created.run });
+    resolveReply!("后台执行完成");
+    await waitForRunStatus(runtime, created.run.run_id, "completed");
   });
 
   it("records reference file metadata in assembled context traces", async () => {

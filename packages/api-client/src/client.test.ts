@@ -1,8 +1,54 @@
 import { describe, expect, it } from "vitest";
-import { appConfigSchema } from "@xiaoshuo/shared";
+import { agentRunStateSchema, appConfigSchema } from "@xiaoshuo/shared";
 import { buildApiUrl, createApiClient, extractErrorMessage, parseJsonResponse } from "./client.js";
 
 describe("api-client", () => {
+  it("posts durable run creation payloads through the lifecycle contract", async () => {
+    const requests: Array<{ url: string; method: string; body: string }> = [];
+    const run = agentRunStateSchema.parse({
+      run_id: "run-created",
+      request_id: "request-created",
+      goal: { instruction: "继续写作" },
+      created_at: "2026-07-10T04:00:00.000Z",
+      updated_at: "2026-07-10T04:00:00.000Z"
+    });
+    const client = createApiClient({
+      baseUrl: "http://127.0.0.1:18452",
+      fetchFn: async (input, init) => {
+        requests.push({
+          url: String(input),
+          method: String(init?.method || "GET"),
+          body: String(init?.body || "")
+        });
+        return new Response(JSON.stringify(run), { status: 201, headers: { "Content-Type": "application/json" } });
+      }
+    });
+
+    const created = await client.createAgentRun({ request_id: "request-created", content: "继续写作" });
+
+    expect(created.run_id).toBe("run-created");
+    expect(requests).toEqual([
+      {
+        url: "http://127.0.0.1:18452/api/agent/runs",
+        method: "POST",
+        body: JSON.stringify({
+          request_id: "request-created",
+          autonomy_mode: "plan",
+          conversation_id: "",
+          content: "继续写作",
+          current_path: "",
+          selection: "",
+          project_context_hint: "",
+          skill_id: "",
+          attachment_ids: [],
+          reference_paths: [],
+          confirmed_reference_paths: [],
+          disable_auto_references: false
+        })
+      }
+    ]);
+  });
+
   it("preserves slashes when encoding path placeholders", () => {
     const url = buildApiUrl("http://127.0.0.1:18452", "/api/documents/{rel_path}", {
       rel_path: "01_大纲/章纲.txt"

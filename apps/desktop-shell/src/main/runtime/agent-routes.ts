@@ -75,6 +75,15 @@ export async function handleAgentRoutes(
         return true;
       }
 
+      if (pathname === "/api/agent/runs" && request.method === "POST") {
+        if (await writeAiLicenseRequiredIfNeeded(context, response, deps.writeJson)) {
+          return true;
+        }
+        const created = await runtime.createDurableRun(agentRunRequestSchema.parse(await deps.readJsonBody(request)));
+        deps.writeJson(response, created.created ? 201 : 200, created.run);
+        return true;
+      }
+
       if (runRoute && !runRoute.action && request.method === "GET") {
         const run = runtime.getDurableRun(runRoute.runId);
         if (!run) {
@@ -91,10 +100,18 @@ export async function handleAgentRoutes(
           return true;
         }
         const after = clampInteger(searchParams.get("after"), 0, 0, Number.MAX_SAFE_INTEGER);
-        const events = runtime.listDurableRunEvents(runRoute.runId, after, 500);
+        const limit = clampInteger(searchParams.get("limit"), 200, 1, 1_000);
+        const rows = runtime.listDurableRunEvents(runRoute.runId, after, limit + 1);
+        const events = rows.slice(0, limit);
+        const earliestAvailableSequence = runtime.listDurableRunEvents(runRoute.runId, 0, 1)[0]?.sequence ?? 0;
+        const nextSequence = events.at(-1)?.sequence ?? after;
         deps.writeJson(response, 200, {
           events,
-          next_after: events.at(-1)?.sequence ?? after
+          next_after: nextSequence,
+          next_sequence: nextSequence,
+          has_more: rows.length > limit,
+          earliest_available_sequence: earliestAvailableSequence,
+          gap_detected: earliestAvailableSequence > 0 && after < earliestAvailableSequence - 1
         });
         return true;
       }
@@ -143,7 +160,7 @@ export async function handleAgentRoutes(
       }
     } catch (error) {
       const code = lifecycleErrorCode(error);
-      const status = code === "RUN_NOT_FOUND" || code === "CONFIRMATION_NOT_FOUND" ? 404 : code.includes("CONFLICT") || code.includes("VERSION") ? 409 : 400;
+      const status = code === "RUN_NOT_FOUND" || code === "CONFIRMATION_NOT_FOUND" ? 404 : code === "REQUEST_ID_REUSED" || code.includes("CONFLICT") || code.includes("VERSION") ? 409 : 400;
       deps.writeJson(response, status, { detail: error instanceof Error ? error.message : String(error), code });
       return true;
     }

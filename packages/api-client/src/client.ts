@@ -3,6 +3,7 @@ import {
   agentStreamEventSchema,
   agentConfirmationResolveRequestSchema,
   agentPlanResponseSchema,
+  agentRunRequestSchema,
   agentRunControlRequestSchema,
   agentRunTraceSchema,
   agentStepRetryRequestSchema,
@@ -468,6 +469,10 @@ export function createApiClient(options: ApiClientOptions) {
         method: "POST",
         body: JSON.stringify(payload)
       }),
+    createAgentRun: (payload: z.input<typeof agentRunRequestSchema>) =>
+      requestContract("createAgentRun", {
+        body: JSON.stringify(agentRunRequestSchema.parse(payload))
+      }),
     listAgentRuns: (params: AgentRunListParams = {}) =>
       requestContract("agentRuns", {
         query: {
@@ -481,10 +486,10 @@ export function createApiClient(options: ApiClientOptions) {
       requestContract("agentRun", {
         pathParams: { run_id: runId }
       }),
-    getAgentRunEvents: (runId: string, after = 0) =>
+    getAgentRunEvents: (runId: string, after = 0, limit?: number) =>
       requestContract("agentRunEvents", {
         pathParams: { run_id: runId },
-        query: { after }
+        query: { after, limit }
       }),
     pauseAgentRun: (runId: string, payload: z.input<typeof agentRunControlRequestSchema>) =>
       requestContract("pauseAgentRun", {

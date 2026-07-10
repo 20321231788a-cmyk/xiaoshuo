@@ -13,6 +13,7 @@ const runtime = vi.hoisted(() => ({
   resumeDurableRun: vi.fn(),
   retryDurableRunStep: vi.fn(),
   resolveDurableConfirmation: vi.fn(),
+  createDurableRun: vi.fn(),
   runAgent: vi.fn(),
   streamAgentRun: vi.fn()
 }));
@@ -54,6 +55,38 @@ describe("agent lifecycle routes", () => {
     );
   });
 
+  it("creates a durable run once and replays the same request id", async () => {
+    const writeJson = vi.fn();
+    const run = runState("run-created", 1, "running");
+    runtime.createDurableRun.mockResolvedValueOnce({ run, created: true }).mockResolvedValueOnce({ run, created: false });
+    const payload = { request_id: "request-created", content: "继续写作" };
+
+    await handleAgentRoutes(request("POST"), response(), "/api/agent/runs", context(), deps(writeJson, payload));
+    await handleAgentRoutes(request("POST"), response(), "/api/agent/runs", context(), deps(writeJson, payload));
+
+    expect(runtime.createDurableRun).toHaveBeenCalledWith(expect.objectContaining({ request_id: "request-created", content: "继续写作" }));
+    expect(writeJson).toHaveBeenNthCalledWith(1, expect.anything(), 201, run);
+    expect(writeJson).toHaveBeenNthCalledWith(2, expect.anything(), 200, run);
+  });
+
+  it("returns a stable conflict for a request id bound to different content", async () => {
+    const writeJson = vi.fn();
+    runtime.createDurableRun.mockRejectedValue(Object.assign(new Error("request id already used"), { code: "REQUEST_ID_REUSED" }));
+
+    await handleAgentRoutes(
+      request("POST"),
+      response(),
+      "/api/agent/runs",
+      context(),
+      deps(writeJson, { request_id: "request-created", content: "different content" })
+    );
+
+    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 409, {
+      detail: "request id already used",
+      code: "REQUEST_ID_REUSED"
+    });
+  });
+
   it("returns run detail and replays events after a sequence", async () => {
     const writeJson = vi.fn();
     const run = runState("run-detail", 4, "running");
@@ -70,8 +103,43 @@ describe("agent lifecycle routes", () => {
       new URLSearchParams({ after: "4" })
     );
 
-    expect(runtime.listDurableRunEvents).toHaveBeenCalledWith("run-detail", 4, 500);
-    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 200, { events, next_after: 5 });
+    expect(runtime.listDurableRunEvents).toHaveBeenNthCalledWith(1, "run-detail", 4, 201);
+    expect(runtime.listDurableRunEvents).toHaveBeenNthCalledWith(2, "run-detail", 0, 1);
+    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 200, {
+      events,
+      next_after: 5,
+      next_sequence: 5,
+      has_more: false,
+      earliest_available_sequence: 5,
+      gap_detected: false
+    });
+  });
+
+  it("reports paginated event replay gaps before the earliest retained sequence", async () => {
+    const writeJson = vi.fn();
+    const run = runState("run-gap", 4, "paused");
+    const first = { event_id: "event-3", run_id: run.run_id, sequence: 3, event_type: "run.paused", step_id: "", payload: {}, created_at: run.updated_at };
+    const second = { event_id: "event-4", run_id: run.run_id, sequence: 4, event_type: "run.resumed", step_id: "", payload: {}, created_at: run.updated_at };
+    runtime.getDurableRun.mockReturnValue(run);
+    runtime.listDurableRunEvents.mockReturnValueOnce([first, second]).mockReturnValueOnce([first]);
+
+    await handleAgentRoutes(
+      request("GET"),
+      response(),
+      "/api/agent/runs/run-gap/events",
+      context(),
+      deps(writeJson),
+      new URLSearchParams({ after: "1", limit: "1" })
+    );
+
+    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 200, {
+      events: [first],
+      next_after: 3,
+      next_sequence: 3,
+      has_more: true,
+      earliest_available_sequence: 3,
+      gap_detected: true
+    });
   });
 
   it("passes operation id and expected version to pause and retry", async () => {

@@ -524,7 +524,11 @@ export const agentRunListResponseSchema = z
 export const agentRunEventReplayResponseSchema = z
   .object({
     events: z.array(agentRunEventSchema),
-    next_after: z.number().int().nonnegative()
+    next_after: z.number().int().nonnegative(),
+    next_sequence: z.number().int().nonnegative().default(0),
+    has_more: z.boolean().default(false),
+    earliest_available_sequence: z.number().int().nonnegative().default(0),
+    gap_detected: z.boolean().default(false)
   })
   .passthrough();
 

@@ -191,6 +191,12 @@ export class RunCoordinator {
       payload: { request_id: requestId }
     });
     if (created.run_id !== runId) {
+      const recoveredRequest = getStoredRecoveryRequest(created);
+      if (!recoveredRequest || digestJson(recoveredRequest) !== digestJson(requestSnapshot)) {
+        throw Object.assign(new Error(`Request id ${requestId} is already bound to a different Agent request`), {
+          code: "REQUEST_ID_REUSED"
+        });
+      }
       throw new RunRequestReplayError(created);
     }
 
@@ -892,6 +898,11 @@ function sanitizeRequestSnapshot(request: AgentRunRequest): Record<string, unkno
     }
   }
   return safe;
+}
+
+function getStoredRecoveryRequest(run: AgentRunState): Record<string, unknown> | null {
+  const value = run.goal.request_snapshot.settings_snapshot.agent_request;
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
 function isSnapshotValue(value: unknown, depth = 0): boolean {
