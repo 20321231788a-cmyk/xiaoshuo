@@ -1,4 +1,4 @@
-import { AgentRuntimeService, encodeNdjsonEvent } from "@xiaoshuo/agent-runtime";
+import { encodeNdjsonEvent } from "@xiaoshuo/agent-runtime";
 import { loadPublicConfig, savePublicConfig } from "@xiaoshuo/config-service";
 import { DocumentService, type DocumentTimelineSession } from "@xiaoshuo/document-service";
 import { JobManager } from "@xiaoshuo/job-service";
@@ -19,9 +19,11 @@ import { URL } from "node:url";
 import {
   addCorsHeaders,
   booleanValue,
+  closeProjectAgentRuntimes,
   createRequestAbortSignal,
   ensureDocumentSession,
   ensureProjectSessionCurrent,
+  getProjectAgentRuntime,
   handleAgentRoutes,
   handleAgentTraceRoutes,
   handleBaseRuntimeRoutes,
@@ -34,6 +36,7 @@ import {
   handleVectorRoutes,
   handleGraphRoutes,
   handleWebsiteAiRoutes,
+  isAllowedRuntimeOrigin,
   listRuntimeJobs,
   matchCardDrawRoute,
   matchConversationRoute,
@@ -80,8 +83,10 @@ export async function startRuntimeServer(options: RuntimeServerOptions): Promise
   const jobManager = new JobManager({ idFactory: () => "ts-" + randomUUID().replace(/-/g, "") });
   const projectSession = new ProjectSessionService({ stateFilePath: options.stateFilePath });
   const documentSessions = options.state.documentSessions || new Map<string, DocumentTimelineSession>();
+  const agentRuntimes = options.state.agentRuntimes || new Map();
   options.state.jobManager = jobManager;
   options.state.documentSessions = documentSessions;
+  options.state.agentRuntimes = agentRuntimes;
   const restoredProject = await projectSession.getCurrentProject();
   if (restoredProject.path) {
     startDocumentSession(documentSessions, restoredProject.path);
@@ -92,7 +97,8 @@ export async function startRuntimeServer(options: RuntimeServerOptions): Promise
       projectRoot: options.projectRoot,
       jobManager,
       projectSession,
-      documentSessions
+      documentSessions,
+      agentRuntimes
     }).catch((error) => {
       options.state.lastError = error instanceof Error ? error.message : String(error);
       writeJson(response, 500, { detail: options.state.lastError });
@@ -111,6 +117,8 @@ export async function startRuntimeServer(options: RuntimeServerOptions): Promise
 }
 
 export async function stopRuntimeServer(state: RuntimeServerState): Promise<void> {
+  closeProjectAgentRuntimes(state.agentRuntimes);
+  state.agentRuntimes = undefined;
   const server = state.server;
   state.server = undefined;
   state.ready = false;
@@ -123,7 +131,12 @@ export async function stopRuntimeServer(state: RuntimeServerState): Promise<void
 }
 
 async function handleRuntimeRequest(request: IncomingMessage, response: ServerResponse, context: RuntimeContext): Promise<void> {
-  addCorsHeaders(response);
+  const origin = Array.isArray(request.headers.origin) ? request.headers.origin[0] || "" : request.headers.origin || "";
+  if (!isAllowedRuntimeOrigin(origin)) {
+    writeJson(response, 403, { detail: "拒绝非本机来源访问 ArcWriter 本地服务" });
+    return;
+  }
+  addCorsHeaders(response, origin);
   if (request.method === "OPTIONS") {
     response.writeHead(204);
     response.end();
@@ -179,7 +192,7 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
     writeJson,
     writeNdjsonEvent,
     addCorsHeaders
-  })) {
+  }, url.searchParams)) {
     return;
   }
 
@@ -217,10 +230,7 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
     const signal = createRequestAbortSignal(request, response);
     const rawBody = await readRawBody(request);
     const payload = cardDrawRequestSchema.parse(parseJsonRecord(rawBody));
-    const runtime = new AgentRuntimeService({
-      projectRoot: currentProject.path,
-      config: { rootDir: context.projectRoot, env: process.env }
-    });
+    const runtime = getProjectAgentRuntime(context, currentProject.path);
     try {
       const result = await runtime.generateCardDraw(payload, () => undefined, { signal });
       if (!signal.aborted) {
@@ -247,10 +257,7 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
     }
     const rawBody = await readRawBody(request);
     const payload = cardDrawSelectRequestSchema.parse(parseJsonRecord(rawBody));
-    const runtime = new AgentRuntimeService({
-      projectRoot: currentProject.path,
-      config: { rootDir: context.projectRoot, env: process.env }
-    });
+    const runtime = getProjectAgentRuntime(context, currentProject.path);
     try {
       const result = await runtime.selectCardDraw(cardDrawRoute.drawId, payload);
       await rebuildProjectManifest(currentProject.path);

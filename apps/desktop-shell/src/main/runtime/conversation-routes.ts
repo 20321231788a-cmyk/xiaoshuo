@@ -7,6 +7,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import { createRequestAbortSignal } from "./http-utils.js";
 import { writeAiLicenseRequiredIfNeeded } from "./license-guard.js";
 import type { RuntimeContext } from "./types.js";
+import { getProjectAgentRuntime } from "./agent-runtime-registry.js";
 
 type JsonRecord = Record<string, unknown>;
 type RuntimeAbortOptions = { signal: AbortSignal };
@@ -85,10 +86,7 @@ export async function handleConversationRoutes(
     if (await writeAiLicenseRequiredIfNeeded(context, response, deps.writeJson)) {
       return true;
     }
-    const runtime = new AgentRuntimeService({
-      projectRoot: projectPath,
-      config: { rootDir: context.projectRoot, env: process.env }
-    }) as AbortableConversationRuntimeService;
+    const runtime = getProjectAgentRuntime(context, projectPath) as AbortableConversationRuntimeService;
     const signal = createRequestAbortSignal(request, response);
     const rawBody = await deps.readRawBody(request);
     const payload = conversationMessageRequestSchema.parse(deps.parseJsonRecord(rawBody));

@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { GeneratedSavePlanner } from "../generated-save-planner.js";
-import { AgentRuntimeService } from "../runtime.js";
+import { AgentRuntimeService, closeAllAgentRuntimeServices } from "../runtime.js";
 import { PromptSkillRunner } from "../skill-runner.js";
 import { DisassembleBookWorkflow } from "./disassemble-book.js";
 import type { WorkflowRunContext } from "./types.js";
@@ -21,6 +21,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  closeAllAgentRuntimeServices();
   if (tempDir) {
     await fs.rm(tempDir, { recursive: true, force: true });
   }

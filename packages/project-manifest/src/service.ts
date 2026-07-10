@@ -2,6 +2,8 @@ import { AGENT_DIR, BODY_DIR, GENRE_DIR, OUTLINE_DIR, SETTINGS_DIR, STYLE_DIR } 
 import type { CurrentProject, DocumentInfo, LibraryCard, ProjectChromeSnapshot, ProjectManifestStatus, TimelineEntry, TreeNode } from "@xiaoshuo/shared";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { createProjectId, parseProjectId } from "./project-identity.js";
 
 export const MANIFEST_REL_PATH = `${AGENT_DIR}/project_manifest.json`;
 export const TRASH_DIR = "99_回收站";
@@ -63,9 +65,17 @@ type ManifestEntry = {
 
 type ManifestDiskPayload = {
   project_path: string;
+  project_id?: unknown;
   version?: number;
   generated_at?: string;
   entries?: unknown[];
+};
+
+type LoadedManifest = {
+  project_id: string;
+  entries: ManifestEntry[];
+  version: number;
+  generated_at: string;
 };
 
 export class ProjectManifestService {
@@ -75,6 +85,19 @@ export class ProjectManifestService {
   constructor(projectPath: string) {
     this.projectPath = path.resolve(projectPath);
     this.manifestPath = path.join(this.projectPath, MANIFEST_REL_PATH);
+  }
+
+  async getProjectId(): Promise<string> {
+    const loaded = await this.loadFromDisk();
+    if (loaded) {
+      return loaded.project_id;
+    }
+    await this.rebuild();
+    const rebuilt = await this.loadFromDisk();
+    if (!rebuilt) {
+      throw new Error("无法创建项目身份记录");
+    }
+    return rebuilt.project_id;
   }
 
   async listDocuments(options: { limit?: number; force?: boolean } = {}): Promise<DocumentInfo[]> {
@@ -217,6 +240,7 @@ export class ProjectManifestService {
 
     await writeManifestDisk(this.manifestPath, {
       project_path: this.projectPath,
+      project_id: loaded?.project_id ?? createProjectId(),
       version: 1,
       generated_at: formatNow(new Date()),
       entries: entries.map((entry) => ({ ...entry }))
@@ -234,7 +258,7 @@ export class ProjectManifestService {
     return this.rebuild();
   }
 
-  private async loadFromDisk(): Promise<{ entries: ManifestEntry[]; version: number; generated_at: string } | null> {
+  private async loadFromDisk(): Promise<LoadedManifest | null> {
     const raw = await fs.readFile(this.manifestPath, "utf8").catch(() => "");
     if (!raw.trim()) {
       return null;
@@ -242,18 +266,32 @@ export class ProjectManifestService {
 
     try {
       const parsed = JSON.parse(raw) as ManifestDiskPayload;
-      if ((parsed.project_path || "") !== this.projectPath || !Array.isArray(parsed.entries)) {
+      if (!Array.isArray(parsed.entries)) {
         return null;
       }
       const entries = parsed.entries
         .map(parseManifestEntry)
         .filter((entry): entry is ManifestEntry => entry !== null && BROWSABLE_EXTENSIONS.has(entry.suffix))
         .sort((left, right) => compareManifestEntries(left, right));
+      const projectId = parseProjectId(parsed.project_id) ?? createProjectId();
+      const version = typeof parsed.version === "number" ? parsed.version : 1;
+      const generatedAt = typeof parsed.generated_at === "string" ? parsed.generated_at : "";
+
+      if (parsed.project_path !== this.projectPath || parsed.project_id !== projectId) {
+        await writeManifestDisk(this.manifestPath, {
+          project_path: this.projectPath,
+          project_id: projectId,
+          version,
+          generated_at: generatedAt,
+          entries: entries.map((entry) => ({ ...entry }))
+        });
+      }
 
       return {
+        project_id: projectId,
         entries,
-        version: typeof parsed.version === "number" ? parsed.version : 1,
-        generated_at: typeof parsed.generated_at === "string" ? parsed.generated_at : ""
+        version,
+        generated_at: generatedAt
       };
     } catch {
       return null;
@@ -426,7 +464,7 @@ async function readText(filePath: string): Promise<string> {
 
 async function writeManifestDisk(filePath: string, payload: ManifestDiskPayload): Promise<void> {
   await fs.mkdir(path.dirname(filePath), { recursive: true });
-  const tempPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.tmp`);
+  const tempPath = path.join(path.dirname(filePath), `.${path.basename(filePath)}.${randomUUID()}.tmp`);
   await fs.writeFile(tempPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
   await fs.rename(tempPath, filePath);
 }

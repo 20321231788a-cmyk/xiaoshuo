@@ -5,10 +5,11 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ModelConfig } from "@xiaoshuo/config-service";
 import { ConversationService } from "@xiaoshuo/conversation-service";
 import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
+import { ProjectManifestService } from "@xiaoshuo/project-manifest";
 import type { ChatCompletionMessage } from "@xiaoshuo/model-client";
 import type { AgentStreamEvent } from "@xiaoshuo/shared";
 import { getAgentTraceFilePath } from "./agent-trace.js";
-import { AgentRuntimeService } from "./runtime.js";
+import { AgentRuntimeService, closeAllAgentRuntimeServices } from "./runtime.js";
 
 let tempDir = "";
 let configPath = "";
@@ -29,6 +30,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  closeAllAgentRuntimeServices();
   if (tempDir) {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
@@ -117,6 +119,21 @@ describe("agent-runtime chat flow", () => {
     });
 
     const [trace] = await readAgentRunTraces();
+    expect(result.run_id).toEqual(expect.stringMatching(/^run_/));
+    expect(trace.run_id).toBe(result.run_id);
+    expect(runtime.getDurableRun(result.run_id!)).toMatchObject({
+      run_id: result.run_id,
+      status: "completed",
+      project_id: await new ProjectManifestService(tempDir).getProjectId(),
+      conversation_id: result.conversation!.id,
+      steps: [expect.objectContaining({ status: "done", attempts: 1 })]
+    });
+    expect(runtime.listDurableRunEvents(result.run_id!).map((event) => event.event_type)).toEqual([
+      "run.created",
+      "run.planning",
+      "run.started",
+      "run.completed"
+    ]);
     expect(trace).toMatchObject({
       conversation_id: result.conversation!.id,
       intent: "read_context",
@@ -327,12 +344,13 @@ describe("agent-runtime chat flow", () => {
     }
 
     expect(events.map((event) => event.type)).toEqual(["start", "final"]);
-    expect(events[0]).toMatchObject({ type: "start", intent: "file_operation" });
+    expect(events[0]).toMatchObject({ type: "start", intent: "file_operation", run_id: expect.stringMatching(/^run_/) });
     expect(events[1]).toMatchObject({
       type: "final",
       payload: {
         intent: "file_operation",
-        requires_confirmation: true
+        requires_confirmation: true,
+        run_id: (events[0] as Extract<AgentStreamEvent, { type: "start" }>).run_id
       }
     });
   });

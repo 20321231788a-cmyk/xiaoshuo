@@ -2228,16 +2228,16 @@ CI 必须保存 Eval Manifest、失败 case 摘要、性能基线和脱敏 Trace
 
 | Task | 当前状态 | 已有证据 | 仍缺退出条件 |
 | --- | --- | --- | --- |
-| A Run Schema | 实现中 | shared schema 与 focused tests 已存在 | 补 `interrupted`、白名单 recoverable request、稳定 project UUID、`chat/file_operation/chat_answer` 文档/代码一致性，根级验证 |
+| A Run Schema | 实现中 | shared schema、`interrupted` attempt、manifest 稳定 UUID/move migration、durable run 注入 UUID 与根级验证已通过 | 白名单 `AgentRecoverableRequest`、重复 UUID 路径写隔离、`chat/file_operation/chat_answer` 文档/代码一致性 |
 | B Execution Store | 实现中 | SQLite 表、CRUD、WAL、CAS、outbox/lease/journal 基础测试已存在 | 驱动 adapter、可靠 backup、未知 schema/损坏/磁盘/锁 fixture、逻辑校验 |
-| C 状态机与幂等 | 实现中 | 状态机、idempotency、heartbeat/lease focused tests 已存在 | stale attempt 结算、pause race、flag snapshot、真实副作用幂等 |
-| D 最小恢复链路 | 实现中 | run/stream/Trace 同 ID 和 runtime registry 已接入 | 真实子进程强杀后同 ID resume；renderer disconnect 解耦；pause/cancel 正确收口 |
-| E API 与 UI | 实现中 | 查询/控制 route 与 Workbench 草稿已存在 | `POST /runs` 幂等、认证事件补流、Workbench typecheck/build/E2E；当前 UI 草稿不可编译，不能验收 |
+| C 状态机与幂等 | 实现中 | 状态机、idempotency、heartbeat/lease；pause `interrupted`、stale orphan 原子结算与 retry budget 定向测试已通过 | flag snapshot、真实副作用幂等、adapter/迁移故障 fixture |
+| D 最小恢复链路 | 实现中 | run/stream/Trace 同 ID、runtime registry、HTTP 订阅断连解耦；真实子进程强杀后同 ID resume/完成 E2E 已通过 | 两步 fixture 从第二步恢复、实际 renderer event 订阅与完整旧入口回归 |
+| E API 与 UI | 实现中 | 查询/控制 route、Workbench 基础控制 UI；E0 typecheck/build 已通过 | `POST /runs` 幂等、认证事件补流、任务列表/详情/控制 E2E |
 | F 崩溃/并发/确认 | 实现中 | store 已有 journal/lease/confirmation 表、CRUD 和部分 route 基础 | CommitJournalService 接入所有真实写入、fencing、Confirmation 生产/过期/批准全链路 |
 | G Job/长任务 | 未开始 | 无可验收垂直链路 | 批量/拆书 N+1 恢复、legacy job 映射和唯一事实源 |
 | H 安全/发布 | 实现中 | Origin 基础校验、现有 tag release workflow | session token、Electron/terminal hardening、CI/RC/签名/installed smoke、保留/导出/删除和发布报告 |
 
-E0 只修复当前 `AgentTraceView` 未定义符号并恢复根级绿色基线，不新增 E 功能。随后先完成 A-C 的 `interrupted`、snapshot、stable project UUID、状态迁移和 adapter 契约，再补 D stale attempt/resume、pause/断连语义和真实强杀集成测试；D 通过后完成 E 的创建/补流/E2E，随后进入 F 真实写入链路。不得因为表结构和定向单测通过就跳到 P1。
+E0 已修复当前 `AgentTraceView` 未定义符号并恢复根级绿色基线，不代表 E 已完成。A-C 的 `interrupted`、stable project UUID、状态迁移、stale attempt/resume、pause/断连语义和真实强杀集成测试已有实现与验证；仍须补 snapshot 白名单、adapter/迁移故障契约、两步恢复 fixture 和 E 的创建/补流/E2E，随后才能进入 F 真实写入链路。不得因为表结构和定向单测通过就跳到 P1。
 
 ### 15.1 Task A：Run Schema
 

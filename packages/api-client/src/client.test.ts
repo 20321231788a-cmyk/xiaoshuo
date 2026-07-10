@@ -253,6 +253,162 @@ describe("api-client", () => {
     ]);
   });
 
+  it("lists agent runs, gets run detail, and replays events", async () => {
+    const requests: Array<{ url: string; method: string }> = [];
+    const run = {
+      run_id: "run-one",
+      goal: { instruction: "续写下一章" },
+      created_at: "2026-07-10T08:00:00.000Z",
+      updated_at: "2026-07-10T08:00:01.000Z"
+    };
+    const client = createApiClient({
+      baseUrl: "http://127.0.0.1:18452",
+      fetchFn: async (input, init) => {
+        const url = new URL(String(input));
+        requests.push({
+          url: url.toString(),
+          method: String(init?.method || "GET")
+        });
+        if (url.pathname.endsWith("/events")) {
+          return new Response(
+            JSON.stringify({
+              events: [
+                {
+                  event_id: "event-four",
+                  run_id: "run-one",
+                  sequence: 4,
+                  event_type: "run.paused",
+                  created_at: "2026-07-10T08:00:02.000Z"
+                }
+              ],
+              next_after: 4
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        const body = url.pathname === "/api/agent/runs" ? { runs: [run], next_cursor: "cursor-two" } : run;
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    });
+
+    const list = await client.listAgentRuns({
+      project: "project-one",
+      status: "paused",
+      cursor: "cursor-one",
+      limit: 25
+    });
+    const detail = await client.getAgentRun("run-one");
+    const replay = await client.getAgentRunEvents("run-one", 3);
+
+    expect(list.runs[0]).toMatchObject({ run_id: "run-one", status: "queued", version: 1 });
+    expect(list.next_cursor).toBe("cursor-two");
+    expect(detail.goal.instruction).toBe("续写下一章");
+    expect(replay.events[0]).toMatchObject({ sequence: 4, step_id: "", payload: {} });
+    expect(replay.next_after).toBe(4);
+    expect(requests).toEqual([
+      {
+        url: "http://127.0.0.1:18452/api/agent/runs?project=project-one&status=paused&cursor=cursor-one&limit=25",
+        method: "GET"
+      },
+      {
+        url: "http://127.0.0.1:18452/api/agent/runs/run-one",
+        method: "GET"
+      },
+      {
+        url: "http://127.0.0.1:18452/api/agent/runs/run-one/events?after=3",
+        method: "GET"
+      }
+    ]);
+  });
+
+  it("posts agent run lifecycle commands with idempotency and CAS bodies", async () => {
+    const requests: Array<{ url: string; method: string; body: string }> = [];
+    const run = {
+      run_id: "run-one",
+      goal: { instruction: "续写下一章" },
+      created_at: "2026-07-10T08:00:00.000Z",
+      updated_at: "2026-07-10T08:00:01.000Z"
+    };
+    const client = createApiClient({
+      baseUrl: "http://127.0.0.1:18452",
+      fetchFn: async (input, init) => {
+        const url = String(input);
+        requests.push({
+          url,
+          method: String(init?.method || "GET"),
+          body: String(init?.body || "")
+        });
+        const confirmationStatus = url.endsWith("/approve") ? "approved" : url.endsWith("/reject") ? "rejected" : null;
+        const body = confirmationStatus
+          ? {
+              confirmation_id: "confirmation-one",
+              run_id: "run-one",
+              step_id: "step-one",
+              action: "replace_document",
+              risk_level: "high",
+              status: confirmationStatus
+            }
+          : run;
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    });
+
+    const paused = await client.pauseAgentRun("run-one", { operation_id: " operation-pause ", expected_version: 1 });
+    await client.resumeAgentRun("run-one", { operation_id: "operation-resume", expected_version: 2 });
+    await client.cancelAgentRun("run-one", { operation_id: "operation-cancel", expected_version: 3 });
+    await client.retryAgentRunStep("run-one", "step-one", { operation_id: "operation-retry", expected_version: 4 });
+    const approved = await client.approveAgentConfirmation("confirmation-one", {
+      operation_id: "operation-approve",
+      expected_version: 5
+    });
+    const rejected = await client.rejectAgentConfirmation("confirmation-one", {
+      operation_id: "operation-reject",
+      expected_version: 6
+    });
+
+    expect(paused).toMatchObject({ run_id: "run-one", status: "queued", version: 1 });
+    expect(approved.status).toBe("approved");
+    expect(rejected.status).toBe("rejected");
+    expect(requests).toEqual([
+      {
+        url: "http://127.0.0.1:18452/api/agent/runs/run-one/pause",
+        method: "POST",
+        body: JSON.stringify({ operation_id: "operation-pause", expected_version: 1 })
+      },
+      {
+        url: "http://127.0.0.1:18452/api/agent/runs/run-one/resume",
+        method: "POST",
+        body: JSON.stringify({ operation_id: "operation-resume", expected_version: 2 })
+      },
+      {
+        url: "http://127.0.0.1:18452/api/agent/runs/run-one/cancel",
+        method: "POST",
+        body: JSON.stringify({ operation_id: "operation-cancel", expected_version: 3 })
+      },
+      {
+        url: "http://127.0.0.1:18452/api/agent/runs/run-one/steps/step-one/retry",
+        method: "POST",
+        body: JSON.stringify({ operation_id: "operation-retry", expected_version: 4 })
+      },
+      {
+        url: "http://127.0.0.1:18452/api/agent/confirmations/confirmation-one/approve",
+        method: "POST",
+        body: JSON.stringify({ operation_id: "operation-approve", expected_version: 5 })
+      },
+      {
+        url: "http://127.0.0.1:18452/api/agent/confirmations/confirmation-one/reject",
+        method: "POST",
+        body: JSON.stringify({ operation_id: "operation-reject", expected_version: 6 })
+      }
+    ]);
+  });
+
   it("calls project reference endpoints", async () => {
     const requests: Array<{ url: string; method: string; body: string }> = [];
     const client = createApiClient({

@@ -1,8 +1,11 @@
 import {
   type AgentStreamEvent,
   agentStreamEventSchema,
+  agentConfirmationResolveRequestSchema,
   agentPlanResponseSchema,
+  agentRunControlRequestSchema,
   agentRunTraceSchema,
+  agentStepRetryRequestSchema,
   apiContracts,
   appConfigSchema,
   conversationMessageRequestSchema,
@@ -52,6 +55,7 @@ import {
   websiteAiRedeemRequestSchema,
   websiteAiRedeemResponseSchema,
   type ApiContractName,
+  type AgentRunStatus,
   type AgentRunRequest,
   type AgentPlanRequest,
   type ConversationMessageRequest,
@@ -70,6 +74,13 @@ export type QueryParams = Record<string, QueryValue>;
 export type ApiClientOptions = {
   baseUrl: string;
   fetchFn?: FetchLike;
+};
+
+export type AgentRunListParams = {
+  project?: string;
+  status?: AgentRunStatus;
+  cursor?: string;
+  limit?: number;
 };
 
 export type RequestOptions = Omit<RequestInit, "body"> & {
@@ -456,6 +467,60 @@ export function createApiClient(options: ApiClientOptions) {
       requestWithSchema("/api/agent/plan", agentPlanResponseSchema, {
         method: "POST",
         body: JSON.stringify(payload)
+      }),
+    listAgentRuns: (params: AgentRunListParams = {}) =>
+      requestContract("agentRuns", {
+        query: {
+          project: params.project,
+          status: params.status,
+          cursor: params.cursor,
+          limit: params.limit
+        }
+      }),
+    getAgentRun: (runId: string) =>
+      requestContract("agentRun", {
+        pathParams: { run_id: runId }
+      }),
+    getAgentRunEvents: (runId: string, after = 0) =>
+      requestContract("agentRunEvents", {
+        pathParams: { run_id: runId },
+        query: { after }
+      }),
+    pauseAgentRun: (runId: string, payload: z.input<typeof agentRunControlRequestSchema>) =>
+      requestContract("pauseAgentRun", {
+        pathParams: { run_id: runId },
+        body: JSON.stringify(agentRunControlRequestSchema.parse(payload))
+      }),
+    resumeAgentRun: (runId: string, payload: z.input<typeof agentRunControlRequestSchema>) =>
+      requestContract("resumeAgentRun", {
+        pathParams: { run_id: runId },
+        body: JSON.stringify(agentRunControlRequestSchema.parse(payload))
+      }),
+    cancelAgentRun: (runId: string, payload: z.input<typeof agentRunControlRequestSchema>) =>
+      requestContract("cancelAgentRun", {
+        pathParams: { run_id: runId },
+        body: JSON.stringify(agentRunControlRequestSchema.parse(payload))
+      }),
+    retryAgentRunStep: (runId: string, stepId: string, payload: z.input<typeof agentStepRetryRequestSchema>) =>
+      requestContract("retryAgentRunStep", {
+        pathParams: { run_id: runId, step_id: stepId },
+        body: JSON.stringify(agentStepRetryRequestSchema.parse(payload))
+      }),
+    approveAgentConfirmation: (
+      confirmationId: string,
+      payload: z.input<typeof agentConfirmationResolveRequestSchema>
+    ) =>
+      requestContract("approveAgentConfirmation", {
+        pathParams: { confirmation_id: confirmationId },
+        body: JSON.stringify(agentConfirmationResolveRequestSchema.parse(payload))
+      }),
+    rejectAgentConfirmation: (
+      confirmationId: string,
+      payload: z.input<typeof agentConfirmationResolveRequestSchema>
+    ) =>
+      requestContract("rejectAgentConfirmation", {
+        pathParams: { confirmation_id: confirmationId },
+        body: JSON.stringify(agentConfirmationResolveRequestSchema.parse(payload))
       }),
     getAgentTraces: (limit = 50) =>
       requestWithSchema(apiContracts.agentTraces.path, apiContracts.agentTraces.response, {

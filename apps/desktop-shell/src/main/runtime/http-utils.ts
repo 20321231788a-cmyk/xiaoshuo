@@ -111,10 +111,32 @@ export function writeNdjsonEvent(response: ServerResponse, payload: Parameters<t
   response.write(encodeNdjsonEvent(payload));
 }
 
-export function addCorsHeaders(response: ServerResponse): void {
-  response.setHeader("Access-Control-Allow-Origin", "*");
+export function addCorsHeaders(response: ServerResponse, origin = ""): void {
+  if (!response.hasHeader("Access-Control-Allow-Origin")) {
+    const normalizedOrigin = origin.trim();
+    if (normalizedOrigin && isAllowedRuntimeOrigin(normalizedOrigin)) {
+      response.setHeader("Access-Control-Allow-Origin", normalizedOrigin);
+      response.setHeader("Vary", "Origin");
+    }
+  }
   response.setHeader("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS");
   response.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+}
+
+export function isAllowedRuntimeOrigin(origin: string): boolean {
+  const normalized = String(origin || "").trim();
+  if (!normalized || normalized === "null") {
+    return true;
+  }
+  try {
+    const url = new URL(normalized);
+    return (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]")
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function stripTrailingSlash(pathname: string): string {

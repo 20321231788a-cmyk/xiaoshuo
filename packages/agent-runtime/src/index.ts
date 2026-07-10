@@ -12,3 +12,8 @@ export * from "./web-search.js";
 export * from "./kernel/project-file-manifest.js";
 export * from "./kernel/project-file-resolver.js";
 export * from "./kernel/reference-context.js";
+export * from "./kernel/execution-state-machine.js";
+export * from "./kernel/idempotency.js";
+export * from "./kernel/execution-store-port.js";
+export * from "./kernel/execution-store.js";
+export * from "./kernel/run-coordinator.js";

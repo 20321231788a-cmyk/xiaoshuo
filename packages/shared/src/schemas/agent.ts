@@ -231,8 +231,318 @@ export const agentRunTraceSchema = z
   })
   .passthrough();
 
+export const intentAmbiguityImpactSchema = z.enum(["safe_assumption", "blocking"]);
+
+export const intentAmbiguitySchema = z
+  .object({
+    code: z.string(),
+    impact: intentAmbiguityImpactSchema,
+    question: z.string()
+  })
+  .passthrough();
+
+export const agentAllowedEffectSchema = z.enum(["suggest", "read", "draft", "network", "write"]);
+
+export const agentProactiveLevelSchema = z.enum(["off", "quiet", "normal"]);
+
+export const intentResolutionSchema = z
+  .object({
+    intent: z.string(),
+    confidence: z.number().min(0).max(1).default(0),
+    explicit_constraints: z.array(z.string()).default([]),
+    ambiguities: z.array(intentAmbiguitySchema).default([]),
+    allowed_effects: z.array(agentAllowedEffectSchema).default([]),
+    proactive_level: agentProactiveLevelSchema.default("quiet")
+  })
+  .passthrough();
+
+export const agentRunStatusSchema = z.enum([
+  "queued",
+  "planning",
+  "running",
+  "waiting_user_input",
+  "cancelling",
+  "waiting_confirmation",
+  "paused",
+  "failed",
+  "cancelled",
+  "completed"
+]);
+
+export const agentStepStatusSchema = z.enum([
+  "pending",
+  "running",
+  "waiting_confirmation",
+  "done",
+  "failed",
+  "skipped",
+  "cancelled"
+]);
+
+export const agentPlanStatusSchema = z.enum(["draft", "approved", "superseded"]);
+
+export const agentExecutionStepTypeSchema = z.enum([
+  "read",
+  "skill",
+  "workflow",
+  "web_search",
+  "verify",
+  "save_preview",
+  "chat",
+  "file_operation"
+]);
+
+export const agentStepNecessitySchema = z.enum(["required", "optional"]);
+
+export const agentStepAttemptStatusSchema = z.enum(["running", "interrupted", "done", "failed", "cancelled"]);
+
+export const agentArtifactKindSchema = z.enum([
+  "chat_answer",
+  "generated_cache",
+  "project_document",
+  "quality_report",
+  "memory_patch",
+  "web_material"
+]);
+
+export const agentArtifactRefSchema = z
+  .object({
+    artifact_id: z.string(),
+    kind: agentArtifactKindSchema,
+    path: z.string().default(""),
+    cache_id: z.string().default(""),
+    content_hash: z.string().default(""),
+    document_version: z.number().int().nonnegative().default(0),
+    chars: z.number().int().nonnegative().default(0),
+    created_by_step_id: z.string().default(""),
+    created_by_attempt_id: z.string().default("")
+  })
+  .passthrough();
+
+export const agentVerificationCheckSchema = z
+  .object({
+    code: z.string(),
+    passed: z.boolean(),
+    message: z.string().default(""),
+    evidence_ref: z.string().default("")
+  })
+  .passthrough();
+
+export const agentVerificationResultSchema = z
+  .object({
+    passed: z.boolean(),
+    severity: z.enum(["none", "advice", "minor", "major", "blocking"]).default("none"),
+    checks: z.array(agentVerificationCheckSchema).default([])
+  })
+  .passthrough();
+
+export const agentExpectedOutputSchema = z
+  .object({
+    artifact_kind: agentArtifactKindSchema,
+    allow_empty: z.boolean().default(false),
+    format_schema: z.record(z.unknown()).default({}),
+    target_path_pattern: z.string().default(""),
+    minimum_checks: z.array(z.string()).default([])
+  })
+  .passthrough();
+
+export const agentExecutionStepSchema = z
+  .object({
+    step_id: z.string(),
+    version: z.number().int().positive().default(1),
+    index: z.number().int().nonnegative(),
+    type: agentExecutionStepTypeSchema,
+    action_id: z.string(),
+    skill_id: z.string().default(""),
+    instruction: z.string().default(""),
+    necessity: agentStepNecessitySchema.default("required"),
+    input_refs: z.array(z.string()).default([]),
+    required_permissions: z.array(z.string()).default([]),
+    base_document_versions: z.record(z.number().int().nonnegative()).default({}),
+    base_content_hashes: z.record(z.string()).default({}),
+    idempotency_key: z.string(),
+    expected_output: agentExpectedOutputSchema,
+    status: agentStepStatusSchema.default("pending"),
+    attempts: z.number().int().nonnegative().default(0),
+    max_attempts: z.number().int().positive().default(2),
+    retryable: z.boolean().default(false),
+    requires_confirmation: z.boolean().default(false),
+    observation_id: z.string().default(""),
+    error_code: z.string().default(""),
+    error: z.string().default(""),
+    started_at: z.string().default(""),
+    ended_at: z.string().default("")
+  })
+  .passthrough();
+
+export const agentStepAttemptSchema = z
+  .object({
+    attempt_id: z.string(),
+    run_id: z.string(),
+    step_id: z.string(),
+    attempt: z.number().int().positive(),
+    status: agentStepAttemptStatusSchema.default("running"),
+    input_digest: z.string().default(""),
+    observation_id: z.string().default(""),
+    idempotency_key: z.string(),
+    model_call_refs: z.array(z.string()).default([]),
+    error_code: z.string().default(""),
+    error: z.string().default(""),
+    started_at: z.string(),
+    ended_at: z.string().default("")
+  })
+  .passthrough();
+
+export const agentObservationSchema = z
+  .object({
+    observation_id: z.string(),
+    run_id: z.string(),
+    step_id: z.string(),
+    attempt_id: z.string(),
+    ok: z.boolean(),
+    summary: z.string().default(""),
+    output_refs: z.array(z.string()).default([]),
+    saved_paths: z.array(z.string()).default([]),
+    warnings: z.array(z.string()).default([]),
+    verification: agentVerificationResultSchema,
+    created_at: z.string()
+  })
+  .passthrough();
+
+export const agentRunBudgetSchema = z
+  .object({
+    max_steps: z.number().int().positive().default(3),
+    max_replans: z.number().int().nonnegative().default(1),
+    max_attempts_per_step: z.number().int().positive().default(2),
+    max_duration_ms: z.number().int().positive().default(300_000),
+    max_input_tokens: z.number().int().nonnegative().default(32_000),
+    max_output_tokens: z.number().int().nonnegative().default(8_000),
+    max_cost: z.number().finite().nonnegative().default(1),
+    cost_currency: z.literal("USD").default("USD"),
+    pricing_snapshot_id: z.string().default(""),
+    used_steps: z.number().int().nonnegative().default(0),
+    used_replans: z.number().int().nonnegative().default(0),
+    used_input_tokens: z.number().int().nonnegative().default(0),
+    used_output_tokens: z.number().int().nonnegative().default(0),
+    estimated_cost: z.number().finite().nonnegative().default(0)
+  })
+  .passthrough();
+
+export const agentAutonomyModeSchema = z.enum(["assist", "plan", "execute"]);
+
+export const agentGoalRequestSnapshotSchema = z.object({
+  content: z.string().default(""),
+  attachment_refs: z.array(z.string()).default([]),
+  selected_file_refs: z.array(z.string()).default([]),
+  settings_snapshot: z.record(z.unknown()).default({}),
+  feature_flag_snapshot: z.record(z.unknown()).default({})
+});
+
+export const agentGoalSchema = z
+  .object({
+    instruction: z.string().default(""),
+    autonomy_mode: agentAutonomyModeSchema.default("plan"),
+    requested_outputs: z.array(agentExpectedOutputSchema).default([]),
+    success_criteria: z.array(z.string()).default([]),
+    assumptions: z.array(z.string()).default([]),
+    blocking_questions: z.array(z.string()).default([]),
+    request_snapshot: agentGoalRequestSnapshotSchema.default({})
+  })
+  .passthrough();
+
+export const agentConfirmationSchema = z
+  .object({
+    confirmation_id: z.string(),
+    version: z.number().int().positive().default(1),
+    run_id: z.string(),
+    step_id: z.string(),
+    action: z.string(),
+    risk_level: z.enum(["low", "medium", "high", "critical"]),
+    summary: z.string().default(""),
+    target_paths: z.array(z.string()).default([]),
+    expected_versions: z.record(z.number().int().nonnegative()).default({}),
+    expected_hashes: z.record(z.string()).default({}),
+    proposed_artifact_refs: z.array(z.string()).default([]),
+    status: z.enum(["pending", "approved", "rejected", "expired", "superseded"]).default("pending"),
+    expires_at: z.string().default(""),
+    resolved_at: z.string().optional(),
+    resolved_by: z.enum(["user", "policy"]).optional()
+  })
+  .passthrough();
+
+export const agentRunEventSchema = z
+  .object({
+    event_id: z.string(),
+    run_id: z.string(),
+    sequence: z.number().int().positive(),
+    event_type: z.string(),
+    step_id: z.string().default(""),
+    payload: z.record(z.unknown()).default({}),
+    created_at: z.string()
+  })
+  .passthrough();
+
+export const agentRunStateSchema = z
+  .object({
+    schema_version: z.number().int().positive().default(1),
+    version: z.number().int().positive().default(1),
+    run_id: z.string(),
+    request_id: z.string().default(""),
+    conversation_id: z.string().default(""),
+    project_id: z.string().default(""),
+    project_path: z.string().default(""),
+    goal: agentGoalSchema,
+    goal_revision: z.number().int().positive().default(1),
+    plan_version: z.number().int().positive().default(1),
+    plan_status: agentPlanStatusSchema.default("draft"),
+    status: agentRunStatusSchema.default("queued"),
+    current_step_id: z.string().default(""),
+    runtime_instance_id: z.string().default(""),
+    heartbeat_at: z.string().default(""),
+    lease_expires_at: z.string().default(""),
+    pause_requested_at: z.string().default(""),
+    cancel_requested_at: z.string().default(""),
+    recovery_reason: z.string().default(""),
+    error_code: z.string().default(""),
+    error: z.string().default(""),
+    steps: z.array(agentExecutionStepSchema).default([]),
+    artifacts: z.array(agentArtifactRefSchema).default([]),
+    budget: agentRunBudgetSchema.default({}),
+    last_event_sequence: z.number().int().nonnegative().default(0),
+    created_at: z.string(),
+    updated_at: z.string()
+  })
+  .passthrough();
+
+export const agentRunListResponseSchema = z
+  .object({
+    runs: z.array(agentRunStateSchema),
+    next_cursor: z.string().min(1).nullable()
+  })
+  .passthrough();
+
+export const agentRunEventReplayResponseSchema = z
+  .object({
+    events: z.array(agentRunEventSchema),
+    next_after: z.number().int().nonnegative()
+  })
+  .passthrough();
+
+export const agentRunControlRequestSchema = z
+  .object({
+    operation_id: z.string().trim().min(1),
+    expected_version: z.number().int().positive()
+  })
+  .passthrough();
+
+export const agentStepRetryRequestSchema = agentRunControlRequestSchema.extend({});
+
+export const agentConfirmationResolveRequestSchema = agentRunControlRequestSchema.extend({});
+
 export const agentRunRequestSchema = z
   .object({
+    request_id: z.string().default(""),
+    autonomy_mode: agentAutonomyModeSchema.default("plan"),
     conversation_id: z.string().default(""),
     content: z.string().default(""),
     current_path: z.string().default(""),
@@ -248,6 +558,7 @@ export const agentRunRequestSchema = z
 
 export const agentRunResponseSchema = z
   .object({
+    run_id: z.string().optional(),
     intent: agentIntentSchema,
     reply: z.string(),
     conversation: conversationDetailSchema.nullable().optional(),
@@ -343,6 +654,7 @@ export const generatedCacheDetailSchema = z
 export const agentStreamEventSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("start"),
+    run_id: z.string().optional(),
     intent: agentIntentSchema,
     conversation_id: z.string(),
     skill_id: z.string().optional().default(""),
@@ -367,6 +679,8 @@ export const agentStreamEventSchema = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("error"),
+    run_id: z.string().optional(),
+    error_code: z.string().optional(),
     message: z.string()
   })
 ]);
@@ -397,7 +711,39 @@ export type AgentContextBlockTrace = z.infer<typeof agentContextBlockTraceSchema
 export type AgentModelCallTrace = z.infer<typeof agentModelCallTraceSchema>;
 export type AgentSaveDecisionTrace = z.infer<typeof agentSaveDecisionTraceSchema>;
 export type AgentRunTrace = z.infer<typeof agentRunTraceSchema>;
+export type IntentAmbiguityImpact = z.infer<typeof intentAmbiguityImpactSchema>;
+export type IntentAmbiguity = z.infer<typeof intentAmbiguitySchema>;
+export type AgentAllowedEffect = z.infer<typeof agentAllowedEffectSchema>;
+export type AgentProactiveLevel = z.infer<typeof agentProactiveLevelSchema>;
+export type IntentResolution = z.infer<typeof intentResolutionSchema>;
+export type AgentRunStatus = z.infer<typeof agentRunStatusSchema>;
+export type AgentStepStatus = z.infer<typeof agentStepStatusSchema>;
+export type AgentPlanStatus = z.infer<typeof agentPlanStatusSchema>;
+export type AgentExecutionStepType = z.infer<typeof agentExecutionStepTypeSchema>;
+export type AgentStepNecessity = z.infer<typeof agentStepNecessitySchema>;
+export type AgentStepAttemptStatus = z.infer<typeof agentStepAttemptStatusSchema>;
+export type AgentArtifactKind = z.infer<typeof agentArtifactKindSchema>;
+export type AgentArtifactRef = z.infer<typeof agentArtifactRefSchema>;
+export type AgentVerificationResult = z.infer<typeof agentVerificationResultSchema>;
+export type AgentExpectedOutput = z.infer<typeof agentExpectedOutputSchema>;
+export type AgentExecutionStep = z.infer<typeof agentExecutionStepSchema>;
+export type AgentStepAttempt = z.infer<typeof agentStepAttemptSchema>;
+export type AgentObservation = z.infer<typeof agentObservationSchema>;
+export type AgentRunBudget = z.infer<typeof agentRunBudgetSchema>;
+export type AgentAutonomyMode = z.infer<typeof agentAutonomyModeSchema>;
+export type AgentGoalRequestSnapshot = z.infer<typeof agentGoalRequestSnapshotSchema>;
+export type AgentGoal = z.infer<typeof agentGoalSchema>;
+export type AgentConfirmation = z.infer<typeof agentConfirmationSchema>;
+export type AgentRunEvent = z.infer<typeof agentRunEventSchema>;
+export type AgentRunState = z.infer<typeof agentRunStateSchema>;
+export type AgentRunListResponse = z.infer<typeof agentRunListResponseSchema>;
+export type AgentRunEventReplayResponse = z.infer<typeof agentRunEventReplayResponseSchema>;
+export type AgentRunControlRequest = z.infer<typeof agentRunControlRequestSchema>;
+export type AgentStepRetryRequest = z.infer<typeof agentStepRetryRequestSchema>;
+export type AgentConfirmationResolveRequest = z.infer<typeof agentConfirmationResolveRequestSchema>;
 export type AgentRunRequest = {
+  request_id?: string;
+  autonomy_mode?: AgentAutonomyMode;
   conversation_id: string;
   content: string;
   current_path: string;

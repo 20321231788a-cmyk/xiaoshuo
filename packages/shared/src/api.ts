@@ -1,5 +1,17 @@
 import { z } from "zod";
-import { agentPlanResponseSchema, agentRunTraceSchema, generatedCacheDetailSchema } from "./schemas/agent.js";
+import {
+  type AgentConfirmation,
+  type AgentRunEventReplayResponse,
+  type AgentRunListResponse,
+  type AgentRunState,
+  agentConfirmationSchema,
+  agentPlanResponseSchema,
+  agentRunEventReplayResponseSchema,
+  agentRunListResponseSchema,
+  agentRunStateSchema,
+  agentRunTraceSchema,
+  generatedCacheDetailSchema
+} from "./schemas/agent.js";
 import {
   appConfigSchema,
   licenseAccountKeyResponseSchema,
@@ -25,6 +37,12 @@ import {
 } from "./schemas/project.js";
 import { skillDefinitionSchema } from "./schemas/skill.js";
 import { ledgerItemSchema } from "./schemas/workbench.js";
+
+const agentRunListContractSchema: z.ZodType<AgentRunListResponse, z.ZodTypeDef, unknown> = agentRunListResponseSchema;
+const agentRunStateContractSchema: z.ZodType<AgentRunState, z.ZodTypeDef, unknown> = agentRunStateSchema;
+const agentRunEventReplayContractSchema: z.ZodType<AgentRunEventReplayResponse, z.ZodTypeDef, unknown> =
+  agentRunEventReplayResponseSchema;
+const agentConfirmationContractSchema: z.ZodType<AgentConfirmation, z.ZodTypeDef, unknown> = agentConfirmationSchema;
 
 export const apiContracts = {
   health: { method: "GET", path: "/api/health", response: healthSchema },
@@ -53,6 +71,23 @@ export const apiContracts = {
   conversation: { method: "GET", path: "/api/conversations/{conversation_id}", response: conversationDetailSchema },
   skills: { method: "GET", path: "/api/skills", response: z.array(skillDefinitionSchema) },
   agentPlan: { method: "POST", path: "/api/agent/plan", response: agentPlanResponseSchema },
+  agentRuns: { method: "GET", path: "/api/agent/runs", response: agentRunListContractSchema },
+  agentRun: { method: "GET", path: "/api/agent/runs/{run_id}", response: agentRunStateContractSchema },
+  agentRunEvents: { method: "GET", path: "/api/agent/runs/{run_id}/events", response: agentRunEventReplayContractSchema },
+  pauseAgentRun: { method: "POST", path: "/api/agent/runs/{run_id}/pause", response: agentRunStateContractSchema },
+  resumeAgentRun: { method: "POST", path: "/api/agent/runs/{run_id}/resume", response: agentRunStateContractSchema },
+  cancelAgentRun: { method: "POST", path: "/api/agent/runs/{run_id}/cancel", response: agentRunStateContractSchema },
+  retryAgentRunStep: { method: "POST", path: "/api/agent/runs/{run_id}/steps/{step_id}/retry", response: agentRunStateContractSchema },
+  approveAgentConfirmation: {
+    method: "POST",
+    path: "/api/agent/confirmations/{confirmation_id}/approve",
+    response: agentConfirmationContractSchema
+  },
+  rejectAgentConfirmation: {
+    method: "POST",
+    path: "/api/agent/confirmations/{confirmation_id}/reject",
+    response: agentConfirmationContractSchema
+  },
   agentTraces: { method: "GET", path: "/api/agent/traces", response: z.array(agentRunTraceSchema) },
   agentTrace: { method: "GET", path: "/api/agent/traces/{run_id}", response: agentRunTraceSchema },
   generatedCache: { method: "GET", path: "/api/agent/generated/cache/{cache_id}", response: generatedCacheDetailSchema },

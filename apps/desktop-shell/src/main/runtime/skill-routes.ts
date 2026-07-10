@@ -1,4 +1,3 @@
-import { AgentRuntimeService } from "@xiaoshuo/agent-runtime";
 import { SkillService } from "@xiaoshuo/skill-service";
 import {
   skillDraftFromUrlRequestSchema,
@@ -15,6 +14,7 @@ import {
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { writeAiLicenseRequiredIfNeeded } from "./license-guard.js";
 import type { RuntimeContext } from "./types.js";
+import { getProjectAgentRuntime } from "./agent-runtime-registry.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -181,10 +181,7 @@ export async function handleSkillRoutes(
     }
     const rawBody = await deps.readRawBody(request);
     const payload = skillDraftFromUrlRequestSchema.parse(deps.parseJsonRecord(rawBody));
-    const runtime = new AgentRuntimeService({
-      projectRoot: currentProject.path,
-      config: { rootDir: context.projectRoot, env: process.env }
-    });
+    const runtime = getProjectAgentRuntime(context, currentProject.path);
     try {
       deps.writeJson(response, 200, await runtime.draftSkillFromUrl(payload));
     } catch (error) {
@@ -199,10 +196,7 @@ export async function handleSkillRoutes(
     }
     const rawBody = await deps.readRawBody(request);
     const payload = skillDraftRequestSchema.parse(deps.parseJsonRecord(rawBody));
-    const runtime = new AgentRuntimeService({
-      projectRoot: currentProject.path,
-      config: { rootDir: context.projectRoot, env: process.env }
-    });
+    const runtime = getProjectAgentRuntime(context, currentProject.path);
     try {
       deps.writeJson(response, 200, await runtime.draftSkill(payload));
     } catch (error) {
@@ -217,10 +211,7 @@ export async function handleSkillRoutes(
     }
     const rawBody = await deps.readRawBody(request);
     const payload = skillRunRequestSchema.parse(deps.parseJsonRecord(rawBody));
-    const runtime = new AgentRuntimeService({
-      projectRoot: currentProject.path,
-      config: { rootDir: context.projectRoot, env: process.env }
-    });
+    const runtime = getProjectAgentRuntime(context, currentProject.path);
 
     try {
       const result = await runtime.runSkill(skillRoute.id, payload);

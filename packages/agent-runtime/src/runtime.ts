@@ -33,6 +33,7 @@ import { randomUUID } from "node:crypto";
 import { loadModelConfig, loadWebSearchConfig, type ConfigServiceOptions } from "@xiaoshuo/config-service";
 import { OpenAICompatibleClient, type ChatCompletionMessage } from "@xiaoshuo/model-client";
 import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
+import { ProjectManifestService } from "@xiaoshuo/project-manifest";
 import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
 import { DefaultWebSearchClient, formatWebSearchContext, shouldUseWebSearch, summarizeWebSearchSources, type WebSearchClient, type WebSearchSource } from "./web-search.js";
 import fs from "node:fs/promises";
@@ -46,6 +47,7 @@ import { createAgentTraceRecorder, type AgentTraceRecorder } from "./agent-trace
 import { getWorkflowHandler, isWorkflowSkillId } from "./workflows/registry.js";
 import type { WorkflowRunContext } from "./workflows/types.js";
 import { isCancellationError, throwIfAborted, type AgentRunOptions } from "./cancellation.js";
+import { RunCoordinator, RunRequestReplayError, type DurableRunExecution } from "./kernel/run-coordinator.js";
 
 const TARGET_WORD_SKILL_IDS = new Set([
   "body_generate",
@@ -54,6 +56,13 @@ const TARGET_WORD_SKILL_IDS = new Set([
   "detail_outline_generate",
   "chapter_outline_generate"
 ]);
+const activeAgentRuntimeServices = new Set<AgentRuntimeService>();
+
+export function closeAllAgentRuntimeServices(): void {
+  for (const runtime of [...activeAgentRuntimeServices]) {
+    runtime.close();
+  }
+}
 
 export class AgentRuntimeService {
   private readonly planner: AgentPlanner;
@@ -70,6 +79,8 @@ export class AgentRuntimeService {
   private readonly cache: GeneratedCacheService;
   private readonly savePlanner: GeneratedSavePlanner;
   private readonly skillOrchestrator: SmartSkillOrchestrator;
+  private readonly runCoordinator: RunCoordinator;
+  private readonly projectManifest: ProjectManifestService;
 
   constructor(options: AgentPlannerOptions) {
     this.config = options.config ?? {};
@@ -94,6 +105,15 @@ export class AgentRuntimeService {
       config: this.config,
       modelClient: this.modelClient
     });
+    this.projectManifest = new ProjectManifestService(options.projectRoot);
+    this.runCoordinator = new RunCoordinator({ projectRoot: options.projectRoot });
+    this.runCoordinator.recoverStaleRuns();
+    activeAgentRuntimeServices.add(this);
+  }
+
+  close(): void {
+    this.runCoordinator.close();
+    activeAgentRuntimeServices.delete(this);
   }
 
   async plan(request: AgentPlanRequest, options: AgentRunOptions = {}): Promise<AgentPlanResponse> {
@@ -239,16 +259,31 @@ export class AgentRuntimeService {
 
   async runAgent(request: AgentRunRequest, options: AgentRunOptions = {}): Promise<AgentRunResponse> {
     throwIfAborted(options.signal);
+    const execution = await this.beginDurableRun(request, options);
+    return this.executeDurableAgentRun(request, execution, options);
+  }
+
+  private async executeDurableAgentRun(
+    request: AgentRunRequest,
+    execution: DurableRunExecution,
+    options: AgentRunOptions = {}
+  ): Promise<AgentRunResponse> {
+    const runOptions = { ...options, signal: execution.signal };
     const trace = this.createTraceRecorder({
       conversationId: request.conversation_id || "",
       skillId: request.skill_id || "",
-      content: request.content || ""
+      content: request.content || "",
+      runId: execution.run_id,
+      requestId: execution.request_id
     });
     const startedAt = Date.now();
     this.addAgentRequestContextToTrace(trace, request);
     try {
       await this.addRoutingTrace(request, trace);
-      const response = await this.runAgentInternal(request, trace, options);
+      const response = {
+        ...(await this.runAgentInternal(request, trace, runOptions)),
+        run_id: execution.run_id
+      };
       this.addAgentResponseToTrace(trace, response);
       await this.addModelCallSummaryToTrace(trace, {
         inputChars: agentRequestInputChars(request),
@@ -256,9 +291,11 @@ export class AgentRuntimeService {
         durationMs: Date.now() - startedAt,
         streaming: false
       });
+      this.runCoordinator.completeRun(execution, response);
       await trace.finish({ saved_paths: response.saved_paths || [] });
       return response;
     } catch (error) {
+      const durableState = this.failDurableRun(execution, error);
       await this.addModelCallSummaryToTrace(trace, {
         inputChars: agentRequestInputChars(request),
         outputChars: 0,
@@ -266,8 +303,11 @@ export class AgentRuntimeService {
         streaming: false,
         error
       });
-      if (isCancellationError(error, options.signal)) {
-        trace.mark("workflow_completed", { cancelled: true });
+      if (durableState === "paused") {
+        trace.mark("workflow_completed", { cancelled: false, durable_status: "paused" });
+        await trace.finish({ cancelled: false });
+      } else if (durableState === "cancelled" || isCancellationError(error, runOptions.signal)) {
+        trace.mark("workflow_completed", { cancelled: true, durable_status: durableState });
         await trace.finish({ cancelled: true });
       } else {
         trace.fail(error);
@@ -331,22 +371,35 @@ export class AgentRuntimeService {
 
   async *streamAgentRun(request: AgentRunRequest, options: AgentRunOptions = {}): AsyncGenerator<AgentStreamEvent> {
     throwIfAborted(options.signal);
+    const execution = await this.beginDurableRun(request, options);
+    const runOptions = { ...options, signal: execution.signal };
     const trace = this.createTraceRecorder({
       conversationId: request.conversation_id || "",
       skillId: request.skill_id || "",
-      content: request.content || ""
+      content: request.content || "",
+      runId: execution.run_id,
+      requestId: execution.request_id
     });
     const startedAt = Date.now();
     this.addAgentRequestContextToTrace(trace, request);
     try {
       await this.addRoutingTrace(request, trace);
       let finalPayload: AgentRunResponse | null = null;
-      for await (const event of this.streamAgentRunInternal(request, trace, options)) {
+      for await (const sourceEvent of this.streamAgentRunInternal(request, trace, runOptions)) {
+        const event: AgentStreamEvent =
+          sourceEvent.type === "start"
+            ? { ...sourceEvent, run_id: execution.run_id }
+            : sourceEvent.type === "final"
+              ? { ...sourceEvent, payload: { ...sourceEvent.payload, run_id: execution.run_id } }
+              : sourceEvent;
         if (event.type === "final") {
           finalPayload = event.payload;
           this.addAgentResponseToTrace(trace, event.payload);
         }
         yield event;
+      }
+      if (!finalPayload) {
+        throw Object.assign(new Error("Agent stream ended without a final payload"), { code: "STREAM_FINAL_MISSING" });
       }
       await this.addModelCallSummaryToTrace(trace, {
         inputChars: agentRequestInputChars(request),
@@ -354,8 +407,10 @@ export class AgentRuntimeService {
         durationMs: Date.now() - startedAt,
         streaming: true
       });
+      this.runCoordinator.completeRun(execution, finalPayload);
       await trace.finish({ saved_paths: finalPayload?.saved_paths || [] });
     } catch (error) {
+      const durableState = this.failDurableRun(execution, error);
       await this.addModelCallSummaryToTrace(trace, {
         inputChars: agentRequestInputChars(request),
         outputChars: 0,
@@ -363,8 +418,11 @@ export class AgentRuntimeService {
         streaming: true,
         error
       });
-      if (isCancellationError(error, options.signal)) {
-        trace.mark("workflow_completed", { cancelled: true });
+      if (durableState === "paused") {
+        trace.mark("workflow_completed", { cancelled: false, durable_status: "paused" });
+        await trace.finish({ cancelled: false });
+      } else if (durableState === "cancelled" || isCancellationError(error, runOptions.signal)) {
+        trace.mark("workflow_completed", { cancelled: true, durable_status: durableState });
         await trace.finish({ cancelled: true });
       } else {
         trace.fail(error);
@@ -436,13 +494,108 @@ export class AgentRuntimeService {
     }
   }
 
-  private createTraceRecorder(input: { conversationId?: string; skillId?: string; content?: string }): AgentTraceRecorder {
+  private createTraceRecorder(input: { conversationId?: string; skillId?: string; content?: string; runId?: string; requestId?: string }): AgentTraceRecorder {
     return createAgentTraceRecorder({
       projectRoot: this.documents.projectRoot,
       conversationId: input.conversationId || "",
       skillId: input.skillId || "",
-      content: input.content || ""
+      content: input.content || "",
+      requestId: input.requestId || "",
+      ...(input.runId ? { idFactory: () => input.runId! } : {})
     });
+  }
+
+  getDurableRun(runId: string) {
+    return this.runCoordinator.getRun(runId);
+  }
+
+  listDurableRuns(statuses?: Parameters<RunCoordinator["listRuns"]>[0], limit?: number, beforeUpdatedAt?: string) {
+    return this.runCoordinator.listRuns(statuses, limit, beforeUpdatedAt);
+  }
+
+  listDurableRunEvents(runId: string, after?: number, limit?: number) {
+    return this.runCoordinator.listEvents(runId, after, limit);
+  }
+
+  pauseDurableRun(runId: string, operationId?: string, expectedVersion?: number) {
+    return this.runCoordinator.requestPause(runId, operationId, expectedVersion);
+  }
+
+  cancelDurableRun(runId: string, operationId?: string, expectedVersion?: number) {
+    return this.runCoordinator.requestCancel(runId, operationId, expectedVersion);
+  }
+
+  resumeDurableRun(runId: string, operationId: string, expectedVersion: number) {
+    return this.startDurableRetry(runId, operationId, expectedVersion, undefined, "resume");
+  }
+
+  retryDurableRunStep(runId: string, stepId: string, operationId: string, expectedVersion: number) {
+    return this.startDurableRetry(runId, operationId, expectedVersion, stepId, "retry");
+  }
+
+  resolveDurableConfirmation(
+    confirmationId: string,
+    status: "approved" | "rejected",
+    operationId: string,
+    expectedVersion: number
+  ) {
+    return this.runCoordinator.resolveConfirmation(confirmationId, status, operationId, expectedVersion);
+  }
+
+  private startDurableRetry(
+    runId: string,
+    operationId: string,
+    expectedVersion: number,
+    stepId: string | undefined,
+    operationType: "resume" | "retry"
+  ) {
+    let execution: DurableRunExecution;
+    try {
+      execution = this.runCoordinator.resumeRun(runId, operationId, expectedVersion, { stepId, operationType });
+    } catch (error) {
+      if (error instanceof RunRequestReplayError) {
+        return error.run;
+      }
+      throw error;
+    }
+    const request = this.runCoordinator.getRecoveryRequest(runId);
+    void this.executeDurableAgentRun(request, execution).catch(() => undefined);
+    return this.runCoordinator.getRun(runId)!;
+  }
+
+  private async beginDurableRun(request: AgentRunRequest, options: AgentRunOptions): Promise<DurableRunExecution> {
+    const initialIntent = classifyAgentIntent(request.content || "", request.skill_id || "", []);
+    const stepType = initialIntent === "file_operation"
+      ? "file_operation"
+      : initialIntent === "read_context"
+        ? "read"
+        : initialIntent === "skill"
+          ? isWorkflowSkillId(request.skill_id || "")
+            ? "workflow"
+            : "skill"
+          : "chat";
+    const writeRequested = initialIntent === "file_operation" || hasExplicitWriteIntent(request.content || "");
+    return this.runCoordinator.beginRun(request, {
+      projectId: await this.projectManifest.getProjectId(),
+      stepType,
+      actionId: `agent.${initialIntent}`,
+      skillId: request.skill_id || "",
+      retryable: !writeRequested,
+      requiresConfirmation: initialIntent === "file_operation",
+      signal: options.signal
+    });
+  }
+
+  private failDurableRun(execution: DurableRunExecution, error: unknown) {
+    try {
+      return this.runCoordinator.failRun(execution, error).status;
+    } catch (lifecycleError) {
+      const current = this.runCoordinator.getRun(execution.run_id);
+      if (current?.status === "failed" || current?.status === "paused" || current?.status === "cancelled") {
+        return current.status;
+      }
+      throw lifecycleError;
+    }
   }
 
   private buildWorkflowContext(trace?: AgentTraceRecorder, options: AgentRunOptions = {}): WorkflowRunContext {
@@ -1217,7 +1370,7 @@ export class AgentRuntimeService {
       throwIfAborted(options.signal);
       const skillRequest = this.buildPlannedSkillRequest(step, request, priorOutput);
       try {
-        const result = await this.runSkill(step.skill_id, skillRequest, options);
+        const result = await this.runSkillInternal(step.skill_id, skillRequest, options);
         throwIfAborted(options.signal);
         lastResult = result;
         const resultText = String(result.data?.result || result.result || result.content || "").trim();

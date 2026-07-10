@@ -1,4 +1,5 @@
 import type { DocumentTimelineSession } from "@xiaoshuo/document-service";
+import type { AgentRuntimeService } from "@xiaoshuo/agent-runtime";
 import type { JobManager } from "@xiaoshuo/job-service";
 import type { ProjectSessionService } from "@xiaoshuo/project-session";
 import type http from "node:http";
@@ -14,6 +15,7 @@ export type RuntimeServerState = {
   lastError?: string;
   jobManager?: JobManager;
   documentSessions?: Map<string, DocumentTimelineSession>;
+  agentRuntimes?: Map<string, AgentRuntimeService>;
 };
 
 export type RuntimeServerOptions = {
@@ -27,4 +29,5 @@ export type RuntimeContext = {
   jobManager: JobManager;
   projectSession: ProjectSessionService;
   documentSessions: Map<string, DocumentTimelineSession>;
+  agentRuntimes?: Map<string, AgentRuntimeService>;
 };

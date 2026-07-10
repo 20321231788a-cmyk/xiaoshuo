@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   booleanValue,
   createRequestAbortSignal,
+  isAllowedRuntimeOrigin,
   parseJsonRecord,
   parseMultipartFile,
   readBooleanQuery,
@@ -64,6 +65,16 @@ describe("runtime http utils", () => {
     expect(booleanValue("yes")).toBe(true);
     expect(booleanValue("off")).toBe(false);
     expect(stripTrailingSlash("/api/skills/")).toBe("/api/skills");
+  });
+
+  it("only allows local workbench origins", () => {
+    expect(isAllowedRuntimeOrigin("")).toBe(true);
+    expect(isAllowedRuntimeOrigin("null")).toBe(true);
+    expect(isAllowedRuntimeOrigin("http://127.0.0.1:4180")).toBe(true);
+    expect(isAllowedRuntimeOrigin("http://localhost:4173")).toBe(true);
+    expect(isAllowedRuntimeOrigin("https://example.com")).toBe(false);
+    expect(isAllowedRuntimeOrigin("file:///D:/xiaoshuo/index.html")).toBe(false);
+    expect(isAllowedRuntimeOrigin("not-a-url")).toBe(false);
   });
 
   it("parses multipart file payloads", () => {

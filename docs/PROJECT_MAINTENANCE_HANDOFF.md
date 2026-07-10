@@ -1989,6 +1989,31 @@ npm test
 - `git diff --check -- docs/AGENT_OPTIMIZATION_MODIFICATION_MANUAL.md docs/PROJECT_MAINTENANCE_HANDOFF.md` 通过；
 - 本轮未重新运行完整代码测试，118/118 和 typecheck 结果来自三路审查中的当前工作树定向验证；Workbench 失败被保留为实施台账阻塞项，没有伪报绿色。
 
+### 15.49 2026-07-10 P0 持久执行基础实现记录
+
+本轮开始落实冻结的 P0 顺序，完成 E0 编译基线和 A-C/D 的一组可运行基础能力提交；这不是 P0 发布完成，也没有将任何 Task 标为“已验收”。
+
+本轮实现：
+
+- 修复 Workbench `AgentTraceView` 的运行控制、状态格式化和安全 operation ID，暂停、恢复、取消和重试按运行状态禁用；
+- 新增项目 manifest 稳定 UUID，旧 manifest 首次读取会原子回填，移动项目后保留 UUID；每个 durable run 将该 UUID 写入 `project_id`，不再以路径哈希作为生产身份；
+- 补齐 Agent Run/step/attempt schema、SQLite Execution Store、状态机、CAS/idempotency、runtime lease 和基础 lifecycle API/Trace UI 草稿；
+- 显式 pause 将 attempt 结算为 `interrupted` 且 step 回到 `pending`，不消耗失败重试预算；stale lease 在同一 SQLite transaction 中结算 orphan running attempt、重置 step 后才允许同一 `run_id` 新 attempt；
+- HTTP/renderer 连接关闭不再向 durable executor 传递 abort，只有 pause/cancel 控制 API 可改变 run；
+- 新增真实子进程强杀 E2E：持有执行租约的子进程被终止，新进程接管同一 run，保留 interrupted attempt 并以第二个 attempt 完成。
+
+本轮验证：
+
+- `npm run typecheck` 通过，所有 workspace 均为绿色；
+- `npm test` 通过：75 个测试文件、560 个测试；
+- `npm run build:workbench` 通过，仅有既有 bundle size warning；
+- `npm run build:desktop` 通过；
+- `git diff --check` 通过。
+
+尚未满足的 P0 退出条件：recoverable request 白名单、重复 project UUID 路径隔离、驱动 adapter/备份及迁移故障矩阵、两步恢复 fixture、`POST /api/agent/runs` 幂等创建、认证事件补流/E2E、真实文件 CommitJournal/Confirmation、长任务迁移，以及 H 的会话令牌与发布门禁。下一轮严格按 D 余项再进入 E；不得提前开始 P1。
+
+本轮提交边界：提交 P0 shared/store/coordinator/runtime/route/API/Workbench/manifest 基础实现、测试与本维护记录；未跟踪 `PRODUCT.md` 保留且不纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

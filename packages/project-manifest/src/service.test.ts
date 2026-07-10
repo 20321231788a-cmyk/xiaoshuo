@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ProjectSessionService } from "@xiaoshuo/project-session";
 import { MANIFEST_REL_PATH, ProjectManifestService } from "./service.js";
+import { parseProjectId } from "./project-identity.js";
 
 let tempDir = "";
 let projectPath = "";
@@ -52,6 +53,47 @@ describe("project-manifest", () => {
     expect(status.ready).toBe(true);
     expect(status.source).toBe("disk");
     expect(documents.length).toBeGreaterThan(0);
+  });
+
+  it("atomically assigns a stable project UUID to a legacy manifest", async () => {
+    const manifestPath = path.join(projectPath, MANIFEST_REL_PATH);
+    await fs.mkdir(path.dirname(manifestPath), { recursive: true });
+    await fs.writeFile(
+      manifestPath,
+      JSON.stringify({
+        project_path: projectPath,
+        version: 1,
+        generated_at: "2026-06-01 11:00:00",
+        entries: []
+      }),
+      "utf8"
+    );
+
+    const manifest = new ProjectManifestService(projectPath);
+    const projectId = await manifest.getProjectId();
+    const diskPayload = JSON.parse(await fs.readFile(manifestPath, "utf8")) as Record<string, unknown>;
+    const siblingFiles = await fs.readdir(path.dirname(manifestPath));
+
+    expect(parseProjectId(projectId)).toBe(projectId);
+    expect(diskPayload.project_id).toBe(projectId);
+    expect(JSON.parse(await fs.readFile(manifestPath, "utf8"))).toMatchObject({ project_id: projectId });
+    expect(siblingFiles.some((name) => name.includes("project_manifest.json") && name.endsWith(".tmp"))).toBe(false);
+  });
+
+  it("keeps the project UUID when the project directory moves", async () => {
+    const original = new ProjectManifestService(projectPath);
+    await original.rebuild();
+    const projectId = await original.getProjectId();
+    const movedProjectPath = path.join(tempDir, "moved-project");
+
+    await fs.rename(projectPath, movedProjectPath);
+    const moved = new ProjectManifestService(movedProjectPath);
+    const movedProjectId = await moved.getProjectId();
+    const diskPayload = JSON.parse(await fs.readFile(path.join(movedProjectPath, MANIFEST_REL_PATH), "utf8")) as Record<string, unknown>;
+
+    expect(movedProjectId).toBe(projectId);
+    expect(diskPayload.project_path).toBe(path.resolve(movedProjectPath));
+    expect((await moved.listDocuments()).some((item) => item.path === "02_正文/章节/第一章.md")).toBe(true);
   });
 
   it("does not rewrite the manifest when scanned entries are unchanged", async () => {
