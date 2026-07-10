@@ -38,6 +38,15 @@ export type CommitOptions = {
   cleanupContent?: boolean;
 };
 
+/** A validated, fully composed document replacement that has not been written. */
+export type PreparedGeneratedCacheCommit = {
+  cache_id: string;
+  target_path: string;
+  content: string;
+  mode: "replace" | "append";
+  action_key: string;
+};
+
 export type CleanupResult = {
   ok: boolean;
   skipped: boolean;
@@ -159,6 +168,22 @@ export class GeneratedCacheService {
   }
 
   async commitToTargets(cacheId: string, targetPaths?: string[], options: CommitOptions = {}): Promise<string[]> {
+    const commits = await this.prepareTargetCommit(cacheId, targetPaths, options);
+    await this.writePreparedCommits(commits);
+    const savedPaths = commits.map((commit) => commit.target_path);
+    await this.markCommitted(cacheId, savedPaths, { cleanupContent: options.cleanupContent });
+    return savedPaths;
+  }
+
+  /**
+   * Validates and composes target document content without touching target files.
+   * Durable callers submit these records through their CommitJournalService.
+   */
+  async prepareTargetCommit(
+    cacheId: string,
+    targetPaths?: string[],
+    options: CommitOptions = {}
+  ): Promise<PreparedGeneratedCacheCommit[]> {
     const meta = await this.ensurePending(cacheId);
     const paths = this.normalizePaths(targetPaths || meta.target_paths || []);
     if (!paths.length) {
@@ -177,18 +202,13 @@ export class GeneratedCacheService {
     }
 
     const mode = options.mode || meta.mode || "replace";
-    const savedPaths: string[] = [];
-
-    for (const relPath of paths) {
-      const nextText = await this.composeTargetText(relPath, content, mode, strip);
-      // Validate safe path using DocumentService
-      const targetFullPath = await this.documentService.resolveSafePath(relPath, { allowMissing: true });
-      await atomicWrite(targetFullPath, nextText);
-      savedPaths.push(relPath);
-    }
-
-    await this.markCommitted(cacheId, savedPaths, { cleanupContent: options.cleanupContent });
-    return savedPaths;
+    return Promise.all(paths.map(async (targetPath, index) => ({
+      cache_id: cacheId,
+      target_path: targetPath,
+      content: await this.composeTargetText(targetPath, content, mode, strip),
+      mode,
+      action_key: `target:${index}`
+    })));
   }
 
   async updateSavePlan(cacheId: string, savePlan: GeneratedSavePlan): Promise<GeneratedCacheMeta> {
@@ -210,6 +230,19 @@ export class GeneratedCacheService {
   }
 
   async commitSavePlan(cacheId: string, savePlan?: GeneratedSavePlan, options: CommitOptions = {}): Promise<string[]> {
+    const commits = await this.prepareSavePlanCommit(cacheId, savePlan, options);
+    await this.writePreparedCommits(commits);
+    const savedPaths = commits.map((commit) => commit.target_path);
+    await this.markCommitted(cacheId, savedPaths, { cleanupContent: options.cleanupContent });
+    return savedPaths;
+  }
+
+  /** Returns normalized target replacements for a save plan without writing files. */
+  async prepareSavePlanCommit(
+    cacheId: string,
+    savePlan?: GeneratedSavePlan,
+    options: CommitOptions = {}
+  ): Promise<PreparedGeneratedCacheCommit[]> {
     const meta = await this.ensurePending(cacheId);
     const plan = generatedSavePlanSchema.parse(savePlan || meta.save_plan || {});
     if (plan.action === "no_save") {
@@ -224,7 +257,7 @@ export class GeneratedCacheService {
       .filter((segment) => segment.target_path);
 
     if (!segments.length) {
-      return this.commitToTargets(cacheId, plan.target_paths, {
+      return this.prepareTargetCommit(cacheId, plan.target_paths, {
         ...options,
         mode: options.mode || plan.mode
       });
@@ -232,9 +265,9 @@ export class GeneratedCacheService {
 
     const fallbackContent = await this.readContent(cacheId);
     const strip = options.stripContent ?? true;
-    const savedPaths: string[] = [];
+    const commits: PreparedGeneratedCacheCommit[] = [];
 
-    for (const segment of segments) {
+    for (const [index, segment] of segments.entries()) {
       let content = String(segment.content || "").trim();
       if (!content) {
         content = strip ? fallbackContent.trim() : fallbackContent;
@@ -244,13 +277,15 @@ export class GeneratedCacheService {
       }
       const mode = segment.mode || plan.mode || "replace";
       const nextText = await this.composeTargetText(segment.target_path, content, mode, strip);
-      const targetFullPath = await this.documentService.resolveSafePath(segment.target_path, { allowMissing: true });
-      await atomicWrite(targetFullPath, nextText);
-      savedPaths.push(segment.target_path);
+      commits.push({
+        cache_id: cacheId,
+        target_path: segment.target_path,
+        content: nextText,
+        mode,
+        action_key: `segment:${index}`
+      });
     }
-
-    await this.markCommitted(cacheId, savedPaths, { cleanupContent: options.cleanupContent });
-    return savedPaths;
+    return commits;
   }
 
   async markCommitted(cacheId: string, savedPaths: string[], options: { cleanupContent?: boolean } = {}): Promise<GeneratedCacheMeta> {
@@ -389,6 +424,13 @@ export class GeneratedCacheService {
     }
 
     return content;
+  }
+
+  private async writePreparedCommits(commits: PreparedGeneratedCacheCommit[]): Promise<void> {
+    for (const commit of commits) {
+      const targetFullPath = await this.documentService.resolveSafePath(commit.target_path, { allowMissing: true });
+      await atomicWrite(targetFullPath, commit.content);
+    }
   }
 
   private normalizePaths(paths: string[]): string[] {

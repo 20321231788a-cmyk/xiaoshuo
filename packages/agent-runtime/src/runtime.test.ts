@@ -2478,6 +2478,10 @@ describe("agent-runtime chat flow", () => {
       deslopped: true
     });
     expect(await fs.readFile(path.join(tempDir, "02_正文", "第001章.txt"), "utf8")).toContain("林默沿着石阶一步步向上");
+    expect(runtime.listDurableCommitJournal(result.run_id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ target_path: expect.stringContaining("第001章.txt"), stage: "finalized" }),
+      expect.objectContaining({ target_path: expect.stringContaining("章节交接摘要.jsonl"), stage: "finalized" })
+    ]));
   });
 
   it("runs batch_generate locally and writes multiple chapter files", async () => {

@@ -101,6 +101,20 @@ describe("generated-cache-service", () => {
     await expect(service.readContent("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6")).rejects.toThrow();
   });
 
+  it("prepares a target commit without writing the target document", async () => {
+    const service = new GeneratedCacheService({ projectRoot: tempDir });
+    const cache = await service.create({ source: "chat", target_paths: ["02_正文/第一章.txt"], mode: "replace" });
+    await service.replace(cache.cache_id, "待 journal 提交的正文");
+
+    const commits = await service.prepareTargetCommit(cache.cache_id);
+
+    expect(commits).toEqual([
+      expect.objectContaining({ target_path: "02_正文/第一章.txt", content: "待 journal 提交的正文", action_key: "target:0" })
+    ]);
+    await expect(fs.access(path.join(tempDir, "02_正文", "第一章.txt"))).rejects.toThrow();
+    expect((await service.get(cache.cache_id)).status).toBe("pending");
+  });
+
   it("commits pending cache using append mode with separators", async () => {
     const service = new GeneratedCacheService({
       projectRoot: tempDir,

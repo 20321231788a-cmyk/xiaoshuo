@@ -2170,6 +2170,14 @@ npm test
 
 定向验证：`npx vitest run apps/desktop-shell/src/main/runtime/agent-routes.test.ts apps/desktop-shell/src/main/runtime/license-guarded-routes.test.ts`（2 files/20 tests）、`npm run typecheck -w @xiaoshuo/api-client`、`npm run typecheck -w @xiaoshuo/desktop-shell` 和 `git diff --check` 通过。P0-F 与 P0 均仍为实现中；`PRODUCT.md` 未纳入提交。
 
+### 15.63 2026-07-10 P0 正文生成 CommitJournal 接线记录
+
+- GeneratedCacheService 新增只准备、校验和合成目标文本的接口；持久调用者可以在不触碰目标文件的情况下取得稳定写入清单，缓存只在所有写入成功后标记 committed；
+- `body_generate` 在 durable execution 中将正文缓存提交经 CommitJournalService 写入；修正日志和章节交接摘要同样改为 journal 追加，保留非 durable `runSkill` 的旧兼容路径；
+- 回归测试断言正文和交接摘要均存在 finalized journal 记录，且缓存 prepare 本身不创建目标文件。
+
+定向验证：`npx vitest run packages/generated-cache/src/service.test.ts packages/agent-runtime/src/runtime.test.ts`（2 files/77 tests）、`npm run typecheck -w @xiaoshuo/generated-cache`、`npm run typecheck -w @xiaoshuo/agent-runtime` 和 `git diff --check` 通过。仍未覆盖聊天、Prompt Skill、HTTP 延后缓存提交和普通文件操作计划；P0-F 与 P0 均仍为实现中，`PRODUCT.md` 未纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

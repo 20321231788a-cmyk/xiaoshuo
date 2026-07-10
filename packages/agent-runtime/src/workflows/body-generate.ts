@@ -3,7 +3,7 @@ import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
 import type { ChatCompletionMessage } from "@xiaoshuo/model-client";
 import type { AgentRunRequest, AgentRunResponse } from "@xiaoshuo/shared";
 import { GraphMemory, type CheckGraphDraftConsistencyResult } from "@xiaoshuo/vector-service";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { applyHumanizerIfEnabled } from "../humanizer.js";
 import {
   buildBodyChapterSystemPrompt,
@@ -162,7 +162,7 @@ export class BodyGenerateWorkflow implements WorkflowHandler {
     }
 
     throwIfAborted(context.signal);
-    const savedPaths = await context.cache.commitSavePlan(entry.cache_id, savePlan, { cleanupContent: true });
+    const savedPaths = await commitBodyGeneratedCache(entry.cache_id, savePlan, context);
     throwIfAborted(context.signal);
     const graphUpdateError = await updateGraphMemoryForSavedPaths(savedPaths, context);
     if (savedPaths.includes(outputPath)) {
@@ -631,10 +631,13 @@ async function appendRevisionLog(
   }
   lines.push("", "修正说明:", (revisionLog || "模型未返回修正说明").trim(), "");
 
-  await context.documents.appendDocument("00_设定集/修正日志/正文二次修正日志.txt", lines.join("\n"), {
-    source: "generation",
-    summary: `追加第 ${chapter} 章修正日志`
-  });
+  await appendBodyDocument(
+    "00_设定集/修正日志/正文二次修正日志.txt",
+    lines.join("\n"),
+    `追加第 ${chapter} 章修正日志`,
+    `revision-log:${chapter}`,
+    context
+  );
 }
 
 async function appendHandoff(
@@ -664,9 +667,70 @@ async function appendHandoff(
     risks: checkResult.risks
   };
 
-  await context.documents.appendDocument("00_设定集/章节交接摘要.jsonl", JSON.stringify(record) + "\n", {
+  await appendBodyDocument(
+    "00_设定集/章节交接摘要.jsonl",
+    JSON.stringify(record) + "\n",
+    `追加第 ${chapter} 章交接摘要`,
+    `handoff:${chapter}`,
+    context
+  );
+}
+
+async function commitBodyGeneratedCache(
+  cacheId: string,
+  savePlan: Parameters<WorkflowRunContext["cache"]["prepareSavePlanCommit"]>[1],
+  context: WorkflowRunContext
+): Promise<string[]> {
+  const durable = context.durableExecution;
+  if (!durable || !context.commitJournal) {
+    return context.cache.commitSavePlan(cacheId, savePlan, { cleanupContent: true });
+  }
+
+  const commits = await context.cache.prepareSavePlanCommit(cacheId, savePlan, { cleanupContent: true });
+  for (const commit of commits) {
+    await context.commitJournal.write({
+      runId: durable.runId,
+      stepId: durable.stepId,
+      attemptId: durable.attemptId,
+      action: `workflow.body_generate.${commit.action_key}`,
+      targetPath: commit.target_path,
+      content: commit.content,
+      idempotencyKey: createHash("sha256")
+        .update(JSON.stringify({ kind: "body_generated_cache", cache_id: cacheId, action_key: commit.action_key, run_id: durable.runId, step_id: durable.stepId, target_path: commit.target_path }), "utf8")
+        .digest("hex"),
+      source: "skill",
+      summary: `正文生成提交：${commit.target_path}`
+    });
+  }
+  await context.cache.markCommitted(cacheId, commits.map((commit) => commit.target_path), { cleanupContent: true });
+  return commits.map((commit) => commit.target_path);
+}
+
+async function appendBodyDocument(
+  targetPath: string,
+  appendedText: string,
+  summary: string,
+  writeKey: string,
+  context: WorkflowRunContext
+): Promise<void> {
+  const durable = context.durableExecution;
+  if (!durable || !context.commitJournal) {
+    await context.documents.appendDocument(targetPath, appendedText, { source: "generation", summary });
+    return;
+  }
+  const current = await context.documents.readRawText(targetPath).catch(() => "");
+  await context.commitJournal.write({
+    runId: durable.runId,
+    stepId: durable.stepId,
+    attemptId: durable.attemptId,
+    action: `workflow.body_generate.${writeKey}`,
+    targetPath,
+    content: current + appendedText,
+    idempotencyKey: createHash("sha256")
+      .update(JSON.stringify({ kind: "body_document_append", write_key: writeKey, run_id: durable.runId, step_id: durable.stepId, target_path: targetPath }), "utf8")
+      .digest("hex"),
     source: "generation",
-    summary: `追加第 ${chapter} 章交接摘要`
+    summary
   });
 }
 
