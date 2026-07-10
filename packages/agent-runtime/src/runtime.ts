@@ -50,6 +50,7 @@ import type { WorkflowRunContext } from "./workflows/types.js";
 import { isCancellationError, throwIfAborted, type AgentRunOptions } from "./cancellation.js";
 import { RunCoordinator, RunRequestReplayError, type DurableRunExecution } from "./kernel/run-coordinator.js";
 import { CommitJournalService } from "./kernel/commit-journal-service.js";
+import { DurableWorkflowCheckpointStore } from "./kernel/workflow-checkpoint.js";
 
 const TARGET_WORD_SKILL_IDS = new Set([
   "body_generate",
@@ -381,7 +382,7 @@ export class AgentRuntimeService {
       }
       if (isWorkflowSkillId(skillId)) {
         trace?.mark("workflow_started", { selected_skill_id: skillId });
-        return this.runLocalWorkflowSkill(skillId, request, trace, options);
+        return this.runLocalWorkflowSkill(skillId, request, trace, options, execution);
       }
       if (!(await this.skillRunner.canRunSkillLocally(skillId))) {
         throw new Error(`TS runtime 尚未接管该意图：${intent}`);
@@ -508,7 +509,7 @@ export class AgentRuntimeService {
       }
       if (isWorkflowSkillId(skillId)) {
         trace?.mark("workflow_started", { selected_skill_id: skillId });
-        yield* this.streamLocalWorkflowSkill(skillId, request, trace, options);
+        yield* this.streamLocalWorkflowSkill(skillId, request, trace, options, execution);
         return;
       }
       if (!(await this.skillRunner.canRunSkillLocally(skillId))) {
@@ -641,7 +642,11 @@ export class AgentRuntimeService {
     }
   }
 
-  private buildWorkflowContext(trace?: AgentTraceRecorder, options: AgentRunOptions = {}): WorkflowRunContext {
+  private buildWorkflowContext(
+    trace?: AgentTraceRecorder,
+    options: AgentRunOptions = {},
+    execution?: DurableRunExecution
+  ): WorkflowRunContext {
     return {
       projectRoot: this.documents.projectRoot,
       config: this.config,
@@ -653,7 +658,14 @@ export class AgentRuntimeService {
       savePlanner: this.savePlanner,
       skillRunner: this.skillRunner,
       trace,
-      signal: options.signal
+      signal: options.signal,
+      checkpoint: execution
+        ? new DurableWorkflowCheckpointStore(this.runCoordinator.store, {
+            runId: execution.run_id,
+            stepId: execution.step_id,
+            attemptId: execution.attempt_id
+          })
+        : undefined
     };
   }
 
@@ -1311,7 +1323,13 @@ export class AgentRuntimeService {
     }
   }
 
-  private async *streamLocalWorkflowSkill(skillId: string, request: AgentRunRequest, trace?: AgentTraceRecorder, options: AgentRunOptions = {}): AsyncGenerator<AgentStreamEvent> {
+  private async *streamLocalWorkflowSkill(
+    skillId: string,
+    request: AgentRunRequest,
+    trace?: AgentTraceRecorder,
+    options: AgentRunOptions = {},
+    execution?: DurableRunExecution
+  ): AsyncGenerator<AgentStreamEvent> {
     throwIfAborted(options.signal);
     request = { ...request, skill_id: skillId };
     yield {
@@ -1326,7 +1344,7 @@ export class AgentRuntimeService {
       stage: "workflow_start",
       skill_id: skillId
     };
-    const payload = await this.runLocalWorkflowSkill(skillId, request, trace, options);
+    const payload = await this.runLocalWorkflowSkill(skillId, request, trace, options, execution);
     throwIfAborted(options.signal);
     const resultText = this.extractStreamPreviewText(payload);
     if (resultText.trim()) {
@@ -1638,10 +1656,16 @@ export class AgentRuntimeService {
     };
   }
 
-  private async runLocalWorkflowSkill(skillId: string, request: AgentRunRequest, trace?: AgentTraceRecorder, options: AgentRunOptions = {}): Promise<AgentRunResponse> {
+  private async runLocalWorkflowSkill(
+    skillId: string,
+    request: AgentRunRequest,
+    trace?: AgentTraceRecorder,
+    options: AgentRunOptions = {},
+    execution?: DurableRunExecution
+  ): Promise<AgentRunResponse> {
     throwIfAborted(options.signal);
     request = { ...request, skill_id: skillId };
-    const context = this.buildWorkflowContext(trace, options);
+    const context = this.buildWorkflowContext(trace, options, execution);
     const handler = getWorkflowHandler(skillId);
     if (handler) {
       return handler.runAgent(request, context);

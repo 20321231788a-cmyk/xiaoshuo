@@ -20,10 +20,22 @@ export class BatchGenerateWorkflow implements WorkflowHandler {
     const results: Array<Record<string, unknown>> = [];
     const savedPaths: string[] = [];
     const webSearchSources: WebSearchSource[] = [];
+    const completed = new Map(
+      (context.checkpoint?.listCompletedUnits(this.id) || []).map((checkpoint) => [checkpoint.unit_id, checkpoint.payload])
+    );
 
     throwIfAborted(context.signal);
     for (let chapter = startChapter; chapter <= endChapter; chapter += 1) {
       throwIfAborted(context.signal);
+      const unitId = `chapter:${chapter}`;
+      const checkpoint = completed.get(unitId);
+      if (checkpoint) {
+        const restored = restoreChapterResult(chapter, checkpoint);
+        savedPaths.push(...restored.saved_paths);
+        webSearchSources.push(...restored.web_search_sources);
+        results.push(restored.result);
+        continue;
+      }
       const originalInstruction = (request.content || "").trim();
       const chapterInstruction = shouldWriteSkillResult(originalInstruction)
         ? `生成第${chapter}章正文并写入文件`
@@ -38,9 +50,20 @@ export class BatchGenerateWorkflow implements WorkflowHandler {
       throwIfAborted(context.signal);
       savedPaths.push(...result.saved_paths);
       webSearchSources.push(...(result.web_search_sources || []));
-      results.push({
+      const chapterResult = {
         ...(result.skill_result?.data || {}),
         saved_paths: result.saved_paths
+      };
+      results.push(chapterResult);
+      context.checkpoint?.completeUnit({
+        workflow_id: this.id,
+        unit_id: unitId,
+        payload: {
+          chapter,
+          saved_paths: result.saved_paths,
+          web_search_sources: result.web_search_sources || [],
+          result: chapterResult
+        }
       });
     }
 
@@ -75,6 +98,33 @@ export class BatchGenerateWorkflow implements WorkflowHandler {
       web_search_sources: batchWebSearchSources
     };
   }
+}
+
+function restoreChapterResult(chapter: number, checkpoint: Record<string, unknown>): {
+  saved_paths: string[];
+  web_search_sources: WebSearchSource[];
+  result: Record<string, unknown>;
+} {
+  const savedPaths = Array.isArray(checkpoint.saved_paths)
+    ? checkpoint.saved_paths.map((value) => String(value || "").trim()).filter(Boolean)
+    : [];
+  const webSearchSources = Array.isArray(checkpoint.web_search_sources)
+    ? checkpoint.web_search_sources.filter(isWebSearchSource)
+    : [];
+  const result = checkpoint.result && typeof checkpoint.result === "object" && !Array.isArray(checkpoint.result)
+    ? { ...(checkpoint.result as Record<string, unknown>) }
+    : { chapter, saved_paths: savedPaths, resumed_from_checkpoint: true };
+  return { saved_paths: savedPaths, web_search_sources: webSearchSources, result };
+}
+
+function isWebSearchSource(value: unknown): value is WebSearchSource {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      String((value as Record<string, unknown>).title || "").trim() &&
+      String((value as Record<string, unknown>).url || "").trim()
+  );
 }
 
 function resolveBatchChapterRange(request: AgentRunRequest): [number, number] {

@@ -172,7 +172,7 @@ export async function handleAgentRoutes(
       }
     } catch (error) {
       const code = lifecycleErrorCode(error);
-      const status = code === "RUN_NOT_FOUND" || code === "CONFIRMATION_NOT_FOUND" ? 404 : code === "REQUEST_ID_REUSED" || code.includes("CONFLICT") || code.includes("VERSION") ? 409 : 400;
+      const status = code === "RUN_NOT_FOUND" || code === "CONFIRMATION_NOT_FOUND" ? 404 : code === "REQUEST_ID_REUSED" || code.includes("CONFLICT") || code.includes("VERSION") || code.includes("CONFIRMATION_") ? 409 : 400;
       deps.writeJson(response, status, { detail: error instanceof Error ? error.message : String(error), code });
       return true;
     }

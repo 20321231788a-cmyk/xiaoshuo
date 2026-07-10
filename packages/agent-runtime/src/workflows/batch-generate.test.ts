@@ -7,6 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { GeneratedSavePlanner } from "../generated-save-planner.js";
+import { RunCoordinator } from "../kernel/run-coordinator.js";
+import { DurableWorkflowCheckpointStore } from "../kernel/workflow-checkpoint.js";
 import { PromptSkillRunner } from "../skill-runner.js";
 import { BatchGenerateWorkflow } from "./batch-generate.js";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
@@ -151,4 +153,86 @@ describe("BatchGenerateWorkflow", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]?.content).toMatch(/^生成第1章正文并写入文件。/);
   });
+
+  it("resumes the same durable run at the first unchecked chapter", async () => {
+    const request: AgentRunRequest = {
+      request_id: "batch-checkpoint-recovery",
+      conversation_id: "",
+      content: "生成第1章到第2章正文",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "batch_generate",
+      attachment_ids: []
+    };
+    const coordinator = new RunCoordinator({ projectRoot: tempDir, autoHeartbeat: false });
+    const calls: number[] = [];
+    let failChapterTwo = true;
+    const bodyHandler: WorkflowHandler = {
+      id: "body_generate",
+      async runAgent(chapterRequest): Promise<AgentRunResponse> {
+        const chapter = Number(/第(\d+)章/.exec(chapterRequest.content || "")?.[1] || 0);
+        calls.push(chapter);
+        if (chapter === 2 && failChapterTwo) {
+          failChapterTwo = false;
+          throw new Error("simulated runtime interruption");
+        }
+        const savedPath = `02_正文/第${String(chapter).padStart(3, "0")}章.txt`;
+        return chapterResponse(chapter, savedPath);
+      }
+    };
+    const workflow = new BatchGenerateWorkflow(bodyHandler);
+    const firstExecution = coordinator.beginRun(request, { stepType: "workflow", retryable: true });
+    const firstContext = createWorkflowContext();
+    firstContext.checkpoint = new DurableWorkflowCheckpointStore(coordinator.store, {
+      runId: firstExecution.run_id,
+      stepId: firstExecution.step_id,
+      attemptId: firstExecution.attempt_id
+    });
+
+    await expect(workflow.runAgent(request, firstContext)).rejects.toThrow("simulated runtime interruption");
+    const failed = coordinator.failRun(firstExecution, new Error("simulated runtime interruption"));
+    expect(failed.status).toBe("failed");
+    expect(coordinator.listEvents(firstExecution.run_id).filter((event) => event.event_type === "workflow.unit.completed")).toEqual([
+      expect.objectContaining({ payload: expect.objectContaining({ unit_id: "chapter:1" }) })
+    ]);
+    coordinator.close();
+
+    const recovered = new RunCoordinator({ projectRoot: tempDir, autoHeartbeat: false });
+    try {
+      const resumed = recovered.resumeRun(firstExecution.run_id, "resume-batch-checkpoint", failed.version);
+      const resumedContext = createWorkflowContext();
+      resumedContext.checkpoint = new DurableWorkflowCheckpointStore(recovered.store, {
+        runId: resumed.run_id,
+        stepId: resumed.step_id,
+        attemptId: resumed.attempt_id
+      });
+
+      const response = await workflow.runAgent(request, resumedContext);
+      recovered.completeRun(resumed, response);
+
+      expect(calls).toEqual([1, 2, 2]);
+      expect(response.saved_paths).toEqual(["02_正文/第001章.txt", "02_正文/第002章.txt"]);
+      expect(recovered.getRun(firstExecution.run_id)).toMatchObject({ run_id: firstExecution.run_id, status: "completed" });
+      expect(recovered.listEvents(firstExecution.run_id).filter((event) => event.event_type === "workflow.unit.completed")).toHaveLength(2);
+    } finally {
+      recovered.close();
+    }
+  });
 });
+
+function chapterResponse(chapter: number, savedPath: string): AgentRunResponse {
+  return {
+    intent: "skill",
+    reply: `已写入 ${savedPath}`,
+    results: [],
+    skill_result: {
+      status: "done",
+      result: `第${chapter}章正文`,
+      saved_path: savedPath,
+      data: { chapter, saved_paths: [savedPath] }
+    },
+    saved_paths: [savedPath],
+    requires_confirmation: false
+  };
+}

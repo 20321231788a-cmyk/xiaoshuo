@@ -1,0 +1,82 @@
+name: Desktop RC and Nightly
+
+on:
+  schedule:
+    - cron: "17 2 * * *"
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Release channel to build
+        required: true
+        default: nightly
+        type: choice
+        options:
+          - nightly
+          - rc
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-rc-${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'nightly' }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'nightly' }} package and evidence
+    runs-on: windows-latest
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.channel == 'rc' && 'release-candidate' || 'nightly' }}
+    timeout-minutes: 60
+    env:
+      RELEASE_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'nightly' }}
+      CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Quality gates
+        run: |
+          npm run typecheck
+          npm test
+          npm run build:workbench
+          npm run build:desktop
+          npm run test:e2e
+          npm run smoke:desktop
+
+      - name: Package Windows installer
+        run: npm run dist -w @xiaoshuo/desktop-shell
+
+      - name: Verify RC signing and timestamp
+        if: ${{ env.RELEASE_CHANNEL == 'rc' }}
+        shell: pwsh
+        run: ./apps/desktop-shell/scripts/verify-authenticode.ps1 -InstallerPath (Get-ChildItem apps/desktop-shell/release/ArcWriter-Setup-*.exe | Select-Object -First 1).FullName
+
+      - name: Run installed-build smoke
+        shell: pwsh
+        run: ./apps/desktop-shell/scripts/smoke-installed-desktop.ps1 -InstallerPath (Get-ChildItem apps/desktop-shell/release/ArcWriter-Setup-*.exe | Select-Object -First 1).FullName -OutputPath artifacts/installed-smoke.json
+
+      - name: Create release evidence
+        run: node apps/desktop-shell/scripts/verify-release-evidence.mjs --artifact-dir apps/desktop-shell/release --installed-evidence artifacts/installed-smoke.json --channel $env:RELEASE_CHANNEL --out artifacts/release-evidence.json
+
+      - name: Upload installer and immutable evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: arcwriter-${{ env.RELEASE_CHANNEL }}-${{ github.sha }}
+          path: |
+            apps/desktop-shell/release/ArcWriter-Setup-*.exe
+            apps/desktop-shell/release/ArcWriter-Setup-*.exe.blockmap
+            apps/desktop-shell/release/latest.yml
+            artifacts/installed-smoke.json
+            artifacts/release-evidence.json
+          if-no-files-found: error
+          retention-days: 30

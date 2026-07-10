@@ -92,6 +92,71 @@ describe("RunCoordinator", () => {
     coordinator.completeRun(resumed, response("恢复完成"));
   });
 
+  it("holds a confirmation-required step at a durable checkpoint until approval and then resumes it", () => {
+    const coordinator = createCoordinator("runtime-confirmation");
+    const execution = coordinator.beginRun(request(), { stepType: "file_operation", requiresConfirmation: true });
+
+    const waiting = coordinator.completeRun(execution, response("已生成写入预览"));
+    const confirmation = coordinator.store.listConfirmations(execution.run_id, "pending")[0]!;
+    expect(waiting).toMatchObject({ status: "waiting_confirmation" });
+    expect(waiting.steps[0]).toMatchObject({ status: "waiting_confirmation", requires_confirmation: true });
+    expect(coordinator.store.listAttempts(execution.run_id, execution.step_id)).toMatchObject([
+      { status: "interrupted", error_code: "CONFIRMATION_REQUIRED" }
+    ]);
+
+    const approved = coordinator.resolveConfirmation(confirmation.confirmation_id, "approved", "operation-approve", confirmation.version);
+    expect(approved).toMatchObject({ status: "approved", resolved_by: "user" });
+    const paused = coordinator.getRun(execution.run_id)!;
+    expect(paused).toMatchObject({ status: "paused", steps: [expect.objectContaining({ status: "pending", requires_confirmation: false })] });
+
+    const resumed = coordinator.resumeRun(execution.run_id, "operation-resume-approved", paused.version);
+    expect(coordinator.completeRun(resumed, response("确认后完成")).status).toBe("completed");
+  });
+
+  it("makes repeated matching confirmation decisions idempotent and fails a rejected step", () => {
+    const coordinator = createCoordinator("runtime-confirmation-reject");
+    const execution = coordinator.beginRun(request(), { stepType: "file_operation", requiresConfirmation: true });
+    coordinator.completeRun(execution, response("预览"));
+    const confirmation = coordinator.store.listConfirmations(execution.run_id, "pending")[0]!;
+
+    const rejected = coordinator.resolveConfirmation(confirmation.confirmation_id, "rejected", "operation-reject", confirmation.version);
+    expect(rejected.status).toBe("rejected");
+    expect(coordinator.getRun(execution.run_id)).toMatchObject({
+      status: "failed",
+      error_code: "CONFIRMATION_REJECTED",
+      steps: [expect.objectContaining({ status: "failed", error_code: "CONFIRMATION_REJECTED" })]
+    });
+    expect(
+      coordinator.resolveConfirmation(confirmation.confirmation_id, "rejected", "operation-reject-replay", confirmation.version)
+    ).toMatchObject({ status: "rejected" });
+  });
+
+  it("expires abandoned confirmation checkpoints with an explicit failure code", () => {
+    let nowMs = Date.parse("2026-07-10T04:00:00.000Z");
+    const coordinator = new RunCoordinator({
+      projectRoot: tempDir,
+      runtimeInstanceId: "runtime-confirmation-expiry",
+      now: () => new Date(nowMs),
+      autoHeartbeat: false,
+      idFactory: sequenceFactory("expiry")
+    });
+    coordinators.push(coordinator);
+    const execution = coordinator.beginRun(request(), { stepType: "file_operation", requiresConfirmation: true });
+    coordinator.completeRun(execution, response("预览"));
+
+    nowMs += 16 * 60_000;
+    expect(coordinator.expirePendingConfirmations()).toBe(1);
+    expect(coordinator.store.listConfirmations(execution.run_id)[0]).toMatchObject({
+      status: "expired",
+      resolved_by: "policy"
+    });
+    expect(coordinator.getRun(execution.run_id)).toMatchObject({
+      status: "failed",
+      error_code: "CONFIRMATION_EXPIRED",
+      steps: [expect.objectContaining({ status: "failed", error_code: "CONFIRMATION_EXPIRED" })]
+    });
+  });
+
   it("cooperatively cancels an active run", () => {
     const coordinator = createCoordinator("runtime-cancel");
     const execution = coordinator.beginRun(request());

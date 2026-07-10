@@ -18,4 +18,5 @@ export * from "./kernel/feature-flag-registry.js";
 export * from "./kernel/execution-store-port.js";
 export * from "./kernel/execution-store.js";
 export * from "./kernel/commit-journal-service.js";
+export * from "./kernel/workflow-checkpoint.js";
 export * from "./kernel/run-coordinator.js";

@@ -9,10 +9,19 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   windows:
-    name: Windows installer
+    name: Windows release gate
     runs-on: windows-latest
+    environment: production
+    timeout-minutes: 60
+    env:
+      CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -27,7 +36,10 @@ jobs:
         run: npm ci
 
       - name: Typecheck
-        run: npm run typecheck --workspaces --if-present
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
 
       - name: Build workbench
         run: npm run build:workbench
@@ -35,8 +47,31 @@ jobs:
       - name: Build desktop
         run: npm run build:desktop
 
+      - name: Browser E2E
+        run: npm run test:e2e
+
+      - name: Desktop source smoke
+        run: npm run smoke:desktop
+
+      - name: Verify tag matches desktop version
+        shell: pwsh
+        run: |
+          $version = (Get-Content apps/desktop-shell/package.json -Raw | ConvertFrom-Json).version
+          if ($env:GITHUB_REF_NAME -ne "v$version") { throw "Tag $env:GITHUB_REF_NAME does not match desktop version v$version" }
+
       - name: Package installer
         run: npm run dist -w @xiaoshuo/desktop-shell
+
+      - name: Verify signing and timestamp
+        shell: pwsh
+        run: ./apps/desktop-shell/scripts/verify-authenticode.ps1 -InstallerPath (Get-ChildItem apps/desktop-shell/release/ArcWriter-Setup-*.exe | Select-Object -First 1).FullName
+
+      - name: Run installed-build smoke
+        shell: pwsh
+        run: ./apps/desktop-shell/scripts/smoke-installed-desktop.ps1 -InstallerPath (Get-ChildItem apps/desktop-shell/release/ArcWriter-Setup-*.exe | Select-Object -First 1).FullName -OutputPath artifacts/installed-smoke.json
+
+      - name: Create same-commit release evidence
+        run: node apps/desktop-shell/scripts/verify-release-evidence.mjs --artifact-dir apps/desktop-shell/release --installed-evidence artifacts/installed-smoke.json --channel release --out artifacts/release-evidence.json
 
       - name: Publish release assets
         uses: softprops/action-gh-release@v2
@@ -47,3 +82,5 @@ jobs:
             apps/desktop-shell/release/ArcWriter-Setup-*.exe
             apps/desktop-shell/release/ArcWriter-Setup-*.exe.blockmap
             apps/desktop-shell/release/latest.yml
+            artifacts/installed-smoke.json
+            artifacts/release-evidence.json

@@ -244,6 +244,13 @@ export class RunCoordinator {
     if (active.control === "pause" || current.pause_requested_at) {
       return this.settlePaused(active, new Error("Pause checkpoint reached"));
     }
+    const step = this.store.getStep(execution.run_id, execution.step_id);
+    if (!step) {
+      throw Object.assign(new Error(`Step ${execution.step_id} does not exist in run ${execution.run_id}`), { code: "STEP_NOT_FOUND" });
+    }
+    if (step.requires_confirmation || response.requires_confirmation) {
+      return this.waitForConfirmation(active, step, response);
+    }
 
     const observationId = `observation_${this.idFactory()}`;
     const attempt = this.store.finishAttempt({
@@ -496,6 +503,41 @@ export class RunCoordinator {
       throw Object.assign(new Error(`Confirmation ${confirmationId} not found`), { code: "CONFIRMATION_NOT_FOUND" });
     }
     const run = this.requireRun(confirmation.run_id);
+    if (confirmation.status !== "pending") {
+      if (confirmation.status === status) {
+        const replay = this.store.createControlOperation({
+          operation_id: operationId,
+          run_id: confirmation.run_id,
+          step_id: confirmation.step_id,
+          confirmation_id: confirmationId,
+          operation_type: `confirmation.${status}`,
+          expected_version: expectedVersion,
+          version: 1,
+          status: "pending",
+          result: {},
+          error_code: "",
+          error: "",
+          created_at: this.timestamp(),
+          completed_at: ""
+        });
+        if (replay.confirmation_id !== confirmationId || replay.operation_type !== `confirmation.${status}`) {
+          throw new RunCoordinatorConflictError(run.run_id, `Operation ${operationId} belongs to another confirmation`);
+        }
+        this.completeControlOperation(replay, "applied", run);
+        return confirmation;
+      }
+      throw Object.assign(
+        new Error(`Confirmation ${confirmationId} has already been resolved as ${confirmation.status}`),
+        { code: "CONFIRMATION_ALREADY_RESOLVED" }
+      );
+    }
+    const step = this.store.getStep(confirmation.run_id, confirmation.step_id);
+    if (!step || run.status !== "waiting_confirmation" || step.status !== "waiting_confirmation") {
+      throw Object.assign(
+        new Error(`Confirmation ${confirmationId} is no longer the active checkpoint`),
+        { code: "CONFIRMATION_NOT_ACTIVE" }
+      );
+    }
     const operation = this.store.createControlOperation({
       operation_id: operationId,
       run_id: confirmation.run_id,
@@ -531,6 +573,9 @@ export class RunCoordinator {
       this.completeControlOperation(operation, "failed", run, new Error("Confirmation changed before resolution"));
       throw new RunCoordinatorConflictError(run.run_id, "Confirmation changed before resolution");
     }
+    const settled = status === "approved"
+      ? this.settleApprovedConfirmation(run, step, confirmationId)
+      : this.settleRejectedConfirmation(run, step, confirmationId, "CONFIRMATION_REJECTED", "用户拒绝执行高风险操作");
     this.store.appendEventInTransaction(run.run_id, {
       event_type: `confirmation.${status}`,
       step_id: confirmation.step_id,
@@ -538,6 +583,48 @@ export class RunCoordinator {
     });
     this.completeControlOperation(operation, "applied", this.requireRun(run.run_id));
     return resolved.value;
+  }
+
+  /** Resolve expired confirmation checkpoints without relying on an HTTP client. */
+  expirePendingConfirmations(): number {
+    const now = this.timestamp();
+    let expired = 0;
+    for (const run of this.store.listRuns({ limit: 500 })) {
+      for (const confirmation of this.store.listConfirmations(run.run_id, "pending")) {
+        const expiresAt = Date.parse(confirmation.expires_at);
+        if (!confirmation.expires_at || !Number.isFinite(expiresAt) || expiresAt > Date.parse(now)) {
+          continue;
+        }
+        const resolved = this.store.resolveConfirmation({
+          confirmation_id: confirmation.confirmation_id,
+          expected_version: confirmation.version,
+          status: "expired",
+          resolved_at: now,
+          resolved_by: "policy"
+        });
+        if (!resolved.applied) {
+          continue;
+        }
+        const currentRun = this.requireRun(run.run_id);
+        const step = this.store.getStep(run.run_id, confirmation.step_id);
+        if (currentRun.status === "waiting_confirmation" && step?.status === "waiting_confirmation") {
+          this.settleRejectedConfirmation(
+            currentRun,
+            step,
+            confirmation.confirmation_id,
+            "CONFIRMATION_EXPIRED",
+            "确认请求已过期"
+          );
+          this.store.appendEventInTransaction(run.run_id, {
+            event_type: "confirmation.expired",
+            step_id: confirmation.step_id,
+            payload: { confirmation_id: confirmation.confirmation_id, error_code: "CONFIRMATION_EXPIRED" }
+          });
+        }
+        expired += 1;
+      }
+    }
+    return expired;
   }
 
   heartbeat(): void {
@@ -567,6 +654,7 @@ export class RunCoordinator {
         lease_expires_at: this.leaseExpiry(heartbeatAt)
       });
     }
+    this.expirePendingConfirmations();
   }
 
   recoverStaleRuns(): AgentRunState[] {
@@ -686,6 +774,103 @@ export class RunCoordinator {
     });
   }
 
+  private waitForConfirmation(
+    active: ActiveExecution,
+    step: AgentExecutionStep,
+    response: AgentRunResponse
+  ): AgentRunState {
+    const createdAt = this.timestamp();
+    const confirmationId = `confirmation_${this.idFactory()}`;
+    const confirmation = this.store.upsertConfirmation({
+      confirmation_id: confirmationId,
+      version: 1,
+      run_id: active.run_id,
+      step_id: active.step_id,
+      action: step.action_id,
+      risk_level: "high",
+      summary: truncate(response.reply || response.skill_result?.result || "操作需要确认", 2_000),
+      target_paths: uniqueStrings(response.saved_paths || []),
+      expected_versions: {},
+      expected_hashes: {},
+      proposed_artifact_refs: [],
+      status: "pending",
+      // The default is deliberately finite so abandoned preview requests do
+      // not leave a durable run waiting forever.
+      expires_at: new Date(Date.parse(createdAt) + 15 * 60_000).toISOString()
+    }, 0);
+    if (!confirmation.applied || !confirmation.value) {
+      throw new RunCoordinatorConflictError(active.run_id, "Could not persist confirmation checkpoint");
+    }
+    const waiting = this.store.finishAttempt({
+      attempt_id: active.attempt_id,
+      expected_version: 1,
+      status: "interrupted",
+      step_status: "waiting_confirmation",
+      error_code: "CONFIRMATION_REQUIRED",
+      error: "等待用户确认",
+      ended_at: createdAt
+    });
+    if (!waiting.applied) {
+      throw new RunCoordinatorConflictError(active.run_id, "Step attempt changed before confirmation checkpoint");
+    }
+    const run = this.transitionRun(active.run_id, "waiting_confirmation", "confirmation.requested", {
+      confirmation_id: confirmation.value.confirmation_id,
+      action: step.action_id,
+      expires_at: confirmation.value.expires_at
+    });
+    this.releaseActive(active);
+    return run;
+  }
+
+  private settleApprovedConfirmation(
+    run: AgentRunState,
+    step: AgentExecutionStep,
+    confirmationId: string
+  ): AgentRunState {
+    assertStepStatusTransition(step.status, "pending");
+    const reset = this.store.upsertStep(run.run_id, {
+      ...step,
+      status: "pending",
+      requires_confirmation: false,
+      observation_id: "",
+      error_code: "",
+      error: "",
+      started_at: "",
+      ended_at: ""
+    }, step.version);
+    if (!reset.applied) {
+      throw new RunCoordinatorConflictError(run.run_id, "Step changed while approving confirmation");
+    }
+    return this.updateRun(run, "paused", "run.awaiting_resume", {
+      confirmation_id: confirmationId,
+      approved: true
+    });
+  }
+
+  private settleRejectedConfirmation(
+    run: AgentRunState,
+    step: AgentExecutionStep,
+    confirmationId: string,
+    code: string,
+    message: string
+  ): AgentRunState {
+    assertStepStatusTransition(step.status, "failed");
+    const failed = this.store.upsertStep(run.run_id, {
+      ...step,
+      status: "failed",
+      error_code: code,
+      error: message,
+      ended_at: this.timestamp()
+    }, step.version);
+    if (!failed.applied) {
+      throw new RunCoordinatorConflictError(run.run_id, "Step changed while settling confirmation");
+    }
+    return this.updateRun(run, "failed", "run.failed", {
+      confirmation_id: confirmationId,
+      error_code: code
+    }, { error_code: code, error: message });
+  }
+
   private transitionRun(
     runId: string,
     status: AgentRunStatus,
@@ -708,7 +893,7 @@ export class RunCoordinator {
       cancel_requested_at?: string;
       error_code?: string;
       error?: string;
-    }
+    } = {}
   ): AgentRunState {
     if (run.status !== status) {
       assertRunStatusTransition(run.status, status);
@@ -777,6 +962,15 @@ export class RunCoordinator {
   }
 
   private cancelInactiveRun(run: AgentRunState): AgentRunState {
+    for (const confirmation of this.store.listConfirmations(run.run_id, "pending")) {
+      this.store.resolveConfirmation({
+        confirmation_id: confirmation.confirmation_id,
+        expected_version: confirmation.version,
+        status: "superseded",
+        resolved_at: this.timestamp(),
+        resolved_by: "policy"
+      });
+    }
     for (const step of run.steps) {
       if (step.status === "pending" || step.status === "running" || step.status === "failed" || step.status === "waiting_confirmation") {
         this.store.upsertStep(run.run_id, { ...step, status: "cancelled", ended_at: this.timestamp() }, step.version);

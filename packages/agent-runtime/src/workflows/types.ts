@@ -8,6 +8,7 @@ import type { GeneratedSavePlanner } from "../generated-save-planner.js";
 import type { PromptSkillRunner } from "../skill-runner.js";
 import type { StreamingModelClient } from "../stream.js";
 import type { WebSearchClient } from "../web-search.js";
+import type { WorkflowCheckpointStore } from "../kernel/workflow-checkpoint.js";
 
 export type WorkflowRunContext = {
   projectRoot: string;
@@ -21,6 +22,7 @@ export type WorkflowRunContext = {
   skillRunner: PromptSkillRunner;
   trace?: AgentTraceRecorder;
   signal?: AbortSignal;
+  checkpoint?: WorkflowCheckpointStore;
 };
 
 export type WorkflowHandler = {

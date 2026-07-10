@@ -2114,6 +2114,14 @@ npm test
 
 仍未验收：受控的 desktop 持久覆盖与 safe-mode、shadow 对照报告、真实副作用幂等和完整发布门禁尚未完成。`PRODUCT.md` 继续保留且不纳入提交。
 
+### 15.56 2026-07-10 P0 Confirmation、Batch Checkpoint 与发布门禁记录
+
+- Confirmation 支持等待、批准后显式 resume、拒绝/过期失败、取消 supersede 和幂等决议；
+- batch_generate 将已完成章节写为 durable event checkpoint，同一 run 重启跳过已完成单元；
+- 增加 Windows PR CI、RC evidence 和 tag provenance gate，签名/安装 smoke 脚本 fail-closed；真实 GitHub environment、证书和 Windows runner 证据仍待配置后运行。
+
+本轮根级验证：`npm run typecheck`、`npm test`（79 files/596 tests）、`npm run build:desktop` 和 `git diff --check` 通过。P0 仍未验收；`PRODUCT.md` 未纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

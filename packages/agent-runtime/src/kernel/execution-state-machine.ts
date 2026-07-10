@@ -93,7 +93,10 @@ export const RUN_STATUS_TRANSITIONS = defineTransitions<ExecutionRunStatus>({
 export const STEP_STATUS_TRANSITIONS = defineTransitions<ExecutionStepStatus>({
   pending: ["running", "skipped", "cancelled"],
   running: ["pending", "waiting_confirmation", "done", "failed", "cancelled"],
-  waiting_confirmation: ["running", "failed", "skipped", "cancelled"],
+  // An approved confirmation resumes from a durable pending checkpoint.  The
+  // executor must explicitly claim a fresh attempt instead of completing the
+  // attempt that produced the preview.
+  waiting_confirmation: ["pending", "running", "failed", "skipped", "cancelled"],
   failed: ["pending", "skipped"],
   done: [],
   skipped: [],
