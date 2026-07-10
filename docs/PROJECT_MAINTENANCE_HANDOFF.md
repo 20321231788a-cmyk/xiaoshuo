@@ -2228,6 +2228,17 @@ npm test
 
 本轮定向验证：`npx vitest run packages/agent-runtime/src/runtime.test.ts packages/agent-runtime/src/kernel/run-coordinator.test.ts packages/agent-runtime/src/kernel/run-recovery.e2e.test.ts --reporter=dot`（3 files / 100 tests）、`npm run typecheck -w @xiaoshuo/agent-runtime` 和 `git diff --check` 通过。最终根级验证：`npm run typecheck`、`npm test`（86 files / 668 tests）通过。`PRODUCT.md` 未修改、未纳入提交；chat generated-save 的并发工作保持未暂存，未混入本提交。
 
+### 15.68 2026-07-10 P0 Chat Generated Save Durable Commit 记录
+
+- `chat/read_context` 的自动保存不再通过 `GeneratedCacheService.commitSavePlan()` 直接写目标文件；durable run 会用 `run_id + step_id + chat_auto_save` 派生确定性 cache，并通过当前 outer run 的 `commitGeneratedCache()` 写入 CommitJournal；
+- 同步与流式 chat 共享同一提交协议：模型回复先进入 pending cache，目标写入 journal finalized 后，outer run observation 完成，再统一把 cache 标记为 committed 并清理正文；
+- 覆盖 journal finalized 后、outer run complete 前崩溃的恢复窗口：同一 `run_id` resume 时优先读取 pending cache 复原最终回复，不重新调用模型，也不会重复写入目标文件；
+- 覆盖 outer run completed 后、cache metadata 收口失败的恢复窗口：重复同 `request_id` 或 completed-run 对账会从 observation 重放 finalizer，只补 `committed`/cleanup，不重新调用模型；
+- 本板块没有新增 SQLite schema。回滚代码不得删除已有 durable run、journal 或 deterministic cache；失败恢复仍以 cache 正文、保存计划和原 run journal 为依据；
+- 本板块只收口 chat/read_context 自动保存；显式会话 `write_target` 写回、普通 `file_operation` plan 和 card draw 写入仍是 P0-F 的剩余旁路，P0 继续为“实现中”。`PRODUCT.md` 未修改、未纳入提交。
+
+本轮定向验证：`npm run typecheck -w @xiaoshuo/agent-runtime`、`npx vitest run packages/agent-runtime/src/runtime.test.ts`（87 tests）和 `git diff --check` 通过。根级验证：`npm run typecheck`、`npm test`（86 files / 671 tests）、`npm run build:desktop`、`npm run build:workbench` 和 `git diff --check` 通过；Workbench 只有既有的 >500 kB chunk warning。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

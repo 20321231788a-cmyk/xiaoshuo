@@ -176,6 +176,7 @@ export class AgentRuntimeService {
       modelClient: this.modelClient
     });
     this.projectManifest = new ProjectManifestService(options.projectRoot);
+    void this.reconcileCompletedDurableGeneratedCaches().catch(() => undefined);
     if (options.autoRecoverStaleRuns !== false) {
       this.recoverStaleDurableRuns();
     }
@@ -329,7 +330,7 @@ export class AgentRuntimeService {
       const prepared = await this.skillRunner.runSkill(skillId, request, {
         ...runOptions,
         deferAutoCommit: true,
-        deterministicCacheId: deterministicPromptSkillCacheId(execution, skillId)
+        deterministicCacheId: deterministicGeneratedCacheId(execution, skillId)
       });
       const result = await this.commitDeferredPromptSkillResult(
         skillId,
@@ -345,7 +346,7 @@ export class AgentRuntimeService {
         streaming: false
       });
       this.runCoordinator.completeRun(execution, durableSkillAgentResponse(skillId, result));
-      await this.finalizeDeferredPromptSkillCache(result, execution.run_id, execution.request_id);
+      await this.finalizeDeferredGeneratedCache(result, execution.run_id, execution.request_id);
       await trace.finish({ saved_paths: this.resolveSavedPaths(result) });
       return result;
     } catch (error) {
@@ -384,13 +385,71 @@ export class AgentRuntimeService {
       );
     }
     const result = skillRunResponseSchema.parse(stored);
-    await this.finalizeDeferredPromptSkillCache(result, run.run_id, run.request_id);
+    await this.finalizeDeferredGeneratedCache(result, run.run_id, run.request_id);
     return withDurableSkillIdentity(
       result,
       run.run_id,
       run.request_id,
       true
     );
+  }
+
+  private getCompletedRunObservation(run: AgentRunState) {
+    const step = this.runCoordinator.store.getStep(run.run_id, run.current_step_id);
+    return step?.observation_id
+      ? this.runCoordinator.store.getObservation(step.observation_id)
+      : null;
+  }
+
+  private completedRunSkillResponse(run: AgentRunState): SkillRunResponse | null {
+    const observation = this.getCompletedRunObservation(run);
+    const stored = isRecord(observation) ? observation.skill_response : undefined;
+    return stored ? skillRunResponseSchema.parse(stored) : null;
+  }
+
+  private async reconcileCompletedAgentRunGeneratedCache(run: AgentRunState): Promise<void> {
+    const result = this.completedRunSkillResponse(run);
+    if (!result) {
+      return;
+    }
+    await this.finalizeDeferredGeneratedCache(result, run.run_id, run.request_id);
+  }
+
+  private async replayCompletedAgentResponse(run: AgentRunState): Promise<AgentRunResponse> {
+    const observation = this.getCompletedRunObservation(run);
+    if (!observation) {
+      throw codedRuntimeError(
+        "DURABLE_AGENT_RESULT_MISSING",
+        `Agent run ${run.run_id} 已完成，但缺少可重放结果`
+      );
+    }
+    const request = this.runCoordinator.getRecoveryRequest(run.run_id);
+    const rawSkillResult = this.completedRunSkillResponse(run);
+    if (rawSkillResult) {
+      await this.finalizeDeferredGeneratedCache(rawSkillResult, run.run_id, run.request_id);
+    }
+    const skillResult = rawSkillResult
+      ? withDurableSkillIdentity(rawSkillResult, run.run_id, run.request_id, true)
+      : undefined;
+    const savedPaths = canonicalGeneratedPaths([
+      ...stringListFromUnknown(observation.saved_paths),
+      ...(skillResult
+        ? [
+            ...stringListFromUnknown(skillResult.data?.saved_paths),
+            skillResult.saved_path || ""
+          ]
+        : [])
+    ]);
+    return {
+      run_id: run.run_id,
+      intent: classifyAgentIntent(request.content || "", request.skill_id || "", []),
+      reply: skillResult?.result || observation.summary || "任务已完成。",
+      results: [],
+      skill_result: skillResult,
+      saved_paths: savedPaths,
+      requires_confirmation: false,
+      current_skill: request.skill_id || undefined
+    };
   }
 
   private async runSkillInternal(skillId: string, request: SkillRunRequest, options: AgentRunOptions = {}): Promise<SkillRunResponse> {
@@ -772,7 +831,15 @@ export class AgentRuntimeService {
 
   async runAgent(request: AgentRunRequest, options: AgentRunOptions = {}): Promise<AgentRunResponse> {
     throwIfAborted(options.signal);
-    const execution = await this.beginDurableRun(request, options);
+    let execution: DurableRunExecution;
+    try {
+      execution = await this.beginDurableRun(request, options);
+    } catch (error) {
+      if (error instanceof RunRequestReplayError && error.run.status === "completed") {
+        return this.replayCompletedAgentResponse(error.run);
+      }
+      throw error;
+    }
     return this.executeDurableAgentRun(request, execution, options);
   }
 
@@ -782,6 +849,9 @@ export class AgentRuntimeService {
       execution = await this.beginDurableRun(request, {});
     } catch (error) {
       if (error instanceof RunRequestReplayError) {
+        if (error.run.status === "completed") {
+          await this.reconcileCompletedAgentRunGeneratedCache(error.run);
+        }
         return { run: error.run, created: false };
       }
       throw error;
@@ -820,7 +890,7 @@ export class AgentRuntimeService {
         streaming: false
       });
       this.runCoordinator.completeRun(execution, response);
-      await this.finalizeDeferredPromptSkillCache(
+      await this.finalizeDeferredGeneratedCache(
         response.skill_result,
         execution.run_id,
         execution.request_id
@@ -904,16 +974,37 @@ export class AgentRuntimeService {
     if (intent !== "chat" && intent !== "read_context") {
       throw new Error(`TS runtime 尚未接管该意图：${intent}`);
     }
+    const restored = execution
+      ? await this.restoreDeferredChatGeneratedResponse(request, intent, execution)
+      : null;
     return this.attachGeneratedSaveDecision(
       request,
-      await this.chatRunner.runAgent(request, intent, this.buildChatContextObserver(trace), options),
-      options
+      restored || await this.chatRunner.runAgent(request, intent, this.buildChatContextObserver(trace), options),
+      options,
+      execution
     );
   }
 
   async *streamAgentRun(request: AgentRunRequest, options: AgentRunOptions = {}): AsyncGenerator<AgentStreamEvent> {
     throwIfAborted(options.signal);
-    const execution = await this.beginDurableRun(request, options);
+    let execution: DurableRunExecution;
+    try {
+      execution = await this.beginDurableRun(request, options);
+    } catch (error) {
+      if (error instanceof RunRequestReplayError && error.run.status === "completed") {
+        const replay = await this.replayCompletedAgentResponse(error.run);
+        yield {
+          type: "start",
+          intent: replay.intent,
+          conversation_id: replay.conversation?.id || request.conversation_id || "",
+          skill_id: replay.current_skill || request.skill_id || "",
+          run_id: replay.run_id
+        };
+        yield { type: "final", payload: replay };
+        return;
+      }
+      throw error;
+    }
     const runOptions = { ...options, signal: execution.signal };
     const trace = this.createTraceRecorder({
       conversationId: request.conversation_id || "",
@@ -950,7 +1041,7 @@ export class AgentRuntimeService {
         streaming: true
       });
       this.runCoordinator.completeRun(execution, finalPayload);
-      await this.finalizeDeferredPromptSkillCache(
+      await this.finalizeDeferredGeneratedCache(
         finalPayload.skill_result,
         execution.run_id,
         execution.request_id
@@ -1038,11 +1129,27 @@ export class AgentRuntimeService {
     if (intent !== "chat" && intent !== "read_context") {
       throw new Error(`TS runtime 尚未接管该意图：${intent}`);
     }
+    const restored = execution
+      ? await this.restoreDeferredChatGeneratedResponse(request, intent, execution)
+      : null;
+    if (restored) {
+      yield {
+        type: "start",
+        intent,
+        conversation_id: restored.conversation?.id || request.conversation_id || "",
+        skill_id: ""
+      };
+      yield {
+        type: "final",
+        payload: await this.attachGeneratedSaveDecision(request, restored, options, execution)
+      };
+      return;
+    }
     for await (const event of this.chatRunner.streamAgentRun(request, intent, this.buildChatContextObserver(trace), options)) {
       if (event.type === "final") {
         yield {
           ...event,
-          payload: await this.attachGeneratedSaveDecision(request, event.payload, options)
+          payload: await this.attachGeneratedSaveDecision(request, event.payload, options, execution)
         };
         continue;
       }
@@ -1079,6 +1186,12 @@ export class AgentRuntimeService {
 
   listDurableCommitJournal(runId?: string) {
     return this.runCoordinator.listCommitJournal(runId);
+  }
+
+  async reconcileCompletedDurableGeneratedCaches(limit = 500): Promise<void> {
+    for (const run of this.runCoordinator.listRuns(["completed"], limit)) {
+      await this.reconcileCompletedAgentRunGeneratedCache(run);
+    }
   }
 
   exportDurableRun(runId: string): AgentRunExport {
@@ -1202,12 +1315,13 @@ export class AgentRuntimeService {
             : "skill"
           : "chat";
     const writeRequested = initialIntent === "file_operation" || hasExplicitWriteIntent(request.content || "");
+    const retryable = initialIntent !== "file_operation" || !writeRequested;
     return this.runCoordinator.beginRun(request, {
       projectId: await this.projectManifest.getProjectId(),
       stepType,
       actionId: `agent.${initialIntent}`,
       skillId: request.skill_id || "",
-      retryable: !writeRequested,
+      retryable,
       requiresConfirmation: initialIntent === "file_operation",
       signal: options.signal
     });
@@ -1536,7 +1650,47 @@ export class AgentRuntimeService {
     })[0]?.skillId || "";
   }
 
-  private async attachGeneratedSaveDecision(request: AgentRunRequest, response: AgentRunResponse, options: AgentRunOptions = {}): Promise<AgentRunResponse> {
+  private async restoreDeferredChatGeneratedResponse(
+    request: AgentRunRequest,
+    intent: "chat" | "read_context",
+    execution: DurableRunExecution
+  ): Promise<AgentRunResponse | null> {
+    if (!hasExplicitWriteIntent(request.content || "")) {
+      return null;
+    }
+    const cacheId = deterministicGeneratedCacheId(execution, "chat_generated", "chat_auto_save");
+    const meta = await this.cache.get(cacheId).catch(() => null);
+    if (
+      !meta
+      || meta.skill_id !== "chat_generated"
+      || (meta.status !== "pending" && meta.status !== "committed")
+      || !meta.save_plan
+    ) {
+      return null;
+    }
+    const reply = await this.cache.readContent(cacheId).catch(() => "");
+    if (!reply.trim()) {
+      return null;
+    }
+    const conversation = request.conversation_id
+      ? await this.conversations.getConversation(request.conversation_id).catch(() => undefined)
+      : undefined;
+    return {
+      intent,
+      reply,
+      conversation,
+      results: [],
+      saved_paths: [],
+      requires_confirmation: false
+    };
+  }
+
+  private async attachGeneratedSaveDecision(
+    request: AgentRunRequest,
+    response: AgentRunResponse,
+    options: AgentRunOptions = {},
+    execution?: DurableRunExecution
+  ): Promise<AgentRunResponse> {
     throwIfAborted(options.signal);
     if (response.intent !== "chat" && response.intent !== "read_context") {
       return response;
@@ -1544,42 +1698,94 @@ export class AgentRuntimeService {
     if (response.saved_paths.length || response.skill_result?.data?.pending_save) {
       return response;
     }
-    const content = String(response.reply || "").trim();
+    let content = String(response.reply || "").trim();
     if (!content || !hasExplicitWriteIntent(request.content || "")) {
       return response;
     }
 
-    const plan = await this.savePlanner.planGeneratedSave({
-      instruction: request.content || "",
-      content,
-      source: "chat",
-      skillId: "chat_generated",
-      currentPath: request.current_path || "",
-      chapter: this.resolveSkillChapter("body_generate", request),
-      writeRequested: true,
-      defaultMode: "replace"
-    }, options);
+    const deterministicCacheId = execution
+      ? deterministicGeneratedCacheId(execution, "chat_generated", "chat_auto_save")
+      : "";
+    const existing = deterministicCacheId
+      ? await this.cache.get(deterministicCacheId).catch(() => null)
+      : null;
+    const cachedContent = existing
+      ? await this.cache.readContent(existing.cache_id).catch(() => "")
+      : "";
+    if (cachedContent.trim()) {
+      if (cachedContent !== content) {
+        throw codedRuntimeError(
+          "CHAT_GENERATED_CACHE_CONTENT_CONFLICT",
+          "同一 durable chat run 已绑定到不同生成结果"
+        );
+      }
+      content = cachedContent;
+    }
+
+    const plan = existing?.save_plan || await this.savePlanner.planGeneratedSave({
+        instruction: request.content || "",
+        content,
+        source: "chat",
+        skillId: "chat_generated",
+        currentPath: request.current_path || "",
+        chapter: this.resolveSkillChapter("body_generate", request),
+        writeRequested: true,
+        defaultMode: "replace"
+      }, options);
     throwIfAborted(options.signal);
 
     if (plan.action === "no_save" || !plan.target_paths.length) {
       return response;
     }
 
-    const entry = await this.cache.create({
-      source: "chat",
-      target_paths: plan.target_paths,
-      skill_id: "chat_generated",
-      conversation_id: response.conversation?.id || request.conversation_id || "",
-      mode: plan.mode,
-      summary: "AI 会话生成保存计划",
-      save_plan: plan
-    });
-    const meta = await this.cache.replace(entry.cache_id, content);
+    const entry = existing || (deterministicCacheId
+      ? await this.cache.createWithId(deterministicCacheId, {
+          source: "chat",
+          target_paths: plan.target_paths,
+          skill_id: "chat_generated",
+          conversation_id: response.conversation?.id || request.conversation_id || "",
+          mode: plan.mode,
+          summary: "AI 会话生成保存计划",
+          save_plan: plan
+        })
+      : await this.cache.create({
+          source: "chat",
+          target_paths: plan.target_paths,
+          skill_id: "chat_generated",
+          conversation_id: response.conversation?.id || request.conversation_id || "",
+          mode: plan.mode,
+          summary: "AI 会话生成保存计划",
+          save_plan: plan
+        }));
+    if (entry.status !== "pending") {
+      throw codedRuntimeError(
+        "CHAT_GENERATED_CACHE_NOT_PENDING",
+        `Chat 生成缓存状态为 ${entry.status}，不能继续提交`
+      );
+    }
+    const meta = cachedContent ? entry : await this.cache.replace(entry.cache_id, content);
     throwIfAborted(options.signal);
 
     if (await this.savePlanner.shouldAutoCommit(plan)) {
       throwIfAborted(options.signal);
-      const savedPaths = await this.cache.commitSavePlan(entry.cache_id, plan, { cleanupContent: true });
+      const committed = execution
+        ? await this.commitGeneratedCache({
+            cache_id: entry.cache_id,
+            source: "chat",
+            skill_id: "chat_generated",
+            mode: plan.mode,
+            target_paths: plan.target_paths,
+            save_plan: plan,
+            summary: "Chat generated auto-save",
+            cleanup_content: false
+          }, {
+            ...options,
+            execution
+          })
+        : null;
+      const savedPaths = committed
+        ? committed.saved_paths
+        : await this.cache.commitSavePlan(entry.cache_id, plan, { cleanupContent: true });
       return {
         ...response,
         saved_paths: savedPaths,
@@ -1593,7 +1799,16 @@ export class AgentRuntimeService {
             saved_paths: savedPaths,
             target_paths: plan.target_paths,
             target_path: plan.target_paths[0] || "",
-            save_plan: plan
+            save_plan: plan,
+            cache_id: entry.cache_id,
+            ...(committed
+              ? {
+                  journal_ids: committed.journal_ids,
+                  run_id: execution!.run_id,
+                  request_id: execution!.request_id,
+                  replayed: committed.replayed
+                }
+              : {})
           }
         }
       };
@@ -1938,7 +2153,7 @@ export class AgentRuntimeService {
       ...options,
       deferAutoCommit: Boolean(execution),
       ...(execution
-        ? { deterministicCacheId: deterministicPromptSkillCacheId(execution, skillId) }
+        ? { deterministicCacheId: deterministicGeneratedCacheId(execution, skillId) }
         : {})
     })) {
       throwIfAborted(options.signal);
@@ -2328,7 +2543,7 @@ export class AgentRuntimeService {
     });
   }
 
-  private async finalizeDeferredPromptSkillCache(
+  private async finalizeDeferredGeneratedCache(
     result: SkillRunResponse | null | undefined,
     runId: string,
     requestId: string
@@ -2386,7 +2601,7 @@ export class AgentRuntimeService {
       ...options,
       deferAutoCommit: Boolean(execution),
       ...(execution
-        ? { deterministicCacheId: deterministicPromptSkillCacheId(execution, skillId) }
+        ? { deterministicCacheId: deterministicGeneratedCacheId(execution, skillId) }
         : {})
     });
     const result = execution
@@ -3395,7 +3610,7 @@ function isDurableSkillAgentRequest(request: AgentRunRequest): boolean {
     && Boolean(String(request.skill_id || "").trim());
 }
 
-function deterministicPromptSkillCacheId(
+function deterministicGeneratedCacheId(
   execution: DurableRunExecution,
   skillId: string,
   scope = "direct"
