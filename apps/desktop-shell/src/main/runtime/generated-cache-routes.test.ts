@@ -142,6 +142,144 @@ describe("handleGeneratedCacheRoutes", () => {
     );
   });
 
+  it("delegates cached sectioned saves without writing through PromptSkillRunner", async () => {
+    runtimeMocks.commitGeneratedCache.mockResolvedValueOnce({
+      run_id: "run_style",
+      cache_id: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+      saved_paths: [
+        "00_设定集/风格库/写作风格.txt",
+        "00_设定集/风格库/风格示例.txt",
+        "00_设定集/风格库/参考素材.txt"
+      ],
+      journal_ids: ["journal_style_1", "journal_style_2", "journal_style_3"],
+      replayed: false,
+      cache: {}
+    });
+    const writeJson = vi.fn();
+    const deps = createDeps(writeJson);
+    vi.mocked(deps.readJsonBody).mockResolvedValue({
+      cache_id: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+      content: "",
+      skill_id: "style_extract",
+      mode: "replace",
+      target_paths: ["02_正文/不应写入.txt"],
+      target_path: "",
+      chapter: 0,
+      save_plan: {
+        action: "no_save",
+        mode: "replace",
+        target_paths: [],
+        segments: [],
+        reason: "response compatibility",
+        confidence: 1,
+        requires_confirmation: false,
+        should_auto_commit: false,
+        source: "skill",
+        skill_id: "style_extract"
+      }
+    });
+
+    const handled = await handleGeneratedCacheRoutes(
+      { method: "POST" } as IncomingMessage,
+      {} as ServerResponse,
+      "/api/agent/generated/save",
+      createContext(),
+      deps
+    );
+
+    expect(handled).toBe(true);
+    expect(runtimeMocks.commitGeneratedCache).toHaveBeenCalledWith(expect.objectContaining({
+      cache_id: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+      skill_id: "style_extract",
+      cleanup_content: true
+    }));
+    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 200, {
+      saved_paths: [
+        "00_设定集/风格库/写作风格.txt",
+        "00_设定集/风格库/风格示例.txt",
+        "00_设定集/风格库/参考素材.txt"
+      ],
+      save_plan: expect.objectContaining({ reason: "response compatibility" })
+    });
+    expect(await fs.stat(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt")).catch(() => null)).toBeNull();
+    expect(await fs.stat(path.join(tempDir, "00_设定集", "风格库", "风格示例.txt")).catch(() => null)).toBeNull();
+    expect(await fs.stat(path.join(tempDir, "00_设定集", "风格库", "参考素材.txt")).catch(() => null)).toBeNull();
+  });
+
+  it("allows raw sectioned content with no caller-supplied target paths", async () => {
+    runtimeMocks.commitGeneratedCache.mockResolvedValueOnce({
+      run_id: "run_lore",
+      cache_id: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+      saved_paths: ["00_设定集/设定集/人物设定.txt"],
+      journal_ids: ["journal_lore"],
+      replayed: false,
+      cache: {}
+    });
+    const writeJson = vi.fn();
+    const deps = createDeps(writeJson);
+    vi.mocked(deps.readJsonBody).mockResolvedValue({
+      cache_id: "",
+      content: "人物设定\n林烬：流亡剑修。",
+      skill_id: "lore_extract",
+      mode: "replace",
+      target_paths: [],
+      target_path: "",
+      chapter: 0
+    });
+
+    const handled = await handleGeneratedCacheRoutes(
+      { method: "POST" } as IncomingMessage,
+      {} as ServerResponse,
+      "/api/agent/generated/save",
+      createContext(),
+      deps
+    );
+
+    expect(handled).toBe(true);
+    expect(runtimeMocks.commitGeneratedCache).toHaveBeenCalledWith(expect.objectContaining({
+      content: "人物设定\n林烬：流亡剑修。",
+      skill_id: "lore_extract",
+      target_paths: []
+    }));
+    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 200, {
+      saved_paths: ["00_设定集/设定集/人物设定.txt"],
+      save_plan: undefined
+    });
+  });
+
+  it("maps cache skill identity conflicts to a 409 response", async () => {
+    runtimeMocks.commitGeneratedCache.mockRejectedValueOnce(Object.assign(
+      new Error("生成缓存技能身份不匹配"),
+      { code: "GENERATED_CACHE_SKILL_MISMATCH" }
+    ));
+    const writeJson = vi.fn();
+    const deps = createDeps(writeJson);
+    vi.mocked(deps.readJsonBody).mockResolvedValue({
+      cache_id: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+      content: "",
+      skill_id: "style_extract",
+      mode: "replace",
+      target_paths: [],
+      target_path: "",
+      chapter: 0
+    });
+
+    const handled = await handleGeneratedCacheRoutes(
+      { method: "POST" } as IncomingMessage,
+      {} as ServerResponse,
+      "/api/agent/generated/save",
+      createContext(),
+      deps
+    );
+
+    expect(handled).toBe(true);
+    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 409, {
+      detail: "生成缓存技能身份不匹配",
+      code: "GENERATED_CACHE_SKILL_MISMATCH"
+    });
+    expect(vi.mocked(deps.rebuildProjectManifest)).not.toHaveBeenCalled();
+  });
+
   it("delegates the compatibility cache commit endpoint to the same runtime method", async () => {
     const writeJson = vi.fn();
     const deps = createDeps(writeJson);

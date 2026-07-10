@@ -2233,13 +2233,15 @@ CI 必须保存 Eval Manifest、失败 case 摘要、性能基线和脱敏 Trace
 | C 状态机与幂等 | 实现中 | 状态机、idempotency、heartbeat/lease；feature flag registry/snapshot；main-process allowlist 持久覆盖和 `--safe-agent` 强制 off/禁用自动恢复已通过 | shadow 对照报告和更广泛的真实副作用幂等 |
 | D 最小恢复链路 | 实现中 | run/stream/Trace 同 ID、runtime registry、HTTP 订阅断连解耦；真实子进程强杀后同 ID 仅恢复第二步、第一步保持唯一完成 attempt 的 E2E，以及旧 `streamAgentRun` durable 回归已通过 | 实际 renderer 长连接订阅和完整旧入口矩阵回归 |
 | E API 与 UI | 实现中 | 查询/控制、分页/实时 replay、认证 NDJSON、Workbench trace 实时订阅；Confirmation 列表/批准/拒绝与批准后显式恢复 UI/API；隔离项目/run 的 Agent Trace 列表、详情、pause 控制和 Confirmation 批准后恢复/拒绝失败浏览器 E2E 已通过 | 端到端异常/恢复矩阵扩展 |
-| F 崩溃/并发/确认 | 实现中 | journal/lease/confirmation；durable direct-save/batch-replace、拆书所有持久输出及正文生成的正文/修正日志/交接摘要已走 journal/hash；通用 HTTP 延后缓存提交与无缓存草稿保存已通过 synthetic durable run 收口，覆盖确定性 raw cache、重复 append、多目标中途失败后同 run retry 和 completed run 补缓存元数据；Confirmation UI/API 及批准后显式恢复、拒绝失败浏览器 E2E 已通过；旧 `/api/agent/execute` 已安全退役 | 普通文件操作计划、Prompt Skill 及 style/genre/lore 特殊保存、chat 自动保存/写回和 card draw 写入仍需统一 journal/确认协议 |
+| F 崩溃/并发/确认 | 实现中 | journal/lease/confirmation；durable direct-save/batch-replace、拆书所有持久输出及正文生成的正文/修正日志/交接摘要已走 journal/hash；通用及 style/genre/lore 分段 HTTP 延后保存均由 synthetic durable run + CommitJournal 收口，覆盖固定 section target、稳定 action key、缓存技能身份锁、确定性 raw cache、重复 append、多目标中途失败后同 run retry、同目标多 segment 原子折叠和 completed run 补缓存元数据；Confirmation UI/API 及批准后显式恢复、拒绝失败浏览器 E2E 已通过；旧 `/api/agent/execute` 已安全退役 | 普通文件操作计划、Prompt Skill 自动提交（包括 style/genre/lore 兼容 writer facade）、chat 自动保存/写回和 card draw 写入仍需统一 journal/确认协议 |
 | G Job/长任务 | 实现中 | batch/disassemble SQLite checkpoint、batch 子进程 SIGKILL 后同 run 恢复 N+1 且无重复副作用、legacy JobManager 只读映射 API 已通过 | legacy 映射 UI/回归 |
 | H 安全/发布 | 实现中 | runtime token/IPC、CI/RC gate、terminal/permission hardening；项目作用域的 run audit 导出与终态受控删除 API 已通过 | GitHub environment/证书配置后的真实 RC、发布报告 |
 
 E0 已修复当前 `AgentTraceView` 未定义符号并恢复根级绿色基线，不代表 E 已完成。A-C 的 `interrupted`、stable project UUID、状态迁移、stale attempt/resume、pause/断连语义和真实强杀集成测试已有实现与验证；仍须补 snapshot 白名单、adapter/迁移故障契约、两步恢复 fixture 和 E 的创建/补流/E2E，随后才能进入 F 真实写入链路。不得因为表结构和定向单测通过就跳到 P1。
 
-2026-07-10 的通用 GeneratedCache HTTP 提交板块完成后，F 仍保持“实现中”。本轮只证明普通 cache/save-plan 与 raw draft 的 durable journal、重放和部分失败恢复；路由中的 style/genre/lore 分段保存仍由 PromptSkillRunner 直写，不能据此宣称 generated-cache route 已全部不可绕过。
+2026-07-10 的通用 GeneratedCache HTTP 提交板块完成后，F 仍保持“实现中”。该板块证明普通 cache/save-plan 与 raw draft 的 durable journal、重放和部分失败恢复，但当时路由中的 style/genre/lore 分段保存仍由 PromptSkillRunner 直写。
+
+2026-07-10 的 style/genre/lore GeneratedCache 分段保存板块已把两个 HTTP 保存入口收口到同一个 runtime committer：纯 planner 保留旧标题/fenced 解析、style/genre 首目标 fallback、Lore 空占位过滤和 replace 覆盖语义；runtime 只信任缓存元数据决定特殊技能身份，忽略 transport target/save-plan 对固定 section target 的改写，并以稳定 section action key 写 journal。相同目标的多个 save-plan segment 会先折叠成一次最终原子写入，避免首段成功、后段崩溃后重试重复内容。PromptSkillRunner 的自动提交与 `/api/skills/:id/run` 仍保留兼容直写，因此 F 与 P0 继续为“实现中”。
 
 ### 15.1 Task A：Run Schema
 

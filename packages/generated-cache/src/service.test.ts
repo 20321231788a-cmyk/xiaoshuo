@@ -271,8 +271,13 @@ describe("generated-cache-service", () => {
       skill_id: "chat_generated"
     });
 
-    expect(commits[0]?.content).toBe("第一章\n\n---\n第二章\n");
-    expect(commits[1]?.content).toBe("第一章\n\n---\n第二章\n\n---\n第三章\n");
+    expect(commits).toEqual([
+      expect.objectContaining({
+        target_path: "01_大纲/大纲.txt",
+        content: "第一章\n\n---\n第二章\n\n---\n第三章\n",
+        action_key: "save_plan_target:01_大纲/大纲.txt"
+      })
+    ]);
   });
 
   it("refuses to overwrite restricted file types or paths", async () => {

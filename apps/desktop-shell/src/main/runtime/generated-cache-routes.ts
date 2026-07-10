@@ -1,4 +1,8 @@
-import { PromptSkillRunner } from "@xiaoshuo/agent-runtime";
+import {
+  isSectionedGeneratedSkillId,
+  type GeneratedCacheCommitInput,
+  type GeneratedCacheCommitResult
+} from "@xiaoshuo/agent-runtime";
 import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
 import { generatedSaveRequestSchema, type CurrentProject } from "@xiaoshuo/shared";
 import { VectorIndex } from "@xiaoshuo/vector-service";
@@ -37,43 +41,30 @@ export async function handleGeneratedCacheRoutes(
 
   const segments = pathname.split("/").filter(Boolean);
   const cacheService = new GeneratedCacheService({ projectRoot: currentProject.path });
+  const commitThroughRuntime = async (
+    input: GeneratedCacheCommitInput
+  ): Promise<GeneratedCacheCommitResult | null> => {
+    try {
+      return await getProjectAgentRuntime(context, currentProject.path).commitGeneratedCache(input);
+    } catch (error) {
+      if (runtimeErrorCode(error) === "GENERATED_CACHE_SKILL_MISMATCH") {
+        deps.writeJson(response, 409, {
+          detail: error instanceof Error ? error.message : "生成缓存技能身份不匹配",
+          code: "GENERATED_CACHE_SKILL_MISMATCH"
+        });
+        return null;
+      }
+      throw error;
+    }
+  };
 
   if (request.method === "POST" && segments.length === 4 && segments[3] === "save") {
     const payload = generatedSaveRequestSchema.parse(await deps.readJsonBody(request));
     const skillId = (payload.skill_id || "").trim();
 
-    if (skillId === "lore_extract" || skillId === "style_extract" || skillId === "genre_generate") {
-      const content = payload.cache_id ? await cacheService.readContent(payload.cache_id) : payload.content || "";
-      const runner = new PromptSkillRunner({
-        projectRoot: currentProject.path,
-        config: { rootDir: context.projectRoot, env: process.env }
-      });
-      const finalMode = payload.mode === "append" ? "append" : "replace";
-      const savedPaths = skillId === "style_extract"
-        ? await runner.saveStyleSections(content, finalMode, { summaryPrefix: "风格库保存" })
-        : skillId === "genre_generate"
-          ? await runner.saveGenreSections(content, finalMode, { summaryPrefix: "题材库保存" })
-          : await runner.saveLoreSections(content, finalMode, {
-              summaryPrefix: "设定提取保存",
-              mergeExisting: finalMode !== "replace"
-            });
-
-      if (savedPaths.length) {
-        await deps.rebuildProjectManifest(currentProject.path);
-        const index = new VectorIndex(currentProject.path);
-        index.markChanged(savedPaths, "upsert");
-        index.close();
-        if (payload.cache_id) {
-          await cacheService.markCommitted(payload.cache_id, savedPaths, { cleanupContent: true });
-        }
-      }
-      deps.writeJson(response, 200, { saved_paths: savedPaths, save_plan: payload.save_plan });
-      return true;
-    }
-
     let savedPaths: string[] = [];
     if (payload.cache_id) {
-      savedPaths = (await getProjectAgentRuntime(context, currentProject.path).commitGeneratedCache({
+      const committed = await commitThroughRuntime({
         cache_id: payload.cache_id,
         source: "generated_save_route",
         skill_id: skillId,
@@ -82,14 +73,18 @@ export async function handleGeneratedCacheRoutes(
         save_plan: payload.save_plan,
         summary: "Generated result confirmed by user",
         cleanup_content: true
-      })).saved_paths;
+      });
+      if (!committed) {
+        return true;
+      }
+      savedPaths = committed.saved_paths;
     } else {
       const paths = payload.target_paths.length ? payload.target_paths : (payload.target_path ? [payload.target_path] : []);
-      if (!paths.length) {
+      if (!paths.length && !isSectionedGeneratedSkillId(skillId)) {
         deps.writeJson(response, 400, { detail: "没有可写入的目标文件" });
         return true;
       }
-      savedPaths = (await getProjectAgentRuntime(context, currentProject.path).commitGeneratedCache({
+      const committed = await commitThroughRuntime({
         content: payload.content,
         source: "generated_save_route",
         skill_id: skillId,
@@ -97,7 +92,11 @@ export async function handleGeneratedCacheRoutes(
         target_paths: paths,
         summary: "Generated draft saved by user",
         cleanup_content: true
-      })).saved_paths;
+      });
+      if (!committed) {
+        return true;
+      }
+      savedPaths = committed.saved_paths;
     }
 
     if (savedPaths.length) {
@@ -115,40 +114,7 @@ export async function handleGeneratedCacheRoutes(
     const rawBody = await deps.readRawBody(request);
     const payload = deps.parseJsonRecord(rawBody) || {};
 
-    let skillId = "";
-    try {
-      const meta = await cacheService.get(cacheId);
-      skillId = (deps.stringValue(payload.skill_id) || meta.skill_id || "").trim();
-    } catch {
-      // cache not found
-    }
-
-    if (skillId === "lore_extract" || skillId === "style_extract" || skillId === "genre_generate") {
-      const content = await cacheService.readContent(cacheId);
-      const runner = new PromptSkillRunner({
-        projectRoot: currentProject.path,
-        config: { rootDir: context.projectRoot, env: process.env }
-      });
-      const finalMode = payload.mode === "append" ? "append" : "replace";
-      const savedPaths = skillId === "style_extract"
-        ? await runner.saveStyleSections(content, finalMode, { summaryPrefix: "风格库保存" })
-        : skillId === "genre_generate"
-          ? await runner.saveGenreSections(content, finalMode, { summaryPrefix: "题材库保存" })
-          : await runner.saveLoreSections(content, finalMode, {
-              summaryPrefix: "设定提取保存",
-              mergeExisting: finalMode !== "replace"
-            });
-
-      if (savedPaths.length) {
-        await deps.rebuildProjectManifest(currentProject.path);
-        const index = new VectorIndex(currentProject.path);
-        index.markChanged(savedPaths, "upsert");
-        index.close();
-        await cacheService.markCommitted(cacheId, savedPaths, { cleanupContent: true });
-      }
-      deps.writeJson(response, 200, { saved_paths: savedPaths });
-      return true;
-    }
+    const skillId = deps.stringValue(payload.skill_id).trim();
 
     const mode = (payload.mode === "append" || payload.mode === "replace") ? payload.mode : undefined;
     const targetPaths = Array.isArray(payload.target_paths)
@@ -156,7 +122,7 @@ export async function handleGeneratedCacheRoutes(
       : (payload.target_path ? [String(payload.target_path)] : undefined);
 
     const savePlan = payload.save_plan && typeof payload.save_plan === "object" ? payload.save_plan as any : undefined;
-    const savedPaths = (await getProjectAgentRuntime(context, currentProject.path).commitGeneratedCache({
+    const committed = await commitThroughRuntime({
       cache_id: cacheId,
       source: "generated_cache_commit_route",
       skill_id: skillId,
@@ -165,7 +131,11 @@ export async function handleGeneratedCacheRoutes(
       save_plan: savePlan,
       summary: "Generated cache committed by user",
       cleanup_content: true
-    })).saved_paths;
+    });
+    if (!committed) {
+      return true;
+    }
+    const savedPaths = committed.saved_paths;
     if (savedPaths.length) {
       await deps.rebuildProjectManifest(currentProject.path);
       const index = new VectorIndex(currentProject.path);
@@ -200,4 +170,11 @@ export async function handleGeneratedCacheRoutes(
   }
 
   return false;
+}
+
+function runtimeErrorCode(error: unknown): string {
+  if (!error || typeof error !== "object") {
+    return "";
+  }
+  return String((error as { code?: unknown }).code || "");
 }

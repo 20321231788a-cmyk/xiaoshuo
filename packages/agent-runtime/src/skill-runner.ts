@@ -12,6 +12,11 @@ import { GeneratedSavePlanner } from "./generated-save-planner.js";
 import { assembleContext } from "./kernel/context-assembler.js";
 import type { ContextBlock } from "./kernel/context-block.js";
 import { ProjectFileResolver } from "./kernel/project-file-resolver.js";
+import {
+  isEmptyLoreBody,
+  prepareSectionedGeneratedSave,
+  sectionedGeneratedTargetPaths
+} from "./sectioned-generated-save.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import { streamModelText, StreamingGenerationSession, type StreamingModelClient } from "./stream.js";
 import { isCancellationError, throwIfAborted, type AgentRunOptions } from "./cancellation.js";
@@ -26,26 +31,6 @@ const DEFAULT_TARGETS: Record<string, string> = {
   continue_text: "02_正文/续写结果.txt",
   story_deslop: "02_正文/去AI味结果.txt",
   humanizer_zh: "02_正文/去AI味结果.txt"
-};
-
-const STYLE_SECTION_TARGETS: Record<string, string> = {
-  写作风格: "00_设定集/风格库/写作风格.txt",
-  风格示例: "00_设定集/风格库/风格示例.txt",
-  参考素材: "00_设定集/风格库/参考素材.txt"
-};
-
-const GENRE_SECTION_TARGETS: Record<string, string> = {
-  题材规则: "00_设定集/题材库/题材规则.txt",
-  题材素材: "00_设定集/题材库/题材素材.txt",
-  战斗模板: "00_设定集/题材库/战斗模板.txt",
-  违禁词: "00_设定集/题材库/违禁词.txt"
-};
-
-const LORE_SECTION_TARGETS: Record<string, string> = {
-  人物设定: "00_设定集/设定集/人物设定.txt",
-  体系设定: "00_设定集/设定集/体系设定.txt",
-  地图设定: "00_设定集/设定集/地图设定.txt",
-  道具设定: "00_设定集/设定集/道具设定.txt"
 };
 
 const LORE_EXTRACT_SOURCE_FALLBACKS = ["01_大纲/章纲.txt", "01_大纲/细纲.txt", "01_大纲/大纲.txt"];
@@ -512,13 +497,13 @@ export class PromptSkillRunner {
 
   private pendingSaveTargets(skill: SkillDefinition, payload: SkillRunRequest): string[] {
     if (skill.id === "style_extract") {
-      return Object.values(STYLE_SECTION_TARGETS);
+      return sectionedGeneratedTargetPaths("style_extract");
     }
     if (skill.id === "genre_generate") {
-      return Object.values(GENRE_SECTION_TARGETS);
+      return sectionedGeneratedTargetPaths("genre_generate");
     }
     if (skill.id === "lore_extract") {
-      return Object.values(LORE_SECTION_TARGETS);
+      return sectionedGeneratedTargetPaths("lore_extract");
     }
     const explicit = normalizeOptionalPath(this.documents, payload.target_path);
     if (explicit) {
@@ -607,23 +592,16 @@ export class PromptSkillRunner {
     mode: "replace" | "append",
     options: { summaryPrefix: string }
   ): Promise<string[]> {
-    let sections = splitStyleSections(result);
-    if (!Object.keys(sections).length) {
-      const fallback = String(result || "").trim();
-      if (!fallback) {
-        return [];
-      }
-      sections = { 写作风格: fallback };
-    }
-
+    const prepared = prepareSectionedGeneratedSave({
+      skillId: "style_extract",
+      result,
+      mode,
+      summaryPrefix: options.summaryPrefix
+    });
     const savedPaths: string[] = [];
-    for (const [title, relPath] of Object.entries(STYLE_SECTION_TARGETS)) {
-      const body = String(sections[title] || "").trim();
-      if (!body) {
-        continue;
-      }
-      await this.saveGeneratedText(relPath, body, mode, `${options.summaryPrefix}：${title}`);
-      savedPaths.push(relPath);
+    for (const item of prepared) {
+      await this.saveGeneratedText(item.target_path, item.content, item.mode, item.summary);
+      savedPaths.push(item.target_path);
     }
     return savedPaths;
   }
@@ -633,23 +611,16 @@ export class PromptSkillRunner {
     mode: "replace" | "append",
     options: { summaryPrefix: string }
   ): Promise<string[]> {
-    let sections = splitGenreSections(result);
-    if (!Object.keys(sections).length) {
-      const fallback = String(result || "").trim();
-      if (!fallback) {
-        return [];
-      }
-      sections = { 题材规则: fallback };
-    }
-
+    const prepared = prepareSectionedGeneratedSave({
+      skillId: "genre_generate",
+      result,
+      mode,
+      summaryPrefix: options.summaryPrefix
+    });
     const savedPaths: string[] = [];
-    for (const [title, relPath] of Object.entries(GENRE_SECTION_TARGETS)) {
-      const body = String(sections[title] || "").trim();
-      if (!body) {
-        continue;
-      }
-      await this.saveGeneratedText(relPath, body, mode, `${options.summaryPrefix}：${title}`);
-      savedPaths.push(relPath);
+    for (const item of prepared) {
+      await this.saveGeneratedText(item.target_path, item.content, item.mode, item.summary);
+      savedPaths.push(item.target_path);
     }
     return savedPaths;
   }
@@ -659,41 +630,38 @@ export class PromptSkillRunner {
     mode: "replace" | "append",
     options: { summaryPrefix: string; mergeExisting: boolean }
   ): Promise<string[]> {
-    const sections = splitLoreSections(result);
-    if (!Object.keys(sections).length) {
-      return [];
-    }
-
+    const prepared = prepareSectionedGeneratedSave({
+      skillId: "lore_extract",
+      result,
+      mode,
+      summaryPrefix: options.summaryPrefix
+    });
     const savedPaths: string[] = [];
-    for (const [title, relPath] of Object.entries(LORE_SECTION_TARGETS)) {
-      const body = String(sections[title] || "").trim();
-      if (isEmptyLoreBody(body)) {
-        continue;
-      }
+    for (const item of prepared) {
       if (mode === "append") {
-        await this.saveGeneratedText(relPath, body, "append", `${options.summaryPrefix}：${title}`);
-        savedPaths.push(relPath);
+        await this.saveGeneratedText(item.target_path, item.content, "append", item.summary);
+        savedPaths.push(item.target_path);
         continue;
       }
 
-      let nextText = body;
+      let nextText = item.content;
       if (options.mergeExisting) {
         let existing = "";
         try {
-          existing = await this.documents.readRawText(relPath);
+          existing = await this.documents.readRawText(item.target_path);
         } catch {
           existing = "";
         }
-        nextText = mergeLoreSectionText(title, existing, body);
+        nextText = mergeLoreSectionText(item.title, existing, item.content);
       }
       if (!String(nextText || "").trim()) {
         continue;
       }
-      await this.documents.saveDocument(relPath, String(nextText).trim(), {
+      await this.documents.saveDocument(item.target_path, String(nextText).trim(), {
         source: "skill",
-        summary: `${options.summaryPrefix}：${title}`
+        summary: item.summary
       });
-      savedPaths.push(relPath);
+      savedPaths.push(item.target_path);
     }
     return savedPaths;
   }
@@ -922,236 +890,6 @@ function guardAgainstOverdelete(original: string, cleaned: string): string {
     return original;
   }
   return cleaned;
-}
-
-function splitStyleSections(result: string): Record<string, string> {
-  const text = String(result || "").trim();
-  if (!text) {
-    return {};
-  }
-
-  const sections: Record<string, string[]> = {
-    写作风格: [],
-    风格示例: [],
-    参考素材: []
-  };
-  const aliases: Record<string, keyof typeof sections> = {
-    写作风格: "写作风格",
-    写作风格规则: "写作风格",
-    文风规则: "写作风格",
-    文风: "写作风格",
-    风格示例: "风格示例",
-    风格示例特征: "风格示例",
-    参考素材: "参考素材",
-    参考素材摘要: "参考素材"
-  };
-
-  const heading =
-    /^[ \t]*(?:#{1,6}[ \t]*)?(?:[【\[])?[ \t]*(写作风格规则|写作风格|文风规则|文风|风格示例特征|风格示例|参考素材摘要|参考素材)[ \t]*(?:[】\]])?[ \t]*[:：]?[ \t]*$/gmu;
-  const matches = [...text.matchAll(heading)];
-  if (matches.length) {
-    for (let index = 0; index < matches.length; index += 1) {
-      const alias = (matches[index]?.[1] || "").trim();
-      const title = aliases[alias];
-      if (!title) {
-        continue;
-      }
-      const start = matches[index]?.index !== undefined ? matches[index]!.index! + matches[index]![0].length : 0;
-      const end = index + 1 < matches.length && matches[index + 1]?.index !== undefined ? matches[index + 1]!.index! : text.length;
-      const body = text.slice(start, end).trim();
-      if (body) {
-        sections[title]!.push(body);
-      }
-    }
-    return compactSections(sections);
-  }
-
-  const fenced = /\*\*(00_设定集\/风格库\/([^*\n]+?\.txt))\*\*\s*```(?:\w+)?\s*(.*?)```/gs;
-  for (const match of text.matchAll(fenced)) {
-    const filename = match[2] || "";
-    const body = String(match[3] || "").trim();
-    for (const [title, relPath] of Object.entries(STYLE_SECTION_TARGETS)) {
-      if (path.posix.basename(relPath) === filename && body) {
-        sections[title]!.push(body);
-      }
-    }
-  }
-
-  return compactSections(sections);
-}
-
-function splitGenreSections(result: string): Record<string, string> {
-  const text = String(result || "").trim();
-  if (!text) {
-    return {};
-  }
-
-  const sections: Record<string, string[]> = {
-    题材规则: [],
-    题材素材: [],
-    战斗模板: [],
-    违禁词: []
-  };
-  const aliases: Record<string, keyof typeof sections> = {
-    题材规则: "题材规则",
-    规则: "题材规则",
-    世界规则: "题材规则",
-    题材素材: "题材素材",
-    素材: "题材素材",
-    灵感素材: "题材素材",
-    脑洞素材: "题材素材",
-    战斗模板: "战斗模板",
-    冲突模板: "战斗模板",
-    冲突场景模板: "战斗模板",
-    场景模板: "战斗模板",
-    违禁词: "违禁词",
-    禁忌词: "违禁词",
-    禁用词: "违禁词"
-  };
-
-  const heading = /^[ \t]*(?:#{1,6}[ \t]*)?(?:[【\[])?[ \t]*(题材规则|规则|世界规则|题材素材|素材|灵感素材|脑洞素材|战斗模板|冲突模板|冲突场景模板|场景模板|违禁词|禁忌词|禁用词)[ \t]*(?:[】\]])?[ \t]*[:：]?[ \t]*$/gmu;
-  const matches = [...text.matchAll(heading)];
-  if (matches.length) {
-    for (let index = 0; index < matches.length; index += 1) {
-      const alias = (matches[index]?.[1] || "").trim();
-      const title = aliases[alias];
-      if (!title) {
-        continue;
-      }
-      const start = matches[index]?.index !== undefined ? matches[index]!.index! + matches[index]![0].length : 0;
-      const end = index + 1 < matches.length && matches[index + 1]?.index !== undefined ? matches[index + 1]!.index! : text.length;
-      const body = text.slice(start, end).trim();
-      if (body) {
-        sections[title]!.push(body);
-      }
-    }
-    return Object.fromEntries(
-      Object.entries(sections)
-        .map(([title, parts]) => [title, parts.join("\n\n").trim()])
-        .filter(([, body]) => Boolean(body))
-    );
-  }
-
-  const fenced = /\*\*(00_设定集\/题材库\/([^*\n]+?\.txt))\*\*\s*```(?:\w+)?\s*(.*?)```/gs;
-  for (const match of text.matchAll(fenced)) {
-    const filename = match[2] || "";
-    const body = String(match[3] || "").trim();
-    for (const [title, relPath] of Object.entries(GENRE_SECTION_TARGETS)) {
-      if (path.posix.basename(relPath) === filename && body) {
-        sections[title]!.push(body);
-      }
-    }
-  }
-
-  return Object.fromEntries(
-    Object.entries(sections)
-      .map(([title, parts]) => [title, parts.join("\n\n").trim()])
-      .filter(([, body]) => Boolean(body))
-  );
-}
-
-function compactSections(sections: Record<string, string[]>): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(sections)
-      .map(([title, parts]) => [title, parts.join("\n\n").trim()])
-      .filter(([, body]) => Boolean(body))
-  );
-}
-
-function splitLoreSections(result: string): Record<string, string> {
-  const text = String(result || "").trim();
-  if (!text) {
-    return {};
-  }
-
-  const sections: Record<string, string[]> = {
-    人物设定: [],
-    体系设定: [],
-    地图设定: [],
-    道具设定: []
-  };
-  const aliases: Record<string, keyof typeof sections> = {
-    人物: "人物设定",
-    人物设定: "人物设定",
-    角色: "人物设定",
-    角色设定: "人物设定",
-    体系: "体系设定",
-    体系设定: "体系设定",
-    世界观: "体系设定",
-    世界设定: "体系设定",
-    规则设定: "体系设定",
-    能力体系: "体系设定",
-    势力组织: "体系设定",
-    地图: "地图设定",
-    地图设定: "地图设定",
-    地点: "地图设定",
-    地点设定: "地图设定",
-    地理设定: "地图设定",
-    道具: "道具设定",
-    道具设定: "道具设定",
-    物品: "道具设定",
-    物品设定: "道具设定",
-    法宝设定: "道具设定",
-    装备设定: "道具设定"
-  };
-
-  const heading =
-    /^[ \t]*(?:#{1,6}[ \t]*)?(?:[【\[])?[ \t]*(人物设定|人物|角色设定|角色|体系设定|体系|世界观|世界设定|规则设定|能力体系|势力组织|地图设定|地图|地点设定|地点|地理设定|道具设定|道具|物品设定|物品|法宝设定|装备设定)[ \t]*(?:[】\]])?[ \t]*[:：]?[ \t]*$/gmu;
-  const matches = [...text.matchAll(heading)];
-  if (matches.length) {
-    for (let index = 0; index < matches.length; index += 1) {
-      const alias = (matches[index]?.[1] || "").trim();
-      const title = aliases[alias];
-      if (!title) {
-        continue;
-      }
-      const start = matches[index]?.index !== undefined ? matches[index]!.index! + matches[index]![0].length : 0;
-      const end = index + 1 < matches.length && matches[index + 1]?.index !== undefined ? matches[index + 1]!.index! : text.length;
-      const body = text.slice(start, end).trim();
-      if (body) {
-        sections[title]!.push(body);
-      }
-    }
-    return Object.fromEntries(
-      Object.entries(sections)
-        .map(([title, parts]) => [title, parts.join("\n\n").trim()])
-        .filter(([, body]) => Boolean(body))
-    );
-  }
-
-  for (const block of text.split(/\n{2,}/)) {
-    const clean = block.trim();
-    if (!clean) {
-      continue;
-    }
-    sections[classifyLoreBlock(clean)]!.push(clean);
-  }
-  return Object.fromEntries(
-    Object.entries(sections)
-      .map(([title, parts]) => [title, parts.join("\n\n").trim()])
-      .filter(([, body]) => Boolean(body))
-  );
-}
-
-function classifyLoreBlock(text: string): keyof typeof LORE_SECTION_TARGETS {
-  if (/道具|物品|法宝|武器|装备|丹药|符箓|灵器|宝物|剑|刀|枪|弓/.test(text)) {
-    return "道具设定";
-  }
-  if (/地图|地点|地名|地理|地域|城|镇|村|山|海|河|谷|洞府|秘境|遗迹|宫|殿/.test(text)) {
-    return "地图设定";
-  }
-  if (/人物|角色|主角|配角|姓名|身份|性格|动机|关系|师父|弟子|父|母|兄|姐|妹|男|女/.test(text)) {
-    return "人物设定";
-  }
-  if (/世界|规则|体系|组织|势力|宗门|家族|能力|功法|境界|修为|血脉|种族|法则|等级/.test(text)) {
-    return "体系设定";
-  }
-  return "体系设定";
-}
-
-function isEmptyLoreBody(text: string): boolean {
-  const cleaned = String(text || "").trim().replace(/^[\s\-*]+/, "").replace(/[ 。.；;]+$/g, "");
-  return !cleaned || ["无", "暂无", "未提取", "未发现", "没有内容"].includes(cleaned);
 }
 
 function shouldOverwriteLore(instruction: string): boolean {

@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ModelConfig } from "@xiaoshuo/config-service";
 import { ConversationService } from "@xiaoshuo/conversation-service";
+import { DocumentService } from "@xiaoshuo/document-service";
 import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
 import { ProjectManifestService } from "@xiaoshuo/project-manifest";
 import type { ChatCompletionMessage } from "@xiaoshuo/model-client";
@@ -127,6 +128,48 @@ describe("agent-runtime generated cache commits", () => {
       .toBe("已有内容\n\n---\n新增内容\n");
   });
 
+  it("folds repeated save-plan segments for one target into one replay-safe journal write", async () => {
+    await fs.writeFile(path.join(tempDir, "01_大纲", "追加测试.txt"), "第一章", "utf8");
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    const entry = await cache.create({
+      source: "chat",
+      skill_id: "chat_generated",
+      target_paths: ["01_大纲/追加测试.txt"],
+      mode: "append",
+      save_plan: {
+        action: "split_and_save",
+        mode: "append",
+        target_paths: ["01_大纲/追加测试.txt"],
+        segments: [
+          { target_path: "01_大纲/追加测试.txt", content: "第二章", mode: "append", reason: "first" },
+          { target_path: "01_大纲/追加测试.txt", content: "第三章", mode: "append", reason: "second" }
+        ],
+        reason: "append two sections",
+        confidence: 1,
+        requires_confirmation: false,
+        should_auto_commit: true,
+        source: "chat",
+        skill_id: "chat_generated"
+      }
+    });
+    await cache.replace(entry.cache_id, "fallback");
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+
+    const first = await runtime.commitGeneratedCache({ cache_id: entry.cache_id });
+    const replay = await runtime.commitGeneratedCache({ cache_id: entry.cache_id });
+
+    expect(first.saved_paths).toEqual(["01_大纲/追加测试.txt"]);
+    expect(replay.run_id).toBe(first.run_id);
+    expect(runtime.listDurableCommitJournal(first.run_id)).toEqual([
+      expect.objectContaining({
+        action: "generated_cache.commit.save_plan_target:01_大纲/追加测试.txt",
+        stage: "finalized"
+      })
+    ]);
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "追加测试.txt"), "utf8"))
+      .toBe("第一章\n\n---\n第二章\n\n---\n第三章\n");
+  });
+
   it("repairs pending cache metadata from a completed synthetic run", async () => {
     const cache = new GeneratedCacheService({ projectRoot: tempDir });
     const entry = await cache.create({
@@ -211,6 +254,236 @@ describe("agent-runtime generated cache commits", () => {
       .toBe("已有第一章\n\n---\n多目标正文\n");
     expect(await fs.readFile(path.join(blockedParent, "第二章.txt"), "utf8")).toBe("多目标正文\n");
     expect((await cache.get(entry.cache_id)).status).toBe("committed");
+  });
+
+  it("commits sectioned style cache content through stable per-section journals", async () => {
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    const entry = await cache.create({
+      source: "skill_stream",
+      skill_id: "style_extract",
+      target_paths: [
+        "00_设定集/风格库/写作风格.txt",
+        "00_设定集/风格库/风格示例.txt",
+        "00_设定集/风格库/参考素材.txt"
+      ],
+      mode: "replace"
+    });
+    await cache.replace(entry.cache_id, [
+      "写作风格",
+      "短句、留白。",
+      "风格示例",
+      "雨打旧檐。",
+      "参考素材",
+      "明清话本。"
+    ].join("\n"));
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+
+    const result = await runtime.commitGeneratedCache({
+      cache_id: entry.cache_id,
+      source: "generated_save_route",
+      skill_id: "style_extract",
+      mode: "replace",
+      target_paths: ["02_正文/不应写入.txt"],
+      save_plan: {
+        action: "save_generated",
+        mode: "replace",
+        target_paths: ["02_正文/也不应写入.txt"],
+        segments: [],
+        reason: "untrusted transport plan",
+        confidence: 1,
+        requires_confirmation: false,
+        should_auto_commit: true,
+        source: "transport",
+        skill_id: "style_extract"
+      }
+    });
+
+    expect(result.saved_paths).toEqual([
+      "00_设定集/风格库/写作风格.txt",
+      "00_设定集/风格库/风格示例.txt",
+      "00_设定集/风格库/参考素材.txt"
+    ]);
+    expect(result.cache).toMatchObject({
+      status: "committed",
+      save_plan: expect.objectContaining({
+        action: "split_and_save",
+        skill_id: "style_extract"
+      })
+    });
+    expect(runtime.listDurableCommitJournal(result.run_id)).toEqual([
+      expect.objectContaining({
+        action: "generated_cache.commit.section:style_extract:00_设定集/风格库/写作风格.txt",
+        stage: "finalized"
+      }),
+      expect.objectContaining({
+        action: "generated_cache.commit.section:style_extract:00_设定集/风格库/风格示例.txt",
+        stage: "finalized"
+      }),
+      expect.objectContaining({
+        action: "generated_cache.commit.section:style_extract:00_设定集/风格库/参考素材.txt",
+        stage: "finalized"
+      })
+    ]);
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toBe("短句、留白。");
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "风格示例.txt"), "utf8")).toBe("雨打旧檐。");
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "参考素材.txt"), "utf8")).toBe("明清话本。");
+    expect(existsSync(path.join(tempDir, "02_正文", "不应写入.txt"))).toBe(false);
+    expect(existsSync(path.join(tempDir, "02_正文", "也不应写入.txt"))).toBe(false);
+    const timeline = await new DocumentService({ projectRoot: tempDir }).listTimeline();
+    const sectionTimeline = Object.fromEntries(timeline.map((entry) => [
+      entry.files[0]?.path,
+      { source: entry.source, summary: entry.summary }
+    ]));
+    expect(sectionTimeline).toMatchObject({
+      "00_设定集/风格库/写作风格.txt": {
+        source: "agent_generated_save",
+        summary: "风格库保存：写作风格"
+      },
+      "00_设定集/风格库/风格示例.txt": {
+        source: "agent_generated_save",
+        summary: "风格库保存：风格示例"
+      },
+      "00_设定集/风格库/参考素材.txt": {
+        source: "agent_generated_save",
+        summary: "风格库保存：参考素材"
+      }
+    });
+  });
+
+  it("rejects a request skill that conflicts with pending cache metadata before any journal write", async () => {
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    const entry = await cache.create({
+      source: "chat",
+      skill_id: "chat_generated",
+      target_paths: ["02_正文/第一章.txt"],
+      mode: "replace"
+    });
+    await cache.replace(entry.cache_id, "普通正文缓存");
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+
+    await expect(runtime.commitGeneratedCache({
+      cache_id: entry.cache_id,
+      skill_id: "style_extract",
+      mode: "replace"
+    })).rejects.toMatchObject({
+      code: "GENERATED_CACHE_SKILL_MISMATCH"
+    });
+
+    expect(runtime.listDurableRuns(undefined, 20)).toHaveLength(0);
+    expect(runtime.listDurableCommitJournal()).toHaveLength(0);
+    expect((await cache.get(entry.cache_id)).status).toBe("pending");
+    expect(existsSync(path.join(tempDir, "02_正文", "第一章.txt"))).toBe(false);
+  });
+
+  it("retries a failed sectioned append on the same run without duplicating finalized sections", async () => {
+    const styleDir = path.join(tempDir, "00_设定集", "风格库");
+    const blockedTarget = path.join(styleDir, "风格示例.txt");
+    await fs.writeFile(path.join(styleDir, "写作风格.txt"), "原有风格", "utf8");
+    await fs.mkdir(blockedTarget);
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    const entry = await cache.create({
+      source: "skill_stream",
+      skill_id: "style_extract",
+      target_paths: [],
+      mode: "append"
+    });
+    await cache.replace(entry.cache_id, [
+      "写作风格",
+      "新增风格",
+      "风格示例",
+      "新增示例",
+      "参考素材",
+      "新增素材"
+    ].join("\n"));
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+
+    await expect(runtime.commitGeneratedCache({
+      cache_id: entry.cache_id,
+      source: "generated_save_route",
+      skill_id: "style_extract",
+      mode: "append"
+    })).rejects.toThrow();
+    const failedRun = runtime.listDurableRuns(["failed"], 10)[0];
+    expect(failedRun?.status).toBe("failed");
+    expect(await fs.readFile(path.join(styleDir, "写作风格.txt"), "utf8"))
+      .toBe("原有风格\n\n---\n新增风格\n");
+    expect((await cache.get(entry.cache_id)).status).toBe("pending");
+
+    await fs.rm(blockedTarget, { recursive: true });
+    const recovered = await runtime.commitGeneratedCache({
+      cache_id: entry.cache_id,
+      source: "generated_cache_commit_route",
+      mode: "append"
+    });
+
+    expect(recovered.run_id).toBe(failedRun?.run_id);
+    expect(runtime.exportDurableRun(recovered.run_id).attempts).toHaveLength(2);
+    expect(await fs.readFile(path.join(styleDir, "写作风格.txt"), "utf8"))
+      .toBe("原有风格\n\n---\n新增风格\n");
+    expect(await fs.readFile(path.join(styleDir, "风格示例.txt"), "utf8")).toBe("新增示例\n");
+    expect(await fs.readFile(path.join(styleDir, "参考素材.txt"), "utf8")).toBe("新增素材\n");
+    expect((await cache.get(entry.cache_id)).status).toBe("committed");
+    expect(runtime.listDurableCommitJournal(recovered.run_id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        action: "generated_cache.commit.section:style_extract:00_设定集/风格库/写作风格.txt",
+        stage: "finalized"
+      }),
+      expect.objectContaining({
+        action: "generated_cache.commit.section:style_extract:00_设定集/风格库/风格示例.txt",
+        error_code: "COMMIT_WRITE_FAILED"
+      }),
+      expect.objectContaining({
+        action: "generated_cache.commit.section:style_extract:00_设定集/风格库/风格示例.txt",
+        stage: "finalized"
+      }),
+      expect.objectContaining({
+        action: "generated_cache.commit.section:style_extract:00_设定集/风格库/参考素材.txt",
+        stage: "finalized"
+      })
+    ]));
+  });
+
+  it("uses pending sectioned cache mode when the commit request omits mode", async () => {
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    const entry = await cache.create({
+      source: "skill_stream",
+      skill_id: "style_extract",
+      target_paths: [],
+      mode: "append"
+    });
+    await cache.replace(entry.cache_id, "新增风格");
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+
+    await runtime.commitGeneratedCache({
+      cache_id: entry.cache_id,
+      skill_id: "style_extract"
+    });
+
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8"))
+      .toBe("克制冷静\n\n---\n新增风格\n");
+  });
+
+  it("discards deterministic raw sectioned caches when parsing produces no target", async () => {
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+    const input = {
+      content: "人物设定\n暂无。",
+      source: "generated_save_route",
+      skill_id: "lore_extract",
+      mode: "replace" as const,
+      target_paths: [] as string[]
+    };
+
+    const first = await runtime.commitGeneratedCache(input);
+    const replay = await runtime.commitGeneratedCache(input);
+
+    expect(first.saved_paths).toEqual([]);
+    expect(first.run_id).toBe("");
+    expect(first.cache.status).toBe("discarded");
+    expect(replay.cache_id).toBe(first.cache_id);
+    expect(replay.replayed).toBe(true);
+    expect(replay.cache.status).toBe("discarded");
+    expect(runtime.listDurableRuns(undefined, 20)).toHaveLength(0);
+    await expect(new GeneratedCacheService({ projectRoot: tempDir }).readContent(first.cache_id)).rejects.toThrow();
   });
 });
 

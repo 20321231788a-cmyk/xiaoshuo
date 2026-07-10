@@ -60,6 +60,11 @@ import {
 import type { AgentFeatureFlagRegistry } from "./kernel/feature-flag-registry.js";
 import { CommitJournalService } from "./kernel/commit-journal-service.js";
 import { DurableWorkflowCheckpointStore } from "./kernel/workflow-checkpoint.js";
+import {
+  buildSectionedGeneratedSavePlan,
+  isSectionedGeneratedSkillId,
+  type SectionedGeneratedSkillId
+} from "./sectioned-generated-save.js";
 
 const TARGET_WORD_SKILL_IDS = new Set([
   "body_generate",
@@ -308,33 +313,44 @@ export class AgentRuntimeService {
   ): Promise<GeneratedCacheCommitResult> {
     throwIfAborted(options.signal);
     const source = String(input.source || "generated_cache").trim() || "generated_cache";
-    const skillId = String(input.skill_id || "").trim();
-    const mode = input.mode === "append" ? "append" : "replace";
+    const requestedSkillId = String(input.skill_id || "").trim();
+    const requestedMode = input.mode === "append" || input.mode === "replace" ? input.mode : undefined;
+    const rawMode = requestedMode || "replace";
     const requestedTargets = canonicalGeneratedPaths(input.target_paths || []);
-    const savePlan = input.save_plan ? canonicalGeneratedSavePlan(input.save_plan) : undefined;
+    const requestedSavePlan = input.save_plan ? canonicalGeneratedSavePlan(input.save_plan) : undefined;
     let cacheId = String(input.cache_id || "").trim();
 
     if (!cacheId) {
       const content = String(input.content || "");
+      const sectionedSavePlan = isSectionedGeneratedSkillId(requestedSkillId)
+        ? canonicalGeneratedSavePlan(buildSectionedGeneratedSavePlan({
+            skillId: requestedSkillId,
+            result: content,
+            mode: rawMode,
+            summaryPrefix: sectionedGeneratedSummaryPrefix(requestedSkillId)
+          }))
+        : undefined;
+      const rawTargets = sectionedSavePlan?.target_paths || requestedTargets;
+      const rawSavePlan = sectionedSavePlan || requestedSavePlan;
       const rawIntent = {
         schema_version: 1,
         kind: "generated_cache_raw",
         source,
-        skill_id: skillId,
-        mode,
-        target_paths: requestedTargets,
-        save_plan: savePlan || null,
+        skill_id: requestedSkillId,
+        mode: rawMode,
+        target_paths: rawTargets,
+        save_plan: rawSavePlan || null,
         content_hash: sha256Text(content)
       };
       cacheId = sha256Text(stableJson(rawIntent)).slice(0, 32);
       const rawCache = await this.cache.createWithId(cacheId, {
         source,
-        skill_id: skillId,
-        mode,
-        target_paths: requestedTargets,
+        skill_id: requestedSkillId,
+        mode: rawMode,
+        target_paths: rawTargets,
         summary: input.summary || "Generated content pending durable commit",
         transient: true,
-        save_plan: savePlan
+        save_plan: rawSavePlan
       });
       if (rawCache.status === "pending") {
         const cachedContent = await this.cache.readContent(cacheId);
@@ -345,9 +361,34 @@ export class AgentRuntimeService {
           await this.cache.replace(cacheId, content);
         }
       }
+      if (sectionedSavePlan && !sectionedSavePlan.target_paths.length) {
+        const noSaveMeta = rawCache.status === "pending"
+          ? await this.cache.discard(cacheId)
+          : rawCache;
+        return {
+          run_id: "",
+          cache_id: cacheId,
+          saved_paths: [],
+          journal_ids: [],
+          replayed: rawCache.status !== "pending",
+          cache: noSaveMeta
+        };
+      }
     }
 
-    const meta = await this.cache.get(cacheId);
+    let meta = await this.cache.get(cacheId);
+    const cachedSkillId = String(meta.skill_id || "").trim();
+    if (
+      requestedSkillId
+      && requestedSkillId !== cachedSkillId
+      && (Boolean(cachedSkillId) || isSectionedGeneratedSkillId(requestedSkillId))
+    ) {
+      throw codedRuntimeError(
+        "GENERATED_CACHE_SKILL_MISMATCH",
+        `生成缓存技能身份不匹配：缓存为 ${cachedSkillId || "(empty)"}，请求为 ${requestedSkillId}`
+      );
+    }
+    const effectiveSkillId = cachedSkillId || requestedSkillId;
     if (meta.status === "committed") {
       return {
         run_id: meta.commit_run_id,
@@ -363,23 +404,66 @@ export class AgentRuntimeService {
     }
 
     const cachedContent = await this.cache.readContent(cacheId);
-    const effectiveSavePlan = savePlan || (meta.save_plan ? canonicalGeneratedSavePlan(meta.save_plan) : undefined);
-    const effectiveTargets = requestedTargets.length
-      ? requestedTargets
-      : canonicalGeneratedPaths(effectiveSavePlan?.target_paths?.length ? effectiveSavePlan.target_paths : meta.target_paths);
+    const sectionedMode = requestedMode || meta.save_plan?.mode || meta.mode || "replace";
+    const sectionedSavePlan = isSectionedGeneratedSkillId(effectiveSkillId)
+      ? canonicalGeneratedSavePlan(buildSectionedGeneratedSavePlan({
+          skillId: effectiveSkillId,
+          result: cachedContent,
+          mode: sectionedMode,
+          summaryPrefix: sectionedGeneratedSummaryPrefix(effectiveSkillId)
+        }))
+      : undefined;
+    if (sectionedSavePlan) {
+      meta = await this.cache.updateSavePlan(cacheId, sectionedSavePlan);
+      if (!sectionedSavePlan.target_paths.length) {
+        return {
+          run_id: "",
+          cache_id: cacheId,
+          saved_paths: [],
+          journal_ids: [],
+          replayed: false,
+          cache: meta
+        };
+      }
+    }
+    const effectiveSavePlan = sectionedSavePlan
+      || requestedSavePlan
+      || (meta.save_plan ? canonicalGeneratedSavePlan(meta.save_plan) : undefined);
+    const commitMode = requestedMode || effectiveSavePlan?.mode || meta.mode || "replace";
+    const effectiveTargets = sectionedSavePlan
+      ? canonicalGeneratedPaths(sectionedSavePlan.target_paths)
+      : requestedTargets.length
+        ? requestedTargets
+        : canonicalGeneratedPaths(effectiveSavePlan?.target_paths?.length ? effectiveSavePlan.target_paths : meta.target_paths);
     const commitIntent = {
       schema_version: 1,
       kind: "generated_cache_commit",
       cache_id: cacheId,
-      mode: input.mode || effectiveSavePlan?.mode || meta.mode || "replace",
+      mode: commitMode,
       target_paths: effectiveTargets,
       save_plan: effectiveSavePlan || null,
       content_hash: sha256Text(cachedContent)
     };
     const intentHash = sha256Text(stableJson(commitIntent));
-    const commits = effectiveSavePlan
+    const preparedCommits = effectiveSavePlan
       ? await this.cache.prepareSavePlanCommit(cacheId, effectiveSavePlan, { mode: input.mode })
       : await this.cache.prepareTargetCommit(cacheId, effectiveTargets, { mode: input.mode });
+    const sectionedCommitMetadata = sectionedSavePlan && isSectionedGeneratedSkillId(effectiveSkillId)
+      ? new Map(sectionedSavePlan.segments.map((segment) => [
+          segment.target_path,
+          {
+            actionKey: `section:${effectiveSkillId}:${segment.target_path}`,
+            source: effectiveSkillId === "lore_extract" && sectionedMode === "replace"
+              ? "skill"
+              : "agent_generated_save",
+            summary: segment.reason
+          }
+        ]))
+      : new Map<string, { actionKey: string; source: string; summary: string }>();
+    const commits = preparedCommits.map((commit) => {
+      const sectioned = sectionedCommitMetadata.get(commit.target_path);
+      return sectioned ? { ...commit, action_key: sectioned.actionKey } : commit;
+    });
     throwIfAborted(options.signal);
 
     let execution = options.execution;
@@ -458,12 +542,13 @@ export class AgentRuntimeService {
     try {
       for (const commit of commits) {
         throwIfAborted(execution.signal);
+        const sectioned = sectionedCommitMetadata.get(commit.target_path);
         const result = await this.writePreparedGeneratedCacheCommit(
           commit,
           execution,
           intentHash,
-          source,
-          input.summary
+          sectioned?.source || source,
+          sectioned?.summary || input.summary
         );
         journalIds.push(result.journal.journal_id);
         replayed = replayed && result.replayed;
@@ -2892,6 +2977,16 @@ function canonicalGeneratedSavePlan(savePlan: GeneratedSavePlan): GeneratedSaveP
       target_path: String(segment.target_path || "").trim().replace(/\\/g, "/")
     }))
   };
+}
+
+function sectionedGeneratedSummaryPrefix(skillId: SectionedGeneratedSkillId): string {
+  if (skillId === "style_extract") {
+    return "风格库保存";
+  }
+  if (skillId === "genre_generate") {
+    return "题材库保存";
+  }
+  return "设定提取保存";
 }
 
 function stableJson(value: unknown): string {

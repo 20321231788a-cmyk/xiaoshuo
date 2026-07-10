@@ -282,8 +282,9 @@ export class GeneratedCacheService {
     const strip = options.stripContent ?? true;
     const commits: PreparedGeneratedCacheCommit[] = [];
     const stagedContent = new Map<string, string>();
+    const commitIndexByTarget = new Map<string, number>();
 
-    for (const [index, segment] of segments.entries()) {
+    for (const segment of segments) {
       let content = String(segment.content || "").trim();
       if (!content) {
         content = strip ? fallbackContent.trim() : fallbackContent;
@@ -300,13 +301,23 @@ export class GeneratedCacheService {
         stagedContent.get(segment.target_path)
       );
       stagedContent.set(segment.target_path, nextText);
-      commits.push({
-        cache_id: cacheId,
-        target_path: segment.target_path,
-        content: nextText,
-        mode,
-        action_key: `segment:${index}`
-      });
+      const existingIndex = commitIndexByTarget.get(segment.target_path);
+      if (existingIndex !== undefined) {
+        commits[existingIndex] = {
+          ...commits[existingIndex]!,
+          content: nextText,
+          mode
+        };
+      } else {
+        commitIndexByTarget.set(segment.target_path, commits.length);
+        commits.push({
+          cache_id: cacheId,
+          target_path: segment.target_path,
+          content: nextText,
+          mode,
+          action_key: `save_plan_target:${segment.target_path}`
+        });
+      }
     }
     return commits;
   }

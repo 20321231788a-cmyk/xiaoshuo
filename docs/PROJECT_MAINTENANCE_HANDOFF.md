@@ -2195,6 +2195,21 @@ npm test
 - 根级：`npm run typecheck`、`npm test`（85 files / 636 tests）、`npm run build:desktop`、`npm run build:workbench` 和 `git diff --check` 通过；Workbench 只有既有的 >500 kB chunk warning；
 - P0-F 与 P0 继续为“实现中”；`PRODUCT.md` 未修改、未纳入提交。
 
+### 15.65 2026-07-10 P0 Style/Genre/Lore 分段 GeneratedCache Journal 记录
+
+- 新增无文件副作用的 sectioned generated-save planner，统一承接 `style_extract`、`genre_generate`、`lore_extract` 的标题别名、legacy fenced 文件块、固定目标顺序、style/genre 首目标 fallback、Lore 关键词分类与空占位过滤；`PromptSkillRunner` 的兼容 writer facade 复用同一解析结果，避免两套规则漂移；
+- `/api/agent/generated/save` 与 `/api/agent/generated/cache/{id}/commit` 不再实例化 `PromptSkillRunner` 直写特殊分段文件，统一委托 `AgentRuntimeService.commitGeneratedCache()`；特殊缓存只按 metadata `skill_id` 决定 handler，body 技能不一致返回 `409 GENERATED_CACHE_SKILL_MISMATCH`，空 metadata 不能被提升为特殊技能；
+- runtime 为每个实际 section 生成固定目标、稳定 action key 和服务端派生的 timeline source/summary；客户端 `target_paths`、`save_plan` 及 passthrough 字段不能改写特殊目标或伪造 journal 审计元数据。Lore 的 HTTP replace 继续保持原有覆盖语义，Prompt Skill 自动保存的 merge-existing 兼容语义未被改动；
+- section append 继续使用 `existing.trimEnd() + "\n\n---\n" + content + "\n"`；多文件中途失败保持 cache pending，并在同一 run 新 attempt 恢复，已经 finalized 的 section 不重复追加。普通 save-plan 对同一目标的多个 segment 现在先合成为一个最终 replacement，只生成一次原子 journal 写入，封住“首段成功、后段崩溃、重试重复首段”的恢复漏洞；
+- 无 cache 的特殊 raw 内容仍使用确定性 32-hex cache；若 Lore 等解析后没有实际目标，cache 会立即进入 discarded 并删除正文，不留下调用方无法寻址的 pending 项。调用未显式给 mode 时，特殊缓存沿用 metadata/save-plan mode；
+- 本板块没有新增 SQLite schema。回滚代码不得删除已有 cache、run 或 journal；失败重试仍以 cache 内容、规范化 section plan 和原 run journal 为恢复依据。
+
+本轮验证：
+
+- 定向：`npx vitest run packages/agent-runtime/src/sectioned-generated-save.test.ts packages/agent-runtime/src/skill-runner.test.ts packages/agent-runtime/src/runtime.test.ts packages/generated-cache/src/service.test.ts apps/desktop-shell/src/main/runtime/generated-cache-routes.test.ts packages/shared/src/schemas/agent.test.ts --reporter=dot`，6 files / 135 tests；
+- 根级：`npm run typecheck`、`npm test`（86 files / 650 tests）、`npm run build:desktop`、`npm run build:workbench` 和 `git diff --check` 通过；Workbench 只有既有的 >500 kB chunk warning；
+- P0-F 与 P0 继续为“实现中”；Prompt Skill 自动提交、chat 写回、普通文件操作计划和 card draw 仍是未完成旁路；`PRODUCT.md` 未修改、未纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：
