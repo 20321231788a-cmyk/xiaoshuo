@@ -1,6 +1,7 @@
 import { ConversationService } from "@xiaoshuo/conversation-service";
 import { DocumentService } from "@xiaoshuo/document-service";
 import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -231,6 +232,27 @@ describe("DisassembleBookWorkflow", () => {
     ]));
     expect(actions).toHaveLength(8);
     expect(new Set(journal.map((entry) => `${entry.run_id}:${entry.step_id}:${entry.attempt_id}`)).size).toBe(1);
+
+    // A journaled action is only useful if it is the durable commit for the
+    // output that the workflow actually leaves on disk. The manifest is
+    // deliberately rewritten throughout this workflow, so verify its final
+    // write alongside every final generated and legacy-sync document.
+    const book = response.skill_result?.data?.book as { dir?: string } | undefined;
+    const expectedFinalWrites = [
+      { action: "workflow.disassemble_book.book.source", relativePath: `${book?.dir}/原文.txt` },
+      { action: "workflow.disassemble_book.book.manifest.reverse_outline", relativePath: `${book?.dir}/manifest.jsonl` },
+      { action: "workflow.disassemble_book.lore.output", relativePath: `${book?.dir}/拆书设定提取.txt` },
+      { action: "workflow.disassemble_book.lore.legacy_sync", relativePath: "00_设定集/设定集/拆书设定提取.txt" },
+      { action: "workflow.disassemble_book.reverse_outline.output", relativePath: `${book?.dir}/反向细纲.txt` },
+      { action: "workflow.disassemble_book.reverse_outline.legacy_sync", relativePath: "01_大纲/反向细纲.txt" }
+    ];
+    for (const expected of expectedFinalWrites) {
+      const entry = journal.find((item) => item.action === expected.action);
+      expect(entry).toBeDefined();
+      expect(path.relative(tempDir, entry!.target_path).replace(/\\/g, "/")).toBe(expected.relativePath);
+      const content = await fs.readFile(entry!.target_path, "utf8");
+      expect(entry!.new_hash).toBe(`sha256:${createHash("sha256").update(content, "utf8").digest("hex")}`);
+    }
   });
 
   it("resumes the same durable run without recomputing its persisted lore output after a SQLite restart", async () => {

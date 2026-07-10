@@ -13,6 +13,8 @@ const runtime = vi.hoisted(() => ({
   getDurableRun: vi.fn(),
   listDurableRunConfirmations: vi.fn(),
   listDurableRunEvents: vi.fn(),
+  exportDurableRun: vi.fn(),
+  deleteDurableRun: vi.fn(),
   pauseDurableRun: vi.fn(),
   cancelDurableRun: vi.fn(),
   resumeDurableRun: vi.fn(),
@@ -117,6 +119,49 @@ describe("agent lifecycle routes", () => {
       has_more: false,
       earliest_available_sequence: 5,
       gap_detected: false
+    });
+  });
+
+  it("exports and deletes a project-local terminal durable run", async () => {
+    const writeJson = vi.fn();
+    const exported = {
+      format_version: 1,
+      exported_at: "2026-07-10T04:00:00.000Z",
+      project_id: "project",
+      project_path: "D:\\projects\\demo",
+      run: runState("run-export", 2, "completed"),
+      steps: [], attempts: [], observations: [], artifacts: [], confirmations: [], events: [], control_operations: [], commit_journal: []
+    };
+    const deleted = {
+      run_id: "run-export",
+      project_id: "project",
+      deleted_at: "2026-07-10T04:01:00.000Z",
+      deleted_records: { run: 1, steps: 0, attempts: 0, observations: 0, artifacts: 0, confirmations: 0, events: 0, control_operations: 0, commit_journal: 0, write_leases: 0 },
+      preserved_artifacts: []
+    };
+    runtime.exportDurableRun.mockReturnValue(exported);
+    runtime.deleteDurableRun.mockReturnValue(deleted);
+
+    await handleAgentRoutes(request("GET"), response(), "/api/agent/runs/run-export/export", context(), deps(writeJson));
+    await handleAgentRoutes(request("DELETE"), response(), "/api/agent/runs/run-export", context(), deps(writeJson));
+
+    expect(runtime.exportDurableRun).toHaveBeenCalledWith("run-export");
+    expect(runtime.deleteDurableRun).toHaveBeenCalledWith("run-export");
+    expect(writeJson).toHaveBeenNthCalledWith(1, expect.anything(), 200, exported);
+    expect(writeJson).toHaveBeenNthCalledWith(2, expect.anything(), 200, deleted);
+  });
+
+  it("maps an unsafe durable run deletion to a conflict", async () => {
+    const writeJson = vi.fn();
+    runtime.deleteDurableRun.mockImplementation(() => {
+      throw Object.assign(new Error("Agent run run-active must be terminal before deletion"), { code: "RUN_NOT_TERMINAL" });
+    });
+
+    await handleAgentRoutes(request("DELETE"), response(), "/api/agent/runs/run-active", context(), deps(writeJson));
+
+    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 409, {
+      detail: "Agent run run-active must be terminal before deletion",
+      code: "RUN_NOT_TERMINAL"
     });
   });
 

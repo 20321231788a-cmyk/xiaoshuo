@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { AGENT_FEATURE_FLAG_DEFINITIONS, InMemoryAgentFeatureFlagRegistry } from "./feature-flag-registry.js";
+import {
+  AGENT_FEATURE_FLAG_DEFINITIONS,
+  AGENT_PERSISTABLE_FEATURE_FLAG_KEYS,
+  InMemoryAgentFeatureFlagRegistry,
+  parseAgentFeatureFlagOverrides
+} from "./feature-flag-registry.js";
 
 describe("InMemoryAgentFeatureFlagRegistry", () => {
   it("declares the P0 flags and defaults every future capability to off", () => {
@@ -43,5 +48,11 @@ describe("InMemoryAgentFeatureFlagRegistry", () => {
       agent_replanning_v2: false,
       memory_context_selector_v2: false
     });
+  });
+
+  it("accepts only product capability overrides and never creates security toggles", () => {
+    expect(AGENT_PERSISTABLE_FEATURE_FLAG_KEYS).toEqual(AGENT_FEATURE_FLAG_DEFINITIONS.map((definition) => definition.key));
+    expect(parseAgentFeatureFlagOverrides({ agent_execution_v2_mode: "shadow" })).toEqual({ agent_execution_v2_mode: "shadow" });
+    expect(() => parseAgentFeatureFlagOverrides({ runtime_session_auth: false })).toThrow();
   });
 });

@@ -502,6 +502,14 @@ export function createApiClient(options: ApiClientOptions) {
       requestContract("agentRun", {
         pathParams: { run_id: runId }
       }),
+    exportAgentRun: (runId: string) =>
+      requestContract("agentRunExport", {
+        pathParams: { run_id: runId }
+      }),
+    deleteAgentRun: (runId: string) =>
+      requestContract("deleteAgentRun", {
+        pathParams: { run_id: runId }
+      }),
     getAgentRunConfirmations: (runId: string) =>
       requestContract("agentRunConfirmations", {
         pathParams: { run_id: runId }

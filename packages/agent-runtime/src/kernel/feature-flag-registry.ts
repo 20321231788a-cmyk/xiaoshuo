@@ -3,8 +3,10 @@ import {
   agentFeatureFlagSnapshotSchema,
   type AgentFeatureFlagSnapshot
 } from "@xiaoshuo/shared";
+import { z } from "zod";
 
 export type AgentFeatureFlagKey = Exclude<keyof AgentFeatureFlagSnapshot, "schema_version">;
+export type AgentFeatureFlagOverrides = Partial<Omit<AgentFeatureFlagSnapshot, "schema_version">>;
 
 export type AgentFeatureFlagDefinition = {
   key: AgentFeatureFlagKey;
@@ -28,6 +30,41 @@ export const AGENT_FEATURE_FLAG_DEFINITIONS: readonly AgentFeatureFlagDefinition
   flag("agent_inline_plan_ui", false, ["agent_execution_v2_mode"])
 ];
 
+/**
+ * This is deliberately a product-capability allowlist. Transport security,
+ * filesystem policy and redaction controls are code-only settings and cannot
+ * be persisted or surfaced through this registry.
+ */
+export const AGENT_PERSISTABLE_FEATURE_FLAG_KEYS: readonly AgentFeatureFlagKey[] = [
+  "agent_execution_v2_mode",
+  "model_gateway_v2",
+  "agent_replanning_v2",
+  "context_budget_v2",
+  "memory_v2",
+  "memory_context_selector_v2",
+  "quality_gate_v2",
+  "agent_event_stream_v2",
+  "agent_inline_plan_ui"
+];
+
+export const agentFeatureFlagOverridesSchema = z
+  .object({
+    agent_execution_v2_mode: z.enum(["off", "shadow", "on"]).optional(),
+    model_gateway_v2: z.boolean().optional(),
+    agent_replanning_v2: z.boolean().optional(),
+    context_budget_v2: z.boolean().optional(),
+    memory_v2: z.boolean().optional(),
+    memory_context_selector_v2: z.boolean().optional(),
+    quality_gate_v2: z.boolean().optional(),
+    agent_event_stream_v2: z.boolean().optional(),
+    agent_inline_plan_ui: z.boolean().optional()
+  })
+  .strict();
+
+export function parseAgentFeatureFlagOverrides(value: unknown): AgentFeatureFlagOverrides {
+  return agentFeatureFlagOverridesSchema.parse(value);
+}
+
 export interface AgentFeatureFlagRegistry {
   snapshot(): AgentFeatureFlagSnapshot;
 }
@@ -35,16 +72,16 @@ export interface AgentFeatureFlagRegistry {
 export class InMemoryAgentFeatureFlagRegistry implements AgentFeatureFlagRegistry {
   private overrides: Partial<AgentFeatureFlagSnapshot>;
 
-  constructor(overrides: Partial<AgentFeatureFlagSnapshot> = {}) {
-    this.overrides = { ...overrides };
+  constructor(overrides: AgentFeatureFlagOverrides = {}) {
+    this.overrides = { ...parseAgentFeatureFlagOverrides(overrides) };
   }
 
   snapshot(): AgentFeatureFlagSnapshot {
     return agentFeatureFlagSnapshotSchema.parse(normalize({ ...DEFAULT_AGENT_FEATURE_FLAG_SNAPSHOT, ...this.overrides }));
   }
 
-  update(overrides: Partial<AgentFeatureFlagSnapshot>): void {
-    this.overrides = { ...this.overrides, ...overrides };
+  update(overrides: AgentFeatureFlagOverrides): void {
+    this.overrides = { ...this.overrides, ...parseAgentFeatureFlagOverrides(overrides) };
   }
 }
 

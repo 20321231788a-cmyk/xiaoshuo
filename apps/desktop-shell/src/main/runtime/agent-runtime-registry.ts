@@ -14,7 +14,9 @@ export function getProjectAgentRuntime(context: RuntimeContext, projectRoot: str
   }
   const runtime = new AgentRuntimeService({
     projectRoot: resolved,
-    config: { rootDir: context.projectRoot, env: process.env }
+    config: { rootDir: context.projectRoot, env: process.env },
+    featureFlags: context.featureFlags,
+    autoRecoverStaleRuns: context.autoRecoverStaleRuns
   });
   registry.set(key, runtime);
   return runtime;

@@ -2,7 +2,9 @@ import type {
   AgentArtifactRef,
   AgentConfirmation,
   AgentExecutionStep,
+  AgentRunDeleteResponse,
   AgentObservation,
+  AgentRunExport,
   AgentRunEvent,
   AgentRunState,
   AgentRunStatus,
@@ -346,6 +348,8 @@ export interface ExecutionStorePort {
   getRun(runId: string): AgentRunState | null;
   getRunByRequestId(requestId: string, projectId?: string): AgentRunState | null;
   listRuns(options?: ExecutionRunListOptions): AgentRunState[];
+  exportRun(runId: string): AgentRunExport;
+  deleteRun(runId: string): AgentRunDeleteResponse;
   updateRunStatus(input: UpdateRunStatusInput): ExecutionCasResult<AgentRunState>;
   heartbeatRunLease(input: HeartbeatRunLeaseInput): boolean;
   replaceSteps(input: ReplaceRunStepsInput): ExecutionCasResult<AgentRunState>;

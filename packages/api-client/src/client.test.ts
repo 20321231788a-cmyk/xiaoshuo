@@ -380,6 +380,46 @@ describe("api-client", () => {
     ]);
   });
 
+  it("exports and deletes durable runs through typed project-scoped endpoints", async () => {
+    const requests: Array<{ url: string; method: string }> = [];
+    const run = {
+      run_id: "run-export",
+      project_id: "project-one",
+      project_path: "D:\\projects\\demo",
+      goal: { instruction: "导出" },
+      created_at: "2026-07-10T08:00:00.000Z",
+      updated_at: "2026-07-10T08:00:01.000Z"
+    };
+    const client = createApiClient({
+      baseUrl: "http://127.0.0.1:18452",
+      fetchFn: async (input, init) => {
+        const url = String(input);
+        requests.push({ url, method: String(init?.method || "GET") });
+        const body = init?.method === "DELETE"
+          ? {
+              run_id: "run-export", project_id: "project-one", deleted_at: "2026-07-10T08:02:00.000Z",
+              deleted_records: { run: 1, steps: 0, attempts: 0, observations: 0, artifacts: 0, confirmations: 0, events: 0, control_operations: 0, commit_journal: 0, write_leases: 0 },
+              preserved_artifacts: []
+            }
+          : {
+              format_version: 1, exported_at: "2026-07-10T08:02:00.000Z", project_id: "project-one", project_path: "D:\\projects\\demo",
+              run, steps: [], attempts: [], observations: [], artifacts: [], confirmations: [], events: [], control_operations: [], commit_journal: []
+            };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+    });
+
+    const exported = await client.exportAgentRun("run-export");
+    const deleted = await client.deleteAgentRun("run-export");
+
+    expect(exported).toMatchObject({ format_version: 1, run: { run_id: "run-export" } });
+    expect(deleted).toMatchObject({ run_id: "run-export", deleted_records: { run: 1 } });
+    expect(requests).toEqual([
+      { url: "http://127.0.0.1:18452/api/agent/runs/run-export/export", method: "GET" },
+      { url: "http://127.0.0.1:18452/api/agent/runs/run-export", method: "DELETE" }
+    ]);
+  });
+
   it("posts agent run lifecycle commands with idempotency and CAS bodies", async () => {
     const requests: Array<{ url: string; method: string; body: string }> = [];
     const run = {

@@ -49,6 +49,36 @@ describe("RunCoordinator", () => {
     ]);
   });
 
+  it("does not export or delete a record through a coordinator for another project", async () => {
+    const store = openExecutionStore(tempDir);
+    externalStores.push(store);
+    const owner = new RunCoordinator({
+      projectRoot: tempDir,
+      store,
+      runtimeInstanceId: "runtime-owner",
+      autoHeartbeat: false,
+      idFactory: sequenceFactory("owner")
+    });
+    coordinators.push(owner);
+    const execution = owner.beginRun(request());
+    owner.completeRun(execution, response("完成"));
+
+    const otherProject = path.join(tempDir, "other-project");
+    await fs.mkdir(otherProject);
+    const foreign = new RunCoordinator({
+      projectRoot: otherProject,
+      store,
+      runtimeInstanceId: "runtime-foreign",
+      autoHeartbeat: false,
+      idFactory: sequenceFactory("foreign")
+    });
+    coordinators.push(foreign);
+
+    expect(() => foreign.exportRun(execution.run_id)).toThrow(/does not belong to this project/);
+    expect(() => foreign.deleteRun(execution.run_id)).toThrow(/does not belong to this project/);
+    expect(owner.getRun(execution.run_id)).not.toBeNull();
+  });
+
   it("records typed failures without losing the retryable step", () => {
     const coordinator = createCoordinator("runtime-failure");
     const execution = coordinator.beginRun(request());

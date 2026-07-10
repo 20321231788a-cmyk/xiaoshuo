@@ -1,5 +1,5 @@
 import type { DocumentTimelineSession } from "@xiaoshuo/document-service";
-import type { AgentRuntimeService } from "@xiaoshuo/agent-runtime";
+import type { AgentFeatureFlagRegistry, AgentRuntimeService } from "@xiaoshuo/agent-runtime";
 import type { JobManager } from "@xiaoshuo/job-service";
 import type { ProjectSessionService } from "@xiaoshuo/project-session";
 import type http from "node:http";
@@ -18,6 +18,8 @@ export type RuntimeServerState = {
   documentSessions?: Map<string, DocumentTimelineSession>;
   agentRuntimes?: Map<string, AgentRuntimeService>;
   projectIdentityRegistry?: ProjectIdentityRegistry;
+  featureFlags?: AgentFeatureFlagRegistry;
+  autoRecoverStaleRuns?: boolean;
   sessionToken?: string;
 };
 
@@ -25,6 +27,8 @@ export type RuntimeServerOptions = {
   projectRoot: string;
   stateFilePath: string;
   projectIdentityRegistryPath?: string;
+  agentFeatureFlagOverridesPath?: string;
+  safeAgent?: boolean;
   state: RuntimeServerState;
 };
 
@@ -35,6 +39,8 @@ export type RuntimeContext = {
   documentSessions: Map<string, DocumentTimelineSession>;
   agentRuntimes?: Map<string, AgentRuntimeService>;
   projectIdentityRegistry?: ProjectIdentityRegistry;
+  featureFlags?: AgentFeatureFlagRegistry;
+  autoRecoverStaleRuns?: boolean;
   sessionToken?: string;
   allowedOrigins?: readonly string[];
 };

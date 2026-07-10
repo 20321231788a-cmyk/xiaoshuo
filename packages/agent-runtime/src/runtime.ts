@@ -1,5 +1,7 @@
 import type {
   AgentRunRequest,
+  AgentRunDeleteResponse,
+  AgentRunExport,
   AgentRunResponse,
   AgentRunState,
   AgentPlanRequest,
@@ -48,7 +50,12 @@ import { createAgentTraceRecorder, type AgentTraceRecorder } from "./agent-trace
 import { getWorkflowHandler, isWorkflowSkillId } from "./workflows/registry.js";
 import type { WorkflowRunContext } from "./workflows/types.js";
 import { isCancellationError, throwIfAborted, type AgentRunOptions } from "./cancellation.js";
-import { RunCoordinator, RunRequestReplayError, type DurableRunExecution } from "./kernel/run-coordinator.js";
+import {
+  RunCoordinator,
+  RunRequestReplayError,
+  type DurableRunExecution
+} from "./kernel/run-coordinator.js";
+import type { AgentFeatureFlagRegistry } from "./kernel/feature-flag-registry.js";
 import { CommitJournalService } from "./kernel/commit-journal-service.js";
 import { DurableWorkflowCheckpointStore } from "./kernel/workflow-checkpoint.js";
 
@@ -86,7 +93,7 @@ export class AgentRuntimeService {
   private readonly commitJournal: CommitJournalService;
   private readonly projectManifest: ProjectManifestService;
 
-  constructor(options: AgentPlannerOptions) {
+  constructor(options: AgentRuntimeOptions) {
     this.config = options.config ?? {};
     this.modelClient = options.modelClient ?? new OpenAICompatibleClient();
     this.webSearchClient = options.webSearchClient ?? new DefaultWebSearchClient();
@@ -94,7 +101,7 @@ export class AgentRuntimeService {
     this.skillRunner = new PromptSkillRunner(options);
     this.skillDrafts = new SkillDraftService(options);
     this.chatRunner = new AgentChatRunner(options);
-    this.runCoordinator = new RunCoordinator({ projectRoot: options.projectRoot });
+    this.runCoordinator = new RunCoordinator({ projectRoot: options.projectRoot, featureFlags: options.featureFlags });
     this.commitJournal = new CommitJournalService({ store: this.runCoordinator.store, projectRoot: options.projectRoot });
     this.fileOperationRunner = new AgentFileOperationRunner({
       planner: this.planner,
@@ -116,7 +123,9 @@ export class AgentRuntimeService {
       modelClient: this.modelClient
     });
     this.projectManifest = new ProjectManifestService(options.projectRoot);
-    this.runCoordinator.recoverStaleRuns();
+    if (options.autoRecoverStaleRuns !== false) {
+      this.runCoordinator.recoverStaleRuns();
+    }
     activeAgentRuntimeServices.add(this);
   }
 
@@ -565,6 +574,14 @@ export class AgentRuntimeService {
 
   listDurableCommitJournal(runId?: string) {
     return this.runCoordinator.listCommitJournal(runId);
+  }
+
+  exportDurableRun(runId: string): AgentRunExport {
+    return this.runCoordinator.exportRun(runId);
+  }
+
+  deleteDurableRun(runId: string): AgentRunDeleteResponse {
+    return this.runCoordinator.deleteRun(runId);
   }
 
   pauseDurableRun(runId: string, operationId?: string, expectedVersion?: number) {
@@ -2579,6 +2596,12 @@ export class AgentRuntimeService {
     return target;
   }
 }
+
+export type AgentRuntimeOptions = AgentPlannerOptions & {
+  featureFlags?: AgentFeatureFlagRegistry;
+  /** Safe mode keeps stale runs untouched until an operator explicitly exits it. */
+  autoRecoverStaleRuns?: boolean;
+};
 
 function stringListFromUnknown(value: unknown): string[] {
   if (!Array.isArray(value)) {

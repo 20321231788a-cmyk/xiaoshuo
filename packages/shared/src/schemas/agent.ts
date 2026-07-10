@@ -568,6 +568,83 @@ export const agentRunEventReplayResponseSchema = z
   })
   .passthrough();
 
+export type AgentRunExport = {
+  format_version: 1;
+  exported_at: string;
+  project_id: string;
+  project_path: string;
+  run: AgentRunState;
+  steps: AgentExecutionStep[];
+  attempts: AgentStepAttempt[];
+  observations: AgentObservation[];
+  artifacts: AgentArtifactRef[];
+  confirmations: AgentConfirmation[];
+  events: AgentRunEvent[];
+  control_operations: Record<string, unknown>[];
+  commit_journal: Record<string, unknown>[];
+};
+
+export type AgentRunDeleteResponse = {
+  run_id: string;
+  project_id: string;
+  deleted_at: string;
+  deleted_records: {
+    run: 1;
+    steps: number;
+    attempts: number;
+    observations: number;
+    artifacts: number;
+    confirmations: number;
+    events: number;
+    control_operations: number;
+    commit_journal: number;
+    write_leases: number;
+  };
+  preserved_artifacts: AgentArtifactRef[];
+};
+
+/** A portable, project-local record of one durable execution and its audit trail. */
+export const agentRunExportSchema: z.ZodType<AgentRunExport> = z
+  .object({
+    format_version: z.literal(1),
+    exported_at: z.string(),
+    project_id: z.string(),
+    project_path: z.string(),
+    run: agentRunStateSchema,
+    steps: z.array(agentExecutionStepSchema),
+    attempts: z.array(agentStepAttemptSchema),
+    observations: z.array(agentObservationSchema),
+    artifacts: z.array(agentArtifactRefSchema),
+    confirmations: z.array(agentConfirmationSchema),
+    events: z.array(agentRunEventSchema),
+    control_operations: z.array(z.record(z.unknown())).default([]),
+    commit_journal: z.array(z.record(z.unknown())).default([])
+  })
+  .passthrough() as z.ZodType<AgentRunExport>;
+
+export const agentRunDeleteResponseSchema: z.ZodType<AgentRunDeleteResponse> = z
+  .object({
+    run_id: z.string(),
+    project_id: z.string(),
+    deleted_at: z.string(),
+    deleted_records: z.object({
+      run: z.literal(1),
+      steps: z.number().int().nonnegative(),
+      attempts: z.number().int().nonnegative(),
+      observations: z.number().int().nonnegative(),
+      artifacts: z.number().int().nonnegative(),
+      confirmations: z.number().int().nonnegative(),
+      events: z.number().int().nonnegative(),
+      control_operations: z.number().int().nonnegative(),
+      commit_journal: z.number().int().nonnegative(),
+      write_leases: z.number().int().nonnegative()
+    }),
+    // The record is removed, but these are references to project files/cache that
+    // deletion must never unlink implicitly.
+    preserved_artifacts: z.array(agentArtifactRefSchema).default([])
+  })
+  .passthrough() as z.ZodType<AgentRunDeleteResponse>;
+
 export const agentRunControlRequestSchema = z
   .object({
     operation_id: z.string().trim().min(1),

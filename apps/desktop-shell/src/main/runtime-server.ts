@@ -68,6 +68,7 @@ import {
   writeNdjsonEvent
 } from "./runtime/index.js";
 import { ProjectIdentityRegistry, ProjectIdentityRegistryError } from "./project-identity-registry.js";
+import { loadDesktopAgentFeatureFlags } from "./agent-feature-flags.js";
 
 export { runtimeHost, runtimePort, runtimeUrl, type RuntimeServerOptions, type RuntimeServerState } from "./runtime/types.js";
 type ShellLike = { openPath: (target: string) => unknown };
@@ -89,6 +90,12 @@ export async function startRuntimeServer(options: RuntimeServerOptions): Promise
   const projectIdentityRegistry = options.state.projectIdentityRegistry || new ProjectIdentityRegistry(
     options.projectIdentityRegistryPath || path.join(path.dirname(options.stateFilePath), "project-identities.json")
   );
+  const desktopFlags = !options.safeAgent && options.state.featureFlags
+    ? { featureFlags: options.state.featureFlags, autoRecoverStaleRuns: options.state.autoRecoverStaleRuns !== false }
+    : await loadDesktopAgentFeatureFlags(
+        options.agentFeatureFlagOverridesPath || path.join(path.dirname(options.stateFilePath), "agent-feature-flags.json"),
+        options.safeAgent ? [...process.argv, "--safe-agent"] : process.argv
+      );
   // Browser E2E cannot use Electron's preload bridge. The explicit token is
   // accepted only by the separately-gated test runtime process.
   const sessionToken = process.env.XIAOSHUO_E2E_RUNTIME === "1" && process.env.XIAOSHUO_E2E_SESSION_TOKEN
@@ -99,6 +106,8 @@ export async function startRuntimeServer(options: RuntimeServerOptions): Promise
   options.state.documentSessions = documentSessions;
   options.state.agentRuntimes = agentRuntimes;
   options.state.projectIdentityRegistry = projectIdentityRegistry;
+  options.state.featureFlags = desktopFlags.featureFlags;
+  options.state.autoRecoverStaleRuns = desktopFlags.autoRecoverStaleRuns;
   options.state.sessionToken = sessionToken;
   const restoredProject = await projectSession.getCurrentProject();
   if (restoredProject.path) {
@@ -113,6 +122,8 @@ export async function startRuntimeServer(options: RuntimeServerOptions): Promise
       documentSessions,
       agentRuntimes,
       projectIdentityRegistry,
+      featureFlags: desktopFlags.featureFlags,
+      autoRecoverStaleRuns: desktopFlags.autoRecoverStaleRuns,
       sessionToken,
       allowedOrigins
     }).catch((error) => {

@@ -7,6 +7,8 @@ import {
   agentRunStateSchema,
   type AgentExecutionStep,
   type AgentExecutionStepType,
+  type AgentRunDeleteResponse,
+  type AgentRunExport,
   type AgentRunRequest,
   type AgentRunResponse,
   type AgentRunState,
@@ -699,6 +701,19 @@ export class RunCoordinator {
     return this.store.listCommitJournal(runId);
   }
 
+  exportRun(runId: string): AgentRunExport {
+    this.assertRunProjectScope(runId);
+    return this.store.exportRun(runId);
+  }
+
+  deleteRun(runId: string): AgentRunDeleteResponse {
+    this.assertRunProjectScope(runId);
+    if (this.active.has(runId)) {
+      throw codedError("RUN_ACTIVE", `Agent run ${runId} is still active and cannot be deleted`);
+    }
+    return this.store.deleteRun(runId);
+  }
+
   close(): void {
     if (this.closed) {
       return;
@@ -1067,6 +1082,14 @@ export class RunCoordinator {
     return run;
   }
 
+  private assertRunProjectScope(runId: string): AgentRunState {
+    const run = this.requireRun(runId);
+    if (!run.project_path || path.resolve(run.project_path) !== this.projectRoot) {
+      throw codedError("RUN_PROJECT_SCOPE_MISMATCH", `Agent run ${runId} does not belong to this project`);
+    }
+    return run;
+  }
+
   private assertOpen(): void {
     if (this.closed) {
       throw new Error("Run coordinator is closed");
@@ -1128,6 +1151,10 @@ function errorCode(error: unknown, fallback: string): string {
     }
   }
   return fallback;
+}
+
+function codedError(code: string, message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
 }
 
 function truncate(value: string, limit: number): string {

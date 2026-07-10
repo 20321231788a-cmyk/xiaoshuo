@@ -2,7 +2,9 @@ import type {
   AgentArtifactRef,
   AgentConfirmation,
   AgentExecutionStep,
+  AgentRunDeleteResponse,
   AgentRunEvent,
+  AgentRunExport,
   AgentRunState,
   AgentRunStatus,
   AgentStepStatus
@@ -714,6 +716,66 @@ export class ExecutionStore implements ExecutionStorePort {
         .prepare(`SELECT * FROM agent_runs ${where} ORDER BY updated_at DESC, run_id DESC LIMIT ?`)
         .all(...parameters)
     ).map((source) => this.mapRunRow(source));
+  }
+
+  exportRun(runId: string): AgentRunExport {
+    const run = this.requireRun(runId);
+    return {
+      format_version: 1,
+      exported_at: this.timestamp(),
+      project_id: run.project_id,
+      project_path: run.project_path,
+      run,
+      steps: this.listAllSteps(runId),
+      attempts: this.listAttempts(runId),
+      observations: this.listObservations(runId),
+      artifacts: this.listArtifacts(runId),
+      confirmations: this.listConfirmations(runId),
+      events: this.listAllEventsForExport(runId),
+      control_operations: this.listControlOperations(runId),
+      commit_journal: this.listCommitJournal(runId)
+    };
+  }
+
+  deleteRun(runId: string): AgentRunDeleteResponse {
+    return this.transaction(() => {
+      const exported = this.exportRun(runId);
+      const { run } = exported;
+      if (!isTerminalRunStatus(run.status)) {
+        throw codedError("RUN_NOT_TERMINAL", `Agent run ${runId} must be terminal before deletion`);
+      }
+      if (exported.commit_journal.some((entry) => entry.stage !== "finalized")) {
+        throw codedError("RUN_JOURNAL_PENDING", `Agent run ${runId} has unfinished commit journal entries`);
+      }
+
+      const deletedWriteLeases = changes(
+        this.database
+          .prepare("DELETE FROM agent_write_leases WHERE run_id = ? AND (released_at <> '' OR expires_at <= ?)")
+          .run(runId, this.timestamp())
+      );
+      const deleted = changes(this.database.prepare("DELETE FROM agent_runs WHERE run_id = ?").run(runId));
+      if (deleted !== 1) {
+        throw codedError("RUN_NOT_FOUND", `Execution run not found: ${runId}`);
+      }
+      return {
+        run_id: run.run_id,
+        project_id: run.project_id,
+        deleted_at: this.timestamp(),
+        deleted_records: {
+          run: 1,
+          steps: exported.steps.length,
+          attempts: exported.attempts.length,
+          observations: exported.observations.length,
+          artifacts: exported.artifacts.length,
+          confirmations: exported.confirmations.length,
+          events: exported.events.length,
+          control_operations: exported.control_operations.length,
+          commit_journal: exported.commit_journal.length,
+          write_leases: deletedWriteLeases
+        },
+        preserved_artifacts: exported.artifacts
+      };
+    });
   }
 
   updateRunStatus(input: UpdateRunStatusInput): ExecutionCasResult<AgentRunState> {
@@ -2035,6 +2097,23 @@ export class ExecutionStore implements ExecutionStorePort {
     return run;
   }
 
+  private listAllEventsForExport(runId: string): StoredAgentRunEvent[] {
+    const events: StoredAgentRunEvent[] = [];
+    let after = 0;
+    for (;;) {
+      const page = this.listEvents(runId, { after, limit: 1_000 });
+      events.push(...page);
+      if (page.length < 1_000) {
+        return events;
+      }
+      const next = page.at(-1)?.sequence ?? after;
+      if (next <= after) {
+        throw new ExecutionStoreIntegrityError(`Execution event sequence stalled while exporting run ${runId}`);
+      }
+      after = next;
+    }
+  }
+
   private requireStep(runId: string, stepId: string): StoredAgentExecutionStep {
     const step = this.getStep(runId, stepId);
     if (!step) {
@@ -2557,4 +2636,12 @@ function assertTimestampOrder(start: string, end: string, subject: string): void
   if (!Number.isFinite(startTime) || !Number.isFinite(endTime) || endTime <= startTime) {
     throw new Error(`${subject} expiry must be a valid timestamp after its start`);
   }
+}
+
+function isTerminalRunStatus(status: AgentRunStatus): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
+function codedError(code: string, message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
 }

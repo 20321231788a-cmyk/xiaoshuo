@@ -2146,6 +2146,14 @@ npm test
 
 验证：`npx playwright test tests/e2e/project-entry.spec.ts --reporter=line` 通过（1 passed）；同时 `npm run typecheck`、`npm test`（84 files/612 tests）、Workbench/desktop 构建和 `git diff --check` 通过。`PRODUCT.md` 未纳入提交。
 
+### 15.60 2026-07-10 P0 Flag、审计生命周期与拆书 Journal 记录
+
+- feature flag 仅在 desktop 主进程按 allowlist 原子持久化；`--safe-agent` 不改写用户配置，强制关闭 v2 执行并禁用 stale-run 自动恢复；
+- durable run API 支持项目作用域的完整 audit export 与终态受控删除，删除不会删除用户文档或 cache；
+- 拆书 durable 输出逐项走 CommitJournalService，测试核对最终文件、journal target path 和 `new_hash`。
+
+本轮根级验证：`npm run typecheck`、`npm test`（85 files/622 tests）、`npm run build:workbench`、`npm run build:desktop` 和 `git diff --check` 通过。P0 仍未验收；`PRODUCT.md` 未纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

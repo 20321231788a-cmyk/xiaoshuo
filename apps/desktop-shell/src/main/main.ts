@@ -215,6 +215,8 @@ function registerIpc(): void {
       projectRoot,
       stateFilePath: path.join(app.getPath("userData"), "state", "project-session.json"),
       projectIdentityRegistryPath: path.join(app.getPath("userData"), "state", "project-identities.json"),
+      agentFeatureFlagOverridesPath: path.join(app.getPath("userData"), "state", "agent-feature-flags.json"),
+      safeAgent: process.argv.includes("--safe-agent"),
       state: runtimeState
     });
     return { ready: true, url: runtimeUrl, pid: undefined };
@@ -382,6 +384,8 @@ app.whenReady().then(async () => {
       projectRoot,
       stateFilePath: path.join(app.getPath("userData"), "state", "project-session.json"),
       projectIdentityRegistryPath: path.join(app.getPath("userData"), "state", "project-identities.json"),
+      agentFeatureFlagOverridesPath: path.join(app.getPath("userData"), "state", "agent-feature-flags.json"),
+      safeAgent: process.argv.includes("--safe-agent"),
       state: runtimeState
     });
   } catch (error) {

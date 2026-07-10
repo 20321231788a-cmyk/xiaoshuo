@@ -94,6 +94,16 @@ export async function handleAgentRoutes(
         return true;
       }
 
+      if (runRoute?.action === "export" && request.method === "GET") {
+        deps.writeJson(response, 200, runtime.exportDurableRun(runRoute.runId));
+        return true;
+      }
+
+      if (runRoute && !runRoute.action && request.method === "DELETE") {
+        deps.writeJson(response, 200, runtime.deleteDurableRun(runRoute.runId));
+        return true;
+      }
+
       if (runRoute?.action === "confirmations" && request.method === "GET") {
         if (!runtime.getDurableRun(runRoute.runId)) {
           deps.writeJson(response, 404, { detail: "Agent 运行记录不存在", code: "RUN_NOT_FOUND" });
@@ -181,7 +191,11 @@ export async function handleAgentRoutes(
       }
     } catch (error) {
       const code = lifecycleErrorCode(error);
-      const status = code === "RUN_NOT_FOUND" || code === "CONFIRMATION_NOT_FOUND" ? 404 : code === "REQUEST_ID_REUSED" || code.includes("CONFLICT") || code.includes("VERSION") || code.includes("CONFIRMATION_") ? 409 : 400;
+      const status = code === "RUN_NOT_FOUND" || code === "CONFIRMATION_NOT_FOUND" || code === "RUN_PROJECT_SCOPE_MISMATCH"
+        ? 404
+        : code === "REQUEST_ID_REUSED" || code.includes("CONFLICT") || code.includes("VERSION") || code.includes("CONFIRMATION_") || code === "RUN_ACTIVE" || code === "RUN_NOT_TERMINAL" || code === "RUN_JOURNAL_PENDING"
+          ? 409
+          : 400;
       deps.writeJson(response, status, { detail: error instanceof Error ? error.message : String(error), code });
       return true;
     }
@@ -327,7 +341,7 @@ export async function handleAgentRoutes(
 
 type AgentRunLifecycleRoute = {
   runId: string;
-  action?: "confirmations" | "events" | "event-stream" | "pause" | "resume" | "cancel" | "retry";
+  action?: "confirmations" | "events" | "event-stream" | "export" | "pause" | "resume" | "cancel" | "retry";
   stepId?: string;
 };
 
@@ -340,7 +354,7 @@ function matchAgentRunLifecycleRoute(pathname: string): AgentRunLifecycleRoute |
   if (eventStream) {
     return { runId: decodeRoutePart(eventStream[1]!), action: "event-stream" };
   }
-  const action = pathname.match(/^\/api\/agent\/runs\/([^/]+)\/(confirmations|events|pause|resume|cancel)$/);
+  const action = pathname.match(/^\/api\/agent\/runs\/([^/]+)\/(confirmations|events|export|pause|resume|cancel)$/);
   if (action) {
     return { runId: decodeRoutePart(action[1]!), action: action[2] as AgentRunLifecycleRoute["action"] };
   }

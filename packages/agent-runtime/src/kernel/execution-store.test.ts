@@ -378,6 +378,95 @@ describe("ExecutionStore", () => {
     expect(store.getRun("run-1")).toMatchObject({ version: 4, status: "running", last_event_sequence: 3 });
   });
 
+  it("exports a complete run audit and deletes only terminal records without unlinking artifact files", () => {
+    const projectRoot = temporaryProject();
+    const artifactPath = path.join(projectRoot, "chapter.md");
+    writeFileSync(artifactPath, "user document", "utf8");
+    const store = track(ExecutionStore.open(projectRoot, {
+      backupBeforeMigration: false,
+      now: () => new Date("2026-07-10T03:00:00.000Z")
+    }));
+    store.createRun(makeRun(projectRoot, {
+      status: "completed",
+      artifacts: [{ ...makeArtifact("artifact-export", "step-1"), path: artifactPath }]
+    }), { event_id: "event-export", event_type: "run.completed" });
+    const journal = store.createCommitJournal({
+      journal_id: "journal-export",
+      run_id: "run-1",
+      step_id: "step-1",
+      attempt_id: "attempt-none",
+      action: "replace_file",
+      target_path: artifactPath,
+      base_hash: "sha256:before",
+      new_hash: "sha256:after",
+      temp_path: path.join(projectRoot, ".chapter.export.tmp"),
+      backup_path: "",
+      document_version: 1,
+      timeline_ref: "",
+      idempotency_key: "journal-export-key",
+      fencing_token: 1,
+      stage: "finalized",
+      version: 1,
+      manifest: {},
+      error_code: "",
+      error: "",
+      created_at: "2026-07-10T02:00:00.000Z",
+      updated_at: "2026-07-10T02:00:00.000Z",
+      finalized_at: "2026-07-10T02:00:00.000Z"
+    });
+    expect(journal.stage).toBe("finalized");
+
+    const exported = store.exportRun("run-1");
+    expect(exported).toMatchObject({ format_version: 1, project_path: projectRoot, run: { run_id: "run-1" } });
+    expect(exported.artifacts).toMatchObject([{ artifact_id: "artifact-export", path: artifactPath }]);
+    expect(exported.events).toMatchObject([{ event_id: "event-export" }]);
+    expect(exported.commit_journal).toMatchObject([{ journal_id: "journal-export", stage: "finalized" }]);
+
+    const deleted = store.deleteRun("run-1");
+    expect(deleted).toMatchObject({
+      run_id: "run-1",
+      deleted_records: { run: 1, artifacts: 1, events: 1, commit_journal: 1 },
+      preserved_artifacts: [{ artifact_id: "artifact-export", path: artifactPath }]
+    });
+    expect(store.getRun("run-1")).toBeNull();
+    expect(existsSync(artifactPath)).toBe(true);
+  });
+
+  it("refuses durable record deletion for nonterminal runs and unfinished journals", () => {
+    const projectRoot = temporaryProject();
+    const store = track(ExecutionStore.open(projectRoot, { backupBeforeMigration: false }));
+    store.createRun(makeRun(projectRoot));
+    expect(() => store.deleteRun("run-1")).toThrow(/terminal/);
+
+    store.updateRunStatus({ run_id: "run-1", expected_version: 1, status: "failed" });
+    store.createCommitJournal({
+      journal_id: "journal-pending",
+      run_id: "run-1",
+      step_id: "step-1",
+      attempt_id: "attempt-none",
+      action: "replace_file",
+      target_path: "chapter.md",
+      base_hash: "",
+      new_hash: "sha256:new",
+      temp_path: path.join(projectRoot, ".chapter.pending.tmp"),
+      backup_path: "",
+      document_version: 1,
+      timeline_ref: "",
+      idempotency_key: "journal-pending-key",
+      fencing_token: 1,
+      stage: "prepared",
+      version: 1,
+      manifest: {},
+      error_code: "",
+      error: "",
+      created_at: "2026-07-10T02:00:00.000Z",
+      updated_at: "2026-07-10T02:00:00.000Z",
+      finalized_at: ""
+    });
+    expect(() => store.deleteRun("run-1")).toThrow(/unfinished commit journal/);
+    expect(store.getRun("run-1")).not.toBeNull();
+  });
+
   it("reopens durable state and supports runtime heartbeat, release, and stale-run claiming", () => {
     const projectRoot = temporaryProject();
     const first = ExecutionStore.open(projectRoot, { backupBeforeMigration: false });
