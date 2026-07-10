@@ -47,7 +47,9 @@ const child = runBackground(process.execPath, [path.join(desktopDir, "dist", "e2
   env: {
     ...process.env,
     XIAOSHUO_E2E_RUNTIME: "1",
-    XIAOSHUO_E2E_BYPASS_LICENSE: "1"
+    XIAOSHUO_E2E_SESSION_TOKEN: "arcwriter-e2e-runtime-token",
+    XIAOSHUO_E2E_BYPASS_LICENSE: "1",
+    XIAOSHUO_RENDERER_URL: "http://127.0.0.1:4180"
   },
   stdio: "inherit"
 });

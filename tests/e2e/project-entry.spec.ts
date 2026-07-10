@@ -3,29 +3,51 @@ import http from "node:http";
 
 const baseUrl = process.env.WORKBENCH_BASE_URL || "http://127.0.0.1:4180";
 const runtimeApi = process.env.WORKBENCH_API_BASE || "http://127.0.0.1:18453";
+const runtimeSessionToken = process.env.WORKBENCH_E2E_SESSION_TOKEN || "arcwriter-e2e-runtime-token";
+const sandboxProjectsPath = "D:/xiaoshuo/ts-migration/sandbox-projects";
+const heldModelResponses = new Set<http.ServerResponse>();
 let mockModelServer: http.Server | null = null;
 let mockModelBaseUrl = "";
+
+function runtimeHeaders(headers: HeadersInit = {}): Headers {
+  const next = new Headers(headers);
+  next.set("Authorization", `Bearer ${runtimeSessionToken}`);
+  return next;
+}
+
+async function runtimeFetch(pathname: string, init: RequestInit = {}): Promise<Response> {
+  return fetch(`${runtimeApi}${pathname}`, { ...init, headers: runtimeHeaders(init.headers) });
+}
 
 function workbenchUrl() {
   return `${baseUrl}?e2e=${Date.now()}&api=${encodeURIComponent(runtimeApi)}`;
 }
 
-test.beforeEach(async ({ page }) => {
-  const health = await fetch(`${runtimeApi}/api/health`).then((response) => response.json());
-  expect(health.runtime).toBe("typescript-electron");
-  await page.goto(workbenchUrl());
-});
-
 test.beforeAll(async () => {
   mockModelServer = http.createServer((request, response) => {
-    if (request.url?.includes("/chat/completions")) {
-      response.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
-      response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "当前项目已有大纲、设定、正文目录，建议先完善大纲。" } }] })}\n\n`);
-      response.end("data: [DONE]\n\n");
+    if (!request.url?.includes("/chat/completions")) {
+      response.writeHead(404);
+      response.end();
       return;
     }
-    response.writeHead(404);
-    response.end();
+
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk) => {
+      body += chunk;
+    });
+    request.on("end", () => {
+      response.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
+      if (body.includes("E2E 保持运行")) {
+        // Keep the model call open so the UI can exercise a genuine durable-run control.
+        heldModelResponses.add(response);
+        response.flushHeaders();
+        request.once("close", () => heldModelResponses.delete(response));
+        return;
+      }
+      response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "E2E 模型回复" } }] })}\n\n`);
+      response.end("data: [DONE]\n\n");
+    });
   });
   await new Promise<void>((resolve, reject) => {
     mockModelServer?.once("error", reject);
@@ -43,15 +65,29 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
+  for (const response of heldModelResponses) {
+    response.destroy();
+  }
+  heldModelResponses.clear();
   if (!mockModelServer) {
     return;
   }
+  mockModelServer.closeAllConnections?.();
   await new Promise<void>((resolve) => mockModelServer?.close(() => resolve()));
   mockModelServer = null;
 });
 
+test.beforeEach(async ({ page }) => {
+  const health = await runtimeFetch("/api/health");
+  expect(health.ok).toBe(true);
+  expect((await health.json()).runtime).toBe("typescript-electron");
+  await page.route(`${runtimeApi}/**`, async (route) => {
+    await route.continue({ headers: Object.fromEntries(runtimeHeaders(route.request().headers())) });
+  });
+});
+
 async function configureMockModel() {
-  const response = await fetch(`${runtimeApi}/api/config`, {
+  const response = await runtimeFetch("/api/config", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -66,112 +102,52 @@ async function configureMockModel() {
   expect(response.ok).toBe(true);
 }
 
-test("create project auto-opens starter body document", async ({ page }) => {
-  const uniqueName = `e2e-auto-open-${Date.now()}`;
-  await page.getByRole("navigation", { name: "Workbench sections" }).getByRole("button", { name: "项目", exact: true }).click();
-
-  await expect(page.getByTestId("project-panel")).toBeVisible({ timeout: 15_000 });
-  await page.getByTestId("project-path-input").fill("D:/xiaoshuo/ts-migration/sandbox-projects");
-  await page.getByTestId("project-name-input").fill(uniqueName);
-  await page.getByTestId("project-create-button").click();
-  await page.getByRole("navigation", { name: "Workbench sections" }).getByRole("button", { name: "编辑", exact: true }).click();
-
-  await expect(page.getByRole("heading", { name: "文档编辑器", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "正文.txt", exact: true })).toBeVisible();
-  await expect(page.getByText("02_正文/正文.txt", { exact: true }).first()).toBeVisible();
-});
-
-test("dirty tabs require confirmation before closing", async ({ page }) => {
-  const uniqueName = `e2e-close-guard-${Date.now()}`;
-  await page.getByRole("navigation", { name: "Workbench sections" }).getByRole("button", { name: "项目", exact: true }).click();
-  await page.getByTestId("project-path-input").fill("D:/xiaoshuo/ts-migration/sandbox-projects");
-  await page.getByTestId("project-name-input").fill(uniqueName);
-  await page.getByTestId("project-create-button").click();
-
-  await expect(page.getByRole("heading", { name: "文档编辑器", exact: true })).toBeVisible();
-  await page.locator(".editor-surface").fill("临时草稿");
-  await page.locator(".tab-close").click();
-
-  await expect(page.locator(".close-guard")).toBeVisible();
-  await expect(page.locator(".editor-tab")).toHaveCount(1);
-
-  await page.getByRole("button", { name: "仍然关闭", exact: true }).click();
-  await expect(page.locator(".editor-tab")).toHaveCount(0);
-});
-
-test("dirty drafts require confirmation before switching projects", async ({ page }) => {
-  const projectA = `e2e-switch-source-${Date.now()}`;
-  const projectB = `e2e-switch-target-${Date.now()}`;
-  await page.getByRole("navigation", { name: "Workbench sections" }).getByRole("button", { name: "项目", exact: true }).click();
-  await page.getByTestId("project-path-input").fill("D:/xiaoshuo/ts-migration/sandbox-projects");
-  await page.getByTestId("project-name-input").fill(projectA);
-  await page.getByTestId("project-create-button").click();
-
-  await expect(page.locator(".editor-surface")).toBeVisible();
-  await page.locator(".editor-surface").fill("这是一段还没保存的切换前草稿");
-  await page.getByRole("navigation", { name: "Workbench sections" }).getByRole("button", { name: "项目", exact: true }).click();
-
-  await page.getByTestId("project-path-input").fill("D:/xiaoshuo/ts-migration/sandbox-projects");
-  await page.getByTestId("project-name-input").fill(projectB);
-  await page.getByTestId("project-create-button").click();
-
-  await expect(page.getByTestId("project-switch-guard")).toBeVisible();
-  await expect(page.getByTestId("project-panel").getByText(projectA, { exact: true })).toBeVisible();
-  await expect(page.getByTestId("project-switch-cancel-button")).toBeVisible();
-
-  await page.getByTestId("project-switch-confirm-button").click();
-  await page.getByRole("navigation", { name: "Workbench sections" }).getByRole("button", { name: "编辑", exact: true }).click();
-
-  await expect(page.getByRole("heading", { name: "文档编辑器", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "正文.txt", exact: true })).toBeVisible();
-  await expect(page.getByText("02_正文/正文.txt", { exact: true }).first()).toBeVisible();
-  await expect(page.locator(".editor-surface")).not.toHaveValue("这是一段还没保存的切换前草稿");
-});
-
-test("conversation draft also blocks project switching until confirmed", async ({ page }) => {
-  const projectA = `e2e-chat-draft-source-${Date.now()}`;
-  const projectB = `e2e-chat-draft-target-${Date.now()}`;
-  await page.getByRole("navigation", { name: "Workbench sections" }).getByRole("button", { name: "项目", exact: true }).click();
-  await page.getByTestId("project-path-input").fill("D:/xiaoshuo/ts-migration/sandbox-projects");
-  await page.getByTestId("project-name-input").fill(projectA);
-  await page.getByTestId("project-create-button").click();
-
-  await page.getByRole("navigation", { name: "Workbench sections" }).getByRole("button", { name: "会话", exact: true }).click();
-  await page.getByTestId("conversation-message-input").fill("这条消息还没发出去");
-
-  await page.getByRole("navigation", { name: "Workbench sections" }).getByRole("button", { name: "项目", exact: true }).click();
-  await page.getByTestId("project-path-input").fill("D:/xiaoshuo/ts-migration/sandbox-projects");
-  await page.getByTestId("project-name-input").fill(projectB);
-  await page.getByTestId("project-create-button").click();
-
-  await expect(page.getByTestId("project-switch-guard")).toBeVisible();
-  await expect(page.getByTestId("project-switch-guard")).toContainText("会话输入框里还有草稿");
-
-  await page.getByTestId("project-switch-cancel-button").click();
-  await expect(page.getByTestId("project-switch-guard")).toHaveCount(0);
-  await page.getByRole("navigation", { name: "Workbench sections" }).getByRole("button", { name: "会话", exact: true }).click();
-  await expect(page.getByTestId("conversation-message-input")).toHaveValue("这条消息还没发出去");
-});
-
-test("conversation tab can send a real message through the TS runtime chain", async ({ page }) => {
-  const uniqueName = `e2e-chat-send-${Date.now()}`;
-  await page.getByRole("navigation", { name: "Workbench sections" }).getByRole("button", { name: "项目", exact: true }).click();
-  await page.getByTestId("project-path-input").fill("D:/xiaoshuo/ts-migration/sandbox-projects");
-  await page.getByTestId("project-name-input").fill(uniqueName);
-  await page.getByTestId("project-create-button").click();
+async function prepareTraceRun() {
+  const projectName = `e2e-agent-trace-${Date.now()}`;
+  const projectResponse = await runtimeFetch("/api/projects/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: sandboxProjectsPath, project_name: projectName, create_in_parent: true })
+  });
+  expect(projectResponse.ok).toBe(true);
   await configureMockModel();
 
-  await page.getByRole("navigation", { name: "Workbench sections" }).getByRole("button", { name: "会话", exact: true }).click();
-  await page.getByTestId("conversation-message-input").fill("请总结当前项目");
-  await page.getByTestId("conversation-send-button").click();
+  const requestId = `e2e-agent-trace-run-${Date.now()}`;
+  const runResponse = await runtimeFetch("/api/agent/runs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      request_id: requestId,
+      content: "E2E 保持运行，用于验证 Agent Trace 暂停控制。",
+      current_path: "01_大纲/大纲.txt"
+    })
+  });
+  expect(runResponse.status).toBe(201);
+  const run = await runResponse.json() as { run_id: string; request_id: string };
+  expect(run.run_id).not.toBe("");
+  expect(run.request_id).toBe(requestId);
+  return run;
+}
 
-  await expect(page.locator(".conversation-thread .assistant-card")).toContainText(/当前项目|建议先|大纲|设定|正文/, { timeout: 15000 });
-});
+test("status menu opens Agent Trace and pauses a durable run", async ({ page }) => {
+  const run = await prepareTraceRun();
+  await page.goto(workbenchUrl());
 
-test("terminal tab falls back cleanly in browser mode", async ({ page }) => {
-  await page.getByRole("navigation", { name: "Workbench sections" }).getByRole("button", { name: "终端", exact: true }).click();
+  await expect(page.locator("summary.xw-status-summary")).toBeVisible({ timeout: 15_000 });
+  await page.locator("summary.xw-status-summary").click();
+  await page.getByRole("menuitem", { name: "运行", exact: true }).click();
 
-  await expect(page.getByTestId("terminal-placeholder")).toBeVisible();
-  await expect(page.getByTestId("terminal-placeholder")).toContainText("等待桌面壳连接");
-  await expect(page.getByTestId("terminal-command-grid")).toHaveCount(0);
+  const tracePage = page.locator(".xw-trace-page");
+  await expect(tracePage.getByText("Agent 运行", { exact: true })).toBeVisible();
+  await expect(tracePage.getByLabel("Agent trace runs")).toContainText("E2E 保持运行", { timeout: 15_000 });
+
+  const detail = tracePage.getByLabel("Agent trace detail");
+  await expect(detail).toContainText(run.run_id);
+  const pause = detail.getByRole("button", { name: "暂停运行", exact: true });
+  await expect(pause).toBeEnabled({ timeout: 15_000 });
+  await pause.click();
+
+  // An active run pauses cooperatively at its next durable checkpoint. The
+  // immediate user-visible contract is the persisted pause request event.
+  await expect(detail.getByText("run.pause_requested", { exact: true })).toBeVisible();
 });

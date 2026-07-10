@@ -89,7 +89,11 @@ export async function startRuntimeServer(options: RuntimeServerOptions): Promise
   const projectIdentityRegistry = options.state.projectIdentityRegistry || new ProjectIdentityRegistry(
     options.projectIdentityRegistryPath || path.join(path.dirname(options.stateFilePath), "project-identities.json")
   );
-  const sessionToken = randomBytes(32).toString("base64url");
+  // Browser E2E cannot use Electron's preload bridge. The explicit token is
+  // accepted only by the separately-gated test runtime process.
+  const sessionToken = process.env.XIAOSHUO_E2E_RUNTIME === "1" && process.env.XIAOSHUO_E2E_SESSION_TOKEN
+    ? process.env.XIAOSHUO_E2E_SESSION_TOKEN
+    : randomBytes(32).toString("base64url");
   const allowedOrigins = runtimeAllowedOrigins();
   options.state.jobManager = jobManager;
   options.state.documentSessions = documentSessions;

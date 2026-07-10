@@ -2232,7 +2232,7 @@ CI 必须保存 Eval Manifest、失败 case 摘要、性能基线和脱敏 Trace
 | B Execution Store | 实现中 | SQLite 表、CRUD、WAL、CAS、outbox/lease/journal；最小 adapter/filesystem seam、只读高 schema 隔离、原子备份发布和损坏/磁盘/锁故障 fixture 已通过根级验证 | 迁移后逻辑校验、真实跨进程锁和运行期磁盘故障场景 |
 | C 状态机与幂等 | 实现中 | 状态机、idempotency、heartbeat/lease；pause `interrupted`、stale orphan 原子结算与 retry budget 定向测试；版本化 feature flag registry 和创建时固化 snapshot 已通过 | shadow 对照报告、真实副作用幂等，以及 flag 的受控持久覆盖入口 |
 | D 最小恢复链路 | 实现中 | run/stream/Trace 同 ID、runtime registry、HTTP 订阅断连解耦；真实子进程强杀后同 ID 仅恢复第二步、第一步保持唯一完成 attempt 的 E2E，以及旧 `streamAgentRun` durable 回归已通过 | 实际 renderer 长连接订阅和完整旧入口矩阵回归 |
-| E API 与 UI | 实现中 | 查询/控制、分页/实时 replay、认证 NDJSON、Workbench trace 实时订阅；Confirmation 列表/批准/拒绝与批准后显式恢复 UI/API 已通过 | 任务列表/详情/控制浏览器 E2E |
+| E API 与 UI | 实现中 | 查询/控制、分页/实时 replay、认证 NDJSON、Workbench trace 实时订阅；Confirmation 列表/批准/拒绝与批准后显式恢复 UI/API；隔离项目/run 的 Agent Trace 列表、详情和 pause 控制浏览器 E2E 已通过 | 端到端异常/恢复矩阵扩展 |
 | F 崩溃/并发/确认 | 实现中 | journal/lease/confirmation；durable direct-save/batch-replace journal；Confirmation 等待、批准、拒绝、过期、取消、幂等决议和生产 UI/API 已通过 | 剩余 Skill/workflow 写入覆盖与浏览器 E2E |
 | G Job/长任务 | 实现中 | batch/disassemble SQLite checkpoint、batch 子进程 SIGKILL 后同 run 恢复 N+1 且无重复副作用、legacy JobManager 只读映射 API 已通过 | legacy 映射 UI/回归 |
 | H 安全/发布 | 实现中 | runtime token/IPC；Windows PR CI、RC evidence、tag provenance gate、签名/installed smoke 脚本；terminal renderer 所有权、权限/导航/webview deny 基线已落地 | GitHub environment/证书配置后的真实 RC、保留/导出/删除和发布报告 |

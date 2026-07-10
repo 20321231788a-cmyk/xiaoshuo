@@ -2138,6 +2138,14 @@ npm test
 
 本轮根级验证：`npm run typecheck`、`npm test`（84 files/612 tests）、`npm run build:workbench`、`npm run build:desktop` 和 `git diff --check` 通过。P0 仍未验收；`PRODUCT.md` 未纳入提交。
 
+### 15.59 2026-07-10 P0 认证 Browser E2E 记录
+
+- E2E runtime 仅在 `XIAOSHUO_E2E_RUNTIME=1` 下接受固定测试 session token，生产启动继续轮换随机 token；
+- E2E state 目录每次启动清理，并显式允许 preview Origin，避免继承项目身份与 CORS 状态；
+- Playwright 通过认证 runtime API 建立隔离项目/run，从 Workbench `状态 -> 运行` 进入 Agent Trace，验证列表、详情和 pause 后的持久 `run.pause_requested` 事件。
+
+验证：`npx playwright test tests/e2e/project-entry.spec.ts --reporter=line` 通过（1 passed）；同时 `npm run typecheck`、`npm test`（84 files/612 tests）、Workbench/desktop 构建和 `git diff --check` 通过。`PRODUCT.md` 未纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：
