@@ -37,6 +37,20 @@ export interface ExecutionDatabaseAdapter {
   open(filename: string, options?: ExecutionDatabaseOpenOptions): ExecutionDatabase;
 }
 
+/**
+ * Filesystem operations used while opening and migrating an execution store.
+ * Keeping this narrow makes storage-failure handling deterministic in tests.
+ */
+export interface ExecutionStoreFileSystem {
+  mkdir(directory: string): void;
+  exists(filename: string): boolean;
+  fileSize(filename: string): number;
+  availableBytes(directory: string): number;
+  copy(source: string, destination: string): void;
+  rename(source: string, destination: string): void;
+  remove(filename: string): void;
+}
+
 export type ExecutionStoreMigrationRecord = {
   version: number;
   name: string;

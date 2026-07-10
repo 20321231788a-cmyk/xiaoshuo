@@ -543,6 +543,44 @@ export const agentStepRetryRequestSchema = agentRunControlRequestSchema.extend({
 
 export const agentConfirmationResolveRequestSchema = agentRunControlRequestSchema.extend({});
 
+export const agentRecoverableRequestSchema = z.object({
+  request_id: z.string().default(""),
+  autonomy_mode: agentAutonomyModeSchema.default("plan"),
+  conversation_id: z.string().default(""),
+  content: z.string().default(""),
+  current_path: z.string().default(""),
+  selection: z.string().default(""),
+  project_context_hint: z.string().default(""),
+  skill_id: z.string().default(""),
+  attachment_ids: z.array(z.string()).default([]),
+  reference_paths: z.array(z.string()).default([]),
+  confirmed_reference_paths: z.array(z.string()).default([]),
+  disable_auto_references: z.boolean().default(false),
+  instruction: z.string().optional(),
+  text: z.string().optional(),
+  chapter: z.number().int().positive().optional(),
+  start_chapter: z.number().int().positive().optional(),
+  end_chapter: z.number().int().positive().optional(),
+  chapter_count: z.number().int().positive().optional(),
+  section_words: z.number().int().positive().optional(),
+  target_words: z.number().int().positive().optional(),
+  source_path: z.string().optional(),
+  target_path: z.string().optional(),
+  write_result: z.boolean().optional(),
+  candidate_count: z.number().int().positive().optional(),
+  mode: z.string().optional(),
+  auto_revision: z.boolean().optional(),
+  score_threshold: z.number().finite().optional(),
+  book_title: z.string().optional(),
+  source_book_id: z.string().optional(),
+  source_book_ids: z.array(z.string()).optional(),
+  custom_prompt: z.string().optional(),
+  genre_hint: z.string().optional(),
+  output_mode: z.string().optional(),
+  action: z.string().optional(),
+  suppress_conversation_record: z.boolean().optional()
+});
+
 export const agentRunRequestSchema = z
   .object({
     request_id: z.string().default(""),
@@ -745,6 +783,7 @@ export type AgentRunEventReplayResponse = z.infer<typeof agentRunEventReplayResp
 export type AgentRunControlRequest = z.infer<typeof agentRunControlRequestSchema>;
 export type AgentStepRetryRequest = z.infer<typeof agentStepRetryRequestSchema>;
 export type AgentConfirmationResolveRequest = z.infer<typeof agentConfirmationResolveRequestSchema>;
+export type AgentRecoverableRequest = z.infer<typeof agentRecoverableRequestSchema>;
 export type AgentRunRequest = {
   request_id?: string;
   autonomy_mode?: AgentAutonomyMode;

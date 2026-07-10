@@ -1,6 +1,7 @@
 import {
   agentExecutionStepSchema,
   agentObservationSchema,
+  agentRecoverableRequestSchema,
   agentRunRequestSchema,
   agentRunStateSchema,
   type AgentExecutionStep,
@@ -459,11 +460,11 @@ export class RunCoordinator {
 
   getRecoveryRequest(runId: string): AgentRunRequest {
     const run = this.requireRun(runId);
-    const snapshot = run.goal.request_snapshot.settings_snapshot["agent_request"];
-    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) {
+    const snapshot = getStoredRecoveryRequest(run);
+    if (!snapshot) {
       throw Object.assign(new Error(`Run ${runId} has no recoverable request snapshot`), { code: "REQUEST_SNAPSHOT_MISSING" });
     }
-    return agentRunRequestSchema.parse(snapshot) as AgentRunRequest;
+    return agentRecoverableRequestSchema.parse(snapshot) as AgentRunRequest;
   }
 
   resolveConfirmation(
@@ -888,39 +889,15 @@ function publicExecution(active: ActiveExecution): DurableRunExecution {
 }
 
 function sanitizeRequestSnapshot(request: AgentRunRequest): Record<string, unknown> {
-  const safe: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(request)) {
-    if (/(api[_-]?key|token|authorization|password|secret|credential)/i.test(key)) {
-      continue;
-    }
-    if (isSnapshotValue(value)) {
-      safe[key] = value;
-    }
-  }
-  return safe;
+  return agentRecoverableRequestSchema.parse(request) as Record<string, unknown>;
 }
 
 function getStoredRecoveryRequest(run: AgentRunState): Record<string, unknown> | null {
   const value = run.goal.request_snapshot.settings_snapshot.agent_request;
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
-}
-
-function isSnapshotValue(value: unknown, depth = 0): boolean {
-  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
   }
-  if (depth >= 4) {
-    return false;
-  }
-  if (Array.isArray(value)) {
-    return value.length <= 1_000 && value.every((item) => isSnapshotValue(item, depth + 1));
-  }
-  if (value && typeof value === "object") {
-    return Object.entries(value).every(([key, item]) =>
-      !/(api[_-]?key|token|authorization|password|secret|credential)/i.test(key) && isSnapshotValue(item, depth + 1)
-    );
-  }
-  return false;
+  return agentRecoverableRequestSchema.parse(value) as Record<string, unknown>;
 }
 
 function projectId(projectRoot: string): string {

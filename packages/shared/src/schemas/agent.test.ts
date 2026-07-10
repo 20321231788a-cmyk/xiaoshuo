@@ -13,6 +13,7 @@ import {
   agentRunEventReplayResponseSchema,
   agentRunEventSchema,
   agentRunListResponseSchema,
+  agentRecoverableRequestSchema,
   agentRunRequestSchema,
   agentRunResponseSchema,
   agentRunStateSchema,
@@ -420,6 +421,20 @@ describe("agent schemas", () => {
     expect(() => agentRunStateSchema.parse({ ...run, version: 0 })).toThrow();
     expect(() => agentRunStateSchema.parse({ ...run, goal_revision: 0 })).toThrow();
     expect(() => agentRunStateSchema.parse({ ...run, plan_version: 0 })).toThrow();
+  });
+
+  it("whitelists recoverable Agent request fields and strips credentials or arbitrary extensions", () => {
+    const request = agentRecoverableRequestSchema.parse({
+      request_id: "request-1",
+      content: "继续写作",
+      custom_prompt: "保留工作流提示",
+      api_key: "must-not-persist",
+      nested_private_payload: { token: "must-not-persist" }
+    });
+
+    expect(request).toMatchObject({ request_id: "request-1", content: "继续写作", custom_prompt: "保留工作流提示" });
+    expect(request).not.toHaveProperty("api_key");
+    expect(request).not.toHaveProperty("nested_private_payload");
   });
 
   it("parses run lifecycle API envelopes and command requests", () => {

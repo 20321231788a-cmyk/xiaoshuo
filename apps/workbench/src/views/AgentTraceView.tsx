@@ -1,8 +1,11 @@
 import { createApiClient } from "@xiaoshuo/api-client";
-import type { AgentRunState, AgentRunTrace } from "@xiaoshuo/shared";
+import type { AgentRunEvent, AgentRunState, AgentRunTrace } from "@xiaoshuo/shared";
 import { Pause, Play, RefreshCw, RotateCcw, Square } from "lucide-react";
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { WorkbenchRuntime } from "../lib/runtime.js";
+import { mergeAgentRunEvents, replayAgentRunEvents, type AgentRunEventReplay } from "./agentRunEvents.js";
+
+type ReplayState = AgentRunEventReplay & { events: AgentRunEvent[] };
 
 export function AgentTraceView({ runtime }: { runtime: WorkbenchRuntime }) {
   const client = useMemo(() => createApiClient({ baseUrl: runtime.apiBase }), [runtime.apiBase]);
@@ -15,32 +18,77 @@ export function AgentTraceView({ runtime }: { runtime: WorkbenchRuntime }) {
   const [detailLoading, setDetailLoading] = useState(false);
   const [message, setMessage] = useState("");
   const [acting, setActing] = useState("");
+  const [events, setEvents] = useState<AgentRunEvent[]>([]);
+  const [eventGapDetected, setEventGapDetected] = useState(false);
+  const replayStateRef = useRef(new Map<string, ReplayState>());
+  const loadSequenceRef = useRef(0);
 
   async function loadRun(runId: string, fallbackRun?: AgentRunState, fallbackTrace?: AgentRunTrace) {
+    const loadSequence = ++loadSequenceRef.current;
     if (!runId) {
       setRunDetail(null);
       setDetail(null);
+      setEvents([]);
+      setEventGapDetected(false);
       return;
     }
+    const replayState = replayStateRef.current.get(runId) || { events: [], nextSequence: 0, gapDetected: false };
+    setMessage("");
     setSelectedRunId(runId);
     setRunDetail(fallbackRun || null);
     setDetail(fallbackTrace || null);
+    setEvents(replayState.events);
+    setEventGapDetected(replayState.gapDetected);
     setDetailLoading(true);
     try {
-      const [nextRun, nextTrace] = await Promise.allSettled([client.getAgentRun(runId), client.getAgentTrace(runId)]);
+      const [nextRun, nextTrace, replay] = await Promise.allSettled([
+        client.getAgentRun(runId),
+        client.getAgentTrace(runId),
+        replayAgentRunEvents((after) => client.getAgentRunEvents(runId, after), replayState.nextSequence)
+      ]);
+      if (loadSequence !== loadSequenceRef.current) {
+        return;
+      }
       if (nextRun.status === "fulfilled") {
         setRunDetail(nextRun.value);
       }
       if (nextTrace.status === "fulfilled") {
         setDetail(nextTrace.value);
       }
+      if (replay.status === "fulfilled") {
+        const nextReplayState: ReplayState = {
+          events: mergeAgentRunEvents(replayState.events, replay.value.events),
+          nextSequence: replay.value.nextSequence,
+          gapDetected: replayState.gapDetected || replay.value.gapDetected
+        };
+        replayStateRef.current.set(runId, nextReplayState);
+        setEvents(nextReplayState.events);
+        setEventGapDetected(nextReplayState.gapDetected);
+
+        if (replay.value.gapDetected) {
+          const correctedRun = await client.getAgentRun(runId);
+          if (loadSequence !== loadSequenceRef.current) {
+            return;
+          }
+          setRunDetail(correctedRun);
+          setMessage("检测到事件保留缺口，已重新读取运行状态");
+        }
+      }
       if (nextRun.status === "rejected" && nextTrace.status === "rejected") {
         throw nextRun.reason;
       }
+      if (replay.status === "rejected" && nextRun.status === "fulfilled") {
+        setMessage(replay.reason instanceof Error ? replay.reason.message : String(replay.reason));
+      }
     } catch (error) {
+      if (loadSequence !== loadSequenceRef.current) {
+        return;
+      }
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
-      setDetailLoading(false);
+      if (loadSequence === loadSequenceRef.current) {
+        setDetailLoading(false);
+      }
     }
   }
 
@@ -152,7 +200,7 @@ export function AgentTraceView({ runtime }: { runtime: WorkbenchRuntime }) {
           {!runs.length && !legacyTraces.length && <p className="xw-feature-empty">{loading ? "正在读取运行记录" : "暂无运行记录"}</p>}
         </div>
 
-        <TraceDetail trace={selectedTrace} run={selectedRun} acting={acting} onAction={runAction} />
+        <TraceDetail trace={selectedTrace} run={selectedRun} events={events} eventGapDetected={eventGapDetected} acting={acting} onAction={runAction} />
       </div>
     </section>
   );
@@ -161,11 +209,15 @@ export function AgentTraceView({ runtime }: { runtime: WorkbenchRuntime }) {
 function TraceDetail({
   trace,
   run,
+  events,
+  eventGapDetected,
   acting,
   onAction
 }: {
   trace: AgentRunTrace | null;
   run: AgentRunState | null;
+  events: AgentRunEvent[];
+  eventGapDetected: boolean;
   acting: string;
   onAction: (action: "pause" | "resume" | "cancel" | "retry", stepId?: string) => Promise<void>;
 }) {
@@ -211,6 +263,19 @@ function TraceDetail({
                   )}
                 </div>
               ))}
+            </div>
+          </TraceSection>
+          <TraceSection title="运行事件">
+            {eventGapDetected && <p className="xw-trace-warning">部分历史事件已不再保留，状态以当前运行详情为准。</p>}
+            <div className="xw-trace-stack">
+              {events.map((event) => (
+                <div key={event.event_id} className="xw-trace-row">
+                  <strong>{event.event_type}</strong>
+                  <small>#{event.sequence} · {formatDate(event.created_at)}</small>
+                  <span>{event.step_id ? `步骤 ${event.step_id}` : "运行事件"}</span>
+                </div>
+              ))}
+              {!events.length && <p>-</p>}
             </div>
           </TraceSection>
           {run.error && <TraceSection title="运行错误"><p className="xw-trace-error">{run.error}</p></TraceSection>}

@@ -3,6 +3,7 @@ import path from "node:path";
 import type { RuntimeContext } from "./types.js";
 
 export function getProjectAgentRuntime(context: RuntimeContext, projectRoot: string): AgentRuntimeService {
+  context.projectIdentityRegistry?.assertWritable(projectRoot);
   const resolved = path.resolve(projectRoot);
   const key = process.platform === "win32" ? resolved.toLowerCase() : resolved;
   const registry = context.agentRuntimes ?? new Map<string, AgentRuntimeService>();

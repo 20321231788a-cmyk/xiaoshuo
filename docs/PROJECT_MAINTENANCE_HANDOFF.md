@@ -2033,6 +2033,27 @@ npm test
 
 下一步：完成认证长连接 event stream、客户端 sequence 补流/详情校准和 E2E；在此之前 Task E 继续维持“实现中”。`PRODUCT.md` 继续不纳入提交。
 
+### 15.51 2026-07-10 P0 隔离、存储可靠性与事件补流记录
+
+本轮并行补强 A、B 和 E 的未验收实现，不代表 P0 或任一 Task 已验收。
+
+本轮实现：
+
+- 恢复请求改用 `AgentRecoverableRequest` 明确白名单，未知扩展字段和凭据类嵌套载荷不会进入 durable snapshot；
+- desktop 在 userData 中持久记录项目 UUID 与 canonical path，同 UUID 的两个存活路径拒绝创建 runtime，旧路径消失时允许移动重关联；
+- Execution Store 对既有数据库先以 query-only 只读方式探测；未来 schema 始终只读隔离。迁移前备份经临时文件、`quick_check` 与 schema 校验后原子发布，文件系统 seam 覆盖空间不足、复制损坏和锁失败；
+- Workbench Trace 改为按 sequence 分页补流、按 `event_id` 去重，并在 retention gap 后重新读取权威 run detail，避免游标停滞或状态静默失真。
+
+本轮验证：
+
+- `npm run typecheck` 通过，所有 workspace 均为绿色；
+- `npm test` 通过：77 个测试文件、579 个测试；
+- `npm run build:workbench` 通过，仅有 bundle size warning；
+- `npm run build:desktop` 通过；
+- `git diff --check` 通过。
+
+仍未满足的 P0 退出条件：C 的 feature-flag snapshot 与真实副作用幂等；D 的两步恢复和旧入口回归；E 的认证长连接及任务 UI E2E；F 的真实 CommitJournal/Confirmation 接线；G 的长任务检查点迁移；H 的会话令牌、Electron 安全与发布门禁。`PRODUCT.md` 继续保留且不纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

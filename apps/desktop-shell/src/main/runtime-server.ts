@@ -14,6 +14,7 @@ import {
   type CurrentProject
 } from "@xiaoshuo/shared";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
 import {
@@ -66,6 +67,7 @@ import {
   writeJson,
   writeNdjsonEvent
 } from "./runtime/index.js";
+import { ProjectIdentityRegistry, ProjectIdentityRegistryError } from "./project-identity-registry.js";
 
 export { runtimeHost, runtimePort, runtimeUrl, type RuntimeServerOptions, type RuntimeServerState } from "./runtime/types.js";
 type ShellLike = { openPath: (target: string) => unknown };
@@ -84,9 +86,13 @@ export async function startRuntimeServer(options: RuntimeServerOptions): Promise
   const projectSession = new ProjectSessionService({ stateFilePath: options.stateFilePath });
   const documentSessions = options.state.documentSessions || new Map<string, DocumentTimelineSession>();
   const agentRuntimes = options.state.agentRuntimes || new Map();
+  const projectIdentityRegistry = options.state.projectIdentityRegistry || new ProjectIdentityRegistry(
+    options.projectIdentityRegistryPath || path.join(path.dirname(options.stateFilePath), "project-identities.json")
+  );
   options.state.jobManager = jobManager;
   options.state.documentSessions = documentSessions;
   options.state.agentRuntimes = agentRuntimes;
+  options.state.projectIdentityRegistry = projectIdentityRegistry;
   const restoredProject = await projectSession.getCurrentProject();
   if (restoredProject.path) {
     startDocumentSession(documentSessions, restoredProject.path);
@@ -98,9 +104,14 @@ export async function startRuntimeServer(options: RuntimeServerOptions): Promise
       jobManager,
       projectSession,
       documentSessions,
-      agentRuntimes
+      agentRuntimes,
+      projectIdentityRegistry
     }).catch((error) => {
       options.state.lastError = error instanceof Error ? error.message : String(error);
+      if (error instanceof ProjectIdentityRegistryError) {
+        writeJson(response, 409, { detail: options.state.lastError, code: error.code });
+        return;
+      }
       writeJson(response, 500, { detail: options.state.lastError });
     });
   });

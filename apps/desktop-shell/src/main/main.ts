@@ -194,6 +194,7 @@ function registerIpc(): void {
     await startRuntimeServer({
       projectRoot,
       stateFilePath: path.join(app.getPath("userData"), "state", "project-session.json"),
+      projectIdentityRegistryPath: path.join(app.getPath("userData"), "state", "project-identities.json"),
       state: runtimeState
     });
     return { ready: true, url: runtimeUrl, pid: undefined };
@@ -294,6 +295,7 @@ app.whenReady().then(async () => {
     await startRuntimeServer({
       projectRoot,
       stateFilePath: path.join(app.getPath("userData"), "state", "project-session.json"),
+      projectIdentityRegistryPath: path.join(app.getPath("userData"), "state", "project-identities.json"),
       state: runtimeState
     });
   } catch (error) {

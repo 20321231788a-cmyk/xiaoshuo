@@ -5,7 +5,19 @@ import type {
   AgentRunState
 } from "@xiaoshuo/shared";
 import { afterEach, describe, expect, it } from "vitest";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  statfsSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -22,7 +34,8 @@ import type {
   ExecutionCasResult,
   ExecutionDatabase,
   ExecutionDatabaseAdapter,
-  ExecutionDatabaseOpenOptions
+  ExecutionDatabaseOpenOptions,
+  ExecutionStoreFileSystem
 } from "./execution-store-port.js";
 
 const TABLES = [
@@ -479,6 +492,98 @@ describe("ExecutionStore", () => {
       store.appendEventInTransaction("run-1", { event_type: "must-not-write" })
     ).toThrow(UnsupportedExecutionStoreSchemaError);
   });
+
+  it("isolates an unknown high schema without a compatibility view from all writable opens", () => {
+    const projectRoot = temporaryProject();
+    const databasePath = resolveExecutionStorePath(projectRoot);
+    mkdirSync(path.dirname(databasePath), { recursive: true });
+    const future = new DatabaseSync(databasePath);
+    future.exec(`PRAGMA user_version = ${CURRENT_EXECUTION_STORE_SCHEMA_VERSION + 7}`);
+    future.close();
+
+    const adapter = new RecordingAdapter();
+    const store = track(ExecutionStore.open(projectRoot, { adapter }));
+
+    expect(store.isReadOnly).toBe(true);
+    expect(store.schemaVersion).toBe(CURRENT_EXECUTION_STORE_SCHEMA_VERSION + 7);
+    expect(store.getAppliedMigrations()).toEqual([]);
+    expect(adapter.opens).toEqual([{ filename: databasePath, readOnly: true }]);
+    expect(() => store.createRun(makeRun(projectRoot))).toThrow(UnsupportedExecutionStoreSchemaError);
+    const inspection = new DatabaseSync(databasePath, { readOnly: true });
+    try {
+      expect(
+        inspection.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'agent_%'").all()
+      ).toEqual([]);
+    } finally {
+      inspection.close();
+    }
+  });
+
+  it("validates and atomically publishes a pre-migration backup before upgrading an existing database", () => {
+    const projectRoot = temporaryProject();
+    const databasePath = createPreMigrationDatabase(projectRoot);
+    const store = track(
+      ExecutionStore.open(projectRoot, { now: () => new Date("2026-07-10T03:00:00.000Z") })
+    );
+
+    const backupPath = findMigrationBackups(databasePath)[0];
+    if (!backupPath) {
+      throw new Error("Expected a validated migration backup");
+    }
+    expect(backupPath).toBe(`${databasePath}.backup-v0-2026-07-10T03-00-00-000Z`);
+    expect(readdirSync(path.dirname(databasePath)).some((name) => name.includes(".partial-"))).toBe(false);
+    expect(store.schemaVersion).toBe(CURRENT_EXECUTION_STORE_SCHEMA_VERSION);
+    expect(readLegacyMarker(databasePath)).toBe("before-upgrade");
+    expect(readLegacyMarker(backupPath)).toBe("before-upgrade");
+    expect(readUserVersion(backupPath)).toBe(0);
+    expect(readQuickCheck(backupPath)).toBe("ok");
+  });
+
+  it("leaves the original database intact when backup validation or disk capacity checks fail", () => {
+    const projectRoot = temporaryProject();
+    const databasePath = createPreMigrationDatabase(projectRoot);
+    const brokenCopy = withFileSystem({
+      copy: (_source, destination) => writeFileSync(destination, "not a sqlite database")
+    });
+
+    expect(() => ExecutionStore.open(projectRoot, { fileSystem: brokenCopy })).toThrow();
+    expect(readLegacyMarker(databasePath)).toBe("before-upgrade");
+    expect(readUserVersion(databasePath)).toBe(0);
+    expect(readQuickCheck(databasePath)).toBe("ok");
+    expect(findMigrationBackups(databasePath)).toEqual([]);
+    expect(readdirSync(path.dirname(databasePath)).some((name) => name.includes(".partial-"))).toBe(false);
+
+    expect(() =>
+      ExecutionStore.open(projectRoot, {
+        fileSystem: withFileSystem({ availableBytes: () => 0 })
+      })
+    ).toThrow("Insufficient free space for execution store migration backup");
+    expect(readLegacyMarker(databasePath)).toBe("before-upgrade");
+    expect(readUserVersion(databasePath)).toBe(0);
+    expect(readQuickCheck(databasePath)).toBe("ok");
+    expect(findMigrationBackups(databasePath)).toEqual([]);
+  });
+
+  it("rolls back a locked migration and does not alter a corrupted source database", () => {
+    const projectRoot = temporaryProject();
+    const databasePath = createPreMigrationDatabase(projectRoot);
+    const adapter = new FaultInjectingAdapter((source) =>
+      source === "BEGIN EXCLUSIVE" ? new Error("SQLITE_BUSY: injected migration lock") : null
+    );
+
+    expect(() => ExecutionStore.open(projectRoot, { adapter })).toThrow("SQLITE_BUSY: injected migration lock");
+    expect(readLegacyMarker(databasePath)).toBe("before-upgrade");
+    expect(readUserVersion(databasePath)).toBe(0);
+    expect(readQuickCheck(databasePath)).toBe("ok");
+
+    const corruptProject = temporaryProject();
+    const corruptPath = resolveExecutionStorePath(corruptProject);
+    mkdirSync(path.dirname(corruptPath), { recursive: true });
+    writeFileSync(corruptPath, "this is not a SQLite database");
+    const corruptBytes = readFileSync(corruptPath);
+    expect(() => ExecutionStore.open(corruptProject)).toThrow();
+    expect(readFileSync(corruptPath)).toEqual(corruptBytes);
+  });
 });
 
 function temporaryProject(): string {
@@ -630,6 +735,80 @@ function makeConfirmation(): AgentConfirmation {
   } as AgentConfirmation;
 }
 
+function createPreMigrationDatabase(projectRoot: string): string {
+  const databasePath = resolveExecutionStorePath(projectRoot);
+  mkdirSync(path.dirname(databasePath), { recursive: true });
+  const database = new DatabaseSync(databasePath);
+  try {
+    database.exec("CREATE TABLE legacy_marker (value TEXT NOT NULL); INSERT INTO legacy_marker VALUES ('before-upgrade')");
+    database.exec("PRAGMA user_version = 0");
+  } finally {
+    database.close();
+  }
+  return databasePath;
+}
+
+function findMigrationBackups(databasePath: string): string[] {
+  return readdirSync(path.dirname(databasePath))
+    .filter((name) => name.startsWith(`${path.basename(databasePath)}.backup-`))
+    .map((name) => path.join(path.dirname(databasePath), name));
+}
+
+function readLegacyMarker(databasePath: string): string {
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    return (database.prepare("SELECT value FROM legacy_marker").get() as { value: string }).value;
+  } finally {
+    database.close();
+  }
+}
+
+function readUserVersion(databasePath: string): number {
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    return (database.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+  } finally {
+    database.close();
+  }
+}
+
+function readQuickCheck(databasePath: string): string {
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    return (database.prepare("PRAGMA quick_check").get() as { quick_check: string }).quick_check;
+  } finally {
+    database.close();
+  }
+}
+
+function withFileSystem(overrides: Partial<ExecutionStoreFileSystem>): ExecutionStoreFileSystem {
+  return {
+    mkdir(directory): void {
+      mkdirSync(directory, { recursive: true });
+    },
+    exists(filename): boolean {
+      return existsSync(filename);
+    },
+    fileSize(filename): number {
+      return statSync(filename).size;
+    },
+    availableBytes(directory): number {
+      const disk = statfsSync(directory);
+      return Number(disk.bavail) * Number(disk.bsize);
+    },
+    copy(source, destination): void {
+      copyFileSync(source, destination);
+    },
+    rename(source, destination): void {
+      renameSync(source, destination);
+    },
+    remove(filename): void {
+      rmSync(filename, { force: true });
+    },
+    ...overrides
+  };
+}
+
 class RecordingAdapter implements ExecutionDatabaseAdapter {
   readonly opens: Array<{ filename: string; readOnly: boolean }> = [];
   readonly execs: string[] = [];
@@ -649,6 +828,39 @@ class RecordingDatabase implements ExecutionDatabase {
 
   exec(source: string): void {
     this.execs.push(source);
+    this.delegate.exec(source);
+  }
+
+  prepare(source: string) {
+    return this.delegate.prepare(source);
+  }
+
+  close(): void {
+    this.delegate.close();
+  }
+}
+
+class FaultInjectingAdapter implements ExecutionDatabaseAdapter {
+  private readonly delegate = new NodeSqliteExecutionDatabaseAdapter();
+
+  constructor(private readonly failureFor: (source: string) => Error | null) {}
+
+  open(filename: string, options?: ExecutionDatabaseOpenOptions): ExecutionDatabase {
+    return new FaultInjectingDatabase(this.delegate.open(filename, options), this.failureFor);
+  }
+}
+
+class FaultInjectingDatabase implements ExecutionDatabase {
+  constructor(
+    private readonly delegate: ExecutionDatabase,
+    private readonly failureFor: (source: string) => Error | null
+  ) {}
+
+  exec(source: string): void {
+    const error = this.failureFor(source);
+    if (error) {
+      throw error;
+    }
     this.delegate.exec(source);
   }
 

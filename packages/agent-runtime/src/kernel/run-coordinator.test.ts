@@ -131,7 +131,8 @@ describe("RunCoordinator", () => {
         content: "生成正文",
         current_path: "02_正文/第001章.txt",
         api_key: "must-not-persist",
-        custom_prompt: "保留这个扩展字段"
+        custom_prompt: "保留这个扩展字段",
+        transient_private_payload: { token: "must-not-persist" }
       })
     );
 
@@ -139,6 +140,7 @@ describe("RunCoordinator", () => {
     const storedRequest = run.goal.request_snapshot.settings_snapshot.agent_request as Record<string, unknown>;
     expect(storedRequest.api_key).toBeUndefined();
     expect(storedRequest.custom_prompt).toBe("保留这个扩展字段");
+    expect(storedRequest.transient_private_payload).toBeUndefined();
     expect(run.goal.request_snapshot.selected_file_refs).toEqual(["02_正文/第001章.txt"]);
   });
 

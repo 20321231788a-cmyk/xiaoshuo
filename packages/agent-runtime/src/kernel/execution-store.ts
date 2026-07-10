@@ -8,7 +8,7 @@ import type {
   AgentStepStatus
 } from "@xiaoshuo/shared";
 import { createHash, randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, statfsSync, statSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync, statfsSync, statSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import type {
@@ -29,6 +29,7 @@ import type {
   ExecutionSqlValue,
   ExecutionStepAttempt,
   ExecutionStoreMigrationRecord,
+  ExecutionStoreFileSystem,
   ExecutionStorePort,
   ExecutionWriteLease,
   FinishAttemptInput,
@@ -319,6 +320,7 @@ export const EXECUTION_STORE_MIGRATIONS: readonly ExecutionStoreMigration[] = Ob
 
 export type ExecutionStoreOpenOptions = {
   adapter?: ExecutionDatabaseAdapter;
+  fileSystem?: ExecutionStoreFileSystem;
   now?: () => Date;
   backupBeforeMigration?: boolean;
 };
@@ -401,6 +403,31 @@ export function openExecutionStore(projectRoot: string, options?: ExecutionStore
   return ExecutionStore.open(projectRoot, options);
 }
 
+const nodeExecutionStoreFileSystem: ExecutionStoreFileSystem = {
+  mkdir(directory): void {
+    mkdirSync(directory, { recursive: true });
+  },
+  exists(filename): boolean {
+    return existsSync(filename);
+  },
+  fileSize(filename): number {
+    return statSync(filename).size;
+  },
+  availableBytes(directory): number {
+    const disk = statfsSync(directory);
+    return Number(disk.bavail) * Number(disk.bsize);
+  },
+  copy(source, destination): void {
+    copyFileSync(source, destination);
+  },
+  rename(source, destination): void {
+    renameSync(source, destination);
+  },
+  remove(filename): void {
+    rmSync(filename, { force: true });
+  }
+};
+
 type SqlRow = Record<string, unknown>;
 type MutableRecord = Record<string, unknown>;
 
@@ -430,31 +457,57 @@ export class ExecutionStore implements ExecutionStorePort {
     const resolvedProjectRoot = path.resolve(projectRoot);
     const databasePath = resolveExecutionStorePath(resolvedProjectRoot);
     const adapter = options.adapter ?? new NodeSqliteExecutionDatabaseAdapter();
+    const fileSystem = options.fileSystem ?? nodeExecutionStoreFileSystem;
     const now = options.now ?? (() => new Date());
 
-    mkdirSync(path.dirname(databasePath), { recursive: true });
-    let database = adapter.open(databasePath);
-    configureConnection(database, false);
-    const foundVersion = readDatabaseSchemaVersion(database);
+    fileSystem.mkdir(path.dirname(databasePath));
+    // An existing database is inspected through a query-only connection first.
+    // This keeps an unknown future schema isolated from this binary's write path.
+    const existingDatabase = fileSystem.exists(databasePath);
+    let database: ExecutionDatabase | undefined;
+    try {
+      database = adapter.open(databasePath, existingDatabase ? { readOnly: true } : undefined);
+      configureConnection(database, existingDatabase);
+      const foundVersion = readDatabaseSchemaVersion(database);
 
-    if (foundVersion > CURRENT_EXECUTION_STORE_SCHEMA_VERSION) {
-      database.close();
-      database = adapter.open(databasePath, { readOnly: true });
-      configureConnection(database, true);
-      return new ExecutionStore(resolvedProjectRoot, databasePath, database, foundVersion, true, now);
+      if (foundVersion > CURRENT_EXECUTION_STORE_SCHEMA_VERSION) {
+        return new ExecutionStore(resolvedProjectRoot, databasePath, database, foundVersion, true, now);
+      }
+
+      if (existingDatabase) {
+        database.close();
+        database = undefined;
+        database = adapter.open(databasePath);
+        configureConnection(database, false);
+      }
+
+      configureWritableConnection(database);
+      applyMigrations(
+        database,
+        databasePath,
+        adapter,
+        fileSystem,
+        foundVersion,
+        now,
+        options.backupBeforeMigration ?? true
+      );
+      verifyMigrationRegistry(database);
+      return new ExecutionStore(
+        resolvedProjectRoot,
+        databasePath,
+        database,
+        CURRENT_EXECUTION_STORE_SCHEMA_VERSION,
+        false,
+        now
+      );
+    } catch (error) {
+      try {
+        database?.close();
+      } catch {
+        // Preserve the opening or migration failure.
+      }
+      throw error;
     }
-
-    configureWritableConnection(database);
-    applyMigrations(database, databasePath, adapter, foundVersion, now, options.backupBeforeMigration ?? true);
-    verifyMigrationRegistry(database);
-    return new ExecutionStore(
-      resolvedProjectRoot,
-      databasePath,
-      database,
-      CURRENT_EXECUTION_STORE_SCHEMA_VERSION,
-      false,
-      now
-    );
   }
 
   close(): void {
@@ -2016,6 +2069,7 @@ function applyMigrations(
   database: ExecutionDatabase,
   databasePath: string,
   adapter: ExecutionDatabaseAdapter,
+  fileSystem: ExecutionStoreFileSystem,
   foundVersion: number,
   now: () => Date,
   backupBeforeMigration: boolean
@@ -2025,8 +2079,8 @@ function applyMigrations(
     return;
   }
 
-  if (backupBeforeMigration && shouldBackUpDatabase(databasePath, foundVersion)) {
-    createValidatedMigrationBackup(database, databasePath, adapter, foundVersion, now());
+  if (backupBeforeMigration && shouldBackUpDatabase(databasePath, foundVersion, fileSystem)) {
+    createValidatedMigrationBackup(database, databasePath, adapter, fileSystem, foundVersion, now());
   }
 
   for (const migration of pending) {
@@ -2078,42 +2132,72 @@ function verifyMigrationRegistry(database: ExecutionDatabase): void {
   }
 }
 
-function shouldBackUpDatabase(databasePath: string, foundVersion: number): boolean {
-  return foundVersion > 0 || (existsSync(databasePath) && statSync(databasePath).size > 0);
+function shouldBackUpDatabase(
+  databasePath: string,
+  foundVersion: number,
+  fileSystem: ExecutionStoreFileSystem
+): boolean {
+  return foundVersion > 0 || (fileSystem.exists(databasePath) && fileSystem.fileSize(databasePath) > 0);
 }
 
 function createValidatedMigrationBackup(
   database: ExecutionDatabase,
   databasePath: string,
   adapter: ExecutionDatabaseAdapter,
+  fileSystem: ExecutionStoreFileSystem,
   foundVersion: number,
   now: Date
 ): string {
   database.exec("PRAGMA wal_checkpoint(FULL)");
-  const databaseBytes = statSync(databasePath).size;
+  const databaseBytes = fileSystem.fileSize(databasePath);
   const walPath = `${databasePath}-wal`;
-  const walBytes = existsSync(walPath) ? statSync(walPath).size : 0;
+  const walBytes = fileSystem.exists(walPath) ? fileSystem.fileSize(walPath) : 0;
   const requiredBytes = 2 * (databaseBytes + walBytes) + 64 * 1024 * 1024;
-  const disk = statfsSync(path.dirname(databasePath));
-  const availableBytes = Number(disk.bavail) * Number(disk.bsize);
+  const availableBytes = fileSystem.availableBytes(path.dirname(databasePath));
   if (Number.isFinite(availableBytes) && availableBytes < requiredBytes) {
     throw new Error(`Insufficient free space for execution store migration backup: need ${requiredBytes} bytes`);
   }
 
   const stamp = now.toISOString().replace(/[:.]/g, "-");
   const backupPath = `${databasePath}.backup-v${foundVersion}-${stamp}`;
-  copyFileSync(databasePath, backupPath);
-  const backup = adapter.open(backupPath, { readOnly: true });
+  const temporaryBackupPath = `${backupPath}.partial-${randomUUID()}`;
   try {
-    configureConnection(backup, true);
-    const result = row(backup.prepare("PRAGMA quick_check").get());
-    if (!result || stringValue(result.quick_check, "") !== "ok") {
-      throw new ExecutionStoreIntegrityError(`Execution store migration backup failed quick_check: ${backupPath}`);
+    fileSystem.copy(databasePath, temporaryBackupPath);
+    const backup = adapter.open(temporaryBackupPath, { readOnly: true });
+    try {
+      configureConnection(backup, true);
+      const result = row(backup.prepare("PRAGMA quick_check").get());
+      if (!result || stringValue(result.quick_check, "") !== "ok") {
+        throw new ExecutionStoreIntegrityError(`Execution store migration backup failed quick_check: ${backupPath}`);
+      }
+      if (readDatabaseSchemaVersion(backup) !== foundVersion) {
+        throw new ExecutionStoreIntegrityError(`Execution store migration backup schema mismatch: ${backupPath}`);
+      }
+    } finally {
+      backup.close();
     }
-  } finally {
-    backup.close();
+    fileSystem.rename(temporaryBackupPath, backupPath);
+    discardTemporaryBackupArtifacts(fileSystem, temporaryBackupPath);
+  } catch (error) {
+    discardTemporaryBackupArtifacts(fileSystem, temporaryBackupPath);
+    throw error;
   }
   return backupPath;
+}
+
+function discardTemporaryBackupArtifacts(fileSystem: ExecutionStoreFileSystem, temporaryBackupPath: string): void {
+  for (const filename of [
+    temporaryBackupPath,
+    `${temporaryBackupPath}-journal`,
+    `${temporaryBackupPath}-shm`,
+    `${temporaryBackupPath}-wal`
+  ]) {
+    try {
+      fileSystem.remove(filename);
+    } catch {
+      // A failed cleanup must not mask the original migration outcome.
+    }
+  }
 }
 
 function mapMigrationRow(source: SqlRow): ExecutionStoreMigrationRecord {
