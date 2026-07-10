@@ -2540,6 +2540,8 @@ function mapArtifactRow(source: SqlRow): StoredAgentArtifact {
 
 function mapConfirmationRow(source: SqlRow): StoredAgentConfirmation {
   const stored = asRecord(parseJson(source.confirmation_json, {}));
+  const resolvedAt = stringValue(source.resolved_at);
+  const resolvedBy = stringValue(source.resolved_by);
   Object.assign(stored, {
     confirmation_id: stringValue(source.confirmation_id),
     run_id: stringValue(source.run_id),
@@ -2549,11 +2551,21 @@ function mapConfirmationRow(source: SqlRow): StoredAgentConfirmation {
     risk_level: stringValue(source.risk_level),
     status: stringValue(source.status),
     expires_at: stringValue(source.expires_at),
-    resolved_at: stringValue(source.resolved_at),
-    resolved_by: stringValue(source.resolved_by),
     created_at: stringValue(source.created_at),
     updated_at: stringValue(source.updated_at)
   });
+  // The durable schema models unresolved fields as absent. SQLite stores them
+  // as empty strings, which must not leak through the API contract.
+  if (resolvedAt) {
+    stored.resolved_at = resolvedAt;
+  } else {
+    delete stored.resolved_at;
+  }
+  if (resolvedBy) {
+    stored.resolved_by = resolvedBy;
+  } else {
+    delete stored.resolved_by;
+  }
   return stored as unknown as StoredAgentConfirmation;
 }
 

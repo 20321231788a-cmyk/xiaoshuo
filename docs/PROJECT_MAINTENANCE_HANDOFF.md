@@ -2154,6 +2154,14 @@ npm test
 
 本轮根级验证：`npm run typecheck`、`npm test`（85 files/622 tests）、`npm run build:workbench`、`npm run build:desktop` 和 `git diff --check` 通过。P0 仍未验收；`PRODUCT.md` 未纳入提交。
 
+### 15.61 2026-07-10 P0 Confirmation Browser E2E 与 Schema 契约记录
+
+- 修复 Execution Store 将 SQLite 空字符串泄露为 `resolved_at`/`resolved_by` 的契约错误；未解决的 Confirmation 现在省略这两个可选字段，符合 shared schema；
+- Playwright 在认证隔离 runtime 中创建真实确认写入 run，覆盖 pending 展示、批准后保持 paused、显式恢复至 completed，以及拒绝至 failed；
+- 这补齐了 Confirmation 的浏览器生命周期回归，但 E 仍缺异常/恢复矩阵，F 仍缺旧 execute、Skill 与 workflow 的统一 CommitJournal 覆盖，P0 仍未验收。
+
+本轮验证：`npm run typecheck`、`npm test`（85 files/622 tests）、`npm run build:workbench`、`npm run build:desktop`、`npx playwright test tests/e2e/project-entry.spec.ts --reporter=line --workers=1`（3 passed）和 `git diff --check` 通过。`PRODUCT.md` 未纳入提交。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：
