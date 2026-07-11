@@ -474,6 +474,19 @@ export const agentGoalRequestSnapshotSchema = z
     feature_flag_snapshot: agentFeatureFlagSnapshotSchema
   });
 
+export const actionDescriptorSchema = z
+  .object({
+    action: z.string(),
+    input_schema: z.record(z.any()).default({}),
+    output_schema: z.record(z.any()).default({}),
+    required_permissions: z.array(z.string()).default([]),
+    has_side_effects: z.boolean().default(false),
+    retryable: z.boolean().default(true),
+    timeout_ms: z.number().default(30000),
+    confirmation_policy: z.string().default("always")
+  })
+  .passthrough();
+
 export const agentGoalSchema = z
   .object({
     instruction: z.string().default(""),
@@ -930,6 +943,7 @@ export type GeneratedSavePlan = z.infer<typeof generatedSavePlanSchema>;
 export type GeneratedCacheMeta = z.infer<typeof generatedCacheMetaSchema>;
 export type GeneratedCacheDetail = z.infer<typeof generatedCacheDetailSchema>;
 export type GeneratedSaveRequest = z.infer<typeof generatedSaveRequestSchema>;
+export type ActionDescriptor = z.infer<typeof actionDescriptorSchema>;
 
 function isEmptyObject(value: unknown): boolean {
   return Boolean(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0);

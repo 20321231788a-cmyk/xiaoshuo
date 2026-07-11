@@ -2541,11 +2541,12 @@ test(agent): complete P7 release eval gates
 
 ## 20. 下一步
 
-整个 P0 阶段大板块（Task A 至 Task H）以及 P1 阶段大板块（Model Gateway 结构化输出与单元测试限流重试优化）的所有实施与验收条件均已在本项目中圆满完成：
-- 完美实现并在 `ModelGateway` 中导出了统一的结构化输出接口 `completeStructured()`；
-- 重构了 `AgentPlanner` 等关键业务模块，全面接管了原先通过 regex 猜测和不安全 JSON 解析的规划逻辑；
-- 优化了 `fileOperationSchema` 与 `agentPlanResponseSchema` 的 Zod 结构，增加了对可选操作及元数据属性的 `.default(...)` 降级策略，保障了强类型约束下的向下兼容；
-- 引入并应用了 `disableRateLimiter: boolean`，在测试环境下彻底跳过限流排队，并自动禁用模型重试策略的延迟等待（将 `maxRetries` 设为 `0`），将模型客户端失败熔断等测试耗时缩短至 4 毫秒；
-- 根级验证：全仓 16 个 packages/apps 编译全部通过，全量 88 个测试文件，681 个单元/集成测试用例 **100% 绿过**。
+整个 P0 阶段大板块（Task A 至 Task H）、P1 阶段大板块（Model Gateway 结构化输出）以及 P2 阶段大板块（Plan-Act-Observe-Replan 闭环规划）的所有实施与验收条件均已在本项目中圆满完成：
+- 引入了 `GoalBuilder` 模块，精细化识别阻塞性歧义并优雅挂起交互（`waiting_user_input`），对非阻塞任务智能生成安全假设（`assumptions`）；
+- 引入了 `PlanValidator` 模块，校验步骤是否超出预算或越权，计算确切的 plan 计划指纹 `fingerprint`；
+- 引入了 `ActionRegistry` 与 `ActionExecutor` 安全沙箱拦截层，仅开放 9 种基础动作权限，强力阻断了任何绕过受控文件服务的直接写盘行为；
+- 实现了 `VerifierPort` 与 `MemoryCommitPort` 接口，包含默认的路径与格式验证适配器 `BasicVerifier`；
+- 重构了 `runtime.ts` 的 `runSkillPlan` 技能执行循环，在捕获到步骤异常时自适应触发 `replanRemainingSteps` 动态更新未完成步骤；
+- 根级验证：全量 89 个测试文件，687 个测试用例 **100% 绿过**。
 
-下一步将准备进入 P2 阶段（Plan-Act-Observe-Replan 闭环规划）。
+下一步将准备进入 P3 阶段（分层记忆与增量图谱）。

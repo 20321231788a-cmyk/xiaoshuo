@@ -1,3 +1,6 @@
+import { GoalBuilder } from "./goal-builder.js";
+import { PlanValidator } from "./plan-validator.js";
+import { ActionExecutor } from "./action-executor.js";
 import type {
   AgentRunRequest,
   AgentRunDeleteResponse,
@@ -2480,20 +2483,56 @@ export class AgentRuntimeService {
 
   private async runSkillPlan(skillPlan: SkillPlan, request: AgentRunRequest, options: AgentRunOptions = {}): Promise<AgentRunResponse> {
     throwIfAborted(options.signal);
-    const steps = skillPlan.steps.slice(0, 4);
+    
+    // 1. Goal Builder & Ambiguity Resolution
+    const { goal, resolution } = GoalBuilder.resolveGoal(request.content || "", request.skill_id);
+    if (goal.blocking_questions.length > 0) {
+      const reply = `阻塞性歧义未解决，请问：${goal.blocking_questions[0]}`;
+      const conversation = await this.recordSkillExchange(request, reply);
+      return {
+        intent: "skill",
+        reply,
+        conversation,
+        results: [],
+        skill_result: {
+          status: "done",
+          result: reply,
+          saved_path: "",
+          data: { blocking_questions: goal.blocking_questions }
+        },
+        saved_paths: [],
+        requires_confirmation: true,
+        current_skill: "GoalBuilder",
+        skill_steps: [],
+        skill_plan: skillPlan,
+        selected_reason: "blocking_ambiguity",
+        confidence: 0
+      };
+    }
+
+    // 2. Action Sandbox Executor & Checkpoint Loop
+    const steps = [...skillPlan.steps.slice(0, 4)];
     const stepRecords: Array<Record<string, unknown>> = [];
     const savedPaths: string[] = [];
     const webSearchSources: WebSearchSource[] = [];
     let lastResult: SkillRunResponse | null = null;
     let lastReply = "";
     let priorOutput = String(request.selection || "").trim();
+    const executor = new ActionExecutor(this);
 
-    for (const [index, step] of steps.entries()) {
+    let index = 0;
+    while (index < steps.length) {
+      const step = steps[index]!;
       throwIfAborted(options.signal);
+      
       const skillRequest = this.buildPlannedSkillRequest(step, request, priorOutput);
+      
       try {
-        const result = await this.runSkillInternal(step.skill_id, skillRequest, options);
+        // Enforce action sandbox validation before calling the tool
+        const actionResult = await executor.execute("run_skill", { skill_id: step.skill_id, request: skillRequest });
         throwIfAborted(options.signal);
+
+        const result = actionResult as SkillRunResponse;
         lastResult = result;
         const resultText = String(result.data?.result || result.result || result.content || "").trim();
         const stepSavedPaths = this.resolveSavedPaths(result);
@@ -2502,6 +2541,7 @@ export class AgentRuntimeService {
           ? (result.data.web_search_sources as WebSearchSource[])
           : [];
         webSearchSources.push(...stepSources);
+
         stepRecords.push({
           index: index + 1,
           skill_id: step.skill_id,
@@ -2512,13 +2552,30 @@ export class AgentRuntimeService {
           saved_paths: stepSavedPaths,
           result_preview: resultText.slice(0, 800)
         });
+
         priorOutput = resultText || priorOutput;
         lastReply = resultText || (stepSavedPaths.length ? `已写入 ${stepSavedPaths.length} 个文件：\n${stepSavedPaths.join("\n")}` : `${step.name || step.skill_id} 已完成。`);
+        index++;
       } catch (error) {
         if (isCancellationError(error, options.signal)) {
           throw error;
         }
         const message = error instanceof Error ? error.message : String(error);
+        
+        // 3. Dynamic Re-planning Loop
+        const shouldReplan = !message.includes("已取消") && index < steps.length - 1;
+        if (shouldReplan) {
+          try {
+            const replanned = await this.planSkillExecution(request, options);
+            if (replanned && replanned.steps.length > 0) {
+              steps.splice(index + 1);
+              steps.push(...replanned.steps.slice(0, 3));
+            }
+          } catch {
+            // Ignore replan failure and proceed with normal failure
+          }
+        }
+
         stepRecords.push({
           index: index + 1,
           skill_id: step.skill_id,
@@ -2528,6 +2585,7 @@ export class AgentRuntimeService {
           confidence: step.confidence,
           error: message
         });
+
         const reply = `技能 ${step.name || step.skill_id} 执行失败：${message}`;
         const conversation = await this.recordSkillExchange(
           { ...request, skill_id: step.skill_id },
@@ -2540,6 +2598,7 @@ export class AgentRuntimeService {
             confidence: skillPlan.confidence
           }
         );
+
         return {
           intent: "skill",
           reply,
