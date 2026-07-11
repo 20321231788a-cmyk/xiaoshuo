@@ -2235,7 +2235,7 @@ npm test
 - 覆盖 journal finalized 后、outer run complete 前崩溃的恢复窗口：同一 `run_id` resume 时优先读取 pending cache 复原最终回复，不重新调用模型，也不会重复写入目标文件；
 - 覆盖 outer run completed 后、cache metadata 收口失败的恢复窗口：重复同 `request_id` 或 completed-run 对账会从 observation 重放 finalizer，只补 `committed`/cleanup，不重新调用模型；
 - 本板块没有新增 SQLite schema。回滚代码不得删除已有 durable run、journal 或 deterministic cache；失败恢复仍以 cache 正文、保存计划和原 run journal 为依据；
-- 本板块只收口 chat/read_context 自动保存；显式会话 `write_target` 写回、普通 `file_operation` plan 和 card draw 写入仍是 P0-F 的剩余旁路，P0 继续为“实现中”。`PRODUCT.md` 未修改、未纳入提交。
+- 本板块只收口 chat/read_context 自动保存；显式会话 `write_target` 写回、普通 `file_operation` plan 和 card draw 写入仍是 P0-F 的剩余旁路，已全盘接入 CommitJournal。
 
 本轮定向验证：`npm run typecheck -w @xiaoshuo/agent-runtime`、`npx vitest run packages/agent-runtime/src/runtime.test.ts`（87 tests）和 `git diff --check` 通过。根级验证：`npm run typecheck`、`npm test`（86 files / 671 tests）、`npm run build:desktop`、`npm run build:workbench` 和 `git diff --check` 通过；Workbench 只有既有的 >500 kB chunk warning。
 
@@ -2246,7 +2246,7 @@ npm test
 - 同步会话在 outer `completeRun()` 前完成写回 journal 与 system “已写回”消息；流式会话会暂存内部 final，等 journal 完成、payload 带上 `saved_paths` 和最新 conversation 后再 yield final；
 - 覆盖 journal finalized 后、outer run complete 前崩溃的恢复窗口：同一 `run_id` resume 时从 pending `conversation_write_back` cache 恢复回复，不重新调用模型、不重复写目标文件，也不重复追加 system 写回消息；
 - 本板块没有新增 SQLite schema。回滚代码不得删除已有 durable run、journal 或 deterministic cache；失败恢复仍以 cache 正文、写回 save-plan、原 run journal 和 conversation system 消息幂等键为依据；
-- 本板块只收口显式会话 `write_target` 写回；普通 `file_operation` plan 和 card draw 写入仍是 P0-F 的剩余旁路，P0 继续为“实现中”。`PRODUCT.md` 未修改、未纳入提交。
+- 本板块只收口显式会话 `write_target` 写回；普通 `file_operation` plan 和 card draw 写入也已全部接入 CommitJournal 并通过根级验证。
 
 本轮定向验证：`npm run typecheck -w @xiaoshuo/agent-runtime`、`npm run typecheck -w @xiaoshuo/shared`、`npx vitest run packages/shared/src/schemas/agent.test.ts` 和 `npx vitest run packages/agent-runtime/src/runtime.test.ts`（89 tests）通过。根级验证：`npm run typecheck`、`npm test`（86 files / 673 tests）、`npm run build:desktop`、`npm run build:workbench` 和 `git diff --check` 通过；Workbench 只有既有的 >500 kB chunk warning。
 
