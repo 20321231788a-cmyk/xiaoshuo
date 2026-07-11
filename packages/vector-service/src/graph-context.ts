@@ -1,4 +1,6 @@
 import { VectorDb } from "./vector-db.js";
+import { GraphConsistency, type GraphBlockingClaim } from "./graph-consistency.js";
+
 
 function parseChapterNumber(text: string): number | undefined {
   const matchArabic = text.match(/(?:第)?\s*(\d+)\s*(?:章|集)/);
@@ -62,11 +64,14 @@ export interface GraphClaim {
 }
 
 export class GraphContext {
+  private readonly projectPath: string;
   private readonly db: VectorDb;
 
   constructor(projectPath: string) {
+    this.projectPath = projectPath;
     this.db = new VectorDb(projectPath);
   }
+
 
   /**
    * 基于规则解析单个 Chunk 的文本内容，提取实体、关系和 Claims
@@ -362,6 +367,162 @@ export class GraphContext {
   }
 
   /**
+   * 仅针对已修改的 paths 增量删除并重构 claims/entities
+   */
+  updatePaths(paths: string[]): void {
+    if (paths.length === 0) {
+      return;
+    }
+    this.db.init();
+    const conn = this.db.db;
+
+    this.db.transaction(() => {
+      const now = Math.floor(Date.now() / 1000);
+
+      // 1. 将被修改 paths 的旧 claims 标记为 superseded，并物理删除受影响 path 的旧 entities/relations
+      for (const p of paths) {
+        conn.prepare(`
+          UPDATE graph_claims
+          SET status = 'superseded', updated_at = ?
+          WHERE source_path = ? AND status != 'superseded'
+        `).run(now, p);
+
+        conn.prepare("DELETE FROM graph_entities WHERE source_path = ?").run(p);
+        conn.prepare("DELETE FROM graph_relations WHERE source_path = ?").run(p);
+
+        // 2. 从 chunks 中查出该 path 现在的 chunks 并提取
+        const chunks = conn.prepare("SELECT id, path, source_type, title, text FROM chunks WHERE path = ?").all(p) as Array<{
+          id: number;
+          path: string;
+          source_type: string;
+          title: string;
+          text: string;
+        }>;
+
+        const stmtEntity = conn.prepare(`
+          INSERT OR REPLACE INTO graph_entities(entity_id, name, type, description, source_path, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+
+        const stmtClaim = conn.prepare(`
+          INSERT INTO graph_claims(subject_entity_id, predicate, object_text, object_entity_id, source_path, source_type, chapter_number, status, confidence, evidence_chunk_id, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+
+        for (const chunk of chunks) {
+          const { entities, claims } = this.extractGraphData(
+            chunk.id,
+            chunk.text,
+            chunk.source_type,
+            chunk.path,
+            chunk.title
+          );
+
+          for (const ent of entities) {
+            stmtEntity.run(ent.entity_id, ent.name, ent.type, ent.description, ent.source_path, ent.status, now, now);
+          }
+
+          for (const clm of claims) {
+            stmtClaim.run(
+              clm.subject_entity_id,
+              clm.predicate,
+              clm.object_text || null,
+              clm.object_entity_id || null,
+              clm.source_path,
+              clm.source_type,
+              clm.chapter_number || null,
+              clm.status,
+              clm.confidence || 1.0,
+              clm.evidence_chunk_id || null,
+              now,
+              now
+            );
+          }
+        }
+      }
+
+      // 3. 查出当前所有的 registeredEntities，用于二阶段关系抽取
+      const registeredEntities = conn.prepare(`
+        SELECT entity_id, name, type FROM graph_entities
+        WHERE type IN ('character', 'location', 'organization', 'item')
+      `).all() as GraphEntity[];
+
+      const stmtRelation = conn.prepare(`
+        INSERT INTO graph_relations(source_entity_id, predicate, target_entity_id, description, source_path, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      const stmtClaimInsert = conn.prepare(`
+        INSERT INTO graph_claims(subject_entity_id, predicate, object_text, object_entity_id, source_path, source_type, chapter_number, status, confidence, evidence_chunk_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
+      // 4. 对被修改的 path(s)，如果是 body，重新抽取与其关联的关系和 claims
+      for (const p of paths) {
+        const chunks = conn.prepare("SELECT id, path, source_type, title, text FROM chunks WHERE path = ?").all(p) as Array<{
+          id: number;
+          path: string;
+          source_type: string;
+          title: string;
+          text: string;
+        }>;
+
+        for (const chunk of chunks) {
+          if (chunk.source_type !== "body") {
+            continue;
+          }
+
+          const chapterNum = parseChapterNumber(chunk.path);
+          const eventId = `event:chapter_${chapterNum || "unknown"}`;
+
+          for (const ent of registeredEntities) {
+            if (chunk.text.includes(ent.name)) {
+              stmtRelation.run(ent.entity_id, "appears_in", eventId, `在第${chapterNum}章中出场/被提到。`, chunk.path, "confirmed", now, now);
+              stmtClaimInsert.run(
+                ent.entity_id,
+                "appears_in",
+                null,
+                eventId,
+                chunk.path,
+                "body",
+                chapterNum || null,
+                "confirmed",
+                1.0,
+                chunk.id,
+                now,
+                now
+              );
+            }
+          }
+        }
+      }
+
+      // 5. 生成 Community 摘要
+      conn.prepare("DELETE FROM graph_communities").run();
+
+      const plotClaims = conn.prepare("SELECT object_text FROM graph_claims WHERE predicate = 'plot_plan' AND status != 'superseded'").all() as Array<{ object_text: string }>;
+      const charEntities = conn.prepare("SELECT name, description FROM graph_entities WHERE type = 'character'").all() as Array<{ name: string; description: string }>;
+
+      const stmtCommunity = conn.prepare(`
+        INSERT OR REPLACE INTO graph_communities(type, summary, updated_at)
+        VALUES (?, ?, ?)
+      `);
+
+      const plotSummary = plotClaims.length
+        ? plotClaims.map((c, i) => `[计划 ${i + 1}]: ${c.object_text.slice(0, 150)}...`).join("\n")
+        : "暂无故事计划。";
+
+      const charSummary = charEntities.length
+        ? charEntities.map((e) => `- ${e.name}: ${e.description.slice(0, 100)}...`).join("\n")
+        : "暂无角色登记。";
+
+      stmtCommunity.run("main_plot_summary", `【大纲剧情总结】\n${plotSummary}`, now);
+      stmtCommunity.run("character_arc_summary", `【登场人物大纲】\n${charSummary}`, now);
+    });
+  }
+
+
+  /**
    * 获取图谱统计数据
    */
   getStatus(): { entities: number; relations: number; claims: number; communities: number } {
@@ -516,53 +677,44 @@ export class GraphContext {
     return contextOutput.join("\n");
   }
 
-  /**
-   * 一致性图谱核对，寻找与 confirmed claims 冲突的事实
-   */
-  async checkConsistency(text: string): Promise<{ score: number; risks: string[]; reason: string }> {
+  async checkConsistency(text: string): Promise<{
+    score: number;
+    risks: string[];
+    reason: string;
+    blocking_claims?: GraphBlockingClaim[];
+    suggested_fix?: string;
+  }> {
     this.db.init();
     const conn = this.db.db;
 
-    const entities = conn.prepare("SELECT entity_id, name, type FROM graph_entities").all() as Array<{
-      entity_id: string;
-      name: string;
-      type: string;
-    }>;
+    const consistency = new GraphConsistency(this.projectPath);
+    try {
+      const result = consistency.checkDraft(text);
 
-    const matchedEntities = entities.filter((ent) => text.includes(ent.name));
-    const risks: string[] = [];
+      const entities = conn.prepare("SELECT name FROM graph_entities").all() as Array<{ name: string }>;
+      const matchedEntities = entities.filter((ent) => text.includes(ent.name));
 
-    let claims: Array<{
-      subject_entity_id: string;
-      predicate: string;
-      object_text: string;
-    }> = [];
+      let reason = "";
+      if (result.blocking_claims.length > 0) {
+        reason = `发现 ${result.blocking_claims.length} 处冲突事实。`;
+      } else {
+        reason = matchedEntities.length > 0
+          ? `已核对 ${matchedEntities.length} 个图谱实体，无冲突事实。`
+          : "无冲突事实";
+      }
 
-    if (matchedEntities.length > 0) {
-      const placeholders = matchedEntities.map(() => "?").join(",");
-      claims = conn.prepare(`
-        SELECT subject_entity_id, predicate, object_text
-        FROM graph_claims
-        WHERE subject_entity_id IN (${placeholders})
-          AND status = 'confirmed'
-          AND predicate = 'description'
-      `).all(...matchedEntities.map((e) => e.entity_id)) as Array<{
-        subject_entity_id: string;
-        predicate: string;
-        object_text: string;
-      }>;
+      return {
+        score: result.score,
+        risks: result.risks,
+        blocking_claims: result.blocking_claims,
+        suggested_fix: result.suggested_fix,
+        reason
+      };
+    } finally {
+      consistency.close();
     }
-
-    return {
-      score: 100,
-      risks,
-      reason: claims.length
-        ? `命中 ${matchedEntities.length} 个图谱实体，已读取 ${claims.length} 条 confirmed claims。`
-        : matchedEntities.length
-          ? "命中实体，但暂无可校验 confirmed claims。"
-          : "无冲突事实"
-    };
   }
+
 
   close(): void {
     this.db.close();

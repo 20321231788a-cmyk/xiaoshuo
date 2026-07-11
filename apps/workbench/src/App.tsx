@@ -1318,6 +1318,99 @@ function TimelineFeaturePage({ controller }: { controller: WorkbenchController }
   );
 }
 
+function SessionPlanCard({ message, controller }: { message: any; controller: any }) {
+  const plan = message.metadata?.skill_plan;
+  const steps = message.metadata?.skill_steps || plan?.steps || [];
+  const [collapsed, setCollapsed] = useState(true);
+  const [loading, setLoading] = useState(false);
+  const runId = message.metadata?.run_id || "";
+
+  if (!plan && !steps.length) {
+    return null;
+  }
+
+  const handleControl = async (action: string) => {
+    if (loading || !runId) return;
+    setLoading(true);
+    try {
+      const url = `/api/agent/runs/${encodeURIComponent(runId)}/${action}`;
+      await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ operation_id: `op_${Date.now()}` })
+      });
+      // Refresh current conversation content
+      controller.loadConversation?.(controller.conversationDetail?.id);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleRetryStep = async (stepId: string) => {
+    if (loading || !runId) return;
+    setLoading(true);
+    try {
+      const url = `/api/agent/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(stepId)}/retry`;
+      await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ operation_id: `op_${Date.now()}`, expected_version: 1 })
+      });
+      controller.loadConversation?.(controller.conversationDetail?.id);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="xw-session-plan-card" style={{ border: "1px solid #ddd", borderRadius: "6px", padding: "10px", marginTop: "8px", background: "#f9f9f9", color: "#333" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }} onClick={() => setCollapsed(!collapsed)}>
+        <strong>📋 智能执行计划 {plan?.selected_reason ? `(${plan.selected_reason})` : ""}</strong>
+        <span style={{ fontSize: "0.85em" }}>{collapsed ? "展开 ▼" : "折叠 ▲"}</span>
+      </div>
+
+      {!collapsed && (
+        <div style={{ marginTop: "10px" }}>
+          {steps.map((step: any, idx: number) => {
+            const status = step.status || "pending";
+            const color = status === "done" ? "#2e7d32" : status === "error" ? "#c62828" : status === "running" ? "#1565c0" : "#757575";
+            return (
+              <div key={idx} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: "1px dashed #eee" }}>
+                <div>
+                  <span style={{ color, marginRight: "8px" }}>● {status.toUpperCase()}</span>
+                  <strong>{step.name || step.skill_id}</strong>
+                  {step.reason && <p style={{ margin: "2px 0 0 18px", fontSize: "0.85em", color: "#666" }}>理由: {step.reason}</p>}
+                </div>
+                {status === "error" && (
+                  <button 
+                    disabled={loading} 
+                    onClick={() => handleRetryStep(step.skill_id)} 
+                    style={{ fontSize: "0.85em", padding: "2px 6px", cursor: "pointer", borderRadius: "3px" }}
+                  >
+                    重试此步
+                  </button>
+                )}
+              </div>
+            );
+          })}
+
+          {runId && (
+            <div style={{ display: "flex", gap: "8px", marginTop: "12px" }}>
+              <button disabled={loading} onClick={() => handleControl("pause")} style={{ flex: 1, padding: "4px", cursor: "pointer" }}>暂停</button>
+              <button disabled={loading} onClick={() => handleControl("resume")} style={{ flex: 1, padding: "4px", cursor: "pointer" }}>恢复</button>
+              <button disabled={loading} onClick={() => handleControl("cancel")} style={{ flex: 1, padding: "4px", cursor: "pointer" }}>取消</button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ConversationFeaturePage({ controller }: { controller: WorkbenchController }) {
   const messages = controller.conversationDetail?.messages || [];
   const threadEndRef = useRef<HTMLDivElement | null>(null);
@@ -1340,6 +1433,7 @@ function ConversationFeaturePage({ controller }: { controller: WorkbenchControll
           <article key={message.id} className={`xw-message-row ${message.role}`}>
             <strong>{message.role === "assistant" ? "AI" : message.role === "user" ? "我" : "系统"}</strong>
             <p>{message.content}</p>
+            <SessionPlanCard message={message} controller={controller} />
           </article>
         ))}
         <div ref={threadEndRef} aria-hidden="true" />

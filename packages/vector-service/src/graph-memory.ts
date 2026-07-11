@@ -23,9 +23,10 @@ export class GraphMemory {
     this.graphContext.rebuildGraph();
   }
 
-  updatePaths(_paths: string[]): void {
-    this.graphContext.rebuildGraph();
+  updatePaths(paths: string[]): void {
+    this.graphContext.updatePaths(paths);
   }
+
 
   async buildWritingContext(query: string, options: BuildWritingContextOptions = {}): Promise<string> {
     const chapterQuery = options.chapter ? `${query} 第${options.chapter}章` : query;

@@ -356,6 +356,7 @@ export interface ExecutionStorePort {
   readonly isReadOnly: boolean;
 
   close(): void;
+  getDatabase?(): ExecutionDatabase;
   getAppliedMigrations(): ExecutionStoreMigrationRecord[];
   quickCheck(): string;
   checkpoint(mode?: "PASSIVE" | "FULL" | "RESTART" | "TRUNCATE"): void;

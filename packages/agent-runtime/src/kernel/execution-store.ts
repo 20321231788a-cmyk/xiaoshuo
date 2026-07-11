@@ -57,7 +57,7 @@ import type {
 export * from "./execution-store-port.js";
 
 export const EXECUTION_STORE_RELATIVE_PATH = path.join("00_设定集", ".agent", "agent_runs.sqlite3");
-export const CURRENT_EXECUTION_STORE_SCHEMA_VERSION = 1;
+export const CURRENT_EXECUTION_STORE_SCHEMA_VERSION = 2;
 export const EXECUTION_STORE_BUSY_TIMEOUT_MS = 5_000;
 
 const MIGRATION_ONE_SQL = `
@@ -317,6 +317,49 @@ CREATE INDEX idx_agent_outbound_disclosures_run
   ON agent_outbound_disclosures (run_id);
 `;
 
+const MIGRATION_TWO_SQL = `
+CREATE TABLE agent_artifact_feedback (
+  feedback_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  artifact_id TEXT NOT NULL,
+  action TEXT NOT NULL,
+  task_type TEXT NOT NULL,
+  diff_digest TEXT NOT NULL DEFAULT '',
+  evidence_refs TEXT NOT NULL DEFAULT '[]',
+  rubric_versions TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE
+);
+
+CREATE TABLE preference_candidates (
+  candidate_id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL DEFAULT '',
+  scope TEXT NOT NULL,
+  target TEXT NOT NULL,
+  key TEXT NOT NULL,
+  proposed_value TEXT NOT NULL,
+  evidence_feedback_ids TEXT NOT NULL DEFAULT '[]',
+  counterexample_feedback_ids TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL,
+  version INTEGER NOT NULL DEFAULT 1,
+  resolved_by TEXT,
+  resolved_at TEXT,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE preference_versions (
+  preference_version TEXT PRIMARY KEY,
+  parent_version TEXT,
+  scope TEXT NOT NULL,
+  applied_candidate_ids TEXT NOT NULL DEFAULT '[]',
+  rubric_versions TEXT NOT NULL DEFAULT '{}',
+  router_version TEXT NOT NULL DEFAULT '',
+  eval_manifest_ref TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+`;
+
 export type ExecutionStoreMigration = {
   version: number;
   name: string;
@@ -336,6 +379,15 @@ export const EXECUTION_STORE_MIGRATIONS: readonly ExecutionStoreMigration[] = Ob
     minWriterVersion: 1,
     rollbackNotes: "Restore the pre-migration project-local database backup.",
     sql: MIGRATION_ONE_SQL
+  }),
+  Object.freeze({
+    version: 2,
+    name: "p5_feedback_store",
+    checksum: createHash("sha256").update(MIGRATION_TWO_SQL, "utf8").digest("hex"),
+    minReaderVersion: 2,
+    minWriterVersion: 2,
+    rollbackNotes: "Restore the pre-migration project-local database backup.",
+    sql: MIGRATION_TWO_SQL
   })
 ]);
 
@@ -540,6 +592,10 @@ export class ExecutionStore implements ExecutionStorePort {
     }
     this.database.close();
     this.closed = true;
+  }
+
+  getDatabase(): ExecutionDatabase {
+    return this.database;
   }
 
   getAppliedMigrations(): ExecutionStoreMigrationRecord[] {

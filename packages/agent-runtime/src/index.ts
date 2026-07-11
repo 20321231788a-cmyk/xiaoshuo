@@ -1,6 +1,7 @@
 export * from "./planner.js";
 export * from "./generated-save-planner.js";
 export * from "./intent-router.js";
+export * from "./context-scheduler.js";
 export * from "./runtime.js";
 export * from "./agent-trace.js";
 export * from "./cancellation.js";
@@ -21,3 +22,6 @@ export * from "./kernel/execution-store.js";
 export * from "./kernel/commit-journal-service.js";
 export * from "./kernel/workflow-checkpoint.js";
 export * from "./kernel/run-coordinator.js";
+export * from "./memory-governor.js";
+export * from "./evaluator-registry.js";
+export * from "./feedback-learner.js";

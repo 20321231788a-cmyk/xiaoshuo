@@ -51,7 +51,10 @@ const TABLES = [
   "agent_commit_journal",
   "agent_runtime_instances",
   "agent_schema_migrations",
-  "agent_outbound_disclosures"
+  "agent_outbound_disclosures",
+  "agent_artifact_feedback",
+  "preference_candidates",
+  "preference_versions"
 ];
 
 const projects: string[] = [];
@@ -93,6 +96,13 @@ describe("ExecutionStore", () => {
         min_reader_version: 1,
         min_writer_version: 1,
         applied_at: "2026-07-10T00:00:00.000Z"
+      }),
+      expect.objectContaining({
+        version: 2,
+        name: "p5_feedback_store",
+        min_reader_version: 2,
+        min_writer_version: 2,
+        applied_at: "2026-07-10T00:00:00.000Z"
       })
     ]);
     expect(adapter.opens[0]).toEqual({ filename: expectedPath, readOnly: false });
@@ -102,10 +112,10 @@ describe("ExecutionStore", () => {
     const inspection = new DatabaseSync(expectedPath, { readOnly: true });
     try {
       const tableRows = inspection
-        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'agent_%' ORDER BY name")
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND (name LIKE 'agent_%' OR name LIKE 'preference_%') ORDER BY name")
         .all() as Array<{ name: string }>;
       expect(tableRows.map((item) => item.name).sort()).toEqual([...TABLES].sort());
-      expect((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(1);
+      expect((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version).toBe(CURRENT_EXECUTION_STORE_SCHEMA_VERSION);
       expect((inspection.prepare("PRAGMA journal_mode").get() as { journal_mode: string }).journal_mode).toBe("wal");
     } finally {
       inspection.close();

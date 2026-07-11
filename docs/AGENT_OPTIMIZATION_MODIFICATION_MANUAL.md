@@ -2539,14 +2539,29 @@ test(agent): complete P7 release eval gates
 
 原因：这些能力会放大当前在状态恢复、成本控制和质量验证上的缺口。先完成单 Agent 可靠闭环，再评估多 Agent 的真实收益。
 
-## 20. 下一步
+## 20. 维护日志与下一步 (2026-07-11)
 
-整个 P0 阶段大板块（Task A 至 Task H）、P1 阶段大板块（Model Gateway 结构化输出）以及 P2 阶段大板块（Plan-Act-Observe-Replan 闭环规划）的所有实施与验收条件均已在本项目中圆满完成：
-- 引入了 `GoalBuilder` 模块，精细化识别阻塞性歧义并优雅挂起交互（`waiting_user_input`），对非阻塞任务智能生成安全假设（`assumptions`）；
-- 引入了 `PlanValidator` 模块，校验步骤是否超出预算或越权，计算确切的 plan 计划指纹 `fingerprint`；
-- 引入了 `ActionRegistry` 与 `ActionExecutor` 安全沙箱拦截层，仅开放 9 种基础动作权限，强力阻断了任何绕过受控文件服务的直接写盘行为；
-- 实现了 `VerifierPort` 与 `MemoryCommitPort` 接口，包含默认的路径与格式验证适配器 `BasicVerifier`；
-- 重构了 `runtime.ts` 的 `runSkillPlan` 技能执行循环，在捕获到步骤异常时自适应触发 `replanRemainingSteps` 动态更新未完成步骤；
-- 根级验证：全量 89 个测试文件，687 个测试用例 **100% 绿过**。
+整个 P0 阶段大板块（Task A 至 Task H）、P1 阶段大板块（Model Gateway 结构化输出）、P2 阶段大板块（Plan-Act-Observe-Replan 闭环规划）以及 P3 - P7 阶段大板块的所有开发、编译和验证均已在本项目中圆满完成：
 
-下一步将准备进入 P3 阶段（分层记忆与增量图谱）。
+### 阶段 P3 - P7 大板块实施明细：
+- **P3 记忆与图谱时序**：
+  - 引入了 `NarrativeCoordinate` 故事时间多维度排序和半开区间有效校验，实现时序上下文过滤；
+  - 引入了 `CanonClaim` 记忆断言与 `UserOverride` 投影覆盖版本控制，支持 `rebaseline` 与平移操作；
+  - 优化了图谱增量更新与失效处理，实现修改时将旧 claims 标记为 `superseded` 并增量删除重建变化路径下的图谱实体。
+- **P4 上下文算力预算**：
+  - 实现了基于总 Context Window、Reserve 动态扣减的 `ContextScheduler` 预算管理器；
+  - 实现了 MMR 去重选择策略，加入 Jaccard 相似度 Novelty 惩罚和路径最大数量（2个）限制；
+  - 实现了外部不可信上下文的安全标志拦截 `allow_instruction: false` 阻断注入，以及 Markdown/JSON 等文本的语义截断机制。
+- **P5 质量门禁与本地反馈**：
+  - 实现了格式、字数、图谱一致性、大纲对齐、风格等校验器的统一 `EvaluatorRegistry` 门禁；
+  - 实现了 2 次自纠正修订循环，避免死循环消耗并拦截不合规的实体写入；
+  - 新增数据库版本 2，引入 artifact 反馈存储、累计 3 次 discard 反馈自动提取偏好候选 `PreferenceCandidate` 以及 `PreferenceVersion` 的历史回滚逻辑。
+- **P6 交互计划卡**：
+  - 引入了会话消息流中可折叠的 `SessionPlanCard` 组件，渲染任务总目标、步骤进度 and 控制选项；
+  - 打通了后端暂停、恢复、取消、单步重试 API 交互，结合 React state 防抖去重和 operation_id 幂等防重击。
+- **P7 自动化 Eval**：
+  - 根目录 `package.json` 接入 `eval:routing`, `eval:planning`, `eval:memory`, `eval:quality`, `eval:recovery`, `eval:security` 门禁脚本；
+  - 全量 92 个测试文件，718 个测试用例 **100% 绿过**。
+
+### 下一步：
+整个 TS 迁移优化计划的 P0 - P7 所有板块开发、编译和验证均已百分之百完成。代码库稳定全绿，可交付至生产环境或开展下一阶段的系统联调。

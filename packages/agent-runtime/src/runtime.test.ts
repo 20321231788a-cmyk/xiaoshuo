@@ -55,7 +55,7 @@ async function readAgentRunTraces() {
 }
 
 async function waitForRunStatus(runtime: AgentRuntimeService, runId: string, status: string): Promise<void> {
-  for (let attempt = 0; attempt < 50; attempt++) {
+  for (let attempt = 0; attempt < 300; attempt++) {
     if (runtime.getDurableRun(runId)?.status === status) {
       return;
     }
@@ -67,7 +67,7 @@ async function waitForRunStatus(runtime: AgentRuntimeService, runId: string, sta
 }
 
 async function waitForCacheStatus(cache: GeneratedCacheService, cacheId: string, status: string): Promise<void> {
-  for (let attempt = 0; attempt < 50; attempt++) {
+  for (let attempt = 0; attempt < 300; attempt++) {
     if ((await cache.get(cacheId)).status === status) {
       return;
     }

@@ -519,6 +519,99 @@ export const agentConfirmationSchema = z
   })
   .passthrough();
 
+export const contextBlockSchema = z
+  .object({
+    id: z.string(),
+    source: z.string(),
+    content: z.string(),
+    priority: z.enum(["critical", "high", "medium", "low"]),
+    estimated_tokens: z.number().default(0),
+    relevance: z.number().min(0).max(1).default(0),
+    freshness: z.number().min(0).max(1).default(0),
+    trust: z.number().min(0).max(1).default(0),
+    novelty: z.number().min(0).max(1).default(0),
+    semantic_boundary: z.enum(["document", "section", "paragraph", "json"]),
+    trust_level: z.enum([
+      "system_policy",
+      "user_instruction",
+      "trusted_project",
+      "untrusted_project",
+      "untrusted_web",
+      "model_generated"
+    ]),
+    allow_instruction: z.boolean().default(false),
+    source_ref: z.string()
+  })
+  .passthrough();
+
+export const qualityIssueSchema = z
+  .object({
+    code: z.string(),
+    category: z.enum(["hard_gate", "subjective"]),
+    severity: z.enum(["blocking", "major", "minor", "advice"]),
+    message: z.string(),
+    evidence: z.string().default(""),
+    source_ref: z.string().default(""),
+    suggested_fix: z.string().default("")
+  })
+  .passthrough();
+
+export const qualityReportSchema = z
+  .object({
+    artifact_type: z.string(),
+    score: z.number().default(0),
+    passed: z.boolean().default(true),
+    issues: z.array(qualityIssueSchema).default([]),
+    evaluator_versions: z.record(z.string()).default({})
+  })
+  .passthrough();
+
+export const artifactFeedbackSchema = z
+  .object({
+    feedback_id: z.string(),
+    run_id: z.string(),
+    artifact_id: z.string(),
+    action: z.enum(["accepted", "accepted_after_edit", "regenerated", "discarded", "quality_override"]),
+    task_type: z.string(),
+    diff_digest: z.string().default(""),
+    evidence_refs: z.array(z.string()).default([]),
+    rubric_versions: z.record(z.string()).default({}),
+    created_at: z.string()
+  })
+  .passthrough();
+
+export const preferenceCandidateSchema = z
+  .object({
+    candidate_id: z.string(),
+    project_id: z.string(),
+    scope: z.enum(["project", "global"]),
+    target: z.enum(["preference", "rubric", "router"]),
+    key: z.string(),
+    proposed_value: z.any(),
+    evidence_feedback_ids: z.array(z.string()).default([]),
+    counterexample_feedback_ids: z.array(z.string()).default([]),
+    status: z.enum(["pending", "approved", "rejected", "superseded"]),
+    version: z.number().int().positive().default(1),
+    resolved_by: z.string().nullable().default(null),
+    resolved_at: z.string().nullable().default(null),
+    created_at: z.string()
+  })
+  .passthrough();
+
+export const preferenceVersionSchema = z
+  .object({
+    preference_version: z.string(),
+    parent_version: z.string().nullable().default(null),
+    scope: z.enum(["project", "global"]),
+    applied_candidate_ids: z.array(z.string()).default([]),
+    rubric_versions: z.record(z.string()).default({}),
+    router_version: z.string(),
+    eval_manifest_ref: z.string(),
+    status: z.enum(["active", "reverted", "superseded"]),
+    created_at: z.string()
+  })
+  .passthrough();
+
 export const agentRunEventSchema = z
   .object({
     event_id: z.string(),
@@ -944,6 +1037,12 @@ export type GeneratedCacheMeta = z.infer<typeof generatedCacheMetaSchema>;
 export type GeneratedCacheDetail = z.infer<typeof generatedCacheDetailSchema>;
 export type GeneratedSaveRequest = z.infer<typeof generatedSaveRequestSchema>;
 export type ActionDescriptor = z.infer<typeof actionDescriptorSchema>;
+export type ContextBlock = z.infer<typeof contextBlockSchema>;
+export type QualityIssue = z.infer<typeof qualityIssueSchema>;
+export type QualityReport = z.infer<typeof qualityReportSchema>;
+export type ArtifactFeedback = z.infer<typeof artifactFeedbackSchema>;
+export type PreferenceCandidate = z.infer<typeof preferenceCandidateSchema>;
+export type PreferenceVersion = z.infer<typeof preferenceVersionSchema>;
 
 function isEmptyObject(value: unknown): boolean {
   return Boolean(value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0);

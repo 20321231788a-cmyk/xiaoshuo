@@ -15,7 +15,13 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run build -w @xiaoshuo/shared && vitest run",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "eval:routing": "vitest run packages/agent-runtime/src/routing-eval.test.ts",
+    "eval:planning": "vitest run packages/agent-runtime/src/planner.test.ts",
+    "eval:memory": "vitest run packages/agent-runtime/src/memory.test.ts",
+    "eval:quality": "vitest run packages/agent-runtime/src/evaluator-registry.test.ts",
+    "eval:recovery": "vitest run packages/agent-runtime/src/kernel/run-recovery.e2e.test.ts",
+    "eval:security": "vitest run packages/agent-runtime/src/agent-loop.test.ts"
   },
   "dependencies": {
     "adm-zip": "^0.5.17",
