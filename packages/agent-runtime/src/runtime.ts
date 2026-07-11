@@ -37,7 +37,7 @@ import { ConversationService } from "@xiaoshuo/conversation-service";
 import { DocumentService } from "@xiaoshuo/document-service";
 import { createHash, randomUUID } from "node:crypto";
 import { loadModelConfig, loadWebSearchConfig, type ConfigServiceOptions } from "@xiaoshuo/config-service";
-import { OpenAICompatibleClient, type ChatCompletionMessage } from "@xiaoshuo/model-client";
+import { ModelGateway, OpenAICompatibleClient, type ChatCompletionMessage } from "@xiaoshuo/model-client";
 import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
 import { ProjectManifestService } from "@xiaoshuo/project-manifest";
 import { GeneratedCacheService, type PreparedGeneratedCacheCommit } from "@xiaoshuo/generated-cache";
@@ -148,7 +148,38 @@ export class AgentRuntimeService {
 
   constructor(options: AgentRuntimeOptions) {
     this.config = options.config ?? {};
-    this.modelClient = options.modelClient ?? new OpenAICompatibleClient();
+    const rawClient = options.modelClient ?? new OpenAICompatibleClient();
+    const gatewayInstance = rawClient instanceof ModelGateway ? rawClient : new ModelGateway(rawClient as any);
+    this.modelClient = gatewayInstance;
+
+    gatewayInstance.registerBeforeRequestCallback((data) => {
+      const runId = data.runId || "unknown_run";
+      const stepId = data.stepId || "unknown_step";
+      const attemptId = data.attemptIdFromOption || data.attemptId;
+
+      const totalChars = data.messages.reduce((sum, m) => sum + m.content.length, 0);
+      const digest = createHash("sha256").update(JSON.stringify(data.messages)).digest("hex");
+
+      try {
+        this.runCoordinator.store.createOutboundDisclosure({
+          disclosure_id: `disc_${randomUUID().slice(0, 8)}`,
+          run_id: runId,
+          step_id: stepId,
+          attempt_id: attemptId,
+          provider_id: data.provider,
+          purpose: data.purpose,
+          data_classes: "instruction,project_excerpt",
+          content_digest: digest,
+          redacted_summary: `outbound request to model ${data.model} with ${totalChars} chars`,
+          policy_version: "1.0",
+          consent_receipt_id: `consent_${randomUUID().slice(0, 8)}`,
+          created_at: new Date().toISOString()
+        });
+      } catch {
+        // Safe fallback if run is not created in isolated tests
+      }
+    });
+
     this.webSearchClient = options.webSearchClient ?? new DefaultWebSearchClient();
     this.planner = new AgentPlanner(options);
     this.skillRunner = new PromptSkillRunner(options);

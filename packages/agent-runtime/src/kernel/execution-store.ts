@@ -27,6 +27,7 @@ import type {
   ExecutionEventListOptions,
   ExecutionRunEventInput,
   ExecutionRunListOptions,
+  AgentOutboundDisclosure,
   ExecutionRuntimeInstance,
   ExecutionSqlValue,
   ExecutionStepAttempt,
@@ -296,6 +297,24 @@ CREATE TABLE agent_runtime_instances (
 );
 CREATE INDEX idx_agent_runtime_instances_lease
   ON agent_runtime_instances (status, lease_expires_at);
+
+CREATE TABLE agent_outbound_disclosures (
+  disclosure_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  step_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  provider_id TEXT NOT NULL,
+  purpose TEXT NOT NULL,
+  data_classes TEXT NOT NULL,
+  content_digest TEXT NOT NULL,
+  redacted_summary TEXT NOT NULL,
+  policy_version TEXT NOT NULL,
+  consent_receipt_id TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE
+);
+CREATE INDEX idx_agent_outbound_disclosures_run
+  ON agent_outbound_disclosures (run_id);
 `;
 
 export type ExecutionStoreMigration = {
@@ -2120,6 +2139,56 @@ export class ExecutionStore implements ExecutionStorePort {
       throw new Error(`Execution step not found: ${runId}/${stepId}`);
     }
     return step;
+  }
+
+  createOutboundDisclosure(disclosure: AgentOutboundDisclosure): AgentOutboundDisclosure {
+    return this.transaction(() => {
+      this.requireRun(disclosure.run_id);
+      this.database
+        .prepare(`INSERT INTO agent_outbound_disclosures (
+                    disclosure_id, run_id, step_id, attempt_id, provider_id, purpose,
+                    data_classes, content_digest, redacted_summary, policy_version,
+                    consent_receipt_id, created_at
+                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(
+          disclosure.disclosure_id,
+          disclosure.run_id,
+          disclosure.step_id,
+          disclosure.attempt_id,
+          disclosure.provider_id,
+          disclosure.purpose,
+          disclosure.data_classes,
+          disclosure.content_digest,
+          disclosure.redacted_summary,
+          disclosure.policy_version,
+          disclosure.consent_receipt_id,
+          disclosure.created_at
+        );
+      return disclosure;
+    });
+  }
+
+  listOutboundDisclosures(runId?: string): AgentOutboundDisclosure[] {
+    const query = runId
+      ? `SELECT * FROM agent_outbound_disclosures WHERE run_id = ? ORDER BY created_at ASC`
+      : `SELECT * FROM agent_outbound_disclosures ORDER BY created_at ASC`;
+    const rows = runId
+      ? this.database.prepare(query).all(runId)
+      : this.database.prepare(query).all();
+    return rows.map((row: any) => ({
+      disclosure_id: row.disclosure_id,
+      run_id: row.run_id,
+      step_id: row.step_id,
+      attempt_id: row.attempt_id,
+      provider_id: row.provider_id,
+      purpose: row.purpose,
+      data_classes: row.data_classes,
+      content_digest: row.content_digest,
+      redacted_summary: row.redacted_summary,
+      policy_version: row.policy_version,
+      consent_receipt_id: row.consent_receipt_id,
+      created_at: row.created_at
+    }));
   }
 }
 

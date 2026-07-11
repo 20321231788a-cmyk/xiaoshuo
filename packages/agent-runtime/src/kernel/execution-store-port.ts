@@ -334,6 +334,21 @@ export type UpdateCommitJournalInput = {
   finalized_at?: string;
 };
 
+export type AgentOutboundDisclosure = {
+  disclosure_id: string;
+  run_id: string;
+  step_id: string;
+  attempt_id: string;
+  provider_id: string;
+  purpose: string;
+  data_classes: string;
+  content_digest: string;
+  redacted_summary: string;
+  policy_version: string;
+  consent_receipt_id: string;
+  created_at: string;
+};
+
 export interface ExecutionStorePort {
   readonly projectRoot: string;
   readonly databasePath: string;
@@ -395,4 +410,6 @@ export interface ExecutionStorePort {
   listCommitJournal(runId?: string): ExecutionCommitJournalEntry[];
   listPendingCommitJournal(runId?: string): ExecutionCommitJournalEntry[];
   updateCommitJournal(input: UpdateCommitJournalInput): ExecutionCasResult<ExecutionCommitJournalEntry>;
+  createOutboundDisclosure(disclosure: AgentOutboundDisclosure): AgentOutboundDisclosure;
+  listOutboundDisclosures(runId?: string): AgentOutboundDisclosure[];
 }

@@ -7,12 +7,12 @@ export const fileOperationSchema = z
   .object({
     action: z.enum(["create_file", "append_text", "replace_text", "move_file", "archive_file"]),
     path: z.string(),
-    text: z.string(),
-    old_text: z.string(),
-    new_text: z.string(),
-    target_path: z.string(),
-    reason: z.string(),
-    requires_confirmation: z.boolean()
+    text: z.string().default(""),
+    old_text: z.string().default(""),
+    new_text: z.string().default(""),
+    target_path: z.string().default(""),
+    reason: z.string().default(""),
+    requires_confirmation: z.boolean().default(false)
   })
   .passthrough();
 
@@ -29,8 +29,8 @@ export const agentPlanResponseSchema = z
   .object({
     operations: z.array(fileOperationSchema),
     summary: z.string(),
-    warnings: z.array(z.string()),
-    can_execute: z.boolean()
+    warnings: z.array(z.string()).default([]),
+    can_execute: z.boolean().default(true)
   })
   .passthrough();
 

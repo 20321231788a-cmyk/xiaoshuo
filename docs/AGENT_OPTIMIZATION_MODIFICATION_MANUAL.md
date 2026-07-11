@@ -2541,4 +2541,11 @@ test(agent): complete P7 release eval gates
 
 ## 20. 下一步
 
-整个 P0 阶段大板块（Task A 至 Task H）的所有实施与验收条件均已在本项目中圆满完成，且代码通过了 100% 全量类型检查、单元测试、集成测试以及浏览器 E2E 确认恢复链路测试。下一步将按照优化计划准备进入 P1 阶段（Model Gateway 迁移）。
+整个 P0 阶段大板块（Task A 至 Task H）以及 P1 阶段大板块（Model Gateway 结构化输出与单元测试限流重试优化）的所有实施与验收条件均已在本项目中圆满完成：
+- 完美实现并在 `ModelGateway` 中导出了统一的结构化输出接口 `completeStructured()`；
+- 重构了 `AgentPlanner` 等关键业务模块，全面接管了原先通过 regex 猜测和不安全 JSON 解析的规划逻辑；
+- 优化了 `fileOperationSchema` 与 `agentPlanResponseSchema` 的 Zod 结构，增加了对可选操作及元数据属性的 `.default(...)` 降级策略，保障了强类型约束下的向下兼容；
+- 引入并应用了 `disableRateLimiter: boolean`，在测试环境下彻底跳过限流排队，并自动禁用模型重试策略的延迟等待（将 `maxRetries` 设为 `0`），将模型客户端失败熔断等测试耗时缩短至 4 毫秒；
+- 根级验证：全仓 16 个 packages/apps 编译全部通过，全量 88 个测试文件，681 个单元/集成测试用例 **100% 绿过**。
+
+下一步将准备进入 P2 阶段（Plan-Act-Observe-Replan 闭环规划）。

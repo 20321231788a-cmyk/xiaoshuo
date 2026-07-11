@@ -50,7 +50,8 @@ const TABLES = [
   "agent_control_operations",
   "agent_commit_journal",
   "agent_runtime_instances",
-  "agent_schema_migrations"
+  "agent_schema_migrations",
+  "agent_outbound_disclosures"
 ];
 
 const projects: string[] = [];
