@@ -26,6 +26,7 @@ export type DurableFileOperationContext = {
   runId: string;
   stepId: string;
   attemptId: string;
+  requiresConfirmation?: boolean;
 };
 
 export class AgentFileOperationRunner {
@@ -85,10 +86,20 @@ export class AgentFileOperationRunner {
       };
     }
 
-    const results = await this.documents.executeOperations(plan.operations, {
-      source: "agent",
-      summary: plan.summary
-    });
+    if (durable?.requiresConfirmation) {
+      return {
+        intent: "file_operation",
+        reply: "已生成文件操作预览，请确认后执行。",
+        conversation: undefined,
+        plan,
+        results: [],
+        skill_result: undefined,
+        saved_paths: [],
+        requires_confirmation: true
+      };
+    }
+
+    const results = await this.executePlanOperations(plan.operations, plan.summary, durable);
     const reply = this.summarizeOperationResults(results);
     const conversation = await this.recordAgentExchange(request, reply);
     return {
@@ -210,6 +221,18 @@ export class AgentFileOperationRunner {
       warnings: [],
       can_execute: true
     };
+    if (durable?.requiresConfirmation) {
+      return {
+        intent: "file_operation",
+        reply: "已生成文件操作预览，请确认后执行。",
+        conversation: undefined,
+        plan,
+        results: [],
+        skill_result: undefined,
+        saved_paths: [],
+        requires_confirmation: true
+      };
+    }
     const results = await this.executeContentOperation(operation, plan.summary, durable);
     const reply = this.summarizeOperationResults(results);
     const conversation = await this.recordAgentExchange(request, reply);
@@ -374,6 +397,25 @@ export class AgentFileOperationRunner {
     }
 
     const scopePath = /(当前文档|当前文件|这篇|这章|打开的文档|正在编辑)/.test(request.content || "") ? (request.current_path || "").trim() : "";
+    if (durable?.requiresConfirmation) {
+      const operations = await this.buildBatchReplacePlan(oldText, newText, scopePath);
+      const plan: AgentPlanResponse = {
+        operations,
+        summary: `批量替换：${oldText} -> ${newText}`,
+        warnings: [],
+        can_execute: true
+      };
+      return {
+        intent: "file_operation",
+        reply: "已生成批量替换操作预览，请确认后执行。",
+        conversation: undefined,
+        plan,
+        results: [],
+        skill_result: undefined,
+        saved_paths: [],
+        requires_confirmation: true
+      };
+    }
     const results = await this.executeBatchReplace(oldText, newText, scopePath, durable);
     const changed = results.filter((item) => item.ok && /替换\s*\d+\s*处/.test(item.message));
     const total = changed.reduce((sum, item) => {
@@ -500,6 +542,66 @@ export class AgentFileOperationRunner {
       });
     }
     return results.length ? results : [{ action: "replace_text", path: scopePath || ".", ok: false, message: "没有找到可替换的内容。" }];
+  }
+
+  private async buildBatchReplacePlan(oldText: string, newText: string, scopePath: string): Promise<FileOperation[]> {
+    const docPaths = scopePath
+      ? [scopePath]
+      : (await this.manifest.listDocuments({ limit: 500, force: false }).catch(() => [])).map((item) => item.path);
+    const operations: FileOperation[] = [];
+    for (const docPath of docPaths) {
+      const content = await this.documents.readRawText(docPath).catch(() => "");
+      if (content && content.includes(oldText)) {
+        operations.push({
+          action: "replace_text",
+          path: docPath,
+          text: "",
+          old_text: oldText,
+          new_text: newText,
+          target_path: "",
+          reason: `批量替换：${oldText} -> ${newText}`,
+          requires_confirmation: false
+        });
+      }
+    }
+    return operations;
+  }
+
+  private async executePlanOperations(
+    operations: FileOperation[],
+    summary: string,
+    durable?: DurableFileOperationContext
+  ): Promise<OperationResult[]> {
+    if (!durable || !this.commitJournal) {
+      return this.documents.executeOperations(operations, { source: "agent", summary });
+    }
+
+    const results: OperationResult[] = [];
+    for (const operation of operations) {
+      try {
+        if (["create_file", "append_text", "replace_text"].includes(operation.action)) {
+          const content = await this.resolveOperationContent(operation);
+          await this.saveContent(operation.path, content, operation.action, summary, durable);
+          results.push({
+            action: operation.action,
+            path: operation.path,
+            ok: true,
+            message: "完成"
+          });
+        } else {
+          const res = await this.documents.executeOperations([operation], { source: "agent", summary });
+          results.push(...res);
+        }
+      } catch (error) {
+        results.push({
+          action: operation.action,
+          path: operation.path,
+          ok: false,
+          message: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+    return results;
   }
 
   private async executeContentOperation(

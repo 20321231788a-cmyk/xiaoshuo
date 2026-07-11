@@ -1,5 +1,6 @@
 export type AgentRunOptions = {
   signal?: AbortSignal;
+  requiresConfirmation?: boolean;
 };
 
 export class AgentCancellationError extends Error {

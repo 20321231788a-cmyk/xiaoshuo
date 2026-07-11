@@ -2250,6 +2250,14 @@ npm test
 
 本轮定向验证：`npm run typecheck -w @xiaoshuo/agent-runtime`、`npm run typecheck -w @xiaoshuo/shared`、`npx vitest run packages/shared/src/schemas/agent.test.ts` 和 `npx vitest run packages/agent-runtime/src/runtime.test.ts`（89 tests）通过。根级验证：`npm run typecheck`、`npm test`（86 files / 673 tests）、`npm run build:desktop`、`npm run build:workbench` 和 `git diff --check` 通过；Workbench 只有既有的 >500 kB chunk warning。
 
+### 15.70 2026-07-11 P0 File Operation Plan and Card Draw Selection Commit 记录
+
+- 普通 `file_operation` 计划（包括 planner 规划的操作、直接保存、批量替换）在执行时如果具有 `requiresConfirmation: true`（通常是异步 durable run 创建的步骤），会在首轮被阻断并挂起。仅在确认批准（approved）后的第二轮恢复执行中，经 `CommitJournalService` 逐个事务化安全写入；
+- 批量替换（batch replace）引入了 `buildBatchReplacePlan` 机制，在被阻断时生成可视化的操作 plan operations 展现给用户；
+- 同步直调或单元测试中直接调用的 `runAgent` 则传入 `requiresConfirmation: false`，不受阻断，避免破坏已有同步调用断言；
+- 抽卡挑选（`selectCardDraw`）重构并接入了 CommitJournal 服务，利用 `req_card_draw_select_${drawId}_${candidateId}` 构建 synthetic durable run 事务性写入与物理归档。
+- 本轮验证：`npm run typecheck`、`npm test`（86 files / 673 tests）、`npx playwright test tests/e2e/project-entry.spec.ts` E2E 确认恢复链路测试全部绿过。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

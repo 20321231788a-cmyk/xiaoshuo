@@ -833,7 +833,7 @@ export class AgentRuntimeService {
     throwIfAborted(options.signal);
     let execution: DurableRunExecution;
     try {
-      execution = await this.beginDurableRun(request, options);
+      execution = await this.beginDurableRun(request, { ...options, requiresConfirmation: false });
     } catch (error) {
       if (error instanceof RunRequestReplayError && error.run.status === "completed") {
         return this.replayCompletedAgentResponse(error.run);
@@ -954,10 +954,12 @@ export class AgentRuntimeService {
     const intent = await this.classifyIntent(request);
     trace?.mark("classified", { intent });
     if (intent === "file_operation") {
+      const step = execution && this.runCoordinator.store.getStep(execution.run_id, execution.step_id);
       return this.fileOperationRunner.runAgent(request, execution && {
         runId: execution.run_id,
         stepId: execution.step_id,
-        attemptId: execution.attempt_id
+        attemptId: execution.attempt_id,
+        requiresConfirmation: step?.requires_confirmation === true
       });
     }
     if (intent === "skill") {
@@ -1109,10 +1111,12 @@ export class AgentRuntimeService {
     const intent = await this.classifyIntent(request);
     trace?.mark("classified", { intent });
     if (intent === "file_operation") {
+      const step = execution && this.runCoordinator.store.getStep(execution.run_id, execution.step_id);
       yield* this.fileOperationRunner.streamAgentRun(request, execution && {
         runId: execution.run_id,
         stepId: execution.step_id,
-        attemptId: execution.attempt_id
+        attemptId: execution.attempt_id,
+        requiresConfirmation: step?.requires_confirmation === true
       });
       return;
     }
@@ -1323,13 +1327,14 @@ export class AgentRuntimeService {
           : "chat";
     const writeRequested = initialIntent === "file_operation" || hasExplicitWriteIntent(request.content || "");
     const retryable = initialIntent !== "file_operation" || !writeRequested;
+    const requiresConfirmation = options.requiresConfirmation !== false && initialIntent === "file_operation";
     return this.runCoordinator.beginRun(request, {
       projectId: await this.projectManifest.getProjectId(),
       stepType,
       actionId: `agent.${initialIntent}`,
       skillId: request.skill_id || "",
       retryable,
-      requiresConfirmation: initialIntent === "file_operation",
+      requiresConfirmation,
       signal: options.signal
     });
   }
@@ -3447,47 +3452,157 @@ export class AgentRuntimeService {
     const targetPath = (payload.target_path || "").trim() || manifest.target_path;
     const content = await this.documents.readRawText(selected.path);
 
-    let savedPath = "";
-    if (manifest.mode === "chapter_outline" && Number(manifest.start_chapter || 0) > 0) {
-      savedPath = await this.saveCardDrawChapterOutline(
-        targetPath,
-        content,
-        Number(manifest.start_chapter || 1),
-        Number(manifest.chapter_count || 1),
-        candidateId
-      );
-    } else {
-      await this.documents.saveDocument(targetPath, content, {
-        source: "card_draw",
-        summary: `抽卡选中：${candidateId}`
+    const requestId = `req_card_draw_select_${drawId}_${candidateId}`;
+    const request: AgentRunRequest = {
+      request_id: requestId,
+      autonomy_mode: "execute",
+      conversation_id: "",
+      content: JSON.stringify({ draw_id: drawId, candidate_id: candidateId, target_path: targetPath }),
+      current_path: targetPath,
+      selection: "",
+      project_context_hint: "",
+      skill_id: "card_draw_select",
+      attachment_ids: [],
+      reference_paths: [selected.path],
+      confirmed_reference_paths: [selected.path],
+      disable_auto_references: true
+    };
+
+    let execution: DurableRunExecution;
+    let ownsExecution = false;
+    let syntheticRunCompleted = false;
+    try {
+      execution = this.runCoordinator.beginRun(request, {
+        projectId: await this.projectManifest.getProjectId(),
+        stepType: "file_operation",
+        actionId: "agent.card_draw_select",
+        skillId: "card_draw_select",
+        retryable: true,
+        requiresConfirmation: false
       });
-      savedPath = targetPath;
+      ownsExecution = true;
+    } catch (error) {
+      if (!(error instanceof RunRequestReplayError)) {
+        throw error;
+      }
+      const replay = error.run;
+      if (replay.status === "completed") {
+        execution = {
+          run_id: replay.run_id,
+          request_id: replay.request_id || requestId,
+          step_id: replay.steps[0]?.step_id || "select",
+          attempt_id: "1",
+          signal: new AbortController().signal
+        };
+      } else {
+        if (replay.status !== "failed" && replay.status !== "paused") {
+          throw new Error(`卡片抽选提交任务 ${replay.run_id} 当前状态为 ${replay.status}`);
+        }
+        execution = this.runCoordinator.resumeRun(
+          replay.run_id,
+          `op_card_draw_select_${sha256Text(`${requestId}:${replay.version}`).slice(0, 24)}`,
+          replay.version,
+          { operationType: "retry" }
+        );
+        ownsExecution = true;
+      }
     }
 
-    const rejected = manifest.candidates
-      .filter((c: any) => c.id !== candidateId)
-      .map((c: any) => c.path);
+    try {
+      let savedPath = "";
+      if (manifest.mode === "chapter_outline" && Number(manifest.start_chapter || 0) > 0) {
+        const target = (targetPath || "").trim() || "01_大纲/章纲.txt";
+        const newBlock = (content || "").trim();
+        if (!newBlock) {
+          throw new Error("选中的章纲候选为空");
+        }
+        const startChapter = Number(manifest.start_chapter || 1);
+        const chapterCount = Number(manifest.chapter_count || 1);
+        const endChapter = startChapter + Math.max(1, chapterCount) - 1;
+        let existing = "";
+        try {
+          existing = await this.documents.readRawText(target);
+        } catch {}
 
-    const archived = await this.documents.archiveDocuments(rejected, {
-      source: "card_draw",
-      summary: `抽卡未选候选归档：${drawId}`
-    });
+        let nextContent = "";
+        if (existing.trim()) {
+          const replaced = replaceChapterOutlineRange(existing, newBlock, startChapter, endChapter);
+          nextContent = replaced !== null ? replaced : existing.trimEnd() + "\n\n" + newBlock + "\n";
+        } else {
+          nextContent = newBlock + "\n";
+        }
 
-    manifest.selected_id = candidateId;
-    manifest.selected_path = selected.path;
-    manifest.target_path = savedPath;
-    manifest.archived_paths = archived;
+        await this.commitJournal.write({
+          runId: execution.run_id,
+          stepId: execution.step_id,
+          attemptId: execution.attempt_id,
+          action: "card_draw.select.chapter_outline",
+          targetPath: target,
+          content: nextContent,
+          idempotencyKey: sha256Text(`card_draw:${drawId}:${candidateId}:${target}`),
+          source: "card_draw",
+          summary: `抽卡选中章纲：${candidateId}（第 ${String(startChapter).padStart(3, "0")}-${String(endChapter).padStart(3, "0")} 章）`
+        });
+        savedPath = target;
+      } else {
+        await this.commitJournal.write({
+          runId: execution.run_id,
+          stepId: execution.step_id,
+          attemptId: execution.attempt_id,
+          action: "card_draw.select.save",
+          targetPath,
+          content: content,
+          idempotencyKey: sha256Text(`card_draw:${drawId}:${candidateId}:${targetPath}`),
+          source: "card_draw",
+          summary: `抽卡选中：${candidateId}`
+        });
+        savedPath = targetPath;
+      }
 
-    await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+      const rejected = manifest.candidates
+        .filter((c: any) => c.id !== candidateId)
+        .map((c: any) => c.path);
 
-    return {
-      ok: true,
-      draw_id: drawId,
-      selected_id: candidateId,
-      selected_path: selected.path,
-      target_path: savedPath,
-      archived_paths: archived
-    };
+      const archived = await this.documents.archiveDocuments(rejected, {
+        source: "card_draw",
+        summary: `抽卡未选候选归档：${drawId}`
+      });
+
+      manifest.selected_id = candidateId;
+      manifest.selected_path = selected.path;
+      manifest.target_path = savedPath;
+      manifest.archived_paths = archived;
+
+      await fs.writeFile(manifestPath, JSON.stringify(manifest, null, 2), "utf8");
+
+      if (ownsExecution) {
+        this.runCoordinator.completeRun(execution, {
+          intent: "file_operation",
+          reply: `Card draw selection ${candidateId} applied`,
+          conversation: null,
+          plan: null,
+          results: [],
+          skill_result: null,
+          saved_paths: [savedPath],
+          requires_confirmation: false
+        });
+        syntheticRunCompleted = true;
+      }
+
+      return {
+        ok: true,
+        draw_id: drawId,
+        selected_id: candidateId,
+        selected_path: selected.path,
+        target_path: savedPath,
+        archived_paths: archived
+      };
+    } catch (error) {
+      if (ownsExecution && !syntheticRunCompleted) {
+        this.failDurableRun(execution, error);
+      }
+      throw error;
+    }
   }
 
   private async generateCardCandidate(
@@ -3670,38 +3785,7 @@ export class AgentRuntimeService {
     return result.result || "";
   }
 
-  private async saveCardDrawChapterOutline(
-    targetPath: string,
-    content: string,
-    startChapter: number,
-    chapterCount: number,
-    candidateId: string
-  ): Promise<string> {
-    const target = (targetPath || "").trim() || "01_大纲/章纲.txt";
-    const newBlock = (content || "").trim();
-    if (!newBlock) {
-      throw new Error("选中的章纲候选为空");
-    }
-    const endChapter = startChapter + Math.max(1, chapterCount) - 1;
-    let existing = "";
-    try {
-      existing = await this.documents.readRawText(target);
-    } catch {}
 
-    let nextContent = "";
-    if (existing.trim()) {
-      const replaced = replaceChapterOutlineRange(existing, newBlock, startChapter, endChapter);
-      nextContent = replaced !== null ? replaced : existing.trimEnd() + "\n\n" + newBlock + "\n";
-    } else {
-      nextContent = newBlock + "\n";
-    }
-
-    await this.documents.saveDocument(target, nextContent, {
-      source: "card_draw",
-      summary: `抽卡选中章纲：${candidateId}（第 ${String(startChapter).padStart(3, "0")}-${String(endChapter).padStart(3, "0")} 章）`
-    });
-    return target;
-  }
 }
 
 export type AgentRuntimeOptions = AgentPlannerOptions & {
