@@ -45,7 +45,7 @@ export async function handleGeneratedCacheRoutes(
     input: GeneratedCacheCommitInput
   ): Promise<GeneratedCacheCommitResult | null> => {
     try {
-      return await getProjectAgentRuntime(context, currentProject.path).commitGeneratedCache(input);
+      return await (await getProjectAgentRuntime(context, currentProject.path)).commitGeneratedCache(input);
     } catch (error) {
       if (runtimeErrorCode(error) === "GENERATED_CACHE_SKILL_MISMATCH") {
         deps.writeJson(response, 409, {

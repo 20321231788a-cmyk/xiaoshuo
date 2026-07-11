@@ -268,7 +268,7 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
     const signal = createRequestAbortSignal(request, response);
     const rawBody = await readRawBody(request);
     const payload = cardDrawRequestSchema.parse(parseJsonRecord(rawBody));
-    const runtime = getProjectAgentRuntime(context, currentProject.path);
+    const runtime = await getProjectAgentRuntime(context, currentProject.path);
     try {
       const result = await runtime.generateCardDraw(payload, () => undefined, { signal });
       if (!signal.aborted) {
@@ -295,7 +295,7 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
     }
     const rawBody = await readRawBody(request);
     const payload = cardDrawSelectRequestSchema.parse(parseJsonRecord(rawBody));
-    const runtime = getProjectAgentRuntime(context, currentProject.path);
+    const runtime = await getProjectAgentRuntime(context, currentProject.path);
     try {
       const result = await runtime.selectCardDraw(cardDrawRoute.drawId, payload);
       await rebuildProjectManifest(currentProject.path);

@@ -50,6 +50,24 @@ describe("InMemoryAgentFeatureFlagRegistry", () => {
     });
   });
 
+  it("treats shadow as non-executable until a legacy comparison adapter exists", () => {
+    const registry = new InMemoryAgentFeatureFlagRegistry({
+      agent_execution_v2_mode: "shadow",
+      model_gateway_v2: true,
+      agent_replanning_v2: true,
+      memory_v2: true,
+      agent_event_stream_v2: true
+    });
+
+    expect(registry.snapshot()).toMatchObject({
+      agent_execution_v2_mode: "shadow",
+      model_gateway_v2: false,
+      agent_replanning_v2: false,
+      memory_v2: false,
+      agent_event_stream_v2: false
+    });
+  });
+
   it("accepts only product capability overrides and never creates security toggles", () => {
     expect(AGENT_PERSISTABLE_FEATURE_FLAG_KEYS).toEqual(AGENT_FEATURE_FLAG_DEFINITIONS.map((definition) => definition.key));
     expect(parseAgentFeatureFlagOverrides({ agent_execution_v2_mode: "shadow" })).toEqual({ agent_execution_v2_mode: "shadow" });

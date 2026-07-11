@@ -81,6 +81,42 @@ describe("ProjectIdentityRegistry", () => {
     await expect(registry.confirm(projectPath, otherProjectId)).rejects.toBeInstanceOf(ProjectIdentityRegistryError);
     await expect(registry.confirm(projectPath, otherProjectId)).rejects.toMatchObject({ code: projectIdentityConflictCode });
   });
+
+  it("binds writable authorization to the expected project UUID", async () => {
+    const root = await createRoot();
+    const projectPath = path.join(root, "project");
+    await fs.mkdir(projectPath);
+    const registry = new ProjectIdentityRegistry(path.join(root, "state", "project-identities.json"));
+    await registry.confirm(projectPath, projectId);
+
+    expect(() => registry.assertWritable(projectPath, projectId)).not.toThrow();
+    expect(() => registry.assertWritable(projectPath, otherProjectId)).toThrow(ProjectIdentityRegistryError);
+    try {
+      registry.assertWritable(projectPath, otherProjectId);
+    } catch (error) {
+      expect(error).toMatchObject({ code: projectIdentityUnconfirmedCode });
+    }
+  });
+
+  it("fails closed when the persisted identity registry is corrupt", async () => {
+    const root = await createRoot();
+    const projectPath = path.join(root, "project");
+    const registryPath = path.join(root, "state", "project-identities.json");
+    await fs.mkdir(projectPath);
+    await fs.mkdir(path.dirname(registryPath), { recursive: true });
+    await fs.writeFile(registryPath, "{not-json", "utf8");
+    const registry = new ProjectIdentityRegistry(registryPath);
+
+    await expect(registry.confirm(projectPath, projectId)).rejects.toMatchObject({ code: projectIdentityConflictCode });
+  });
+
+  it("fails closed when the project root has no canonical realpath", async () => {
+    const root = await createRoot();
+    const missingProject = path.join(root, "missing-project");
+    const registry = new ProjectIdentityRegistry(path.join(root, "state", "project-identities.json"));
+
+    await expect(registry.confirm(missingProject, projectId)).rejects.toMatchObject({ code: projectIdentityConflictCode });
+  });
 });
 
 async function createRoot(): Promise<string> {

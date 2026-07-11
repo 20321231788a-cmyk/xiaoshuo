@@ -26,6 +26,7 @@ export const ipcChannels = {
   localStatePatchSettings: "local-state:patch-settings",
   localStateTrackGeneratedCache: "local-state:track-generated-cache",
   terminalCreate: "terminal:create",
+  terminalAcquireTicket: "terminal:acquire-ticket",
   terminalWrite: "terminal:write",
   terminalResize: "terminal:resize",
   terminalKill: "terminal:kill",
@@ -263,7 +264,8 @@ export const terminalCreateRequestSchema = z.object({
   cwd: z.string().optional(),
   shell: z.string().optional(),
   cols: z.number().int().min(20).max(500).default(100),
-  rows: z.number().int().min(5).max(200).default(30)
+  rows: z.number().int().min(5).max(200).default(30),
+  ticket: z.string().optional()
 });
 
 export const terminalSessionSchema = z.object({

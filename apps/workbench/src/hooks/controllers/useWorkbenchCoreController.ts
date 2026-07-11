@@ -1,7 +1,8 @@
-import { createApiClient } from "@xiaoshuo/api-client";
+import { ApiError, createApiClient } from "@xiaoshuo/api-client";
 import type {
   AppConfig,
   AgentRunResponse,
+  AgentRunState,
   CardDrawRequest,
   CardDrawResult,
   CardDrawSelectRequest,
@@ -415,6 +416,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [disassemblyBooks, setDisassemblyBooks] = useState<DisassemblyBookSummary[]>([]);
   const [disassemblyLibraryBusy, setDisassemblyLibraryBusy] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  const activeConversationRunIdRef = useRef("");
   const liveJobIdsRef = useRef<Set<string>>(new Set());
   const selectedJobIdRef = useRef("");
   const lastSyncedProjectRef = useRef<CurrentProject>({ path: "", name: "" });
@@ -2116,6 +2118,53 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
+  async function getConversationPlanRun(runId: string): Promise<AgentRunState> {
+    return client.getAgentRun(runId);
+  }
+
+  function subscribeConversationPlanRun(
+    runId: string,
+    onRun: (run: AgentRunState) => void,
+    onError?: (error: unknown) => void
+  ): () => void {
+    const controller = new AbortController();
+    const refresh = async () => {
+      if (!controller.signal.aborted) {
+        onRun(await client.getAgentRun(runId));
+      }
+    };
+    void client.streamAgentRunEvents(runId, { onEvent: refresh, onGap: refresh }, 0, controller.signal).catch((error) => {
+      if (!controller.signal.aborted) {
+        onError?.(error);
+      }
+    });
+    return () => controller.abort();
+  }
+
+  async function controlConversationPlanRun(
+    runId: string,
+    action: "pause" | "resume" | "cancel" | "retry",
+    stepId = ""
+  ): Promise<{ run: AgentRunState; conflict: boolean }> {
+    const latest = await client.getAgentRun(runId);
+    const payload = { operation_id: `op_inline_${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Date.now()}`, expected_version: latest.version };
+    try {
+      const run = action === "pause"
+        ? await client.pauseAgentRun(runId, payload)
+        : action === "resume"
+          ? await client.resumeAgentRun(runId, payload)
+          : action === "cancel"
+            ? await client.cancelAgentRun(runId, payload)
+            : await client.retryAgentRunStep(runId, stepId || latest.current_step_id, payload);
+      return { run, conflict: false };
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        return { run: await client.getAgentRun(runId), conflict: true };
+      }
+      throw error;
+    }
+  }
+
   async function createConversation() {
     setConversationBusy(true);
     setConversationMessage("");
@@ -3471,6 +3520,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setMessageInput("");
 
     let streamedText = "";
+    let streamedAssistantMetadata: Record<string, unknown> = {};
     try {
       await client.streamConversationMessage(
         conversationId,
@@ -3492,6 +3542,16 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
             const currentSkill = event.current_skill || event.skill_id || "";
             updateActiveConversationSkill(conversationId, event.skill_id || "", "");
             setConversationMessage(currentSkill ? `正在调用技能：${currentSkill}` : "正在判断当前技能...");
+            if (event.inline_plan) {
+              activeConversationRunIdRef.current = event.inline_plan.run_id;
+              streamedAssistantMetadata = {
+                intent: "skill",
+                inline_plan: event.inline_plan,
+                skill_plan: event.skill_plan,
+                skill_steps: event.skill_steps || []
+              };
+              upsertLocalMessage(conversationId, { ...assistantMessage, content: streamedText, metadata: streamedAssistantMetadata });
+            }
           },
           onDelta: (event) => {
             if (event.stage === "humanizer_start") {
@@ -3502,16 +3562,18 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
               return;
             }
             streamedText += event.text;
-            upsertLocalMessage(conversationId, { ...assistantMessage, content: streamedText });
+            upsertLocalMessage(conversationId, { ...assistantMessage, content: streamedText, metadata: streamedAssistantMetadata });
           },
           onFinal: async (event) => {
+            activeConversationRunIdRef.current = "";
             const reply = resolveAssistantReply(event.payload, streamedText);
             if (reply.trim()) {
-              upsertLocalMessage(conversationId, { ...assistantMessage, content: reply });
+              upsertLocalMessage(conversationId, { ...assistantMessage, content: reply, metadata: streamedAssistantMetadata });
             }
             await handleAgentRunPayload(conversationId, reply, event.payload);
           },
           onError: async (event) => {
+            activeConversationRunIdRef.current = "";
             throw new Error(event.message || "发送失败");
           }
         },
@@ -3554,12 +3616,22 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   }
 
   function stopMessage() {
-    if (!abortRef.current) {
+    const controller = abortRef.current;
+    if (!controller) {
       return;
     }
 
     setConversationMessage("正在停止响应...");
-    abortRef.current.abort();
+    controller.abort();
+    const runId = activeConversationRunIdRef.current;
+    activeConversationRunIdRef.current = "";
+    if (runId) {
+      void controlConversationPlanRun(runId, "cancel").then(() => {
+        setConversationMessage("已请求取消当前运行。");
+      }).catch((error) => {
+        setConversationMessage(describeActionableError(error, "取消运行失败", "请在执行计划卡中重试取消。"));
+      });
+    }
   }
 
   async function invokeSelectedSkill() {
@@ -4260,6 +4332,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     sendingMessage,
     pendingReferenceResolution,
     loadConversation,
+    getConversationPlanRun,
+    subscribeConversationPlanRun,
+    controlConversationPlanRun,
     createConversation,
     updateConversationTitle,
     summarizeConversation,

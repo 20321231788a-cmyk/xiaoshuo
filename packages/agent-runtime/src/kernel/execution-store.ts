@@ -9,6 +9,7 @@ import type {
   AgentRunStatus,
   AgentStepStatus
 } from "@xiaoshuo/shared";
+import { legacyAgentRunBudgetSchema, persistedAgentRunBudgetSchema } from "@xiaoshuo/shared";
 import { createHash, randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, renameSync, rmSync, statfsSync, statSync } from "node:fs";
 import path from "node:path";
@@ -881,6 +882,9 @@ export class ExecutionStore implements ExecutionStorePort {
       assignDefined(next, "recovery_reason", input.recovery_reason);
       assignDefined(next, "error_code", input.error_code);
       assignDefined(next, "error", input.error);
+      if (input.budget !== undefined) {
+        next.budget = input.budget;
+      }
 
       const preparedEvent = input.event ? this.prepareEvent(input.run_id, input.event, next) : null;
       if (!this.persistRunRecord(next, currentVersion)) {
@@ -1079,7 +1083,7 @@ export class ExecutionStore implements ExecutionStorePort {
       recovery_reason: stringValue(source.recovery_reason),
       error_code: stringValue(source.error_code),
       error: stringValue(source.error),
-      budget: parseJson(source.budget_json, {}),
+      budget: normalizePersistedBudget(parseJson(source.budget_json, {})),
       last_event_sequence: nonNegativeInteger(source.last_event_sequence),
       created_at: stringValue(source.created_at),
       updated_at: stringValue(source.updated_at),
@@ -2462,6 +2466,19 @@ function parseJson<Value>(value: unknown, fallback: Value): Value {
   } catch {
     return fallback;
   }
+}
+
+function normalizePersistedBudget(value: unknown) {
+  const parsed = persistedAgentRunBudgetSchema.safeParse(value);
+  if (parsed.success) {
+    return parsed.data;
+  }
+  return legacyAgentRunBudgetSchema.parse({
+    schema_version: 0,
+    budget_id: "",
+    profile_id: "legacy_unbudgeted",
+    legacy_unbudgeted: true
+  });
 }
 
 function json(value: unknown): string {

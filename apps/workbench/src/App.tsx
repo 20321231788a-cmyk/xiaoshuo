@@ -1,6 +1,9 @@
+import { inlinePlanMetadataSchema } from "@xiaoshuo/shared";
 import type {
+  AgentRunState,
   AiConfigProfile,
   AppConfig,
+  ConversationMessage,
   ConversationSummary,
   DesktopUpdateStatus,
   JobInfo,
@@ -1318,77 +1321,102 @@ function TimelineFeaturePage({ controller }: { controller: WorkbenchController }
   );
 }
 
-function SessionPlanCard({ message, controller }: { message: any; controller: any }) {
-  const plan = message.metadata?.skill_plan;
-  const steps = message.metadata?.skill_steps || plan?.steps || [];
+function SessionPlanCard({ message, controller }: { message: ConversationMessage; controller: WorkbenchController }) {
+  const parsedInlinePlan = inlinePlanMetadataSchema.safeParse(message.metadata?.inline_plan);
+  const inlinePlan = parsedInlinePlan.success ? parsedInlinePlan.data : null;
+  const plan = message.metadata?.skill_plan as { selected_reason?: string } | undefined;
   const [collapsed, setCollapsed] = useState(true);
   const [loading, setLoading] = useState(false);
-  const runId = message.metadata?.run_id || "";
+  const [run, setRun] = useState<AgentRunState | null>(null);
+  const [statusMessage, setStatusMessage] = useState("");
+  const runId = inlinePlan?.run_id || "";
 
-  if (!plan && !steps.length) {
+  useEffect(() => {
+    if (!runId) {
+      setRun(null);
+      return;
+    }
+    let active = true;
+    const updateRun = (next: AgentRunState) => {
+      if (active) {
+        setRun(next);
+      }
+    };
+    void controller.getConversationPlanRun(runId).then(updateRun).catch((error) => {
+      if (active) {
+        setStatusMessage(error instanceof Error ? error.message : String(error));
+      }
+    });
+    const unsubscribe = controller.subscribeConversationPlanRun(runId, updateRun, (error) => {
+      if (active) {
+        setStatusMessage(error instanceof Error ? error.message : String(error));
+      }
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+    // A controller method is intentionally captured at mount; changes to its
+    // identity on unrelated Workbench renders must not restart the NDJSON stream.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [runId]);
+
+  if (!inlinePlan) {
     return null;
   }
 
-  const handleControl = async (action: string) => {
-    if (loading || !runId) return;
+  const handleControl = async (action: "pause" | "resume" | "cancel" | "retry", stepId = "") => {
+    if (loading || !runId) {
+      return;
+    }
     setLoading(true);
+    setStatusMessage("");
     try {
-      const url = `/api/agent/runs/${encodeURIComponent(runId)}/${action}`;
-      await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ operation_id: `op_${Date.now()}` })
-      });
-      // Refresh current conversation content
-      controller.loadConversation?.(controller.conversationDetail?.id);
-    } catch (err) {
-      console.error(err);
+      const result = await controller.controlConversationPlanRun(runId, action, stepId);
+      setRun(result.run);
+      setStatusMessage(result.conflict ? "运行状态已在其他位置更新；本次操作没有自动重放。" : "操作已提交。");
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : String(error));
     } finally {
       setLoading(false);
     }
   };
-
-  const handleRetryStep = async (stepId: string) => {
-    if (loading || !runId) return;
-    setLoading(true);
-    try {
-      const url = `/api/agent/runs/${encodeURIComponent(runId)}/steps/${encodeURIComponent(stepId)}/retry`;
-      await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ operation_id: `op_${Date.now()}`, expected_version: 1 })
-      });
-      controller.loadConversation?.(controller.conversationDetail?.id);
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const steps = run?.steps || [];
+  const status = run?.status || "loading";
+  const canPause = status === "running";
+  const canResume = status === "paused";
+  const canCancel = status === "queued" || status === "planning" || status === "running" || status === "waiting_confirmation" || status === "cancelling";
 
   return (
-    <div className="xw-session-plan-card" style={{ border: "1px solid #ddd", borderRadius: "6px", padding: "10px", marginTop: "8px", background: "#f9f9f9", color: "#333" }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }} onClick={() => setCollapsed(!collapsed)}>
+    <section className="xw-session-plan-card" aria-label="Agent 执行计划" style={{ border: "1px solid #ddd", borderRadius: "6px", padding: "10px", marginTop: "8px", background: "#f9f9f9", color: "#333" }}>
+      <button
+        type="button"
+        aria-expanded={!collapsed}
+        onClick={() => setCollapsed((value) => !value)}
+        style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", background: "transparent", border: 0, padding: 0, color: "inherit", textAlign: "left" }}
+      >
         <strong>📋 智能执行计划 {plan?.selected_reason ? `(${plan.selected_reason})` : ""}</strong>
         <span style={{ fontSize: "0.85em" }}>{collapsed ? "展开 ▼" : "折叠 ▲"}</span>
-      </div>
+      </button>
 
       {!collapsed && (
         <div style={{ marginTop: "10px" }}>
-          {steps.map((step: any, idx: number) => {
-            const status = step.status || "pending";
-            const color = status === "done" ? "#2e7d32" : status === "error" ? "#c62828" : status === "running" ? "#1565c0" : "#757575";
+          <p style={{ margin: "0 0 8px", fontSize: "0.85em" }}>运行 {runId} · 版本 {run?.version ?? inlinePlan.run_version} · 状态：{status}</p>
+          {steps.map((step) => {
+            const stepStatus = step.status || "pending";
+            const color = stepStatus === "done" ? "#2e7d32" : stepStatus === "failed" ? "#c62828" : stepStatus === "running" ? "#1565c0" : "#757575";
             return (
-              <div key={idx} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: "1px dashed #eee" }}>
+              <div key={step.step_id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: "1px dashed #eee" }}>
                 <div>
-                  <span style={{ color, marginRight: "8px" }}>● {status.toUpperCase()}</span>
-                  <strong>{step.name || step.skill_id}</strong>
-                  {step.reason && <p style={{ margin: "2px 0 0 18px", fontSize: "0.85em", color: "#666" }}>理由: {step.reason}</p>}
+                  <span style={{ color, marginRight: "8px" }}>● {stepStatus.toUpperCase()}</span>
+                  <strong>{step.action_id || step.type}</strong>
+                  {step.error && <p style={{ margin: "2px 0 0 18px", fontSize: "0.85em", color: "#666" }}>错误：{step.error}</p>}
                 </div>
-                {status === "error" && (
-                  <button 
-                    disabled={loading} 
-                    onClick={() => handleRetryStep(step.skill_id)} 
+                {stepStatus === "failed" && (
+                  <button
+                    type="button"
+                    disabled={loading}
+                    onClick={() => void handleControl("retry", step.step_id)}
                     style={{ fontSize: "0.85em", padding: "2px 6px", cursor: "pointer", borderRadius: "3px" }}
                   >
                     重试此步
@@ -1398,16 +1426,18 @@ function SessionPlanCard({ message, controller }: { message: any; controller: an
             );
           })}
 
+          {!steps.length && <p style={{ margin: "8px 0" }}>正在读取 durable 步骤…</p>}
+          {statusMessage && <p role="status" aria-live="polite" style={{ margin: "8px 0", fontSize: "0.85em" }}>{statusMessage}</p>}
           {runId && (
             <div style={{ display: "flex", gap: "8px", marginTop: "12px" }}>
-              <button disabled={loading} onClick={() => handleControl("pause")} style={{ flex: 1, padding: "4px", cursor: "pointer" }}>暂停</button>
-              <button disabled={loading} onClick={() => handleControl("resume")} style={{ flex: 1, padding: "4px", cursor: "pointer" }}>恢复</button>
-              <button disabled={loading} onClick={() => handleControl("cancel")} style={{ flex: 1, padding: "4px", cursor: "pointer" }}>取消</button>
+              <button type="button" disabled={loading || !canPause} onClick={() => void handleControl("pause")} style={{ flex: 1, padding: "4px", cursor: "pointer" }}>暂停</button>
+              <button type="button" disabled={loading || !canResume} onClick={() => void handleControl("resume")} style={{ flex: 1, padding: "4px", cursor: "pointer" }}>恢复</button>
+              <button type="button" disabled={loading || !canCancel} onClick={() => void handleControl("cancel")} style={{ flex: 1, padding: "4px", cursor: "pointer" }}>取消</button>
             </div>
           )}
         </div>
       )}
-    </div>
+    </section>
   );
 }
 

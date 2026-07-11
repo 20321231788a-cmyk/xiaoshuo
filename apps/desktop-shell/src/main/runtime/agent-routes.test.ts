@@ -111,6 +111,20 @@ describe("agent lifecycle routes", () => {
     });
   });
 
+  it("returns a stable 503 when durable execution is disabled while retaining read routes", async () => {
+    const writeJson = vi.fn();
+    runtime.createDurableRun.mockRejectedValue(Object.assign(new Error("Agent v2 execution is disabled"), {
+      code: "AGENT_EXECUTION_V2_DISABLED"
+    }));
+
+    await handleAgentRoutes(request("POST"), response(), "/api/agent/runs", context(), deps(writeJson, { content: "继续写作" }));
+
+    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 503, {
+      detail: "Agent v2 execution is disabled",
+      code: "AGENT_EXECUTION_V2_DISABLED"
+    });
+  });
+
   it("returns run detail and replays events after a sequence", async () => {
     const writeJson = vi.fn();
     const run = runState("run-detail", 4, "running");
@@ -396,6 +410,29 @@ describe("agent lifecycle routes", () => {
 
     expect(runtime.runAgent).toHaveBeenCalledWith(expect.anything(), {});
     expect(runtime.streamAgentRun).toHaveBeenCalledWith(expect.anything(), {});
+  });
+
+  it("reports execution-gate failures through JSON and NDJSON with stable codes", async () => {
+    const writeJson = vi.fn();
+    const responseValue = response();
+    runtime.runAgent.mockRejectedValue(Object.assign(new Error("shadow unavailable"), { code: "AGENT_V2_SHADOW_UNAVAILABLE" }));
+    runtime.streamAgentRun.mockImplementation(async function* () {
+      throw Object.assign(new Error("shadow unavailable"), { code: "AGENT_V2_SHADOW_UNAVAILABLE" });
+    });
+    const routeDeps = deps(writeJson);
+
+    await handleAgentRoutes(request("POST"), responseValue, "/api/agent/run", context(), routeDeps);
+    await handleAgentRoutes(request("POST"), responseValue, "/api/agent/run-stream", context(), routeDeps);
+
+    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 503, {
+      detail: "shadow unavailable",
+      code: "AGENT_V2_SHADOW_UNAVAILABLE"
+    });
+    expect(routeDeps.writeNdjsonEvent).toHaveBeenCalledWith(responseValue, {
+      type: "error",
+      message: "shadow unavailable",
+      error_code: "AGENT_V2_SHADOW_UNAVAILABLE"
+    });
   });
 });
 

@@ -3,6 +3,7 @@ export * from "./schemas/agent.js";
 export * from "./schemas/conversation.js";
 export * from "./schemas/document.js";
 export * from "./schemas/health.js";
+export * from "./schemas/negative-capability.js";
 export * from "./schemas/job.js";
 export * from "./schemas/project.js";
 export * from "./schemas/skill.js";

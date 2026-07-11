@@ -271,6 +271,68 @@ async function readNdjson(response) {
     .map((line) => JSON.parse(line));
 }
 
+/**
+ * Replays a request through the same preload -> IPC -> authenticated runtime
+ * path used by the packaged Workbench. The Node process intentionally never
+ * receives the runtime session token.
+ */
+async function fetchRuntimeThroughDesktopBridge(page, input, init) {
+  const request = new Request(input, init);
+  const body = request.method === "GET" || request.method === "HEAD"
+    ? null
+    : Array.from(new Uint8Array(await request.arrayBuffer()));
+  const response = await page.evaluate(async (payload) => {
+    const result = await window.xiaoshuoDesktop.runtimeRequest({
+      url: payload.url,
+      method: payload.method,
+      headers: payload.headers,
+      body: payload.body ? new Uint8Array(payload.body) : null
+    });
+    return {
+      status: result.status,
+      statusText: result.statusText,
+      headers: result.headers,
+      body: result.body ? Array.from(result.body) : null
+    };
+  }, {
+    url: request.url,
+    method: request.method,
+    headers: Object.fromEntries(request.headers.entries()),
+    body
+  });
+  return new Response(response.body ? new Uint8Array(response.body) : null, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers
+  });
+}
+
+/**
+ * Keeps the health probe intentionally unauthenticated, while every other
+ * request aimed at this smoke runtime uses the desktop bridge. Calls to the
+ * mock model server and any unrelated origin continue using Node fetch.
+ */
+function installAuthenticatedRuntimeFetch(page, runtimeBaseUrl) {
+  const nodeFetch = globalThis.fetch;
+  const runtimeOrigin = new URL(runtimeBaseUrl).origin;
+  globalThis.fetch = async (input, init) => {
+    const value = input instanceof Request ? input.url : String(input);
+    let target;
+    try {
+      target = new URL(value);
+    } catch {
+      return nodeFetch(input, init);
+    }
+    if (target.origin !== runtimeOrigin || target.pathname === "/health" || target.pathname === "/api/health") {
+      return nodeFetch(input, init);
+    }
+    return fetchRuntimeThroughDesktopBridge(page, input, init);
+  };
+  return () => {
+    globalThis.fetch = nodeFetch;
+  };
+}
+
 try {
   await ensurePreview();
   await prepareSmokeConfig();
@@ -279,7 +341,7 @@ try {
   console.log("[desktop-smoke] launching Electron");
     const electronApp = await electron.launch({
       cwd: desktopDir,
-      args: ["."],
+      args: [".", "--agent-execution-v2=on"],
       env: {
         ...process.env,
         XIAOSHUO_RENDERER_URL: rendererUrl,
@@ -310,6 +372,16 @@ try {
     if (runtimeHealth.runtime !== "typescript-electron" || runtimeHealth.ts_services?.config !== "active") {
       throw new Error("TS runtime health check did not report active migrated services");
     }
+    const unauthenticatedProbe = await fetch(`${backendStatus.url}/api/jobs/_ts-runtime`);
+    if (unauthenticatedProbe.status !== 401) {
+      throw new Error(`Unauthenticated runtime probe returned ${unauthenticatedProbe.status} instead of 401`);
+    }
+    const unauthenticatedPayload = await unauthenticatedProbe.json();
+    if (unauthenticatedPayload.code !== "RUNTIME_SESSION_REQUIRED") {
+      throw new Error("Unauthenticated runtime probe did not return the expected session error");
+    }
+    const restoreRuntimeFetch = installAuthenticatedRuntimeFetch(page, backendStatus.url);
+    try {
     const runtimeJobs = await fetch(`${backendStatus.url}/api/jobs/_ts-runtime`).then((response) => response.json());
     if (!runtimeJobs.active || runtimeJobs.routed !== "local-ts") {
       throw new Error("TS runtime job manager probe did not respond");
@@ -424,43 +496,23 @@ try {
       throw new Error("Starter outline on disk did not match the TS runtime save");
     }
     await fs.writeFile(path.join(createdProject.path, "00_设定集", "风格库", "写作风格.txt"), "测试风格内容", "utf8");
-    const executeResults = await fetch(`${backendStatus.url}/api/agent/execute`, {
+    const retiredExecuteResponse = await fetch(`${backendStatus.url}/api/agent/execute`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        confirm_delete: true,
-        operations: [
-          { action: "create_file", path: "02_正文/执行测试.txt", text: "首段", old_text: "", new_text: "", target_path: "", reason: "", requires_confirmation: false },
-          { action: "append_text", path: "02_正文/执行测试.txt", text: "\n尾段", old_text: "", new_text: "", target_path: "", reason: "", requires_confirmation: false },
-          { action: "replace_text", path: "01_大纲/大纲.txt", text: "", old_text: "smoke timeline save", new_text: "smoke execute replace", target_path: "", reason: "", requires_confirmation: false },
-          { action: "move_file", path: "02_正文/执行测试.txt", text: "", old_text: "", new_text: "", target_path: "02_正文/执行测试-已移动.txt", reason: "", requires_confirmation: false },
-          { action: "archive_file", path: "00_设定集/风格库/写作风格.txt", text: "", old_text: "", new_text: "", target_path: "", reason: "", requires_confirmation: true }
-        ]
-      })
-    }).then((response) => response.json());
-    if (!Array.isArray(executeResults) || executeResults.length !== 5 || executeResults.some((item) => !item.ok)) {
-      throw new Error("TS runtime agent-execute route did not report successful operation results");
+      body: JSON.stringify({ operations: [] })
+    });
+    if (retiredExecuteResponse.status !== 410) {
+      throw new Error(`Retired agent-execute route returned ${retiredExecuteResponse.status} instead of 410`);
     }
-    const movedExecuteFile = path.join(createdProject.path, "02_正文", "执行测试-已移动.txt");
-    if ((await fs.readFile(movedExecuteFile, "utf8")) !== "首段\n尾段") {
-      throw new Error("TS runtime agent-execute route did not persist create/append/move file changes");
+    const retiredExecutePayload = await retiredExecuteResponse.json();
+    if (retiredExecutePayload.code !== "AGENT_EXECUTE_RETIRED") {
+      throw new Error("Retired agent-execute route did not return the expected safety code");
     }
-    if ((await fs.readFile(starterOutline, "utf8")) !== "smoke execute replace") {
-      throw new Error("TS runtime agent-execute route did not replace text in the outline");
+    if ((await fs.readFile(starterOutline, "utf8")) !== "smoke timeline save") {
+      throw new Error("Retired agent-execute route modified the outline");
     }
-    await expectMissing(path.join(createdProject.path, "00_设定集", "风格库", "写作风格.txt"), "TS runtime agent-execute archive did not remove the source file");
-    const trashEntries = await fs.readdir(path.join(createdProject.path, "99_回收站"), { withFileTypes: true });
-    const archiveStamp = trashEntries.find((entry) => entry.isDirectory())?.name;
-    if (!archiveStamp) {
-      throw new Error("TS runtime agent-execute route did not create a trash timestamp folder");
-    }
-    const archivedStylePath = path.join(createdProject.path, "99_回收站", archiveStamp, "00_设定集", "风格库", "写作风格.txt");
-    if ((await fs.readFile(archivedStylePath, "utf8")) !== "测试风格内容") {
-      throw new Error("TS runtime agent-execute route did not archive the file content");
-    }
-    const executeTimeline = await fetch(`${backendStatus.url}/api/timeline?limit=8`).then((response) => response.json());
-    if (!Array.isArray(executeTimeline) || !executeTimeline.some((entry) => String(entry.summary || "").includes("创建 02_正文/执行测试.txt"))) {
-      throw new Error("TS runtime timeline route did not include the agent execute batch entry");
+    if ((await fs.readFile(path.join(createdProject.path, "00_设定集", "风格库", "写作风格.txt"), "utf8")) !== "测试风格内容") {
+      throw new Error("Retired agent-execute route modified the style source");
     }
     // DELETE /api/documents/{rel_path} archive smoke test
     await fs.writeFile(path.join(createdProject.path, "02_正文", "待归档.txt"), "归档测试内容", "utf8");
@@ -1037,22 +1089,35 @@ try {
     }
 
     await page.getByTestId("terminal-shell").waitFor({ state: "visible", timeout: 15_000 });
-    const terminalOutput = await page.evaluate(
-      (expectedText) =>
+    const terminalWithoutGesture = await page.evaluate(async () => {
+      try {
+        await window.xiaoshuoDesktop.terminal.create({ cols: 100, rows: 24 });
+        return "";
+      } catch (error) {
+        return String(error?.code || error?.message || error);
+      }
+    });
+    if (!terminalWithoutGesture.includes("TERMINAL_USER_GESTURE_REQUIRED")) {
+      throw new Error("Terminal creation unexpectedly succeeded without a user gesture");
+    }
+    const exerciseTerminalSession = async ({ activate, expectedText }) => {
+      await activate();
+      const output = await page.evaluate(
+        (expected) =>
         new Promise(async (resolve, reject) => {
           const session = await window.xiaoshuoDesktop.terminal.create({ cols: 100, rows: 24 });
           let output = "";
-          const timer = window.setTimeout(() => {
+          const timer = window.setTimeout(async () => {
             unsubscribeData();
             unsubscribeExit();
-            void window.xiaoshuoDesktop.terminal.kill({ id: session.id });
-            reject(new Error(`Timed out waiting for terminal output: ${expectedText}`));
+            await window.xiaoshuoDesktop.terminal.kill({ id: session.id });
+            reject(new Error(`Timed out waiting for terminal output: ${expected}`));
           }, 12_000);
-          const finish = (value) => {
+          const finish = async (value) => {
             window.clearTimeout(timer);
             unsubscribeData();
             unsubscribeExit();
-            void window.xiaoshuoDesktop.terminal.kill({ id: session.id });
+            await window.xiaoshuoDesktop.terminal.kill({ id: session.id });
             resolve(value);
           };
           const unsubscribeData = window.xiaoshuoDesktop.terminal.onData((event) => {
@@ -1060,26 +1125,56 @@ try {
               return;
             }
             output += event.data;
-            if (output.includes(expectedText)) {
-              finish(output);
+            if (output.includes(expected)) {
+              void finish(output);
             }
           });
           const unsubscribeExit = window.xiaoshuoDesktop.terminal.onExit((event) => {
-            if (event.id === session.id && !output.includes(expectedText)) {
-              finish(output);
+            if (event.id === session.id && !output.includes(expected)) {
+              void finish(output);
             }
           });
 
-          await window.xiaoshuoDesktop.terminal.write({ id: session.id, data: `echo ${expectedText}\r` });
+          await window.xiaoshuoDesktop.terminal.write({ id: session.id, data: `echo ${expected}\r` });
         }),
-      "XIAOSHUO_TERMINAL_SMOKE"
-    );
-    if (!terminalOutput.includes("XIAOSHUO_TERMINAL_SMOKE")) {
-      throw new Error("Terminal smoke command did not echo the expected marker");
+        expectedText
+      );
+      if (!output.includes(expectedText)) {
+        throw new Error(`Terminal smoke command did not echo the expected marker: ${expectedText}`);
+      }
+    };
+
+    // Only a control carrying the Workbench marker can mint the one-shot
+    // preload lease. The smoke bridge exercises the same pointer/keyboard contract.
+    await exerciseTerminalSession({
+      activate: () => page.getByTestId("terminal-start").click(),
+      expectedText: "XIAOSHUO_TERMINAL_POINTER_SMOKE"
+    });
+    await exerciseTerminalSession({
+      activate: async () => {
+        await page.getByTestId("terminal-start").focus();
+        await page.keyboard.press("Enter");
+      },
+      expectedText: "XIAOSHUO_TERMINAL_KEYBOARD_SMOKE"
+    });
+
+    const terminalAfterConsumedGesture = await page.evaluate(async () => {
+      try {
+        await window.xiaoshuoDesktop.terminal.create({ cols: 100, rows: 24 });
+        return "";
+      } catch (error) {
+        return String(error?.code || error?.message || error);
+      }
+    });
+    if (!terminalAfterConsumedGesture.includes("TERMINAL_USER_GESTURE_REQUIRED")) {
+      throw new Error("Terminal user gesture ticket was not consumed exactly once");
     }
 
     console.log(`[desktop-smoke] ok electron=${versions.electron} terminal=${capabilities.terminal.package} localState=${capabilities.localDatabase.package}`);
     clearTimeout(closeTimer);
+    } finally {
+      restoreRuntimeFetch();
+    }
   } finally {
     await electronApp.close();
   }

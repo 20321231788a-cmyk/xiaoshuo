@@ -21,7 +21,8 @@
     "eval:memory": "vitest run packages/agent-runtime/src/memory.test.ts",
     "eval:quality": "vitest run packages/agent-runtime/src/evaluator-registry.test.ts",
     "eval:recovery": "vitest run packages/agent-runtime/src/kernel/run-recovery.e2e.test.ts",
-    "eval:security": "vitest run packages/agent-runtime/src/agent-loop.test.ts"
+    "eval:security": "vitest run packages/agent-runtime/src/agent-loop.test.ts",
+    "eval:excluded-capabilities": "vitest run packages/agent-runtime/src/negative-capability-policy.test.ts packages/agent-runtime/src/agent-loop.test.ts packages/agent-runtime/src/memory.test.ts apps/desktop-shell/src/preload/user-gesture-ticket.test.ts"
   },
   "dependencies": {
     "adm-zip": "^0.5.17",

@@ -12,6 +12,7 @@ import type { ChatCompletionMessage } from "@xiaoshuo/model-client";
 import type { AgentStreamEvent, ConversationMessageRequest } from "@xiaoshuo/shared";
 import { getAgentTraceFilePath } from "./agent-trace.js";
 import { RunCoordinator } from "./kernel/run-coordinator.js";
+import { InMemoryAgentFeatureFlagRegistry } from "./kernel/feature-flag-registry.js";
 import { AgentRuntimeService, closeAllAgentRuntimeServices } from "./runtime.js";
 
 let tempDir = "";
@@ -78,7 +79,7 @@ async function waitForCacheStatus(cache: GeneratedCacheService, cacheId: string,
 }
 
 describe("agent-runtime stale run recovery", () => {
-  it("automatically resumes an expired chat run under the original run id", async () => {
+  it("keeps a stale chat run paused when its durable budget has expired", async () => {
     const stale = new RunCoordinator({
       projectRoot: tempDir,
       runtimeInstanceId: "runtime-stale",
@@ -109,22 +110,22 @@ describe("agent-runtime stale run recovery", () => {
       }
     });
 
-    await waitForRunStatus(runtime, original.run_id, "completed");
+    await waitForRunStatus(runtime, original.run_id, "paused");
 
-    expect(modelCalls).toBe(1);
+    expect(modelCalls).toBe(0);
     expect(runtime.getDurableRun(original.run_id)).toMatchObject({
       run_id: original.run_id,
-      status: "completed",
-      recovery_reason: "RUNTIME_LEASE_EXPIRED"
+      status: "paused",
+      recovery_reason: "BUDGET_DEADLINE_EXCEEDED",
+      error_code: "BUDGET_DEADLINE_EXCEEDED"
     });
     expect(runtime.exportDurableRun(original.run_id).attempts).toEqual([
-      expect.objectContaining({ attempt: 1, status: "interrupted", error_code: "RUNTIME_LEASE_EXPIRED" }),
-      expect.objectContaining({ attempt: 2, status: "done" })
+      expect.objectContaining({ attempt: 1, status: "interrupted", error_code: "RUNTIME_LEASE_EXPIRED" })
     ]);
     expect(runtime.listDurableRunEvents(original.run_id).map((event) => event.event_type)).toEqual(expect.arrayContaining([
       "run.recovered",
-      "run.resume_started",
-      "run.completed"
+      "run.budget_blocked",
+      "run.recovery_deferred"
     ]));
     stale.close();
   });
@@ -152,12 +153,64 @@ describe("agent-runtime stale run recovery", () => {
     expect(runtime.getDurableRun(original.run_id)).toMatchObject({
       run_id: original.run_id,
       status: "paused",
-      recovery_reason: "RUNTIME_LEASE_EXPIRED"
+      recovery_reason: "BUDGET_DEADLINE_EXCEEDED",
+      error_code: "BUDGET_DEADLINE_EXCEEDED"
     });
     expect(runtime.listDurableRunEvents(original.run_id)).toEqual(expect.arrayContaining([
       expect.objectContaining({ event_type: "run.recovery_deferred", payload: { reason: "FILE_OPERATION_JOURNAL_REQUIRED" } })
     ]));
     stale.close();
+  });
+});
+
+describe("agent-runtime feature-flag admission", () => {
+  it("does not call the model, write files, or persist a run when v2 is disabled", async () => {
+    let modelCalls = 0;
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      featureFlags: new InMemoryAgentFeatureFlagRegistry({ agent_execution_v2_mode: "off" }),
+      modelClient: {
+        requestCompletion: async () => {
+          modelCalls += 1;
+          return "must not be called";
+        }
+      }
+    });
+    const request = {
+      request_id: "disabled-agent-run",
+      conversation_id: "",
+      content: "生成正文",
+      current_path: "02_正文/第一章.txt",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    };
+
+    await expect(runtime.runAgent(request)).rejects.toMatchObject({ code: "AGENT_EXECUTION_V2_DISABLED" });
+    await expect(runtime.createDurableRun({ ...request, request_id: "disabled-durable-run" })).rejects.toMatchObject({
+      code: "AGENT_EXECUTION_V2_DISABLED"
+    });
+    await expect(runtime.streamAgentRun({ ...request, request_id: "disabled-stream-run" }).next()).rejects.toMatchObject({
+      code: "AGENT_EXECUTION_V2_DISABLED"
+    });
+    await expect(runtime.runDurableSkill("not-looked-up", {
+      text: "",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "不应读取 skill",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: false,
+      attachment_ids: []
+    })).rejects.toMatchObject({ code: "AGENT_EXECUTION_V2_DISABLED" });
+
+    expect(modelCalls).toBe(0);
+    expect(runtime.listDurableRuns()).toEqual([]);
+    expect(await fs.readFile(path.join(tempDir, "02_正文", "第一章.txt"), "utf8").catch(() => "")).toBe("");
   });
 });
 
@@ -662,7 +715,7 @@ describe("agent-runtime chat flow", () => {
       conversation_id: result.conversation!.id,
       steps: [expect.objectContaining({ status: "done", attempts: 1 })]
     });
-    expect(runtime.listDurableRunEvents(result.run_id!).map((event) => event.event_type)).toEqual([
+    expect(runtime.listDurableRunEvents(result.run_id!).map((event) => event.event_type).filter((t) => t !== "run.budget_consumed")).toEqual([
       "run.created",
       "run.planning",
       "run.started",
@@ -743,7 +796,7 @@ describe("agent-runtime chat flow", () => {
     const replay = await runtime.createDurableRun(request);
 
     expect(created).toMatchObject({ created: true, run: { status: "running", request_id: request.request_id } });
-    expect(replay).toEqual({ created: false, run: created.run });
+    expect(replay).toMatchObject({ created: false, run: { request_id: request.request_id } });
     resolveReply!("后台执行完成");
     await waitForRunStatus(runtime, created.run.run_id, "completed");
   });
@@ -2543,6 +2596,10 @@ describe("agent-runtime chat flow", () => {
     const runtime = new AgentRuntimeService({
       projectRoot: tempDir,
       config: { configPath },
+      featureFlags: new InMemoryAgentFeatureFlagRegistry({
+        agent_execution_v2_mode: "on",
+        agent_inline_plan_ui: true
+      }),
       modelClient: {
         requestCompletion: async (_config, messages) => {
           const system = messages[0]?.content || "";
@@ -2583,8 +2640,87 @@ describe("agent-runtime chat flow", () => {
     ]);
     expect(result.conversation.current_skill).toBe("consistency_check");
     expect(result.conversation.messages.at(-1)?.metadata.skill_plan).toBeTruthy();
+    const inlinePlan = result.conversation.messages.at(-1)?.metadata.inline_plan as Record<string, unknown>;
+    expect(inlinePlan).toMatchObject({
+      run_id: expect.stringMatching(/^run_/),
+      run_version: expect.any(Number),
+      plan_version: expect.any(Number),
+      current_step_id: expect.stringMatching(/^step_/),
+      step_ids: [expect.stringMatching(/^step_/)]
+    });
+    expect(runtime.getDurableRun(String(inlinePlan.run_id))?.version).toBe(inlinePlan.run_version);
     expect(calls.length).toBeGreaterThanOrEqual(2);
     expect(calls.some((item) => item.includes("连续性审稿人"))).toBe(true);
+  });
+
+  it("persists a pending inline-plan assistant message before a streaming run completes", async () => {
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const conversation = await conversations.createConversation({ title: "重载计划卡" });
+    let releaseSkill: ((value: string) => void) | undefined;
+    const skillReply = new Promise<string>((resolve) => {
+      releaseSkill = resolve;
+    });
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      featureFlags: new InMemoryAgentFeatureFlagRegistry({
+        agent_execution_v2_mode: "on",
+        agent_inline_plan_ui: true
+      }),
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          if ((messages[0]?.content || "").includes("技能调度器")) {
+            return JSON.stringify({
+              should_call_skill: true,
+              confidence: 0.91,
+              selected_reason: "需要提取设定。",
+              steps: [{ skill_id: "lore_extract", instruction: "提取设定", reason: "结构化设定", confidence: 0.9 }]
+            });
+          }
+          return skillReply;
+        }
+      }
+    });
+
+    const stream = runtime.streamMessage(conversation.id, {
+      content: "请提取这段设定",
+      skill_id: "",
+      agent_name: "",
+      write_target: "",
+      insert_mode: "none",
+      runtime_context: "林舟得到一枚古玉。",
+      attachment_ids: []
+    });
+    const first = await stream.next();
+
+    expect(first.value).toMatchObject({
+      type: "start",
+      inline_plan: {
+        run_id: expect.stringMatching(/^run_/),
+        step_ids: [expect.stringMatching(/^step_/)]
+      }
+    });
+    const runId = String((first.value as Extract<typeof first.value, { type: "start" }>).inline_plan?.run_id || "");
+    const pending = await conversations.getConversation(conversation.id);
+    expect(pending.messages.at(-1)).toMatchObject({
+      role: "assistant",
+      content: "正在执行…",
+      metadata: {
+        inline_plan_pending: true,
+        inline_plan: { run_id: runId }
+      }
+    });
+
+    releaseSkill?.("【人物设定】\n主角：林舟");
+    for await (const _event of stream) {
+      // Consume the durable stream so the test does not leave a live run.
+    }
+    const completed = await conversations.getConversation(conversation.id);
+    expect(completed.messages.some((message) => message.metadata.inline_plan_pending === true)).toBe(false);
+    expect(completed.messages.at(-1)).toMatchObject({
+      role: "assistant",
+      metadata: { inline_plan: { run_id: runId } }
+    });
   });
 
   it("uses an imported replacement skill when a builtin is disabled", async () => {

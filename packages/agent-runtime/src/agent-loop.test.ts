@@ -49,7 +49,11 @@ describe("Agent Loop - P2 Plan-Act-Observe-Replan", () => {
 
   it("ActionExecutor rejects unauthorized terminal execution and direct file writes", async () => {
     const mockContext = {};
-    const executor = new ActionExecutor(mockContext);
+    const executor = new ActionExecutor(mockContext, {
+      projectId: "project-test",
+      runId: "run-test",
+      budgetId: "budget-test"
+    });
 
     // 1. Unregistered Action
     await expect(executor.execute("run_arbitrary_shell", {})).rejects.toThrow("未授权或不支持的 Action");
@@ -59,6 +63,13 @@ describe("Agent Loop - P2 Plan-Act-Observe-Replan", () => {
 
     // 3. Propose save bypassing DocumentService
     await expect(executor.execute("propose_save", { path: "test.txt", bypassDocumentService: true })).rejects.toThrow("禁止绕过 DocumentService 直写文件");
+
+    const unbudgeted = new ActionExecutor(mockContext, {
+      projectId: "project-test",
+      runId: "",
+      budgetId: ""
+    });
+    await expect(unbudgeted.execute("run_skill", { skill_id: "test" })).rejects.toMatchObject({ code: "BUDGET_REQUIRED" });
   });
 
   it("BasicVerifier flags empty paths and invalid propose_save payload", async () => {
@@ -94,7 +105,11 @@ describe("Agent Loop - P2 Plan-Act-Observe-Replan", () => {
       const { goal } = GoalBuilder.resolveGoal(req.content);
       const steps = [...plan.steps];
       let idx = 0;
-      const executor = new ActionExecutor(mockRuntime);
+      const executor = new ActionExecutor(mockRuntime, {
+        projectId: "project-test",
+        runId: "run-test",
+        budgetId: "budget-test"
+      });
       while (idx < steps.length) {
         const step = steps[idx]!;
         try {

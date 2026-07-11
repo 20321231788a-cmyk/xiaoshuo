@@ -21,6 +21,15 @@ describe("renderer security", () => {
     expect(isTrustedRendererUrl("file:///C:/Users/Administrator/Downloads/attack.html", config)).toBe(false);
   });
 
+  it("accepts only the explicitly configured development file entry point", () => {
+    const fileRendererConfig = {
+      ...config,
+      rendererUrl: "file:///C:/ArcWriter/smoke/bridge.html"
+    };
+    expect(isTrustedRendererUrl("file:///C:/ArcWriter/smoke/bridge.html", fileRendererConfig)).toBe(true);
+    expect(isTrustedRendererUrl("file:///C:/ArcWriter/smoke/neighbor.html", fileRendererConfig)).toBe(false);
+  });
+
   it("only opens web links externally", () => {
     expect(isSafeExternalUrl("https://example.com/docs")).toBe(true);
     expect(isSafeExternalUrl("file:///C:/Windows/System32/cmd.exe")).toBe(false);

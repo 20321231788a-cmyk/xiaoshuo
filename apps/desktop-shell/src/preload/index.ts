@@ -29,6 +29,15 @@ import {
   type TerminalExitEvent,
   type XiaoShuoDesktopApi
 } from "../shared/channels.js";
+import { UserGestureTicket } from "./user-gesture-ticket.js";
+
+const terminalUserGesture = new UserGestureTicket();
+const recordTerminalUserGesture = (event: Event) => {
+  terminalUserGesture.recordTrustedGesture(event);
+};
+
+window.addEventListener("pointerdown", recordTerminalUserGesture, true);
+window.addEventListener("keydown", recordTerminalUserGesture, true);
 
 const desktopApi: XiaoShuoDesktopApi = {
   versions: async () => desktopVersionsSchema.parse(await ipcRenderer.invoke(ipcChannels.appVersions)),
@@ -121,7 +130,11 @@ const desktopApi: XiaoShuoDesktopApi = {
       )
   },
   terminal: {
-    create: async (request) => terminalSessionSchema.parse(await ipcRenderer.invoke(ipcChannels.terminalCreate, request || {})),
+    create: async (request) => {
+      terminalUserGesture.consume();
+      const ticket = await ipcRenderer.invoke(ipcChannels.terminalAcquireTicket);
+      return terminalSessionSchema.parse(await ipcRenderer.invoke(ipcChannels.terminalCreate, { ...(request || {}), ticket }));
+    },
     write: async (request) => {
       await ipcRenderer.invoke(ipcChannels.terminalWrite, request);
     },

@@ -22,6 +22,8 @@ export * from "./kernel/execution-store.js";
 export * from "./kernel/commit-journal-service.js";
 export * from "./kernel/workflow-checkpoint.js";
 export * from "./kernel/run-coordinator.js";
+export * from "./kernel/budget-policy.js";
 export * from "./memory-governor.js";
 export * from "./evaluator-registry.js";
 export * from "./feedback-learner.js";
+export * from "./negative-capability-policy.js";

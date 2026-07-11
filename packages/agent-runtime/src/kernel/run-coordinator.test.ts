@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { openExecutionStore } from "./execution-store.js";
 import { InMemoryAgentFeatureFlagRegistry } from "./feature-flag-registry.js";
+import { AGENT_BUDGET_ERROR_CODES } from "./budget-policy.js";
 import { RunCoordinator, RunRequestReplayError } from "./run-coordinator.js";
 
 let tempDir = "";
@@ -47,6 +48,166 @@ describe("RunCoordinator", () => {
       "run.started",
       "run.completed"
     ]);
+  });
+
+  it("rejects disabled and unavailable modes before allocating a run id or writing a run", () => {
+    for (const [mode, code] of [["off", "AGENT_EXECUTION_V2_DISABLED"], ["shadow", "AGENT_V2_SHADOW_UNAVAILABLE"]] as const) {
+      let idCalls = 0;
+      const coordinator = new RunCoordinator({
+        projectRoot: tempDir,
+        runtimeInstanceId: `runtime-${mode}`,
+        autoHeartbeat: false,
+        idFactory: () => {
+          idCalls += 1;
+          return `${mode}-${idCalls}`;
+        },
+        featureFlags: new InMemoryAgentFeatureFlagRegistry({ agent_execution_v2_mode: mode })
+      });
+      coordinators.push(coordinator);
+
+      expect(() => coordinator.beginRun(request({ request_id: `request-${mode}` }))).toThrow(
+        expect.objectContaining({ code })
+      );
+      expect(idCalls).toBe(0);
+      expect(coordinator.listRuns()).toEqual([]);
+    }
+  });
+
+  it("rejects an expired trusted budget before allocating durable ids or writing a run", () => {
+    let idCalls = 0;
+    const coordinator = new RunCoordinator({
+      projectRoot: tempDir,
+      runtimeInstanceId: "runtime-expired-budget",
+      autoHeartbeat: false,
+      now: () => new Date("2026-07-11T00:00:00.000Z"),
+      idFactory: () => `id-${++idCalls}`,
+      budgetProfileIssuer: ({ issuedAt }) => ({
+        profileId: "expired-test",
+        envelope: {
+          max_steps: 1,
+          max_replans: 1,
+          max_model_calls: 1,
+          max_input_tokens: 1,
+          max_output_tokens: 1,
+          max_estimated_cost: 1,
+          deadline_at: issuedAt
+        }
+      })
+    });
+    coordinators.push(coordinator);
+
+    expect(() => coordinator.beginRun(request())).toThrow(
+      expect.objectContaining({ code: AGENT_BUDGET_ERROR_CODES.deadlineExceeded })
+    );
+    expect(idCalls).toBe(0);
+    expect(coordinator.listRuns()).toHaveLength(0);
+  });
+
+  it("persists a trusted profile and rejects request-id replay under an expanded profile", () => {
+    let maxSteps = 2;
+    const coordinator = new RunCoordinator({
+      projectRoot: tempDir,
+      runtimeInstanceId: "runtime-budget-replay",
+      autoHeartbeat: false,
+      now: () => new Date("2026-07-11T00:00:00.000Z"),
+      idFactory: sequenceFactory("budget-replay"),
+      budgetProfileIssuer: ({ issuedAt }) => ({
+        profileId: "mutable-test-profile",
+        envelope: {
+          max_steps: maxSteps,
+          max_replans: 1,
+          max_model_calls: 2,
+          max_input_tokens: 100,
+          max_output_tokens: 100,
+          max_estimated_cost: 1,
+          deadline_at: new Date(Date.parse(issuedAt) + 60_000).toISOString()
+        }
+      })
+    });
+    coordinators.push(coordinator);
+    const runRequest = request({ request_id: "budget-replay", budget: { used_steps: 999 } });
+    const execution = coordinator.beginRun(runRequest);
+    expect(coordinator.getRun(execution.run_id)?.budget).toMatchObject({
+      profile_id: "mutable-test-profile",
+      max_steps: 2,
+      used_steps: 0
+    });
+
+    maxSteps = 3;
+    expect(() => coordinator.beginRun(runRequest)).toThrow(
+      expect.objectContaining({ code: AGENT_BUDGET_ERROR_CODES.stateConflict })
+    );
+  });
+
+  it("moves an expired failed run to paused before retry starts a new attempt", () => {
+    let nowMs = Date.parse("2026-07-11T00:00:00.000Z");
+    const coordinator = new RunCoordinator({
+      projectRoot: tempDir,
+      runtimeInstanceId: "runtime-budget-resume",
+      autoHeartbeat: false,
+      now: () => new Date(nowMs),
+      idFactory: sequenceFactory("budget-resume"),
+      budgetProfileIssuer: ({ issuedAt }) => ({
+        profileId: "short-test-profile",
+        envelope: {
+          max_steps: 2,
+          max_replans: 1,
+          max_model_calls: 2,
+          max_input_tokens: 100,
+          max_output_tokens: 100,
+          max_estimated_cost: 1,
+          deadline_at: new Date(Date.parse(issuedAt) + 1_000).toISOString()
+        }
+      })
+    });
+    coordinators.push(coordinator);
+    const execution = coordinator.beginRun(request());
+    const failed = coordinator.failRun(execution, Object.assign(new Error("retry"), { code: "RETRY" }));
+    nowMs += 2_000;
+
+    expect(() => coordinator.resumeRun(failed.run_id, "expired-retry", failed.version)).toThrow(
+      expect.objectContaining({ code: AGENT_BUDGET_ERROR_CODES.deadlineExceeded })
+    );
+    expect(coordinator.getRun(failed.run_id)).toMatchObject({
+      status: "paused",
+      recovery_reason: AGENT_BUDGET_ERROR_CODES.deadlineExceeded,
+      error_code: AGENT_BUDGET_ERROR_CODES.deadlineExceeded
+    });
+    expect(coordinator.store.listAttempts(failed.run_id, execution.step_id)).toHaveLength(1);
+  });
+
+  it("normalizes an historical empty budget and never starts a recovery attempt", () => {
+    const coordinator = createCoordinator("runtime-legacy-budget");
+    const execution = coordinator.beginRun(request());
+    const failed = coordinator.failRun(execution, new Error("seed legacy run"));
+    const legacyStepId = "legacy-step";
+    coordinator.store.createRun({
+      ...failed,
+      run_id: "legacy-run",
+      request_id: "legacy-request",
+      version: 1,
+      status: "paused",
+      current_step_id: legacyStepId,
+      budget: {},
+      steps: failed.steps.map((step) => ({
+        ...step,
+        step_id: legacyStepId,
+        version: 1,
+        status: "pending",
+        attempts: 0,
+        observation_id: "",
+        error_code: "",
+        error: ""
+      }))
+    } as never);
+
+    const legacy = coordinator.getRun("legacy-run")!;
+    expect(legacy.budget).toMatchObject({ legacy_unbudgeted: true, profile_id: "legacy_unbudgeted" });
+    expect(() => coordinator.resumeRun(legacy.run_id, "legacy-resume", legacy.version)).toThrow(
+      expect.objectContaining({ code: AGENT_BUDGET_ERROR_CODES.required })
+    );
+    expect(coordinator.store.listAttempts(legacy.run_id, legacyStepId)).toHaveLength(0);
+    expect(coordinator.getRun(legacy.run_id)?.status).toBe("paused");
   });
 
   it("does not export or delete a record through a coordinator for another project", async () => {

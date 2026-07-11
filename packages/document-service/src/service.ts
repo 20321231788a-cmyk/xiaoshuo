@@ -22,6 +22,7 @@ import {
 } from "@xiaoshuo/shared";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { CanonicalProjectPathGuard } from "./canonical-project-path-guard.js";
 
 const ALLOWED_EXTENSIONS = new Set([".txt", ".md", ".jsonl"]);
 const BLOCKED_SUFFIXES = new Set([".py", ".exe", ".json", ".db", ".sqlite", ".dat", ".dll", ".pyd"]);
@@ -41,6 +42,7 @@ export type DocumentServiceOptions = {
   projectRoot: string;
   now?: () => string;
   idFactory?: () => string;
+  pathGuard?: CanonicalProjectPathGuard;
 };
 
 export type SaveDocumentOptions = {
@@ -81,18 +83,23 @@ export class DocumentService {
   readonly projectRoot: string;
   private readonly now: () => string;
   private readonly idFactory: () => string;
+  private readonly pathGuard: CanonicalProjectPathGuard;
 
   constructor(options: DocumentServiceOptions) {
     this.projectRoot = path.resolve(options.projectRoot);
     this.now = options.now || (() => formatTimestamp(new Date()));
     this.idFactory = options.idFactory || (() => randomUUID().replace(/-/g, ""));
+    this.pathGuard = options.pathGuard || new CanonicalProjectPathGuard(this.projectRoot);
   }
 
   normalizeRelativePath(relativePath: string): string {
-    let normalized = String(relativePath || "")
+    const requestedPath = String(relativePath || "").trim();
+    if (path.isAbsolute(requestedPath) || /^[/\\]/.test(requestedPath) || /^[a-zA-Z]:[/\\]/.test(requestedPath)) {
+      throw new Error("非法项目路径");
+    }
+    let normalized = requestedPath
       .replace(/\\/g, "/")
-      .trim()
-      .replace(/^\/+/, "");
+      .trim();
     normalized = path.posix.normalize(normalized);
     if (!normalized || normalized === "." || normalized === ".." || normalized.startsWith("../")) {
       throw new Error("非法项目路径");
@@ -121,6 +128,7 @@ export class DocumentService {
       throw new Error("Agent 文件管家只允许操作 .txt / .md 文档和 .jsonl 记录");
     }
 
+    await this.pathGuard.assertPath(target, { allowMissing: true });
     if (!options.allowMissing) {
       const stats = await fs.stat(target).catch(() => null);
       if (!stats?.isFile()) {
@@ -128,6 +136,20 @@ export class DocumentService {
       }
     }
     return target;
+  }
+
+  async revalidateWritePath(relativePath: string): Promise<string> {
+    const normalized = this.normalizeRelativePath(relativePath);
+    const target = path.resolve(this.projectRoot, normalized);
+    return this.pathGuard.assertPath(target, { allowMissing: true });
+  }
+
+  async revalidateAbsoluteProjectPath(targetPath: string, allowMissing = true): Promise<string> {
+    return this.pathGuard.assertPath(targetPath, { allowMissing });
+  }
+
+  async canonicalProjectRoot(): Promise<string> {
+    return this.pathGuard.canonicalRoot();
   }
 
   async readDocument(relativePath: string): Promise<DocumentContent> {
@@ -173,6 +195,7 @@ export class DocumentService {
     const beforeChange = await this.snapshotChange(normalized, "save_document");
 
     await fs.mkdir(path.dirname(target), { recursive: true });
+    await this.revalidateAbsoluteProjectPath(target);
     if (options.atomicWrite) {
       await this.writeTextAtomically(target, nextContent, options.atomicWrite);
     } else {
@@ -327,7 +350,7 @@ export class DocumentService {
   }
 
   async deleteTimelineEntry(entryId: string): Promise<TimelineDeleteResult> {
-    const timelinePath = this.timelinePath();
+    const timelinePath = await this.resolveInternalPath(TIMELINE_PATH);
     const raw = await fs.readFile(timelinePath, "utf8").catch(() => "");
     if (!raw.trim()) {
       throw new Error("未找到时间线记录");
@@ -356,6 +379,7 @@ export class DocumentService {
       throw new Error("未找到时间线记录");
     }
 
+    await this.revalidateAbsoluteProjectPath(timelinePath);
     await fs.writeFile(timelinePath, kept.length ? `${kept.join("\n")}\n` : "", "utf8");
     return timelineDeleteResultSchema.parse({ ok: true, deleted_id: entryId });
   }
@@ -377,10 +401,12 @@ export class DocumentService {
       const target = await this.resolveSafePath(change.path, { allowMissing: true });
       if (change.before_exists) {
         await fs.mkdir(path.dirname(target), { recursive: true });
+        await this.revalidateAbsoluteProjectPath(target);
         await fs.writeFile(target, change.before_content || "", "utf8");
       } else {
         const stats = await fs.stat(target).catch(() => null);
         if (stats?.isFile()) {
+          await this.revalidateAbsoluteProjectPath(target, false);
           await fs.unlink(target);
         }
       }
@@ -403,7 +429,7 @@ export class DocumentService {
   }
 
   async getLedger(): Promise<LedgerItem[]> {
-    const raw = await fs.readFile(this.ledgerPath(), "utf8").catch(() => "");
+    const raw = await fs.readFile(await this.resolveInternalPath(LEDGER_PATH), "utf8").catch(() => "");
     if (!raw.trim()) {
       return [];
     }
@@ -457,7 +483,7 @@ export class DocumentService {
   }
 
   async listRevisionLogs(): Promise<RevisionLogEntry[]> {
-    const text = await readText(this.revisionLogPath());
+    const text = await readText(await this.resolveInternalPath(REVISION_LOG_PATH));
     if (!text.trim()) {
       return [];
     }
@@ -491,8 +517,9 @@ export class DocumentService {
     if (!confirmDelete) {
       throw new Error("清空修正日志需要用户确认");
     }
-    const target = this.revisionLogPath();
+    const target = await this.resolveInternalPath(REVISION_LOG_PATH);
     await fs.mkdir(path.dirname(target), { recursive: true });
+    await this.revalidateAbsoluteProjectPath(target);
     await fs.writeFile(target, "", "utf8");
   }
 
@@ -500,8 +527,10 @@ export class DocumentService {
     const normalized = this.normalizeRelativePath(relativePath);
     const target = await this.resolveSafePath(normalized);
     const archivePath = this.archiveRelativePath(normalized);
-    const archiveTarget = path.join(this.projectRoot, archivePath);
+    const archiveTarget = await this.resolveSafePath(archivePath, { allowMissing: true });
     await fs.mkdir(path.dirname(archiveTarget), { recursive: true });
+    await this.revalidateAbsoluteProjectPath(target, false);
+    await this.revalidateAbsoluteProjectPath(archiveTarget);
     await fs.rename(target, archiveTarget);
     return archivePath;
   }
@@ -547,6 +576,8 @@ export class DocumentService {
         throw new Error("目标文件已存在");
       }
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await this.revalidateAbsoluteProjectPath(sourcePath, false);
+      await this.revalidateAbsoluteProjectPath(targetPath);
       await fs.rename(sourcePath, targetPath);
       return;
     }
@@ -560,6 +591,7 @@ export class DocumentService {
   private async writeText(relativePath: string, content: string): Promise<void> {
     const target = await this.resolveSafePath(relativePath, { allowMissing: true });
     await fs.mkdir(path.dirname(target), { recursive: true });
+    await this.revalidateAbsoluteProjectPath(target);
     await fs.writeFile(target, content, "utf8");
   }
 
@@ -581,6 +613,10 @@ export class DocumentService {
       throw new Error("原子保存临时文件必须与目标文件位于同一目录");
     }
 
+    await this.revalidateAbsoluteProjectPath(target);
+    await this.revalidateAbsoluteProjectPath(tempPath);
+    await this.revalidateAbsoluteProjectPath(backupPath);
+
     const current = await fs.stat(target).catch(() => null);
     if (current?.isFile()) {
       await fs.copyFile(target, backupPath);
@@ -588,6 +624,9 @@ export class DocumentService {
     await fs.writeFile(tempPath, content, "utf8");
     await options.onStage?.("temp_written");
     await options.onStage?.("before_replace");
+    await this.revalidateAbsoluteProjectPath(target);
+    await this.revalidateAbsoluteProjectPath(tempPath, false);
+    await this.revalidateAbsoluteProjectPath(backupPath);
     await fs.rename(tempPath, target);
     await options.onStage?.("file_replaced");
   }
@@ -653,8 +692,9 @@ export class DocumentService {
     operations: FileOperation[];
     session?: DocumentTimelineSession;
   }): Promise<TimelineEntry> {
-    const timelinePath = this.timelinePath();
+    const timelinePath = await this.resolveInternalPath(TIMELINE_PATH);
     await fs.mkdir(path.dirname(timelinePath), { recursive: true });
+    await this.revalidateAbsoluteProjectPath(timelinePath);
     const session = input.session || {
       id: this.idFactory(),
       startedAt: this.now()
@@ -675,8 +715,9 @@ export class DocumentService {
   }
 
   private async appendOperationLog(operations: FileOperation[], results: OperationResult[]): Promise<void> {
-    const target = path.join(this.projectRoot, OPERATION_LOG_PATH);
+    const target = await this.resolveInternalPath(OPERATION_LOG_PATH);
     await fs.mkdir(path.dirname(target), { recursive: true });
+    await this.revalidateAbsoluteProjectPath(target);
     const record = {
       time: this.now(),
       operations,
@@ -711,20 +752,8 @@ export class DocumentService {
     return changes;
   }
 
-  private timelinePath(): string {
-    return path.join(this.projectRoot, TIMELINE_PATH);
-  }
-
-  private ledgerPath(): string {
-    return path.join(this.projectRoot, LEDGER_PATH);
-  }
-
-  private revisionLogPath(): string {
-    return path.join(this.projectRoot, REVISION_LOG_PATH);
-  }
-
   private async readTimelineEntries(): Promise<TimelineEntry[]> {
-    const raw = await fs.readFile(this.timelinePath(), "utf8").catch(() => "");
+    const raw = await fs.readFile(await this.resolveInternalPath(TIMELINE_PATH), "utf8").catch(() => "");
     if (!raw.trim()) {
       return [];
     }
@@ -762,9 +791,15 @@ export class DocumentService {
   }
 
   private async saveLedger(items: LedgerItem[]): Promise<void> {
-    const target = this.ledgerPath();
+    const target = await this.resolveInternalPath(LEDGER_PATH);
     await fs.mkdir(path.dirname(target), { recursive: true });
+    await this.revalidateAbsoluteProjectPath(target);
     await fs.writeFile(target, `${JSON.stringify(items, null, 2)}\n`, "utf8");
+  }
+
+  private async resolveInternalPath(relativePath: string): Promise<string> {
+    const target = path.resolve(this.projectRoot, relativePath);
+    return this.pathGuard.assertPath(target, { allowMissing: true });
   }
 }
 

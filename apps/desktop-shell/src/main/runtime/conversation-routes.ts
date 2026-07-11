@@ -10,7 +10,7 @@ import type { RuntimeContext } from "./types.js";
 import { getProjectAgentRuntime } from "./agent-runtime-registry.js";
 
 type JsonRecord = Record<string, unknown>;
-type RuntimeAbortOptions = { signal: AbortSignal };
+type RuntimeAbortOptions = { signal?: AbortSignal };
 type AbortableConversationRuntimeService = Omit<AgentRuntimeService, "sendMessage" | "streamMessage"> & {
   sendMessage: (
     conversationId: Parameters<AgentRuntimeService["sendMessage"]>[0],
@@ -44,6 +44,10 @@ type RuntimeConversationRouteDeps = {
   parseMultipartFile: (body: Buffer, contentType: string) => { filename: string; mediaType: string; content: Buffer };
   matchConversationRoute: (pathname: string) => ConversationRouteMatch;
 };
+
+function canWriteNdjsonResponse(response: ServerResponse): boolean {
+  return !response.writableEnded && !response.destroyed;
+}
 
 export async function handleConversationRoutes(
   request: IncomingMessage,
@@ -86,8 +90,8 @@ export async function handleConversationRoutes(
     if (await writeAiLicenseRequiredIfNeeded(context, response, deps.writeJson)) {
       return true;
     }
-    const runtime = getProjectAgentRuntime(context, projectPath) as AbortableConversationRuntimeService;
-    const signal = createRequestAbortSignal(request, response);
+    const runtime = await getProjectAgentRuntime(context, projectPath) as AbortableConversationRuntimeService;
+    const transportSignal = createRequestAbortSignal(request, response);
     const rawBody = await deps.readRawBody(request);
     const payload = conversationMessageRequestSchema.parse(deps.parseJsonRecord(rawBody));
     const acceptHeader = String(request.headers["accept"] || "").toLowerCase();
@@ -97,29 +101,34 @@ export async function handleConversationRoutes(
       deps.addCorsHeaders(response);
       response.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8" });
       try {
-        for await (const event of runtime.streamMessage(conversationRoute.id, payload, { signal })) {
-          deps.writeNdjsonEvent(response, event);
+        // The HTTP stream is a renderer transport, not durable-run ownership.
+        // A reload must not abort a run that the user can pause/cancel/resume
+        // through its durable controls after the renderer reconnects.
+        for await (const event of runtime.streamMessage(conversationRoute.id, payload, {})) {
+          if (!transportSignal.aborted && canWriteNdjsonResponse(response)) {
+            deps.writeNdjsonEvent(response, event);
+          }
         }
       } catch (error) {
-        if (!signal.aborted) {
+        if (!transportSignal.aborted && canWriteNdjsonResponse(response)) {
           deps.writeNdjsonEvent(response, {
             type: "error",
             message: error instanceof Error ? error.message : String(error)
           });
         }
       } finally {
-        if (!response.writableEnded) {
+        if (canWriteNdjsonResponse(response)) {
           response.end();
         }
       }
     } else {
       try {
-        const result = await runtime.sendMessage(conversationRoute.id, payload, { signal });
-        if (!signal.aborted) {
+        const result = await runtime.sendMessage(conversationRoute.id, payload, { signal: transportSignal });
+        if (!transportSignal.aborted) {
           deps.writeJson(response, 200, result);
         }
       } catch (error) {
-        if (!signal.aborted) {
+        if (!transportSignal.aborted) {
           deps.writeJson(response, 400, { detail: error instanceof Error ? error.message : String(error) });
         }
       }

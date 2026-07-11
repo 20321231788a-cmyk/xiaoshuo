@@ -190,7 +190,7 @@ export async function handleSkillRoutes(
     }
     const rawBody = await deps.readRawBody(request);
     const payload = skillDraftFromUrlRequestSchema.parse(deps.parseJsonRecord(rawBody));
-    const runtime = getProjectAgentRuntime(context, currentProject.path);
+    const runtime = await getProjectAgentRuntime(context, currentProject.path);
     try {
       deps.writeJson(response, 200, await runtime.draftSkillFromUrl(payload));
     } catch (error) {
@@ -205,7 +205,7 @@ export async function handleSkillRoutes(
     }
     const rawBody = await deps.readRawBody(request);
     const payload = skillDraftRequestSchema.parse(deps.parseJsonRecord(rawBody));
-    const runtime = getProjectAgentRuntime(context, currentProject.path);
+    const runtime = await getProjectAgentRuntime(context, currentProject.path);
     try {
       deps.writeJson(response, 200, await runtime.draftSkill(payload));
     } catch (error) {
@@ -220,7 +220,7 @@ export async function handleSkillRoutes(
     }
     const rawBody = await deps.readRawBody(request);
     const payload = skillRunRequestSchema.parse(deps.parseJsonRecord(rawBody));
-    const runtime = getProjectAgentRuntime(context, currentProject.path) as DurableSkillRuntime;
+    const runtime = await getProjectAgentRuntime(context, currentProject.path) as DurableSkillRuntime;
 
     try {
       const skill = await skills.getSkill(skillRoute.id);

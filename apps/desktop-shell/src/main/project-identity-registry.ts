@@ -45,7 +45,7 @@ export class ProjectIdentityRegistryError extends Error {
  * cannot become writable while its original, distinct path is still present.
  */
 export class ProjectIdentityRegistry {
-  private readonly confirmedInputPaths = new Set<string>();
+  private readonly confirmedInputPaths = new Map<string, { projectId: string; canonicalPath: string }>();
   private readonly canonicalize: (projectPath: string) => Promise<string>;
   private readonly pathExists: (projectPath: string) => Promise<boolean>;
   private readonly now: () => string;
@@ -70,11 +70,13 @@ export class ProjectIdentityRegistry {
     }
   }
 
-  assertWritable(projectPath: string): void {
-    if (!this.confirmedInputPaths.has(normalizeProjectPath(projectPath))) {
+  assertWritable(projectPath: string, expectedProjectId?: string): void {
+    const confirmed = this.confirmedInputPaths.get(normalizeProjectPath(projectPath));
+    const expected = expectedProjectId === undefined ? null : parseProjectId(expectedProjectId);
+    if (!confirmed || (expectedProjectId !== undefined && (!expected || confirmed.projectId !== expected))) {
       throw new ProjectIdentityRegistryError(
         projectIdentityUnconfirmedCode,
-        "项目身份尚未确认，已拒绝创建可写运行时"
+        "项目身份或预期 UUID 尚未确认，已拒绝创建可写运行时"
       );
     }
   }
@@ -113,12 +115,12 @@ export class ProjectIdentityRegistry {
         updated_at: this.now()
       });
       await this.writeDisk(disk);
-      this.confirmedInputPaths.add(inputPath);
+      this.confirmedInputPaths.set(inputPath, { projectId: normalizedProjectId, canonicalPath });
       return { projectId: normalizedProjectId, canonicalPath, reassociated: false };
     }
 
     if (currentForId.canonical_path === canonicalPath) {
-      this.confirmedInputPaths.add(inputPath);
+      this.confirmedInputPaths.set(inputPath, { projectId: normalizedProjectId, canonicalPath });
       return { projectId: normalizedProjectId, canonicalPath, reassociated: false };
     }
 
@@ -133,7 +135,7 @@ export class ProjectIdentityRegistry {
     currentForId.canonical_path = canonicalPath;
     currentForId.updated_at = this.now();
     await this.writeDisk(disk);
-    this.confirmedInputPaths.add(inputPath);
+    this.confirmedInputPaths.set(inputPath, { projectId: normalizedProjectId, canonicalPath });
     return { projectId: normalizedProjectId, canonicalPath, reassociated: true };
   }
 
@@ -141,7 +143,14 @@ export class ProjectIdentityRegistry {
     if (this.loaded) {
       return this.loaded;
     }
-    const raw = await fs.readFile(this.registryPath, "utf8").catch(() => "");
+    let raw = "";
+    try {
+      raw = await fs.readFile(this.registryPath, "utf8");
+    } catch (error) {
+      if (!isMissingPathError(error)) {
+        throw new ProjectIdentityRegistryError(projectIdentityConflictCode, "无法读取项目身份注册表，已拒绝写入");
+      }
+    }
     this.loaded = parseDisk(raw);
     return this.loaded;
   }
@@ -172,7 +181,7 @@ function parseDisk(raw: string): ProjectIdentityRegistryDisk {
   try {
     const parsed = JSON.parse(raw) as Partial<ProjectIdentityRegistryDisk>;
     if (parsed.version !== 1 || !Array.isArray(parsed.projects)) {
-      return { version: 1, projects: [] };
+      throw new ProjectIdentityRegistryError(projectIdentityConflictCode, "项目身份注册表格式无效，已拒绝写入");
     }
     return {
       version: 1,
@@ -192,14 +201,22 @@ function parseDisk(raw: string): ProjectIdentityRegistryDisk {
         }];
       })
     };
-  } catch {
-    return { version: 1, projects: [] };
+  } catch (error) {
+    if (error instanceof ProjectIdentityRegistryError) {
+      throw error;
+    }
+    throw new ProjectIdentityRegistryError(projectIdentityConflictCode, "项目身份注册表损坏，已拒绝写入");
   }
 }
 
 async function canonicalProjectPath(projectPath: string): Promise<string> {
   const resolved = path.resolve(projectPath);
-  const physicalPath = await fs.realpath(resolved).catch(() => resolved);
+  let physicalPath: string;
+  try {
+    physicalPath = await fs.realpath(resolved);
+  } catch {
+    throw new ProjectIdentityRegistryError(projectIdentityConflictCode, "无法确认项目 canonical realpath，已拒绝写入");
+  }
   return normalizeProjectPath(physicalPath);
 }
 
@@ -214,4 +231,8 @@ function normalizeProjectPath(projectPath: string): string {
 
 function uniquePaths(paths: string[]): string[] {
   return [...new Set(paths.map((candidate) => candidate.trim()).filter(Boolean))];
+}
+
+function isMissingPathError(error: unknown): boolean {
+  return typeof error === "object" && error !== null && (error as NodeJS.ErrnoException).code === "ENOENT";
 }

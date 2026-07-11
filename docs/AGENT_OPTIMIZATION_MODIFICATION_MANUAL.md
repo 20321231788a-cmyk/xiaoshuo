@@ -2527,41 +2527,52 @@ test(agent): complete P7 release eval gates
 
 ## 19. 暂不实施事项
 
-以下能力不进入 0.5.0：
+以下能力在 0.5.0～0.9.0 内保持硬禁用：
 
 - 多 Agent 并行协作；
-- Agent 自行安装任意工具；
-- Agent 自动或模型驱动的任意 shell 执行；现有用户手动 terminal 保留，但必须通过 P0 Electron/IPC 安全门禁；
-- 自动修改和发布自身代码；
+- Agent 自行安装任意工具或库；
+- Agent 自动或模型驱动的任意 shell 脚本/代码执行；现有用户手动 terminal 保留，但必须经与 Agent 隔离的 Electron/IPC 主进程受控安全通道，并绑定真实用户手势授权；
+- Agent 自动修改和发布自身运行内核代码；
 - 无预算的后台自治任务；
-- 未经确认的跨项目写入；
-- 把模型草稿直接写入 confirmed memory。
+- 未经二次确认的跨项目写入；
+- 把未经用户二次确认的模型草稿（draft）直接写入 Confirmed Memory（`confirmed`）。
 
-原因：这些能力会放大当前在状态恢复、成本控制和质量验证上的缺口。先完成单 Agent 可靠闭环，再评估多 Agent 的真实收益。
+这些约束是 Negative Capability Gate，不是可由普通 Feature Flag、环境变量、Prompt、网页、附件、项目文件或导入 Skill 开启的候选功能。实现必须 fail closed，并对直接调用、权限伪造、确认重放、路径穿越、symlink/junction、项目切换竞态和 Prompt Injection 建立负向测试。
 
-## 20. 维护日志与下一步 (2026-07-11)
+手动 terminal 与 Agent shell 必须是两个独立 capability；可信 renderer 不能替代真实用户手势。长期记忆必须遵循 `draft -> proposed -> confirmed`，只有带用户二次确认、来源 revision 和内容 hash 的事件可以进入 confirmed。每个后台 run 必须携带步骤、重规划、模型调用、token、费用和 deadline 预算，缺失或超限时进入拒绝或 paused，而不是继续自治执行。
 
-整个 P0 阶段大板块（Task A 至 Task H）、P1 阶段大板块（Model Gateway 结构化输出）、P2 阶段大板块（Plan-Act-Observe-Replan 闭环规划）以及 P3 - P7 阶段大板块的所有开发、编译和验证均已在本项目中圆满完成：
+完整实施契约、测试矩阵和解禁条件见 `docs/AGENT_OPTIMIZATION_NEXT_IMPLEMENTATION_MANUAL.md` 第 7 节。原因不变：这些能力会放大状态恢复、成本控制、跨项目隔离和质量验证风险；当前路线只追求单 Agent 的可靠闭环。
 
-### 阶段 P3 - P7 大板块实施明细：
-- **P3 记忆与图谱时序**：
-  - 引入了 `NarrativeCoordinate` 故事时间多维度排序和半开区间有效校验，实现时序上下文过滤；
-  - 引入了 `CanonClaim` 记忆断言与 `UserOverride` 投影覆盖版本控制，支持 `rebaseline` 与平移操作；
-  - 优化了图谱增量更新与失效处理，实现修改时将旧 claims 标记为 `superseded` 并增量删除重建变化路径下的图谱实体。
-- **P4 上下文算力预算**：
-  - 实现了基于总 Context Window、Reserve 动态扣减的 `ContextScheduler` 预算管理器；
-  - 实现了 MMR 去重选择策略，加入 Jaccard 相似度 Novelty 惩罚和路径最大数量（2个）限制；
-  - 实现了外部不可信上下文的安全标志拦截 `allow_instruction: false` 阻断注入，以及 Markdown/JSON 等文本的语义截断机制。
-- **P5 质量门禁与本地反馈**：
-  - 实现了格式、字数、图谱一致性、大纲对齐、风格等校验器的统一 `EvaluatorRegistry` 门禁；
-  - 实现了 2 次自纠正修订循环，避免死循环消耗并拦截不合规的实体写入；
-  - 新增数据库版本 2，引入 artifact 反馈存储、累计 3 次 discard 反馈自动提取偏好候选 `PreferenceCandidate` 以及 `PreferenceVersion` 的历史回滚逻辑。
-- **P6 交互计划卡**：
-  - 引入了会话消息流中可折叠的 `SessionPlanCard` 组件，渲染任务总目标、步骤进度 and 控制选项；
-  - 打通了后端暂停、恢复、取消、单步重试 API 交互，结合 React state 防抖去重和 operation_id 幂等防重击。
-- **P7 自动化 Eval**：
-  - 根目录 `package.json` 接入 `eval:routing`, `eval:planning`, `eval:memory`, `eval:quality`, `eval:recovery`, `eval:security` 门禁脚本；
-  - 全量 92 个测试文件，718 个测试用例 **100% 绿过**。
+## 20. 维护日志与下一步 (2026-07-11 审阅校准)
 
-### 下一步：
-整个 TS 迁移优化计划的 P0 - P7 所有板块开发、编译和验证均已百分之百完成。代码库稳定全绿，可交付至生产环境或开展下一阶段的系统联调。
+2026-07-11 对 `origin/main..HEAD` 的 31 个提交进行了静态审阅和动态验证。已确认：`npm run typecheck`、92 files / 718 tests、六个现有 `eval:*` 命令、`npm run build:desktop` 和 3 个 Playwright E2E 通过；`npm run smoke:desktop` 因新 session token 与旧裸请求不兼容而失败，`git diff --check origin/main...HEAD` 也发现尾随空格。因此当前代码不能标记为“稳定全绿”或“可交付生产”。
+
+阶段状态校准如下：
+
+- P0：持久执行主体已实现，但 Desktop smoke 和真实 Feature Flag 回滚门禁未通过，状态为“集成中”；
+- P1～P2：Gateway/Replan 已有实现与测试，但 Flag 只被快照化、未控制生产路径，不能宣告可灰度或可回滚；
+- P3：`MemoryGovernor` 和相关 schema/测试属于原型，尚未进入持久化记忆与用户治理生产链路；
+- P4：`ContextScheduler` 属于原型，尚未成为生产 ContextAssembler 的实际选择器；
+- P5：`EvaluatorRegistry`/`FeedbackLearner` 属于原型，尚未进入统一保存和反馈闭环；
+- P6：Trace 页基础控制可用；会话内 `SessionPlanCard` 的 run ID、version、step ID 和 Desktop API Client 契约已接入，但完整 Playwright E2E 未通过，状态为“集成中”；
+- P7：六个命令共覆盖 33 个用例，但尚无规定规模数据集、sealed holdout、Eval Manifest、失败 case artifact 和显式 CI gate。
+
+下一步以 `docs/AGENT_OPTIMIZATION_NEXT_IMPLEMENTATION_MANUAL.md` 为执行手册，严格按 M0～M7 推进：
+
+1. 校准文档并冻结生产完成声明；
+2. 修复 Desktop smoke 认证链路；
+3. 让 Feature Flag 真实控制执行与回滚；
+4. 修复 P6 durable run 控制契约并补 E2E；
+5. 落地第 19 节 Negative Capability Gate；
+6. 分别接入 P3、P4、P5，不再一次性宣告完成；
+7. 建立真实 P7 Eval/Manifest/CI artifact 后再进入 RC。
+
+只有新手册第 11 节 Definition of Done 全部满足后，才能恢复“P0～P7 完成”结论。
+
+### 20.1 实时实施状态（2026-07-11）
+
+- M0 已完成：本节、第 19 节、交接记录与后续实施手册已统一使用“原型完成/集成中/RC 候选/完成”的状态词；
+- M1 已完成：Desktop smoke 的受保护请求已改走 preload/IPC，`npm run typecheck`、`npm test`、`npm run test:e2e` 与 `npm run smoke:desktop` 通过；裸 loopback 请求继续被拒绝；
+- M2 集成中：`agent_execution_v2_mode` 已在 durable admission/retry/recovery/API 路径生效；`shadow` 在没有旧路径比较器前拒绝。其余阶段子 Flag 仍只保存 snapshot，不能以文档或配置代替真实执行门；
+- M3 集成中：会话计划卡已改用真实 durable run metadata 和既有 API Client；Playwright 已验证真实 `start.inline_plan`、renderer reload 后恢复同一 durable run、pause/resume/cancel、409 conflict 不重放，以及真实 step retry。Browser E2E 使用 test-only runtime token，完整安装态 Desktop IPC 控制矩阵已闭环。
+- M4 已完成：第 19 节 Negative Capability Gate 全面闭环落地。M4-T1 终端用户手势票据完成了主进程双重绑定校验，成功通过 smoke 负向拦截测试；M4-T2 数据面硬隔离中，durable steps、replans 以及模型/token 消耗与 `consumeBudget` 数据库持久化实现闭环联动，超额自动 pause 挂起；跨项目 propose_save 接入了 canonical realpath 防逃逸前缀校验；正典 memory confirmed 升级门禁已 fail-closed。测试 eval:excluded-capabilities (33个用例) 与全局 npm test (771个用例) 100% 成功绿码。 M5~M7 尚未开始。

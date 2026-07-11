@@ -11,7 +11,8 @@ export function isTrustedRendererUrl(value: string, config: RendererTrustConfig)
   try {
     const url = new URL(value);
     if (url.protocol === "file:") {
-      return path.resolve(fileURLToPath(url)) === path.resolve(config.packagedWorkbenchIndex);
+      const requestedPath = path.resolve(fileURLToPath(url));
+      return trustedFileEntrypoints(config).some((entrypoint) => requestedPath === entrypoint);
     }
 
     const runtime = new URL(config.runtimeUrl);
@@ -27,6 +28,22 @@ export function isTrustedRendererUrl(value: string, config: RendererTrustConfig)
   } catch {
     return false;
   }
+}
+
+function trustedFileEntrypoints(config: RendererTrustConfig): string[] {
+  const entrypoints = [path.resolve(config.packagedWorkbenchIndex)];
+  if (!config.rendererUrl) {
+    return entrypoints;
+  }
+  try {
+    const renderer = new URL(config.rendererUrl);
+    if (renderer.protocol === "file:") {
+      entrypoints.push(path.resolve(fileURLToPath(renderer)));
+    }
+  } catch {
+    // Invalid development renderer URLs are never trusted.
+  }
+  return [...new Set(entrypoints)];
 }
 
 export function isSafeExternalUrl(value: string): boolean {

@@ -3,6 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  AGENT_EXECUTION_V2_ON_ARGUMENT,
+  AGENT_INLINE_PLAN_UI_ON_ARGUMENT,
   SAFE_AGENT_ARGUMENT,
   loadDesktopAgentFeatureFlags,
   saveDesktopAgentFeatureFlagOverrides
@@ -52,7 +54,7 @@ describe("desktop agent feature flag overrides", () => {
     });
     const before = await fs.readFile(overridePath, "utf8");
 
-    const flags = await loadDesktopAgentFeatureFlags(overridePath, ["arcwriter", SAFE_AGENT_ARGUMENT]);
+    const flags = await loadDesktopAgentFeatureFlags(overridePath, ["arcwriter", AGENT_EXECUTION_V2_ON_ARGUMENT, SAFE_AGENT_ARGUMENT]);
 
     expect(flags.safeAgent).toBe(true);
     expect(flags.autoRecoverStaleRuns).toBe(false);
@@ -61,6 +63,17 @@ describe("desktop agent feature flag overrides", () => {
       model_gateway_v2: false
     });
     expect(await fs.readFile(overridePath, "utf8")).toBe(before);
+  });
+
+  it("enables v2 only through the explicit main-process command-line argument", async () => {
+    const overridePath = path.join(await temporaryRoot(), "state", "agent-feature-flags.json");
+
+    const flags = await loadDesktopAgentFeatureFlags(overridePath, ["arcwriter", AGENT_EXECUTION_V2_ON_ARGUMENT, AGENT_INLINE_PLAN_UI_ON_ARGUMENT]);
+
+    expect(flags.safeAgent).toBe(false);
+    expect(flags.autoRecoverStaleRuns).toBe(true);
+    expect(flags.featureFlags.snapshot()).toMatchObject({ agent_execution_v2_mode: "on", agent_inline_plan_ui: true });
+    await expect(fs.access(overridePath)).rejects.toThrow();
   });
 });
 

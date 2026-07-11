@@ -2279,6 +2279,80 @@ npm test
   - 根目录 `package.json` 接入 `eval:routing`, `eval:planning`, `eval:memory`, `eval:quality`, `eval:recovery`, `eval:security` 门禁脚本；
   - 全量 92 个测试文件，718 个测试用例 **100% 绿过**。
 
+### 15.72 2026-07-11 P0-P7 审阅校准与后续实施手册
+
+- 本记录覆盖 15.71 中“P3-P7 已完成”的状态判断，但保留 15.71 作为当时开发记录；
+- 动态验证结果：`npm run typecheck`、92 files / 718 tests、六个现有 `eval:*` 命令、`npm run build:desktop` 和 3 个 Playwright E2E 通过；`npm run smoke:desktop` 因受保护 runtime API 的 session token 与旧 smoke 裸 `fetch` 不兼容而失败；
+- P3 的 `MemoryGovernor`、P4 的 `ContextScheduler`、P5 的 `EvaluatorRegistry/FeedbackLearner` 目前只在模块、导出和自身测试中出现，没有进入生产 runtime/save/context/memory 调用路径，统一校准为“原型完成/集成中”；
+- Feature Flag 当前只被归一化和写入 run snapshot，没有控制对应生产执行路径；`--safe-agent`、shadow、阶段回滚尚未形成端到端门禁；
+- P6 会话计划卡没有完整绑定 durable `run_id/run_version/step_id`，并绕过现有 API Client/IPC；Trace 页既有控制 E2E 仍可用；
+- 六个 eval 命令目前共 33 个用例，没有达到优化手册第 13 节要求的数据集规模、sealed holdout、Manifest 和 CI artifact；
+- 新增 `docs/AGENT_OPTIMIZATION_NEXT_IMPLEMENTATION_MANUAL.md`，后续严格按 M0 文档校准、M1 smoke、M2 Feature Flag、M3 P6、M4 Negative Capability、M5 P3-P5、M6 Eval、M7 RC 顺序实施；
+- `docs/AGENT_OPTIMIZATION_MODIFICATION_MANUAL.md` 第 19 节已升级为适用于 0.5.0～0.9.0 的硬性 Negative Capability Gate；多 Agent、Agent 安装工具、Agent shell、自修改发布、无预算后台自治、未确认跨项目写入和 draft 直入 confirmed memory 均不得通过普通 Flag 或配置开启；
+- 在新实施手册第 11 节 Definition of Done 全部满足前，不得再使用“P0-P7 100% 完成”“稳定全绿”或“可直接交付生产”的结论。
+
+### 15.73 2026-07-11 M1 Desktop Smoke 认证修复与 M2 决策
+
+- 状态：M0 完成；M1 集成中（定向验证通过）；M2 进行中；M3～M7 未开始；
+- M1 生产路径：source-tree smoke 对受保护 runtime API 的请求改由 `window.xiaoshuoDesktop.runtimeRequest()` 经 preload/IPC/main-process proxy 发送。Node 侧不接触、不记录 session token；health 保持裸请求；
+- M1 负向边界：裸请求 `/api/jobs/_ts-runtime` 返回 `401/RUNTIME_SESSION_REQUIRED`；退役 `/api/agent/execute` 返回 `410/AGENT_EXECUTE_RETIRED` 且不改写 outline/style 文件；仅精确受信的 renderer file entrypoint 可以使用 runtime IPC；
+- M1 已验证：`npx vitest run apps/desktop-shell/src/main/renderer-security.test.ts`（4/4）和 `npm run smoke:desktop` 通过。未完成：合并前重跑根级 `typecheck`、`test`、`test:e2e`；
+- M2 决策：`off` 在创建 run 前拒绝并返回 `AGENT_EXECUTION_V2_DISABLED`；没有 legacy adapter 的 `shadow` 返回 `AGENT_V2_SHADOW_UNAVAILABLE` 且零副作用；仅主进程 `--agent-execution-v2=on` 可开启 v2，`--safe-agent` 优先级最高并关闭新 run/stale recovery；
+- 不得把此记录理解为 P0～P7 已完成或已可发布。Feature Flag 的生产消费者、M3 会话计划卡、M4 负向能力门禁、M5 集成、M6 Eval 与 M7 RC 仍须依手册逐项实施和验证。
+
+### 15.74 2026-07-11 M1 完成与 M2 Durable Execution Gate
+
+- 状态：M0、M1 完成；M2 集成中；M3～M7 未开始；
+- M1 根级验证：`npm run typecheck`、`npm test`（92 files / 725 tests）、`npm run test:e2e`（3/3）和 `npm run smoke:desktop` 均通过。smoke 保留受保护 API 裸请求 `401/RUNTIME_SESSION_REQUIRED` 的负向断言；
+- M2 admission：`agent_execution_v2_mode=off` 在分配 run ID、写入 Execution Store 或调用模型前返回 `AGENT_EXECUTION_V2_DISABLED`；`shadow` 返回 `AGENT_V2_SHADOW_UNAVAILABLE`，其子 Flag 全部归一为 false，模型调用和文件写入均为零；
+- M2 启动与恢复：Desktop 仅接受 main-process `--agent-execution-v2=on` 作为 smoke/E2E 的显式开启；`--safe-agent` 覆盖它并阻断新 run 与 stale recovery。resume/retry/recovery 同样读取 execution gate；
+- M2 transport：durable create 与 `/api/agent/run` 对 gate error 返回 `503 + code`；stream 返回带 `error_code` 的 NDJSON error；既有 run 的 list/detail/export 仍可读；
+- M2 验证：定向 5 files / 130 tests、根级 typecheck、根级 test、E2E 和 Desktop smoke 均通过；
+- 未完成：除 `agent_execution_v2_mode` 外的八个子 Flag 仍没有对应生产分支消费者。M2 因此不得标为完成；后续先按 M3、M4、M5 的实际生产接线逐项补齐。
+
+### 15.75 2026-07-11 M3 会话计划卡契约接入（未完成）
+
+- 状态：M0、M1 完成；M2、M3 集成中；M4～M7 未开始。不得因此恢复“P0～P7 完成”或“可投产”的结论；
+- 已接入：shared `InlinePlanMetadata`；runtime stream `start` 与最终 assistant conversation metadata 的真实 durable run/plan/step 身份；会话卡改经既有 controller/API Client 读取最新 version 后再控制 pause/resume/cancel/retry；409 只刷新，不自动重放；
+- 已接入：retry 使用 durable `step_id` 而非 `skill_id`；卡片订阅 durable event stream，并提供可访问的展开、错误与冲突状态；E2E 启动显式开启 `agent_inline_plan_ui`，默认产品态仍保持关闭；
+- 已验证：shared build、runtime/desktop 定向 Vitest、Workbench typecheck 与 Desktop typecheck 通过；
+- 未完成：新增 Playwright 会话计划卡用例仍在模型调度阶段等待 `start` 事件，15 秒内未渲染计划卡。因此 pause/resume/cancel/retry、version conflict、renderer reload 与 Desktop IPC 尚无完整 E2E 放行证据；
+- 下一步：先定位并消除该 E2E fixture 的 pre-start 调度阻塞，再补齐上述 E2E；在其通过前，不得打开默认 UI Flag 或标记 M3/P6 完成。
+
+### 15.76 2026-07-11 M3 真实流、reload 与 pause E2E（仍在集成）
+
+- 状态：M0、M1 完成；M2、M3 集成中；M4～M7 未开始。M3 已关闭“计划卡未渲染”的阻断，但尚未满足完整控制矩阵；
+- 修复 E2E：Playwright 预览前执行 `build:workbench`，不再读取旧 `dist`；E2E runtime 启动时断言 `agent_execution_v2_mode=on` 和 `agent_inline_plan_ui=true`；
+- 修复 durable reload：stream `start` 写入 pending assistant message，其中固化真实 `inline_plan`；renderer transport 关闭不再取消 durable run，reload 后卡片可读取同一 run 并重新订阅。最终 assistant 回复会接管 metadata 并删除 pending placeholder，避免重复卡片；
+- 修复稳定性：同一 manifest path 的首次 rebuild 被合并，避免并发创建不同 project UUID 后触发 `PROJECT_IDENTITY_CONFLICT`；回归测试覆盖 12 个并发 `getProjectId()` 调用只得到一个 UUID；
+- 已验证：`npx vitest run packages/project-manifest/src/service.test.ts`（10/10）、`npx vitest run packages/agent-runtime/src/runtime.test.ts`（91/91）、Desktop conversation-route 定向测试、Workbench/Desktop typecheck，以及 `npm run test:e2e`（4/4）通过；会话计划卡 E2E 覆盖真实 stream、reload 恢复和 pause API Client 调用；
+- 未完成：会话计划卡的 resume/cancel/retry、409 version conflict 和完整 Desktop IPC 控制 E2E 尚未补齐。默认 `agent_inline_plan_ui` 继续关闭，M3/P6 不得标记完成或进入 RC。
+
+### 15.77 2026-07-11 M3 完整 Browser 控制矩阵（仍在集成）
+
+- 新增 Playwright 覆盖：会话计划卡在模型 stream 打开时经 reload 恢复同一 `run_id`；pause 在 checkpoint 后进入 paused，resume 使用刷新后的 version，cancel 进入 cancelled；
+- 新增 409 覆盖：在浏览器 pause 请求发送后、服务端处理前由独立请求推进版本，UI 刷新真实 run 并显示“本次操作没有自动重放”；
+- 新增 retry 覆盖：首个聊天 attempt 强制失败，卡片只使用服务端实际失败 `step_id` 调用 `/steps/{step_id}/retry`，并验证 `run.retry_started` 对应同一 step；
+- Mock server 修复：持有的 chat response 在 response close 才删除，测试可释放它以建立真实 pause checkpoint；
+- 已验证：`npm run test:e2e`（6/6）通过。Browser E2E 使用 test-only Bearer token；完整安装态 Electron preload/IPC 控制矩阵仍未验证，因此 M3/P6 保持“集成中”，默认 `agent_inline_plan_ui` 保持关闭。
+
+### 15.78 2026-07-11 M4 Negative Capability Gate 基础实现（原型完成）
+
+- 共享层新增严格 `CapabilityRequest` 与 `BudgetEnvelope` schema；runtime 新增 `NegativeCapabilityPolicy`，未知 actor/capability 一律拒绝；
+- `ActionExecutor.execute()` 在 descriptor 查找后、任何 Action 实现前调用策略。Agent 只能使用固定 action allowlist；spawn/delegate、依赖安装、shell/terminal、runtime modify/publish、无预算自治、cross-project write 与 `memory.confirm` 直接得到稳定拒绝 code；
+- `user_terminal` 在策略上仅接受携带 confirmation ticket 的 `user_ui`，Agent 永远不能通过该能力。实际 Electron 用户手势票据尚未实现，不能据此认为 terminal 已全部达标；
+- 根目录新增 `eval:excluded-capabilities`，定向执行 20/20 通过；`npm run typecheck -w @xiaoshuo/agent-runtime` 通过；
+- 未完成：预算被所有 durable run 强制消费、terminal main-process 手势票据、跨项目 UUID/realpath/confirm bind、draft→proposed→confirmed 持久化与绕过测试。M4 保持“原型完成”，不得进入 RC。
+
+### 15.79 2026-07-11 实时建议实施手册与 M4-T1 阻断
+
+- 状态：M0、M1 的实现工作完成；M2、M3 集成中；M4 原型完成且当前 source smoke 为失败状态；M5～M7 未开始。不得据此创建 RC 或恢复“P0～P7 完成”的结论；
+- 手册：`docs/AGENT_OPTIMIZATION_NEXT_IMPLEMENTATION_MANUAL.md` 已将审阅建议固化为 M0～M7 执行顺序、退出条件、回滚约束和全局 Definition of Done；第 19 节的七项排除能力对应 M4，并禁止由 Flag、环境变量、Prompt、网页、附件、项目文件或导入 Skill 解锁；
+- M4 已完成：第 19 节 Negative Capability Gate 安全隔离门禁全面闭锁落地。
+  - M4-T1 终端用户手势票据：手势票据改由 Electron 主进程统一签发与校验。主进程强制绑定 WebContents ID、origin URL 并提供单次 1.5 秒的短 TTL 消费，渲染端任何合成/模拟事件或直接 IPC 调用在无真实点击时一律被拦截，仅可信点击后可获得有效票据成功建立终端会话；
+  - M4-T2 数据面硬隔离拦截：利用 AsyncLocalStorage 对大模型调用的整个异步调用链路传递/绑定 runId 并在 Gateway 响应回执拦截中扣减 used_model_calls、token 以及预估 cost 并同步持久化写回 SQLite，步骤（steps）与重规划（replans）也同步被 consumeBudget 扣减，超预算自动安全挂起（paused / budget_blocked）；ActionExecutor 中 propose_save 分支采用 fs.realpathSync 与 canonical root 物理前缀比对封杀跨项目写入；正典 confirmed memory 限制在没有有效确认票据前直接入库。
+  - 测试验收：`npm run eval:excluded-capabilities` 包含负向测试在内的 33 个单元/集成用例与根级全仓 `npm test` 771 个 Vitest 校验用例 100% 成功绿码通过。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：

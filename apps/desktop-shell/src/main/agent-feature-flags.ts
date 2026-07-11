@@ -9,6 +9,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 export const SAFE_AGENT_ARGUMENT = "--safe-agent";
+export const AGENT_EXECUTION_V2_ON_ARGUMENT = "--agent-execution-v2=on";
+export const AGENT_INLINE_PLAN_UI_ON_ARGUMENT = "--agent-inline-plan-ui=on";
 
 export type DesktopAgentFeatureFlags = {
   featureFlags: AgentFeatureFlagRegistry;
@@ -27,13 +29,24 @@ export async function loadDesktopAgentFeatureFlags(
 ): Promise<DesktopAgentFeatureFlags> {
   const persisted = await readOverrides(overridePath);
   const safeAgent = argv.includes(SAFE_AGENT_ARGUMENT);
+  const commandLineEnablesV2 = argv.includes(AGENT_EXECUTION_V2_ON_ARGUMENT);
+  const commandLineEnablesInlinePlanUi = argv.includes(AGENT_INLINE_PLAN_UI_ON_ARGUMENT);
   const overrides: AgentFeatureFlagOverrides = safeAgent
     ? { ...persisted, agent_execution_v2_mode: "off" }
-    : persisted;
+    : commandLineEnablesV2
+      ? {
+          ...persisted,
+          agent_execution_v2_mode: "on",
+          ...(commandLineEnablesInlinePlanUi ? { agent_inline_plan_ui: true } : {})
+        }
+      : persisted;
+  const featureFlags = new InMemoryAgentFeatureFlagRegistry(overrides);
   return {
-    featureFlags: new InMemoryAgentFeatureFlagRegistry(overrides),
+    featureFlags,
     safeAgent,
-    autoRecoverStaleRuns: !safeAgent
+    // Recovery changes durable-run ownership, so disabled and unavailable
+    // modes must leave stale runs untouched for an explicit operator action.
+    autoRecoverStaleRuns: !safeAgent && featureFlags.snapshot().agent_execution_v2_mode === "on"
   };
 }
 

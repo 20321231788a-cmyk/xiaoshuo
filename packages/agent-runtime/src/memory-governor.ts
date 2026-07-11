@@ -16,15 +16,33 @@ export interface CanonClaim {
   predicate: string;
   object: string;
   interval: CoordinateInterval;
-  status: "confirmed" | "planned" | "superseded";
+  status: "draft" | "proposed" | "confirmed" | "planned" | "rejected" | "superseded";
   revision: number;
 }
 
 export interface UserOverride {
   claimId: string;
   overrideObject?: string;
-  overrideStatus?: "confirmed" | "planned" | "superseded";
+  overrideStatus?: CanonClaim["status"];
   overrideInterval?: CoordinateInterval;
+}
+
+export type MemoryConfirmation = {
+  confirmationId: string;
+  actor: "user_ui";
+  sourceRevision: number;
+  contentHash: string;
+  confirmedAt: string;
+};
+
+export const confirmedMemoryRequiresUserConfirmationCode = "CONFIRMED_MEMORY_REQUIRES_USER_CONFIRMATION";
+
+export class ConfirmedMemoryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ConfirmedMemoryError";
+    Object.assign(this, { code: confirmedMemoryRequiresUserConfirmationCode });
+  }
 }
 
 export function compareCoordinates(a: NarrativeCoordinate, b: NarrativeCoordinate): number {
@@ -67,6 +85,9 @@ export class MemoryGovernor {
    * 添加一个 CanonClaim
    */
   addClaim(claim: CanonClaim): void {
+    if (claim.status === "confirmed") {
+      throw new ConfirmedMemoryError("模型或 workflow 不能直接创建 confirmed memory；请先保存为 draft/proposed 并执行用户二次确认。");
+    }
     this.claims.set(claim.id, {
       ...claim,
       interval: {
@@ -74,6 +95,26 @@ export class MemoryGovernor {
         to: claim.interval.to ? { ...claim.interval.to } : undefined
       }
     });
+  }
+
+  /** The only promotion path into confirmed memory. */
+  confirmClaim(projectUuid: string, claimId: string, confirmation: MemoryConfirmation): void {
+    this.assertUserConfirmation(confirmation);
+    const claim = this.claims.get(claimId);
+    if (!claim || claim.projectUuid !== projectUuid) {
+      throw new Error("未找到当前项目的 memory claim");
+    }
+    if (claim.status === "confirmed") {
+      return;
+    }
+    if (claim.status !== "draft" && claim.status !== "proposed" && claim.status !== "planned") {
+      throw new ConfirmedMemoryError("只有 draft/proposed memory 可以确认进入 confirmed");
+    }
+    if (confirmation.sourceRevision !== claim.revision) {
+      throw new ConfirmedMemoryError("memory confirmation 的 source revision 已过期");
+    }
+    claim.status = "confirmed";
+    claim.revision += 1;
   }
 
   /**
@@ -117,10 +158,16 @@ export class MemoryGovernor {
   /**
    * 将覆盖修正彻底合并至正典中，重构为新的基准版本
    */
-  rebaseline(projectUuid: string, overrides: UserOverride[]): void {
+  rebaseline(projectUuid: string, overrides: UserOverride[], confirmation?: MemoryConfirmation): void {
     for (const ovr of overrides) {
       const claim = this.claims.get(ovr.claimId);
       if (claim && claim.projectUuid === projectUuid) {
+        if (ovr.overrideStatus === "confirmed" && claim.status !== "confirmed") {
+          this.assertUserConfirmation(confirmation);
+          if (confirmation!.sourceRevision !== claim.revision) {
+            throw new ConfirmedMemoryError("memory confirmation 的 source revision 已过期");
+          }
+        }
         if (ovr.overrideObject !== undefined) {
           claim.object = ovr.overrideObject;
         }
@@ -163,5 +210,19 @@ export class MemoryGovernor {
         to: c.interval.to ? { ...c.interval.to } : undefined
       }
     };
+  }
+
+  private assertUserConfirmation(confirmation: MemoryConfirmation | undefined): asserts confirmation is MemoryConfirmation {
+    if (
+      !confirmation
+      || confirmation.actor !== "user_ui"
+      || !confirmation.confirmationId.trim()
+      || !confirmation.contentHash.trim()
+      || !confirmation.confirmedAt.trim()
+      || !Number.isInteger(confirmation.sourceRevision)
+      || confirmation.sourceRevision < 0
+    ) {
+      throw new ConfirmedMemoryError("confirmed memory 需要有效的用户二次确认事件");
+    }
   }
 }

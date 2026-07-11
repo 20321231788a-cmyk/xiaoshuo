@@ -409,24 +409,47 @@ export const agentObservationSchema = z
   })
   .passthrough();
 
-export const agentRunBudgetSchema = z
+export const agentRunBudgetEnvelopeSchema = z
   .object({
-    max_steps: z.number().int().positive().default(3),
-    max_replans: z.number().int().nonnegative().default(1),
-    max_attempts_per_step: z.number().int().positive().default(2),
-    max_duration_ms: z.number().int().positive().default(300_000),
-    max_input_tokens: z.number().int().nonnegative().default(32_000),
-    max_output_tokens: z.number().int().nonnegative().default(8_000),
-    max_cost: z.number().finite().nonnegative().default(1),
-    cost_currency: z.literal("USD").default("USD"),
-    pricing_snapshot_id: z.string().default(""),
-    used_steps: z.number().int().nonnegative().default(0),
-    used_replans: z.number().int().nonnegative().default(0),
-    used_input_tokens: z.number().int().nonnegative().default(0),
-    used_output_tokens: z.number().int().nonnegative().default(0),
-    estimated_cost: z.number().finite().nonnegative().default(0)
+    max_steps: z.number().int().positive(),
+    max_replans: z.number().int().nonnegative(),
+    max_model_calls: z.number().int().positive(),
+    max_input_tokens: z.number().int().positive(),
+    max_output_tokens: z.number().int().positive(),
+    max_estimated_cost: z.number().finite().positive(),
+    deadline_at: z.string().datetime()
   })
-  .passthrough();
+  .strict();
+
+export const agentRunBudgetSchema = agentRunBudgetEnvelopeSchema
+  .extend({
+    schema_version: z.literal(1),
+    budget_id: z.string().min(1),
+    profile_id: z.string().min(1),
+    used_steps: z.number().int().nonnegative(),
+    used_replans: z.number().int().nonnegative(),
+    used_model_calls: z.number().int().nonnegative(),
+    used_input_tokens: z.number().int().nonnegative(),
+    used_output_tokens: z.number().int().nonnegative(),
+    estimated_cost: z.number().finite().nonnegative()
+  })
+  .strict();
+
+export const legacyAgentRunBudgetSchema = z
+  .object({
+    schema_version: z.literal(0),
+    budget_id: z.literal(""),
+    profile_id: z.literal("legacy_unbudgeted"),
+    legacy_unbudgeted: z.literal(true)
+  })
+  .strict();
+
+export const persistedAgentRunBudgetSchema = z.preprocess(
+  (value) => value === undefined || isEmptyObject(value)
+    ? { schema_version: 0, budget_id: "", profile_id: "legacy_unbudgeted", legacy_unbudgeted: true }
+    : value,
+  z.union([agentRunBudgetSchema, legacyAgentRunBudgetSchema])
+);
 
 export const agentAutonomyModeSchema = z.enum(["assist", "plan", "execute"]);
 
@@ -649,12 +672,23 @@ export const agentRunStateSchema = z
     error: z.string().default(""),
     steps: z.array(agentExecutionStepSchema).default([]),
     artifacts: z.array(agentArtifactRefSchema).default([]),
-    budget: agentRunBudgetSchema.default({}),
+    budget: persistedAgentRunBudgetSchema,
     last_event_sequence: z.number().int().nonnegative().default(0),
     created_at: z.string(),
     updated_at: z.string()
   })
   .passthrough();
+
+/** Stable identity carried from a durable run into an inline conversation plan. */
+export const inlinePlanMetadataSchema = z
+  .object({
+    run_id: z.string().min(1),
+    run_version: z.number().int().positive(),
+    plan_version: z.number().int().positive(),
+    current_step_id: z.string().min(1).nullable(),
+    step_ids: z.array(z.string().min(1))
+  })
+  .strict();
 
 export const agentRunListResponseSchema = z
   .object({
@@ -836,6 +870,7 @@ export const agentRunResponseSchema = z
     current_skill: z.string().optional(),
     skill_steps: z.array(skillPlanStepSchema).optional(),
     skill_plan: skillPlanSchema.optional(),
+    inline_plan: inlinePlanMetadataSchema.optional(),
     selected_reason: z.string().optional(),
     confidence: z.number().min(0).max(1).optional()
   })
@@ -929,6 +964,7 @@ export const agentStreamEventSchema = z.discriminatedUnion("type", [
     current_skill: z.string().optional(),
     skill_steps: z.array(skillPlanStepSchema).optional(),
     skill_plan: skillPlanSchema.optional(),
+    inline_plan: inlinePlanMetadataSchema.optional(),
     selected_reason: z.string().optional(),
     confidence: z.number().min(0).max(1).optional()
   }),
@@ -997,7 +1033,10 @@ export type AgentExpectedOutput = z.infer<typeof agentExpectedOutputSchema>;
 export type AgentExecutionStep = z.infer<typeof agentExecutionStepSchema>;
 export type AgentStepAttempt = z.infer<typeof agentStepAttemptSchema>;
 export type AgentObservation = z.infer<typeof agentObservationSchema>;
+export type AgentRunBudgetEnvelope = z.infer<typeof agentRunBudgetEnvelopeSchema>;
 export type AgentRunBudget = z.infer<typeof agentRunBudgetSchema>;
+export type LegacyAgentRunBudget = z.infer<typeof legacyAgentRunBudgetSchema>;
+export type PersistedAgentRunBudget = z.infer<typeof persistedAgentRunBudgetSchema>;
 export type AgentAutonomyMode = z.infer<typeof agentAutonomyModeSchema>;
 export type AgentExecutionV2Mode = z.infer<typeof agentExecutionV2ModeSchema>;
 export type AgentFeatureFlagSnapshot = z.infer<typeof agentFeatureFlagSnapshotSchema>;
@@ -1006,6 +1045,7 @@ export type AgentGoal = z.infer<typeof agentGoalSchema>;
 export type AgentConfirmation = z.infer<typeof agentConfirmationSchema>;
 export type AgentRunEvent = z.infer<typeof agentRunEventSchema>;
 export type AgentRunState = z.infer<typeof agentRunStateSchema>;
+export type InlinePlanMetadata = z.infer<typeof inlinePlanMetadataSchema>;
 export type AgentRunListResponse = z.infer<typeof agentRunListResponseSchema>;
 export type AgentRunEventReplayResponse = z.infer<typeof agentRunEventReplayResponseSchema>;
 export type AgentRunControlRequest = z.infer<typeof agentRunControlRequestSchema>;

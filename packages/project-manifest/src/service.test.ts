@@ -80,6 +80,19 @@ describe("project-manifest", () => {
     expect(siblingFiles.some((name) => name.includes("project_manifest.json") && name.endsWith(".tmp"))).toBe(false);
   });
 
+  it("coalesces concurrent first manifests so every caller receives one UUID", async () => {
+    const manifestPath = path.join(projectPath, MANIFEST_REL_PATH);
+    await fs.rm(manifestPath, { force: true });
+
+    const projectIds = await Promise.all(
+      Array.from({ length: 12 }, () => new ProjectManifestService(projectPath).getProjectId())
+    );
+
+    expect(new Set(projectIds).size).toBe(1);
+    expect(parseProjectId(projectIds[0])).toBe(projectIds[0]);
+    await expect(fs.access(manifestPath)).resolves.toBeUndefined();
+  });
+
   it("keeps the project UUID when the project directory moves", async () => {
     const original = new ProjectManifestService(projectPath);
     await original.rebuild();

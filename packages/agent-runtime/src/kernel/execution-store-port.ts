@@ -99,6 +99,7 @@ export type UpdateRunStatusInput = {
   error_code?: string;
   error?: string;
   event?: ExecutionRunEventInput;
+  budget?: any;
 };
 
 export type HeartbeatRunLeaseInput = {

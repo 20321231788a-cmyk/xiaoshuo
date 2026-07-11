@@ -13,7 +13,7 @@ export default defineConfig({
       timeout: 120_000
     },
     {
-      command: "npm run preview -w @xiaoshuo/workbench -- --port 4180",
+      command: "npm run build:workbench && npm run preview -w @xiaoshuo/workbench -- --port 4180",
       url: "http://127.0.0.1:4180",
       reuseExistingServer: true,
       stdout: "pipe",

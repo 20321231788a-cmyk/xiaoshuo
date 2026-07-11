@@ -42,7 +42,7 @@ if (await isUrlReady(runtimeHealthUrl)) {
   process.exit(0);
 }
 
-const child = runBackground(process.execPath, [path.join(desktopDir, "dist", "e2e-runtime.js")], {
+const child = runBackground(process.execPath, [path.join(desktopDir, "dist", "e2e-runtime.js"), "--agent-execution-v2=on", "--agent-inline-plan-ui=on"], {
   cwd: desktopDir,
   env: {
     ...process.env,

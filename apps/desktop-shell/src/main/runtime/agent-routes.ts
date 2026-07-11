@@ -53,7 +53,7 @@ export async function handleAgentRoutes(
       deps.writeJson(response, 400, { detail: "尚未打开项目", code: "PROJECT_NOT_OPEN" });
       return true;
     }
-    const runtime = getProjectAgentRuntime(context, currentProject.path);
+    const runtime = await getProjectAgentRuntime(context, currentProject.path);
     try {
       if (pathname === "/api/agent/runs" && request.method === "GET") {
         const rawStatus = String(searchParams.get("status") || "").trim();
@@ -185,11 +185,7 @@ export async function handleAgentRoutes(
       }
     } catch (error) {
       const code = lifecycleErrorCode(error);
-      const status = code === "RUN_NOT_FOUND" || code === "CONFIRMATION_NOT_FOUND" || code === "RUN_PROJECT_SCOPE_MISMATCH"
-        ? 404
-        : code === "REQUEST_ID_REUSED" || code.includes("CONFLICT") || code.includes("VERSION") || code.includes("CONFIRMATION_") || code === "RUN_ACTIVE" || code === "RUN_NOT_TERMINAL" || code === "RUN_JOURNAL_PENDING"
-          ? 409
-          : 400;
+      const status = agentRuntimeErrorStatus(code);
       deps.writeJson(response, status, { detail: error instanceof Error ? error.message : String(error), code });
       return true;
     }
@@ -215,7 +211,7 @@ export async function handleAgentRoutes(
       deps.writeJson(response, 400, { detail: "尚未打开项目" });
       return true;
     }
-    const runtime = getProjectAgentRuntime(context, currentProject.path) as AbortableAgentRuntimeService;
+    const runtime = await getProjectAgentRuntime(context, currentProject.path) as AbortableAgentRuntimeService;
     const signal = createRequestAbortSignal(request, response);
     const result = await runtime.plan(agentPlanRequestSchema.parse(await deps.readJsonBody(request)), { signal });
     if (!signal.aborted) {
@@ -236,7 +232,7 @@ export async function handleAgentRoutes(
 
     const rawBody = await deps.readRawBody(request);
     const payload = agentRunRequestSchema.parse(deps.parseJsonRecord(rawBody));
-    const runtime = getProjectAgentRuntime(context, currentProject.path) as AbortableAgentRuntimeService;
+    const runtime = await getProjectAgentRuntime(context, currentProject.path) as AbortableAgentRuntimeService;
 
     try {
       // A transport disconnect ends only this HTTP response. Durable run controls
@@ -247,7 +243,11 @@ export async function handleAgentRoutes(
       }
     } catch (error) {
       if (canWriteResponse(response)) {
-        deps.writeJson(response, 400, { detail: error instanceof Error ? error.message : String(error) });
+        const code = lifecycleErrorCode(error);
+        deps.writeJson(response, agentRuntimeErrorStatus(code), {
+          detail: error instanceof Error ? error.message : String(error),
+          code
+        });
       }
     }
     return true;
@@ -265,7 +265,7 @@ export async function handleAgentRoutes(
 
     const rawBody = await deps.readRawBody(request);
     const payload = agentRunRequestSchema.parse(deps.parseJsonRecord(rawBody));
-    const runtime = getProjectAgentRuntime(context, currentProject.path) as AbortableAgentRuntimeService;
+    const runtime = await getProjectAgentRuntime(context, currentProject.path) as AbortableAgentRuntimeService;
 
     if (canWriteResponse(response)) {
       deps.addCorsHeaders(response);
@@ -287,7 +287,8 @@ export async function handleAgentRoutes(
       if (canWriteResponse(response)) {
         deps.writeNdjsonEvent(response, {
           type: "error",
-          message: error instanceof Error ? error.message : String(error)
+          message: error instanceof Error ? error.message : String(error),
+          error_code: lifecycleErrorCode(error)
         });
       }
     } finally {
@@ -379,6 +380,27 @@ function lifecycleErrorCode(error: unknown): string {
     }
   }
   return "AGENT_RUN_ERROR";
+}
+
+function agentRuntimeErrorStatus(code: string): number {
+  if (code === "AGENT_EXECUTION_V2_DISABLED" || code === "AGENT_V2_SHADOW_UNAVAILABLE") {
+    return 503;
+  }
+  if (code === "RUN_NOT_FOUND" || code === "CONFIRMATION_NOT_FOUND" || code === "RUN_PROJECT_SCOPE_MISMATCH") {
+    return 404;
+  }
+  if (
+    code === "REQUEST_ID_REUSED" ||
+    code.includes("CONFLICT") ||
+    code.includes("VERSION") ||
+    code.includes("CONFIRMATION_") ||
+    code === "RUN_ACTIVE" ||
+    code === "RUN_NOT_TERMINAL" ||
+    code === "RUN_JOURNAL_PENDING"
+  ) {
+    return 409;
+  }
+  return 400;
 }
 
 const DURABLE_EVENT_STREAM_POLL_MS = 250;

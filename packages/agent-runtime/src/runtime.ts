@@ -1,12 +1,17 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { GoalBuilder } from "./goal-builder.js";
 import { PlanValidator } from "./plan-validator.js";
 import { ActionExecutor } from "./action-executor.js";
+import { assertBudgetResumable } from "./kernel/budget-policy.js";
+
+const runContextStorage = new AsyncLocalStorage<{ runId: string }>();
 import type {
   AgentRunRequest,
   AgentRunDeleteResponse,
   AgentRunExport,
   AgentRunResponse,
   AgentRunState,
+  InlinePlanMetadata,
   AgentPlanRequest,
   AgentPlanResponse,
   AgentStreamEvent,
@@ -61,7 +66,12 @@ import {
   RunRequestReplayError,
   type DurableRunExecution
 } from "./kernel/run-coordinator.js";
-import type { AgentFeatureFlagRegistry } from "./kernel/feature-flag-registry.js";
+import {
+  assertAgentExecutionV2Enabled,
+  InMemoryAgentFeatureFlagRegistry,
+  isAgentExecutionV2Enabled,
+  type AgentFeatureFlagRegistry
+} from "./kernel/feature-flag-registry.js";
 import { CommitJournalService } from "./kernel/commit-journal-service.js";
 import { DurableWorkflowCheckpointStore } from "./kernel/workflow-checkpoint.js";
 import {
@@ -148,11 +158,50 @@ export class AgentRuntimeService {
   private readonly runCoordinator: RunCoordinator;
   private readonly commitJournal: CommitJournalService;
   private readonly projectManifest: ProjectManifestService;
+  private readonly featureFlags: AgentFeatureFlagRegistry;
 
   constructor(options: AgentRuntimeOptions) {
     this.config = options.config ?? {};
+    // Product callers inject the main-process registry (default `off`). The
+    // explicit compatibility registry preserves the public library's
+    // pre-Feature-Flag direct-construction behavior without weakening Desktop.
+    this.featureFlags = options.featureFlags ?? new InMemoryAgentFeatureFlagRegistry({ agent_execution_v2_mode: "on" });
     const rawClient = options.modelClient ?? new OpenAICompatibleClient();
     const gatewayInstance = rawClient instanceof ModelGateway ? rawClient : new ModelGateway(rawClient as any);
+    const self = this;
+    const originalRequestCompletion = gatewayInstance.requestCompletion.bind(gatewayInstance);
+    gatewayInstance.requestCompletion = async function(
+      config: any,
+      messages: any,
+      temperature?: number,
+      options: any = {}
+    ) {
+      const runId = options.runId || runContextStorage.getStore()?.runId;
+      if (runId) {
+        const run = self.runCoordinator.getRun(runId);
+        if (run && !("legacy_unbudgeted" in run.budget)) {
+          assertBudgetResumable(run.budget, new Date().toISOString());
+        }
+      }
+
+      const response = await originalRequestCompletion(config, messages, temperature, options);
+
+      if (runId) {
+        const inputChars = messages.reduce((acc: number, m: any) => acc + String(m.content || "").length, 0);
+        const outputChars = String(response || "").length;
+        const inputTokens = Math.max(1, Math.ceil(inputChars * 0.7));
+        const outputTokens = Math.max(1, Math.ceil(outputChars * 0.7));
+        const usage = {
+          modelCalls: 1,
+          inputTokens,
+          outputTokens,
+          cost: (inputTokens * 0.0015 + outputTokens * 0.002) / 1000
+        };
+        self.runCoordinator.consumeBudget(runId, usage);
+      }
+
+      return response;
+    };
     this.modelClient = gatewayInstance;
 
     gatewayInstance.registerBeforeRequestCallback((data) => {
@@ -188,7 +237,7 @@ export class AgentRuntimeService {
     this.skillRunner = new PromptSkillRunner(options);
     this.skillDrafts = new SkillDraftService(options);
     this.chatRunner = new AgentChatRunner(options);
-    this.runCoordinator = new RunCoordinator({ projectRoot: options.projectRoot, featureFlags: options.featureFlags });
+    this.runCoordinator = new RunCoordinator({ projectRoot: options.projectRoot, featureFlags: this.featureFlags });
     this.commitJournal = new CommitJournalService({ store: this.runCoordinator.store, projectRoot: options.projectRoot });
     this.fileOperationRunner = new AgentFileOperationRunner({
       planner: this.planner,
@@ -211,7 +260,7 @@ export class AgentRuntimeService {
     });
     this.projectManifest = new ProjectManifestService(options.projectRoot);
     void this.reconcileCompletedDurableGeneratedCaches().catch(() => undefined);
-    if (options.autoRecoverStaleRuns !== false) {
+    if (options.autoRecoverStaleRuns !== false && isAgentExecutionV2Enabled(this.featureFlags.snapshot())) {
       this.recoverStaleDurableRuns();
     }
     activeAgentRuntimeServices.add(this);
@@ -284,6 +333,7 @@ export class AgentRuntimeService {
     options: AgentRunOptions = {}
   ): Promise<SkillRunResponse> {
     throwIfAborted(options.signal);
+    this.assertExecutionV2Enabled();
     const skill = await this.skills.getSkill(skillId).catch(() => null);
     if (!skill) {
       throw new Error(`未知 skill: ${skillId}`);
@@ -359,51 +409,54 @@ export class AgentRuntimeService {
     });
     const startedAt = Date.now();
     this.addSkillRequestContextToTrace(trace, request);
-    try {
-      trace.mark("workflow_started", { selected_skill_id: skillId });
-      const prepared = await this.skillRunner.runSkill(skillId, request, {
-        ...runOptions,
-        deferAutoCommit: true,
-        deterministicCacheId: deterministicGeneratedCacheId(execution, skillId)
-      });
-      const result = await this.commitDeferredPromptSkillResult(
-        skillId,
-        prepared,
-        execution,
-        runOptions
-      );
-      this.addSkillResultToTrace(trace, result);
-      await this.addModelCallSummaryToTrace(trace, {
-        inputChars: skillRequestInputChars(request),
-        outputChars: String(result.result || "").length,
-        durationMs: Date.now() - startedAt,
-        streaming: false
-      });
-      this.runCoordinator.completeRun(execution, durableSkillAgentResponse(skillId, result));
-      await this.finalizeDeferredGeneratedCache(result, execution.run_id, execution.request_id);
-      await trace.finish({ saved_paths: this.resolveSavedPaths(result) });
-      return result;
-    } catch (error) {
-      const durableState = this.failDurableRun(execution, error);
-      await this.addModelCallSummaryToTrace(trace, {
-        inputChars: skillRequestInputChars(request),
-        outputChars: 0,
-        durationMs: Date.now() - startedAt,
-        streaming: false,
-        error
-      });
-      if (durableState === "paused") {
-        trace.mark("workflow_completed", { cancelled: false, durable_status: "paused" });
-        await trace.finish({ cancelled: false });
-      } else if (durableState === "cancelled" || isCancellationError(error, runOptions.signal)) {
-        trace.mark("workflow_completed", { cancelled: true, durable_status: durableState });
-        await trace.finish({ cancelled: true });
-      } else {
-        trace.fail(error);
-        await trace.finish();
+    this.runCoordinator.consumeBudget(execution.run_id, { steps: 1 });
+    return runContextStorage.run({ runId: execution.run_id }, async () => {
+      try {
+        trace.mark("workflow_started", { selected_skill_id: skillId });
+        const prepared = await this.skillRunner.runSkill(skillId, request, {
+          ...runOptions,
+          deferAutoCommit: true,
+          deterministicCacheId: deterministicGeneratedCacheId(execution, skillId)
+        });
+        const result = await this.commitDeferredPromptSkillResult(
+          skillId,
+          prepared,
+          execution,
+          runOptions
+        );
+        this.addSkillResultToTrace(trace, result);
+        await this.addModelCallSummaryToTrace(trace, {
+          inputChars: skillRequestInputChars(request),
+          outputChars: String(result.result || "").length,
+          durationMs: Date.now() - startedAt,
+          streaming: false
+        });
+        this.runCoordinator.completeRun(execution, durableSkillAgentResponse(skillId, result));
+        await this.finalizeDeferredGeneratedCache(result, execution.run_id, execution.request_id);
+        await trace.finish({ saved_paths: this.resolveSavedPaths(result) });
+        return result;
+      } catch (error) {
+        const durableState = this.failDurableRun(execution, error);
+        await this.addModelCallSummaryToTrace(trace, {
+          inputChars: skillRequestInputChars(request),
+          outputChars: 0,
+          durationMs: Date.now() - startedAt,
+          streaming: false,
+          error
+        });
+        if (durableState === "paused") {
+          trace.mark("workflow_completed", { cancelled: false, durable_status: "paused" });
+          await trace.finish({ cancelled: false });
+        } else if (durableState === "cancelled" || isCancellationError(error, runOptions.signal)) {
+          trace.mark("workflow_completed", { cancelled: true, durable_status: durableState });
+          await trace.finish({ cancelled: true });
+        } else {
+          trace.fail(error);
+          await trace.finish();
+        }
+        throw error;
       }
-      throw error;
-    }
+    });
   }
 
   private async replayDurableSkillResponse(run: AgentRunState): Promise<SkillRunResponse> {
@@ -865,6 +918,7 @@ export class AgentRuntimeService {
 
   async runAgent(request: AgentRunRequest, options: AgentRunOptions = {}): Promise<AgentRunResponse> {
     throwIfAborted(options.signal);
+    this.assertExecutionV2Enabled();
     let execution: DurableRunExecution;
     try {
       execution = await this.beginDurableRun(request, { ...options, requiresConfirmation: false });
@@ -878,6 +932,7 @@ export class AgentRuntimeService {
   }
 
   async createDurableRun(request: AgentRunRequest): Promise<{ run: AgentRunState; created: boolean }> {
+    this.assertExecutionV2Enabled();
     let execution: DurableRunExecution;
     try {
       execution = await this.beginDurableRun(request, {});
@@ -910,52 +965,56 @@ export class AgentRuntimeService {
     });
     const startedAt = Date.now();
     this.addAgentRequestContextToTrace(trace, request);
-    try {
-      await this.addRoutingTrace(request, trace);
-      let response: AgentRunResponse = {
-        ...(await this.runAgentInternal(request, trace, runOptions, execution)),
-        run_id: execution.run_id
-      };
-      response = {
-        ...(await this.attachConversationWriteBack(request, response, runOptions, execution)),
-        run_id: execution.run_id
-      };
-      this.addAgentResponseToTrace(trace, response);
-      await this.addModelCallSummaryToTrace(trace, {
-        inputChars: agentRequestInputChars(request),
-        outputChars: String(response.reply || response.skill_result?.result || "").length,
-        durationMs: Date.now() - startedAt,
-        streaming: false
-      });
-      this.runCoordinator.completeRun(execution, response);
-      await this.finalizeDeferredGeneratedCache(
-        response.skill_result,
-        execution.run_id,
-        execution.request_id
-      );
-      await trace.finish({ saved_paths: response.saved_paths || [] });
-      return response;
-    } catch (error) {
-      const durableState = this.failDurableRun(execution, error);
-      await this.addModelCallSummaryToTrace(trace, {
-        inputChars: agentRequestInputChars(request),
-        outputChars: 0,
-        durationMs: Date.now() - startedAt,
-        streaming: false,
-        error
-      });
-      if (durableState === "paused") {
-        trace.mark("workflow_completed", { cancelled: false, durable_status: "paused" });
-        await trace.finish({ cancelled: false });
-      } else if (durableState === "cancelled" || isCancellationError(error, runOptions.signal)) {
-        trace.mark("workflow_completed", { cancelled: true, durable_status: durableState });
-        await trace.finish({ cancelled: true });
-      } else {
-        trace.fail(error);
-        await trace.finish();
+    this.runCoordinator.consumeBudget(execution.run_id, { steps: 1 });
+    return runContextStorage.run({ runId: execution.run_id }, async () => {
+      try {
+        await this.addRoutingTrace(request, trace);
+        let response: AgentRunResponse = {
+          ...(await this.runAgentInternal(request, trace, runOptions, execution)),
+          run_id: execution.run_id
+        };
+        response = {
+          ...(await this.attachConversationWriteBack(request, response, runOptions, execution)),
+          run_id: execution.run_id
+        };
+        this.addAgentResponseToTrace(trace, response);
+        await this.addModelCallSummaryToTrace(trace, {
+          inputChars: agentRequestInputChars(request),
+          outputChars: String(response.reply || response.skill_result?.result || "").length,
+          durationMs: Date.now() - startedAt,
+          streaming: false
+        });
+        this.runCoordinator.completeRun(execution, response);
+        response = await this.persistInlinePlanMetadata(response, execution.run_id).catch(() => response);
+        await this.finalizeDeferredGeneratedCache(
+          response.skill_result,
+          execution.run_id,
+          execution.request_id
+        );
+        await trace.finish({ saved_paths: response.saved_paths || [] });
+        return response;
+      } catch (error) {
+        const durableState = this.failDurableRun(execution, error);
+        await this.addModelCallSummaryToTrace(trace, {
+          inputChars: agentRequestInputChars(request),
+          outputChars: 0,
+          durationMs: Date.now() - startedAt,
+          streaming: false,
+          error
+        });
+        if (durableState === "paused") {
+          trace.mark("workflow_completed", { cancelled: false, durable_status: "paused" });
+          await trace.finish({ cancelled: false });
+        } else if (durableState === "cancelled" || isCancellationError(error, runOptions.signal)) {
+          trace.mark("workflow_completed", { cancelled: true, durable_status: durableState });
+          await trace.finish({ cancelled: true });
+        } else {
+          trace.fail(error);
+          await trace.finish();
+        }
+        throw error;
       }
-      throw error;
-    }
+    });
   }
 
   private async runAgentInternal(
@@ -980,7 +1039,7 @@ export class AgentRuntimeService {
           selected_skill_id: skillPlan.steps[0]?.skill_id || "",
           selected_reason: skillPlan.selected_reason
         });
-        return this.runSkillPlan(skillPlan, request, options);
+        return this.runSkillPlan(skillPlan, request, options, execution);
       }
     }
 
@@ -1027,6 +1086,7 @@ export class AgentRuntimeService {
 
   async *streamAgentRun(request: AgentRunRequest, options: AgentRunOptions = {}): AsyncGenerator<AgentStreamEvent> {
     throwIfAborted(options.signal);
+    this.assertExecutionV2Enabled();
     let execution: DurableRunExecution;
     try {
       execution = await this.beginDurableRun(request, options);
@@ -1059,9 +1119,16 @@ export class AgentRuntimeService {
       await this.addRoutingTrace(request, trace);
       let finalPayload: AgentRunResponse | null = null;
       for await (const sourceEvent of this.streamAgentRunInternal(request, trace, runOptions, execution)) {
+        const inlinePlan = sourceEvent.type === "start" ? this.inlinePlanMetadata(execution.run_id) : null;
+        if (sourceEvent.type === "start" && inlinePlan) {
+          // Persist a pending assistant message before yielding the stream start.
+          // A renderer reload can then recover the real durable run identity
+          // instead of depending on an in-memory NDJSON event.
+          await this.persistInlinePlanPlaceholder(sourceEvent.conversation_id || request.conversation_id || "", request, inlinePlan).catch(() => undefined);
+        }
         const event: AgentStreamEvent =
           sourceEvent.type === "start"
-            ? { ...sourceEvent, run_id: execution.run_id }
+            ? { ...sourceEvent, run_id: execution.run_id, ...(inlinePlan ? { inline_plan: inlinePlan } : {}) }
             : sourceEvent.type === "final"
               ? { ...sourceEvent, payload: { ...sourceEvent.payload, run_id: execution.run_id } }
               : sourceEvent;
@@ -1074,22 +1141,23 @@ export class AgentRuntimeService {
       if (!finalPayload) {
         throw Object.assign(new Error("Agent stream ended without a final payload"), { code: "STREAM_FINAL_MISSING" });
       }
-      finalPayload = await this.attachConversationWriteBack(request, finalPayload, runOptions, execution);
-      this.addAgentResponseToTrace(trace, finalPayload);
+      const completedPayload = await this.attachConversationWriteBack(request, finalPayload, runOptions, execution);
+      this.addAgentResponseToTrace(trace, completedPayload);
       await this.addModelCallSummaryToTrace(trace, {
         inputChars: agentRequestInputChars(request),
-        outputChars: String(finalPayload?.reply || finalPayload?.skill_result?.result || "").length,
+        outputChars: String(completedPayload.reply || completedPayload.skill_result?.result || "").length,
         durationMs: Date.now() - startedAt,
         streaming: true
       });
-      this.runCoordinator.completeRun(execution, finalPayload);
+      this.runCoordinator.completeRun(execution, completedPayload);
+      const persistedPayload = await this.persistInlinePlanMetadata(completedPayload, execution.run_id).catch(() => completedPayload);
       await this.finalizeDeferredGeneratedCache(
-        finalPayload.skill_result,
+        persistedPayload.skill_result,
         execution.run_id,
         execution.request_id
       );
-      await trace.finish({ saved_paths: finalPayload?.saved_paths || [] });
-      yield { type: "final", payload: finalPayload };
+      await trace.finish({ saved_paths: persistedPayload.saved_paths || [] });
+      yield { type: "final", payload: persistedPayload };
     } catch (error) {
       const durableState = this.failDurableRun(execution, error);
       await this.addModelCallSummaryToTrace(trace, {
@@ -1136,7 +1204,7 @@ export class AgentRuntimeService {
           selected_skill_id: skillPlan.steps[0]?.skill_id || "",
           selected_reason: skillPlan.selected_reason
         });
-        yield* this.streamSkillPlan(skillPlan, request, options);
+        yield* this.streamSkillPlan(skillPlan, request, options, execution);
         return;
       }
     }
@@ -1269,6 +1337,9 @@ export class AgentRuntimeService {
    * stay paused until their CommitJournal path is complete.
    */
   recoverStaleDurableRuns(): AgentRunState[] {
+    if (!isAgentExecutionV2Enabled(this.featureFlags.snapshot())) {
+      return [];
+    }
     const claimed = this.runCoordinator.recoverStaleRuns();
     const recovered: AgentRunState[] = [];
     for (const run of claimed) {
@@ -1315,6 +1386,126 @@ export class AgentRuntimeService {
     return this.runCoordinator.resolveConfirmation(confirmationId, status, operationId, expectedVersion);
   }
 
+  private assertExecutionV2Enabled(): void {
+    assertAgentExecutionV2Enabled(this.featureFlags.snapshot());
+  }
+
+  private inlinePlanMetadata(runId: string): InlinePlanMetadata | null {
+    if (!this.featureFlags.snapshot().agent_inline_plan_ui) {
+      return null;
+    }
+    const run = this.runCoordinator.getRun(runId);
+    if (!run) {
+      return null;
+    }
+    return {
+      run_id: run.run_id,
+      run_version: run.version,
+      plan_version: run.plan_version,
+      current_step_id: run.current_step_id || null,
+      step_ids: run.steps.map((step) => step.step_id)
+    };
+  }
+
+  private async persistInlinePlanMetadata(response: AgentRunResponse, runId: string): Promise<AgentRunResponse> {
+    const inlinePlan = this.inlinePlanMetadata(runId);
+    const conversation = response.conversation;
+    if (!inlinePlan || !conversation) {
+      return response;
+    }
+    let assistantIndex = -1;
+    for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
+      if (
+        conversation.messages[index]?.role === "assistant"
+        && !this.isInlinePlanPlaceholder(conversation.messages[index]!, runId)
+      ) {
+        assistantIndex = index;
+        break;
+      }
+    }
+    if (assistantIndex < 0) {
+      return response;
+    }
+    const assistant = conversation.messages[assistantIndex]!;
+    const messages = conversation.messages.flatMap((message, index) => {
+      if (this.isInlinePlanPlaceholder(message, runId)) {
+        return [];
+      }
+      if (index !== assistantIndex) {
+        return [message];
+      }
+      return [{
+        ...message,
+        metadata: {
+          ...message.metadata,
+          inline_plan: inlinePlan,
+          // Keep temporary compatibility for previously rendered cards;
+          // UI controls must read inline_plan rather than these aliases.
+          run_id: inlinePlan.run_id,
+          run_version: inlinePlan.run_version
+        }
+      }];
+    });
+    const updated = { ...conversation, messages, updated_at: new Date().toISOString() };
+    await this.conversations.saveConversation(updated);
+    return { ...response, conversation: updated };
+  }
+
+  private async persistInlinePlanPlaceholder(
+    conversationId: string,
+    request: AgentRunRequest,
+    inlinePlan: InlinePlanMetadata
+  ): Promise<void> {
+    if (!conversationId) {
+      return;
+    }
+    const conversation = await this.conversations.getConversation(conversationId);
+    if (conversation.messages.some((message) => this.isInlinePlanPlaceholder(message, inlinePlan.run_id))) {
+      return;
+    }
+
+    const createdAt = new Date().toISOString();
+    const userText = String(request.content || "").trim();
+    const recentMessages = conversation.messages.slice(-3);
+    const messages = [...conversation.messages];
+    if (userText && !recentMessages.some((message) => message.role === "user" && message.content === userText)) {
+      messages.push({
+        id: randomUUID().replace(/-/g, ""),
+        role: "user",
+        content: userText,
+        created_at: createdAt,
+        metadata: {
+          intent: "skill",
+          pending_run_id: inlinePlan.run_id
+        }
+      });
+    }
+    messages.push({
+      id: randomUUID().replace(/-/g, ""),
+      role: "assistant",
+      content: "正在执行…",
+      created_at: createdAt,
+      metadata: {
+        intent: "skill",
+        inline_plan: inlinePlan,
+        inline_plan_pending: true
+      }
+    });
+    await this.conversations.saveConversation({
+      ...conversation,
+      title: conversation.title === "新对话" && userText ? userText.slice(0, 24) : conversation.title,
+      updated_at: createdAt,
+      messages,
+      message_count: messages.length
+    });
+  }
+
+  private isInlinePlanPlaceholder(message: ConversationDetail["messages"][number], runId: string): boolean {
+    const metadata = isRecord(message.metadata) ? message.metadata : {};
+    const inlinePlan = isRecord(metadata.inline_plan) ? metadata.inline_plan : {};
+    return message.role === "assistant" && metadata.inline_plan_pending === true && String(inlinePlan.run_id || "") === runId;
+  }
+
   private startDurableRetry(
     runId: string,
     operationId: string,
@@ -1322,6 +1513,7 @@ export class AgentRuntimeService {
     stepId: string | undefined,
     operationType: "resume" | "retry"
   ) {
+    this.assertExecutionV2Enabled();
     let execution: DurableRunExecution;
     try {
       execution = this.runCoordinator.resumeRun(runId, operationId, expectedVersion, { stepId, operationType });
@@ -2427,7 +2619,12 @@ export class AgentRuntimeService {
     };
   }
 
-  private async *streamSkillPlan(skillPlan: SkillPlan, request: AgentRunRequest, options: AgentRunOptions = {}): AsyncGenerator<AgentStreamEvent> {
+  private async *streamSkillPlan(
+    skillPlan: SkillPlan,
+    request: AgentRunRequest,
+    options: AgentRunOptions = {},
+    execution?: DurableRunExecution
+  ): AsyncGenerator<AgentStreamEvent> {
     throwIfAborted(options.signal);
     const steps = skillPlan.steps.slice(0, 4);
     yield {
@@ -2447,7 +2644,7 @@ export class AgentRuntimeService {
       stage: "skill_plan_start",
       skill_id: steps[0]?.skill_id || ""
     };
-    const payload = await this.runSkillPlan(skillPlan, request, options);
+    const payload = await this.runSkillPlan(skillPlan, request, options, execution);
     throwIfAborted(options.signal);
     const resultText = this.extractStreamPreviewText(payload);
     if (resultText.trim()) {
@@ -2481,7 +2678,12 @@ export class AgentRuntimeService {
     return !String(request.skill_id || "").trim() && Boolean(String(request.content || "").trim());
   }
 
-  private async runSkillPlan(skillPlan: SkillPlan, request: AgentRunRequest, options: AgentRunOptions = {}): Promise<AgentRunResponse> {
+  private async runSkillPlan(
+    skillPlan: SkillPlan,
+    request: AgentRunRequest,
+    options: AgentRunOptions = {},
+    execution?: DurableRunExecution
+  ): Promise<AgentRunResponse> {
     throwIfAborted(options.signal);
     
     // 1. Goal Builder & Ambiguity Resolution
@@ -2518,7 +2720,12 @@ export class AgentRuntimeService {
     let lastResult: SkillRunResponse | null = null;
     let lastReply = "";
     let priorOutput = String(request.selection || "").trim();
-    const executor = new ActionExecutor(this);
+    const durableRun = execution ? this.runCoordinator.getRun(execution.run_id) : null;
+    const executor = new ActionExecutor(this, {
+      projectId: durableRun?.project_id || "",
+      runId: execution?.run_id || "",
+      budgetId: durableRun && !("legacy_unbudgeted" in durableRun.budget) ? durableRun.budget.budget_id : ""
+    });
 
     let index = 0;
     while (index < steps.length) {

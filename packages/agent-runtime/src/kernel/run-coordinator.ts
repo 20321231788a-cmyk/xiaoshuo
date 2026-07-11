@@ -9,6 +9,7 @@ import {
   type AgentExecutionStepType,
   type AgentRunDeleteResponse,
   type AgentRunExport,
+  type AgentRunBudget,
   type AgentRunRequest,
   type AgentRunResponse,
   type AgentRunState,
@@ -17,8 +18,23 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
 import { isCancellationError } from "../cancellation.js";
+import {
+  AGENT_BUDGET_ERROR_CODES,
+  AgentBudgetPolicyError,
+  assertBudgetResumable,
+  budgetPolicyFingerprint,
+  issueDefaultAgentBudget,
+  materializeBudgetState,
+  validateTrustedBudgetGrant,
+  type TrustedBudgetProfileIssuer
+} from "./budget-policy.js";
 import { openExecutionStore } from "./execution-store.js";
-import { InMemoryAgentFeatureFlagRegistry, type AgentFeatureFlagRegistry } from "./feature-flag-registry.js";
+import {
+  assertAgentExecutionV2Enabled,
+  InMemoryAgentFeatureFlagRegistry,
+  isAgentExecutionV2Enabled,
+  type AgentFeatureFlagRegistry
+} from "./feature-flag-registry.js";
 import type {
   ExecutionControlOperation,
   ExecutionRuntimeInstance,
@@ -44,6 +60,7 @@ export type RunCoordinatorOptions = {
   leaseTtlMs?: number;
   autoHeartbeat?: boolean;
   featureFlags?: AgentFeatureFlagRegistry;
+  budgetProfileIssuer?: TrustedBudgetProfileIssuer;
 };
 
 export type BeginRunOptions = {
@@ -101,6 +118,7 @@ export class RunCoordinator {
   private readonly leaseTtlMs: number;
   private readonly ownsStore: boolean;
   private readonly featureFlags: AgentFeatureFlagRegistry;
+  private readonly budgetProfileIssuer: TrustedBudgetProfileIssuer;
   private readonly active = new Map<string, ActiveExecution>();
   private runtimeInstance: ExecutionRuntimeInstance;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -115,7 +133,11 @@ export class RunCoordinator {
     this.leaseTtlMs = positiveInterval(options.leaseTtlMs, DEFAULT_LEASE_TTL_MS);
     this.store = options.store ?? openExecutionStore(this.projectRoot);
     this.ownsStore = !options.store;
-    this.featureFlags = options.featureFlags ?? new InMemoryAgentFeatureFlagRegistry();
+    // Desktop always injects its main-process registry, whose default is off.
+    // Keep the package's direct-construction API source-compatible for tests
+    // and standalone library users that predate product capability flags.
+    this.featureFlags = options.featureFlags ?? new InMemoryAgentFeatureFlagRegistry({ agent_execution_v2_mode: "on" });
+    this.budgetProfileIssuer = options.budgetProfileIssuer ?? issueDefaultAgentBudget;
 
     const timestamp = this.timestamp();
     this.runtimeInstance = this.store.registerRuntimeInstance({
@@ -138,14 +160,30 @@ export class RunCoordinator {
       throw options.signal.reason instanceof Error ? options.signal.reason : new Error("操作已取消");
     }
 
+    // Admission must happen before IDs are allocated or ExecutionStore state is
+    // mutated. A disabled capability is not a failed run and leaves no run to
+    // recover, retry, or export.
+    const featureFlagSnapshot = this.requireExecutionFeatureFlagSnapshot();
+
+    const createdAt = this.timestamp();
+    const stepType = options.stepType || (request.skill_id ? "skill" : "chat");
+    const actionId = options.actionId || `agent.${stepType}`;
+    // Budget admission is intentionally completed before durable identities are
+    // allocated or store state is mutated. The request cannot supply limits or usage.
+    const trustedGrant = validateTrustedBudgetGrant(this.budgetProfileIssuer({
+      actionId,
+      stepType,
+      autonomyMode: request.autonomy_mode || "plan",
+      issuedAt: createdAt
+    }), createdAt);
+
     const runId = `run_${this.idFactory()}`;
     const requestId = String(request.request_id || "").trim() || `req_${this.idFactory()}`;
     const stepId = `step_${this.idFactory()}`;
     const attemptId = `attempt_${this.idFactory()}`;
-    const createdAt = this.timestamp();
     const requestSnapshot = sanitizeRequestSnapshot(request);
-    const featureFlagSnapshot = this.featureFlags.snapshot();
     const step = this.createRootStep(runId, stepId, request, options);
+    const budget = materializeBudgetState(runId, trustedGrant, createdAt);
     const state = agentRunStateSchema.parse({
       schema_version: this.store.schemaVersion,
       version: 1,
@@ -188,7 +226,7 @@ export class RunCoordinator {
       error: "",
       steps: [step],
       artifacts: [],
-      budget: {},
+      budget,
       last_event_sequence: 0,
       created_at: createdAt,
       updated_at: createdAt
@@ -205,6 +243,13 @@ export class RunCoordinator {
         throw Object.assign(new Error(`Request id ${requestId} is already bound to a different Agent request`), {
           code: "REQUEST_ID_REUSED"
         });
+      }
+      if (!isCanonicalBudget(created.budget)
+        || budgetPolicyFingerprint(created.budget, created.created_at) !== budgetPolicyFingerprint(trustedGrant, createdAt)) {
+        throw new AgentBudgetPolicyError(
+          AGENT_BUDGET_ERROR_CODES.stateConflict,
+          `Request id ${requestId} is already bound to a different budget profile`
+        );
       }
       throw new RunRequestReplayError(created);
     }
@@ -383,6 +428,7 @@ export class RunCoordinator {
     options: { stepId?: string; signal?: AbortSignal; operationType?: "resume" | "retry" } = {}
   ): DurableRunExecution {
     this.assertOpen();
+    this.requireExecutionFeatureFlagSnapshot();
     const operationType = options.operationType ?? "resume";
     const replay = this.replayControlOperation(runId, operationId, operationType);
     if (replay) {
@@ -392,7 +438,15 @@ export class RunCoordinator {
       throw new RunCoordinatorConflictError(runId, "Run is already active in this runtime instance");
     }
 
-    const run = this.requireRun(runId);
+    let run = this.requireRun(runId);
+    try {
+      assertBudgetResumable(run.budget, this.timestamp());
+    } catch (error) {
+      if (error instanceof AgentBudgetPolicyError) {
+        run = this.pauseRunForBudget(run, error);
+      }
+      throw error;
+    }
     const operation = this.createControlOperation(run, operationId, operationType, expectedVersion);
     try {
       if (run.status !== "paused" && run.status !== "failed") {
@@ -661,6 +715,9 @@ export class RunCoordinator {
   }
 
   recoverStaleRuns(): AgentRunState[] {
+    if (!isAgentExecutionV2Enabled(this.featureFlags.snapshot())) {
+      return [];
+    }
     const now = this.timestamp();
     const recovered: AgentRunState[] = [];
     for (const run of this.store.listRuns({ statuses: ["running"], limit: 500 })) {
@@ -681,7 +738,14 @@ export class RunCoordinator {
       if (!claim.applied) {
         continue;
       }
-      recovered.push(claim.value);
+      try {
+        assertBudgetResumable(claim.value.budget, now);
+        recovered.push(claim.value);
+      } catch (error) {
+        recovered.push(error instanceof AgentBudgetPolicyError
+          ? this.pauseRunForBudget(claim.value, error)
+          : claim.value);
+      }
     }
     return recovered;
   }
@@ -907,8 +971,10 @@ export class RunCoordinator {
       conversation_id?: string;
       pause_requested_at?: string;
       cancel_requested_at?: string;
+      recovery_reason?: string;
       error_code?: string;
       error?: string;
+      budget?: any;
     } = {}
   ): AgentRunState {
     if (run.status !== status) {
@@ -924,13 +990,78 @@ export class RunCoordinator {
       heartbeat_at: this.timestamp(),
       lease_expires_at: this.leaseExpiry(),
       conversation_id: patch.conversation_id,
-      ...patch,
+      pause_requested_at: patch.pause_requested_at,
+      cancel_requested_at: patch.cancel_requested_at,
+      recovery_reason: patch.recovery_reason,
+      error_code: patch.error_code,
+      error: patch.error,
+      budget: patch.budget,
       event: { event_type: eventType, step_id: run.current_step_id, payload }
     });
     if (!result.applied) {
       throw new RunCoordinatorConflictError(run.run_id, `Run changed while applying ${eventType}`);
     }
     return result.value;
+  }
+
+  consumeBudget(runId: string, usage: {
+    steps?: number;
+    replans?: number;
+    modelCalls?: number;
+    inputTokens?: number;
+    outputTokens?: number;
+    cost?: number;
+  }): AgentRunState {
+    const run = this.requireRun(runId);
+    if (!isCanonicalBudget(run.budget)) {
+      return run;
+    }
+    const newBudget = {
+      ...run.budget,
+      used_steps: run.budget.used_steps + (usage.steps || 0),
+      used_replans: run.budget.used_replans + (usage.replans || 0),
+      used_model_calls: run.budget.used_model_calls + (usage.modelCalls || 0),
+      used_input_tokens: run.budget.used_input_tokens + (usage.inputTokens || 0),
+      used_output_tokens: run.budget.used_output_tokens + (usage.outputTokens || 0),
+      estimated_cost: run.budget.estimated_cost + (usage.cost || 0)
+    };
+
+    try {
+      assertBudgetResumable(newBudget, this.timestamp());
+    } catch (error) {
+      if (error instanceof AgentBudgetPolicyError) {
+        return this.updateRun(run, "paused", "run.budget_blocked", {
+          error_code: error.code,
+          budget_id: newBudget.budget_id
+        }, {
+          budget: newBudget,
+          recovery_reason: error.code,
+          error_code: error.code,
+          error: error.message
+        });
+      }
+      throw error;
+    }
+
+    return this.updateRun(run, run.status, "run.budget_consumed", {
+      budget_id: newBudget.budget_id
+    }, {
+      budget: newBudget
+    });
+  }
+
+  private pauseRunForBudget(run: AgentRunState, error: AgentBudgetPolicyError): AgentRunState {
+    if (run.status !== "paused" && run.status !== "failed") {
+      return run;
+    }
+    return this.updateRun(run, "paused", "run.budget_blocked", {
+      error_code: error.code,
+      budget_id: isCanonicalBudget(run.budget) ? run.budget.budget_id : ""
+    }, {
+      recovery_reason: error.code,
+      error_code: error.code,
+      error: error.message
+    });
   }
 
   private settlePaused(active: ActiveExecution, error: unknown): AgentRunState {
@@ -1097,6 +1228,10 @@ export class RunCoordinator {
     }
   }
 
+  private requireExecutionFeatureFlagSnapshot(): AgentFeatureFlagSnapshot {
+    return assertAgentExecutionV2Enabled(this.featureFlags.snapshot());
+  }
+
   private timestamp(): string {
     return this.now().toISOString();
   }
@@ -1156,6 +1291,10 @@ function errorCode(error: unknown, fallback: string): string {
 
 function codedError(code: string, message: string): Error & { code: string } {
   return Object.assign(new Error(message), { code });
+}
+
+function isCanonicalBudget(budget: AgentRunState["budget"]): budget is AgentRunBudget {
+  return !("legacy_unbudgeted" in budget);
 }
 
 function truncate(value: string, limit: number): string {

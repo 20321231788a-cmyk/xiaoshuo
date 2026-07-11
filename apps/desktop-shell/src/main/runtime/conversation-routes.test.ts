@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { handleConversationRoutes } from "./conversation-routes.js";
@@ -7,6 +7,7 @@ import type { RuntimeContext } from "./types.js";
 const mockSendMessage = vi.hoisted(() => vi.fn());
 const mockStreamMessage = vi.hoisted(() => vi.fn());
 const mockWriteAiLicenseRequiredIfNeeded = vi.hoisted(() => vi.fn());
+const mockGetProjectAgentRuntime = vi.hoisted(() => vi.fn());
 
 vi.mock("@xiaoshuo/agent-runtime", () => ({
   AgentRuntimeService: class {
@@ -18,6 +19,10 @@ vi.mock("@xiaoshuo/agent-runtime", () => ({
 
 vi.mock("./license-guard.js", () => ({
   writeAiLicenseRequiredIfNeeded: mockWriteAiLicenseRequiredIfNeeded
+}));
+
+vi.mock("./agent-runtime-registry.js", () => ({
+  getProjectAgentRuntime: mockGetProjectAgentRuntime
 }));
 
 function createContext(): RuntimeContext {
@@ -58,6 +63,13 @@ function createResponse(): ServerResponse {
 }
 
 describe("handleConversationRoutes", () => {
+  beforeEach(() => {
+    mockGetProjectAgentRuntime.mockResolvedValue({
+      sendMessage: mockSendMessage,
+      streamMessage: mockStreamMessage
+    });
+  });
+
   afterEach(() => {
     vi.clearAllMocks();
   });
@@ -153,6 +165,7 @@ describe("handleConversationRoutes", () => {
     expect(response.writeHead).toHaveBeenCalledWith(200, { "Content-Type": "application/x-ndjson; charset=utf-8" });
     expect(writeNdjsonEvent).toHaveBeenNthCalledWith(1, response, { type: "message_start", conversation_id: "conv-1" });
     expect(writeNdjsonEvent).toHaveBeenNthCalledWith(2, response, { type: "message_delta", delta: "hello" });
+    expect(mockStreamMessage).toHaveBeenCalledWith("conv-1", expect.objectContaining(payload), {});
     expect(response.end).toHaveBeenCalled();
     expect(writeJson).not.toHaveBeenCalled();
   });

@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type IpcMainInvokeEve
 import contextMenu from "electron-context-menu";
 import { download } from "electron-dl";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { resolveProjectRoot } from "./backend.js";
 import { getShellCapabilities } from "./capabilities.js";
 import {
@@ -288,8 +289,16 @@ function registerIpc(): void {
   ipcMain.handle(ipcChannels.localStateSyncProject, (_event, request) => syncProjectLocalState(request));
   ipcMain.handle(ipcChannels.localStatePatchSettings, (_event, request) => patchWorkbenchSettings(request));
   ipcMain.handle(ipcChannels.localStateTrackGeneratedCache, (_event, request) => trackGeneratedCacheMetadata(request));
+  ipcMain.handle(ipcChannels.terminalAcquireTicket, (event) => {
+    assertTrustedTerminalRenderer(event);
+    const origin = new URL(event.senderFrame!.url).origin;
+    return acquireTerminalTicket(event.sender.id, origin);
+  });
   ipcMain.handle(ipcChannels.terminalCreate, (event, request) => {
     assertTrustedTerminalRenderer(event);
+    const req = request as { ticket?: string };
+    const origin = new URL(event.senderFrame!.url).origin;
+    consumeTerminalTicket(req.ticket, event.sender.id, origin);
     return createTerminalSession(request, event.sender.id);
   });
   ipcMain.handle(ipcChannels.terminalWrite, (event, request) => {
@@ -404,3 +413,34 @@ app.on("before-quit", () => {
 app.on("window-all-closed", () => {
   app.quit();
 });
+
+const activeTerminalTickets = new Map<string, {
+  token: string;
+  expiresAt: number;
+  webContentsId: number;
+  origin: string;
+}>();
+
+function acquireTerminalTicket(webContentsId: number, origin: string): string {
+  const token = `tkt-${randomUUID()}`;
+  const expiresAt = Date.now() + 1500;
+  activeTerminalTickets.set(token, { token, expiresAt, webContentsId, origin });
+  return token;
+}
+
+function consumeTerminalTicket(token: string | undefined, webContentsId: number, origin: string): void {
+  if (!token) {
+    throw new Error("TERMINAL_USER_GESTURE_REQUIRED: 拒绝创建终端，必须提供有效手势票据");
+  }
+  const record = activeTerminalTickets.get(token);
+  if (!record) {
+    throw new Error("TERMINAL_USER_GESTURE_REQUIRED: 无效的终端手势票据");
+  }
+  activeTerminalTickets.delete(token);
+  if (record.webContentsId !== webContentsId || record.origin !== origin) {
+    throw new Error("TERMINAL_USER_GESTURE_REQUIRED: 票据绑定信息不匹配");
+  }
+  if (Date.now() >= record.expiresAt) {
+    throw new Error("TERMINAL_USER_GESTURE_REQUIRED: 票据已过期");
+  }
+}

@@ -16,6 +16,10 @@ async function main() {
     stateFilePath,
     state: runtimeState
   });
+  const flags = runtimeState.featureFlags?.snapshot();
+  if (flags?.agent_execution_v2_mode !== "on" || !flags.agent_inline_plan_ui) {
+    throw new Error("E2E runtime requires --agent-execution-v2=on and --agent-inline-plan-ui=on");
+  }
   process.stdout.write(`[e2e-runtime] ready ${runtimeUrl}\n`);
 }
 

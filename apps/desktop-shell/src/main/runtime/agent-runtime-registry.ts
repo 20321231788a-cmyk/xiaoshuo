@@ -1,10 +1,18 @@
 import { AgentRuntimeService } from "@xiaoshuo/agent-runtime";
+import { CanonicalProjectPathGuard } from "@xiaoshuo/document-service";
+import { MANIFEST_REL_PATH, readExistingProjectId } from "@xiaoshuo/project-manifest";
 import path from "node:path";
 import type { RuntimeContext } from "./types.js";
 
-export function getProjectAgentRuntime(context: RuntimeContext, projectRoot: string): AgentRuntimeService {
-  context.projectIdentityRegistry?.assertWritable(projectRoot);
+export async function getProjectAgentRuntime(context: RuntimeContext, projectRoot: string): Promise<AgentRuntimeService> {
   const resolved = path.resolve(projectRoot);
+  const pathGuard = new CanonicalProjectPathGuard(resolved);
+  await pathGuard.assertPath(path.join(resolved, MANIFEST_REL_PATH), { allowMissing: false });
+  const projectId = await readExistingProjectId(resolved);
+  if (!projectId) {
+    throw new Error("项目 manifest 未提供有效 UUID，已拒绝创建可写运行时");
+  }
+  context.projectIdentityRegistry?.assertWritable(resolved, projectId);
   const key = process.platform === "win32" ? resolved.toLowerCase() : resolved;
   const registry = context.agentRuntimes ?? new Map<string, AgentRuntimeService>();
   context.agentRuntimes = registry;

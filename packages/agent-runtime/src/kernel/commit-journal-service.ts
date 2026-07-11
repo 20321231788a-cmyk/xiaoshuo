@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { DocumentService } from "@xiaoshuo/document-service";
+import { MANIFEST_REL_PATH, parseProjectId, readExistingProjectId } from "@xiaoshuo/project-manifest";
 import type { DocumentContent } from "@xiaoshuo/shared";
 import path from "node:path";
 import type {
@@ -76,6 +77,7 @@ export class CommitJournalService {
   }
 
   async write(input: CommitJournalWriteInput): Promise<CommitJournalWriteResult> {
+    const projectIdentity = await this.assertRunProjectIdentity(input.runId);
     const relativePath = this.documents.normalizeRelativePath(input.targetPath);
     const targetPath = await this.documents.resolveSafePath(relativePath, { allowMissing: true });
     const current = await this.documents.readRawText(relativePath).catch(() => "");
@@ -109,7 +111,11 @@ export class CommitJournalService {
       fencing_token: lease.fencing_token,
       stage: "prepared",
       version: 1,
-      manifest: { relative_path: relativePath },
+      manifest: {
+        relative_path: relativePath,
+        project_id: projectIdentity.projectId,
+        canonical_root: projectIdentity.canonicalRoot
+      },
       error_code: "",
       error: "",
       created_at: now.toISOString(),
@@ -157,6 +163,7 @@ export class CommitJournalService {
           onStage: async (stage) => {
             if (stage === "before_replace") {
               this.assertLeaseStillOwned(lease);
+              await this.assertRunProjectIdentity(input.runId, projectIdentity);
               return;
             }
             if (stage === "temp_written" && contentHash(await readFile(currentJournal.temp_path, "utf8")) !== currentJournal.new_hash) {
@@ -235,6 +242,15 @@ export class CommitJournalService {
     const relativePath = String(journal.manifest.relative_path || "");
     if (!relativePath) {
       this.markRecoveryRequired(journal, new CommitJournalError("RECOVERY_REQUIRED", "提交日志缺少受控相对路径"));
+      return { journalId: journal.journal_id, outcome: "recovery_required" };
+    }
+    try {
+      await this.assertRunProjectIdentity(journal.run_id, {
+        projectId: String(journal.manifest.project_id || ""),
+        canonicalRoot: String(journal.manifest.canonical_root || "")
+      });
+    } catch (error) {
+      this.markRecoveryRequired(journal, error);
       return { journalId: journal.journal_id, outcome: "recovery_required" };
     }
     const targetPath = await this.documents.resolveSafePath(relativePath, { allowMissing: true });
@@ -360,6 +376,35 @@ export class CommitJournalService {
       throw new CommitJournalError("COMMIT_JOURNAL_MISSING", `提交日志不存在: ${journalId}`);
     }
     return journal;
+  }
+
+  private async assertRunProjectIdentity(
+    runId: string,
+    expected?: { projectId: string; canonicalRoot: string }
+  ): Promise<{ projectId: string; canonicalRoot: string }> {
+    const run = this.store.getRun(runId);
+    const projectId = parseProjectId(run?.project_id);
+    if (!run || !projectId || path.resolve(run.project_path) !== path.resolve(this.documents.projectRoot)) {
+      throw new CommitJournalError(
+        "PROJECT_IDENTITY_MISMATCH",
+        "durable run 未绑定当前项目的稳定 UUID 和路径"
+      );
+    }
+
+    const manifestPath = path.join(this.documents.projectRoot, MANIFEST_REL_PATH);
+    await this.documents.revalidateAbsoluteProjectPath(manifestPath, false);
+    const currentProjectId = await readExistingProjectId(this.documents.projectRoot);
+    const canonicalRoot = await this.documents.canonicalProjectRoot();
+    if (
+      currentProjectId !== projectId
+      || (expected && (expected.projectId !== projectId || expected.canonicalRoot !== canonicalRoot))
+    ) {
+      throw new CommitJournalError(
+        "PROJECT_IDENTITY_MISMATCH",
+        "项目 UUID 或 canonical root 在写入授权后发生变化"
+      );
+    }
+    return { projectId, canonicalRoot };
   }
 }
 

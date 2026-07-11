@@ -8,6 +8,16 @@ import {
   type UserOverride
 } from "./memory-governor.js";
 
+function userConfirmation(sourceRevision: number) {
+  return {
+    confirmationId: `confirm-${sourceRevision}`,
+    actor: "user_ui" as const,
+    sourceRevision,
+    contentHash: "content-hash",
+    confirmedAt: "2026-07-11T00:00:00.000Z"
+  };
+}
+
 describe("MemoryGovernor and NarrativeCoordinate System", () => {
   describe("NarrativeCoordinate Sorting", () => {
     it("should sort coordinates based on chapter, section, and scene hierarchy", () => {
@@ -63,7 +73,7 @@ describe("MemoryGovernor and NarrativeCoordinate System", () => {
         predicate: "role",
         object: "主角",
         interval: { from: { chapter: 1 } },
-        status: "confirmed",
+        status: "proposed",
         revision: 0
       };
 
@@ -74,12 +84,14 @@ describe("MemoryGovernor and NarrativeCoordinate System", () => {
         predicate: "role",
         object: "配角",
         interval: { from: { chapter: 1 } },
-        status: "confirmed",
+        status: "proposed",
         revision: 0
       };
 
       gov.addClaim(claim1);
       gov.addClaim(claim2);
+      gov.confirmClaim(p1, claim1.id, userConfirmation(0));
+      gov.confirmClaim(p2, claim2.id, userConfirmation(0));
 
       const claimsP1 = gov.getClaims(p1);
       const claimsP2 = gov.getClaims(p2);
@@ -90,6 +102,30 @@ describe("MemoryGovernor and NarrativeCoordinate System", () => {
       expect(claimsP2).toHaveLength(1);
       expect(claimsP2[0]!.id).toBe("claim-2");
 
+    });
+
+    it("rejects model drafts that attempt to enter confirmed memory directly", () => {
+      const gov = new MemoryGovernor();
+      const claim: CanonClaim = {
+        id: "claim-confirmed-direct",
+        projectUuid: "project-uuid-1",
+        subject: "陆尘",
+        predicate: "role",
+        object: "主角",
+        interval: {},
+        status: "confirmed",
+        revision: 0
+      };
+
+      try {
+        gov.addClaim(claim);
+        throw new Error("Expected confirmed-memory rejection");
+      } catch (error) {
+        expect(error).toMatchObject({ code: "CONFIRMED_MEMORY_REQUIRES_USER_CONFIRMATION" });
+      }
+      gov.addClaim({ ...claim, status: "draft" });
+      gov.confirmClaim(claim.projectUuid, claim.id, userConfirmation(0));
+      expect(gov.getClaims(claim.projectUuid)[0]?.status).toBe("confirmed");
     });
   });
 
@@ -105,11 +141,12 @@ describe("MemoryGovernor and NarrativeCoordinate System", () => {
         predicate: "power",
         object: "练气期",
         interval: { from: { chapter: 1 }, to: { chapter: 10 } },
-        status: "confirmed",
+        status: "proposed",
         revision: 0
       };
 
       gov.addClaim(claim);
+      gov.confirmClaim(p1, claim.id, userConfirmation(0));
 
       const overrides: UserOverride[] = [
         {
@@ -122,12 +159,12 @@ describe("MemoryGovernor and NarrativeCoordinate System", () => {
        const view = gov.applyOverrides(p1, overrides);
       expect(view).toHaveLength(1);
       expect(view[0]!.object).toBe("筑基期");
-      expect(view[0]!.revision).toBe(1);
+      expect(view[0]!.revision).toBe(2);
 
       // Verify original baseline is unmodified
       const baseline = gov.getClaims(p1);
       expect(baseline[0]!.object).toBe("练气期");
-      expect(baseline[0]!.revision).toBe(0);
+      expect(baseline[0]!.revision).toBe(1);
 
     });
 
@@ -157,7 +194,7 @@ describe("MemoryGovernor and NarrativeCoordinate System", () => {
         }
       ];
 
-      gov.rebaseline(p1, overrides);
+      gov.rebaseline(p1, overrides, userConfirmation(1));
 
       const baseline = gov.getClaims(p1);
       expect(baseline).toHaveLength(1);
@@ -178,11 +215,12 @@ describe("MemoryGovernor and NarrativeCoordinate System", () => {
         predicate: "location",
         object: "青云宗",
         interval: { from: { chapter: 5 }, to: { chapter: 10 } },
-        status: "confirmed",
+        status: "proposed",
         revision: 0
       };
 
       gov.addClaim(claim);
+      gov.confirmClaim(p1, claim.id, userConfirmation(0));
 
       // Shift timeline by 2 chapters starting from chapter 4
       gov.shiftTimeline(p1, 4, 2);

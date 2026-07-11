@@ -4,6 +4,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { DocumentService } from "@xiaoshuo/document-service";
+import { MANIFEST_REL_PATH } from "@xiaoshuo/project-manifest";
 import type { AgentRunState } from "@xiaoshuo/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { CommitJournalService } from "./commit-journal-service.js";
@@ -11,6 +12,8 @@ import { ExecutionStore } from "./execution-store.js";
 
 const projects: string[] = [];
 const stores: ExecutionStore[] = [];
+const projectId = "f745c8a6-21c2-4f33-bf72-66cab8d0eb30";
+const otherProjectId = "6f9a3be0-438e-4d24-9408-5a04a6e11764";
 
 afterEach(async () => {
   for (const store of stores.splice(0)) {
@@ -179,6 +182,41 @@ describe("CommitJournalService", () => {
       attemptId: "attempt-2"
     })).rejects.toMatchObject({ code: "IDEMPOTENCY_KEY_CONFLICT" });
   });
+
+  it("rejects a durable write when the manifest UUID no longer matches the persisted run", async () => {
+    const projectRoot = await temporaryProject();
+    const store = track(ExecutionStore.open(projectRoot));
+    store.createRun(makeRun(projectRoot));
+    await writeProjectIdentity(projectRoot, otherProjectId);
+    const service = new CommitJournalService({ store, projectRoot });
+
+    await expect(service.write(writeInput())).rejects.toMatchObject({ code: "PROJECT_IDENTITY_MISMATCH" });
+    expect(await fs.readFile(path.join(projectRoot, "02_正文", "第一章.txt"), "utf8")).toBe("old chapter");
+    expect(store.listCommitJournal("run-1")).toHaveLength(0);
+  });
+
+  it("rechecks the manifest UUID after temp write and before replacing the target", async () => {
+    const projectRoot = await temporaryProject();
+    const store = track(ExecutionStore.open(projectRoot));
+    store.createRun(makeRun(projectRoot));
+    const service = new CommitJournalService({
+      store,
+      projectRoot,
+      idFactory: () => "journal-identity-race",
+      afterStage: async (stage) => {
+        if (stage === "temp_written") {
+          await writeProjectIdentity(projectRoot, otherProjectId);
+        }
+      }
+    });
+
+    await expect(service.write(writeInput())).rejects.toMatchObject({ code: "PROJECT_IDENTITY_MISMATCH" });
+    expect(await fs.readFile(path.join(projectRoot, "02_正文", "第一章.txt"), "utf8")).toBe("old chapter");
+    expect(store.getCommitJournal("journal-identity-race")).toMatchObject({
+      stage: "recovery_required",
+      error_code: "PROJECT_IDENTITY_MISMATCH"
+    });
+  });
 });
 
 async function temporaryProject(): Promise<string> {
@@ -186,7 +224,20 @@ async function temporaryProject(): Promise<string> {
   projects.push(project);
   await fs.mkdir(path.join(project, "02_正文"), { recursive: true });
   await fs.writeFile(path.join(project, "02_正文", "第一章.txt"), "old chapter", "utf8");
+  await writeProjectIdentity(project, projectId);
   return project;
+}
+
+async function writeProjectIdentity(projectRoot: string, identity: string): Promise<void> {
+  const manifestPath = path.join(projectRoot, MANIFEST_REL_PATH);
+  await fs.mkdir(path.dirname(manifestPath), { recursive: true });
+  await fs.writeFile(manifestPath, JSON.stringify({
+    project_path: path.resolve(projectRoot),
+    project_id: identity,
+    version: 1,
+    generated_at: "2026-07-10 00:00:00",
+    entries: []
+  }), "utf8");
 }
 
 function track(store: ExecutionStore): ExecutionStore {
@@ -213,7 +264,7 @@ function makeRun(projectRoot: string): AgentRunState {
     run_id: "run-1",
     request_id: "request-1",
     conversation_id: "conversation-1",
-    project_id: "project-1",
+    project_id: projectId,
     project_path: projectRoot,
     goal: {
       instruction: "Write a chapter",

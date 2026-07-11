@@ -69,6 +69,30 @@ export interface AgentFeatureFlagRegistry {
   snapshot(): AgentFeatureFlagSnapshot;
 }
 
+export type AgentExecutionV2AdmissionErrorCode = "AGENT_EXECUTION_V2_DISABLED" | "AGENT_V2_SHADOW_UNAVAILABLE";
+
+/**
+ * `shadow` has no legacy adapter or comparison protocol yet. Treating it as
+ * executable would silently make it equivalent to `on`, so both non-on modes
+ * reject durable execution until a zero-side-effect comparison path exists.
+ */
+export function assertAgentExecutionV2Enabled(snapshot: AgentFeatureFlagSnapshot): AgentFeatureFlagSnapshot {
+  if (snapshot.agent_execution_v2_mode === "on") {
+    return snapshot;
+  }
+  const code: AgentExecutionV2AdmissionErrorCode = snapshot.agent_execution_v2_mode === "shadow"
+    ? "AGENT_V2_SHADOW_UNAVAILABLE"
+    : "AGENT_EXECUTION_V2_DISABLED";
+  const message = code === "AGENT_V2_SHADOW_UNAVAILABLE"
+    ? "Agent v2 shadow mode is unavailable until its legacy comparison adapter is implemented"
+    : "Agent v2 execution is disabled";
+  throw Object.assign(new Error(message), { code });
+}
+
+export function isAgentExecutionV2Enabled(snapshot: AgentFeatureFlagSnapshot): boolean {
+  return snapshot.agent_execution_v2_mode === "on";
+}
+
 export class InMemoryAgentFeatureFlagRegistry implements AgentFeatureFlagRegistry {
   private overrides: Partial<AgentFeatureFlagSnapshot>;
 
@@ -102,7 +126,7 @@ function flag(
 }
 
 function normalize(snapshot: AgentFeatureFlagSnapshot): AgentFeatureFlagSnapshot {
-  if (snapshot.agent_execution_v2_mode === "off") {
+  if (snapshot.agent_execution_v2_mode === "off" || snapshot.agent_execution_v2_mode === "shadow") {
     return {
       ...snapshot,
       model_gateway_v2: false,

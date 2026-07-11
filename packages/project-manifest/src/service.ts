@@ -31,6 +31,21 @@ export const IGNORED_DIRS = new Set([
 
 export const BROWSABLE_EXTENSIONS = new Set([".txt", ".md"]);
 
+/** Read the persisted identity without rebuilding or repairing the manifest. */
+export async function readExistingProjectId(projectPath: string): Promise<string | null> {
+  const manifestPath = path.join(path.resolve(projectPath), MANIFEST_REL_PATH);
+  const raw = await fs.readFile(manifestPath, "utf8").catch(() => "");
+  if (!raw.trim()) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as { project_id?: unknown };
+    return parseProjectId(parsed.project_id);
+  } catch {
+    return null;
+  }
+}
+
 const GROUP_RULES = [
   [SETTINGS_DIR, "设定集"],
   [OUTLINE_DIR, "大纲"],
@@ -77,6 +92,11 @@ type LoadedManifest = {
   version: number;
   generated_at: string;
 };
+
+// Several runtime routes may request a first manifest at once. Coalesce the
+// initial scan per manifest path so concurrent callers cannot mint distinct
+// project IDs and race the atomic rename.
+const inFlightManifestRebuilds = new Map<string, Promise<ManifestEntry[]>>();
 
 export class ProjectManifestService {
   private readonly projectPath: string;
@@ -210,6 +230,22 @@ export class ProjectManifestService {
   }
 
   async rebuild(): Promise<ManifestEntry[]> {
+    const existing = inFlightManifestRebuilds.get(this.manifestPath);
+    if (existing) {
+      return existing;
+    }
+    const rebuild = this.rebuildInternal();
+    inFlightManifestRebuilds.set(this.manifestPath, rebuild);
+    try {
+      return await rebuild;
+    } finally {
+      if (inFlightManifestRebuilds.get(this.manifestPath) === rebuild) {
+        inFlightManifestRebuilds.delete(this.manifestPath);
+      }
+    }
+  }
+
+  private async rebuildInternal(): Promise<ManifestEntry[]> {
     const entries: ManifestEntry[] = [];
     await walkProject(this.projectPath, async (absolutePath) => {
       const suffix = path.extname(absolutePath).toLowerCase();

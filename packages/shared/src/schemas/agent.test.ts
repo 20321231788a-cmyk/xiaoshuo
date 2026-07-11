@@ -257,22 +257,25 @@ describe("agent schemas", () => {
     expect(() => agentExecutionStepSchema.parse({ ...step, version: 0 })).toThrow();
     expect(() => agentExecutionStepSchema.parse({ ...step, necessity: "conditional" })).toThrow();
 
-    expect(agentRunBudgetSchema.parse({})).toEqual({
+    const budget = {
+      schema_version: 1 as const,
+      budget_id: "budget-1",
+      profile_id: "test-profile",
       max_steps: 3,
       max_replans: 1,
-      max_attempts_per_step: 2,
-      max_duration_ms: 300_000,
+      max_model_calls: 4,
       max_input_tokens: 32_000,
       max_output_tokens: 8_000,
-      max_cost: 1,
-      cost_currency: "USD",
-      pricing_snapshot_id: "",
+      max_estimated_cost: 1,
+      deadline_at: "2026-07-10T01:00:00.000Z",
       used_steps: 0,
       used_replans: 0,
+      used_model_calls: 0,
       used_input_tokens: 0,
       used_output_tokens: 0,
       estimated_cost: 0
-    });
+    };
+    expect(agentRunBudgetSchema.parse(budget)).toEqual(budget);
   });
 
   it("keeps attempt history and artifact/observation ownership explicit", () => {
@@ -334,17 +337,31 @@ describe("agent schemas", () => {
   });
 
   it("enforces budget boundaries", () => {
-    expect(() => agentRunBudgetSchema.parse({ max_steps: 0 })).toThrow();
-    expect(() => agentRunBudgetSchema.parse({ max_attempts_per_step: 0 })).toThrow();
-    expect(() => agentRunBudgetSchema.parse({ max_duration_ms: 0 })).toThrow();
-    expect(() => agentRunBudgetSchema.parse({ max_replans: -1 })).toThrow();
-    expect(() => agentRunBudgetSchema.parse({ used_output_tokens: -1 })).toThrow();
-    expect(() => agentRunBudgetSchema.parse({ max_cost: Number.POSITIVE_INFINITY })).toThrow();
-    expect(() => agentRunBudgetSchema.parse({ cost_currency: "CNY" })).toThrow();
-    expect(agentRunBudgetSchema.parse({ max_replans: 0, max_cost: 0 })).toMatchObject({
-      max_replans: 0,
-      max_cost: 0
-    });
+    const budget = {
+      schema_version: 1 as const,
+      budget_id: "budget-1",
+      profile_id: "test-profile",
+      max_steps: 3,
+      max_replans: 1,
+      max_model_calls: 4,
+      max_input_tokens: 32_000,
+      max_output_tokens: 8_000,
+      max_estimated_cost: 1,
+      deadline_at: "2026-07-10T01:00:00.000Z",
+      used_steps: 0,
+      used_replans: 0,
+      used_model_calls: 0,
+      used_input_tokens: 0,
+      used_output_tokens: 0,
+      estimated_cost: 0
+    };
+    expect(() => agentRunBudgetSchema.parse({ ...budget, max_steps: 0 })).toThrow();
+    expect(() => agentRunBudgetSchema.parse({ ...budget, max_replans: -1 })).toThrow();
+    expect(() => agentRunBudgetSchema.parse({ ...budget, used_output_tokens: -1 })).toThrow();
+    expect(() => agentRunBudgetSchema.parse({ ...budget, max_estimated_cost: Number.POSITIVE_INFINITY })).toThrow();
+    expect(() => agentRunBudgetSchema.parse({ ...budget, deadline_at: "not-a-date" })).toThrow();
+    expect(() => agentRunBudgetSchema.parse({ ...budget, max_cost: 1 })).toThrow();
+    expect(agentRunBudgetSchema.parse({ ...budget, max_replans: 0 })).toMatchObject({ max_replans: 0 });
   });
 
   it("parses confirmations and run events with safe defaults", () => {
@@ -390,6 +407,24 @@ describe("agent schemas", () => {
           selected_file_refs: ["01_正文/第1章.md"]
         }
       },
+      budget: {
+        schema_version: 1,
+        budget_id: "budget-run-1",
+        profile_id: "test-profile",
+        max_steps: 3,
+        max_replans: 1,
+        max_model_calls: 4,
+        max_input_tokens: 32_000,
+        max_output_tokens: 8_000,
+        max_estimated_cost: 1,
+        deadline_at: "2026-07-10T01:00:00.000Z",
+        used_steps: 0,
+        used_replans: 0,
+        used_model_calls: 0,
+        used_input_tokens: 0,
+        used_output_tokens: 0,
+        estimated_cost: 0
+      },
       created_at: "2026-07-10T00:00:00.000Z",
       updated_at: "2026-07-10T00:00:00.000Z"
     });
@@ -434,6 +469,10 @@ describe("agent schemas", () => {
         agent_inline_plan_ui: false
       }
     });
+    expect("legacy_unbudgeted" in run.budget).toBe(false);
+    if ("legacy_unbudgeted" in run.budget) {
+      throw new Error("expected canonical budget");
+    }
     expect(run.budget.max_steps).toBe(3);
     expect(agentRunStateSchema.parse({ ...run, error_code: "RUN_RECOVERY_FAILED", error: "recovery failed" })).toMatchObject({
       error_code: "RUN_RECOVERY_FAILED",
@@ -502,6 +541,12 @@ describe("agent schemas", () => {
     const run = {
       run_id: "run-1",
       goal: { instruction: "续写下一章" },
+      budget: {
+        schema_version: 0,
+        budget_id: "",
+        profile_id: "legacy_unbudgeted",
+        legacy_unbudgeted: true
+      },
       created_at: "2026-07-10T00:00:00.000Z",
       updated_at: "2026-07-10T00:00:00.000Z"
     };

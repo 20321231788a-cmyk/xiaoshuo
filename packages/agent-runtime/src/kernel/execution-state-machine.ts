@@ -84,7 +84,7 @@ export const RUN_STATUS_TRANSITIONS = defineTransitions<ExecutionRunStatus>({
   waiting_user_input: ["planning", "running", "paused", "cancelling", "failed"],
   waiting_confirmation: ["running", "paused", "cancelling", "failed"],
   paused: ["running", "cancelling"],
-  failed: ["running", "cancelling"],
+  failed: ["running", "paused", "cancelling"],
   cancelling: ["cancelled"],
   cancelled: [],
   completed: []
