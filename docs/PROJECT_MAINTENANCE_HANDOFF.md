@@ -2258,6 +2258,27 @@ npm test
 - 抽卡挑选（`selectCardDraw`）重构并接入了 CommitJournal 服务，利用 `req_card_draw_select_${drawId}_${candidateId}` 构建 synthetic durable run 事务性写入与物理归档。
 - 本轮验证：`npm run typecheck`、`npm test`（86 files / 673 tests）、`npx playwright test tests/e2e/project-entry.spec.ts` E2E 确认恢复链路测试全部绿过。
 
+### 15.71 2026-07-11 P3-P7 智能化优化开发与校验记录
+
+- **P3 记忆与图谱时序**：
+  - 引入了 `NarrativeCoordinate` 故事时间多维度排序和半开区间有效校验，实现时序上下文过滤；
+  - 引入了 `CanonClaim` 记忆断言与 `UserOverride` 投影覆盖版本控制，支持 `rebaseline` 与平移操作；
+  - 优化了图谱增量更新与失效处理，实现修改时将旧 claims 标记为 `superseded` 并增量删除重建变化路径下的图谱实体。
+- **P4 上下文算力预算**：
+  - 实现了基于总 Context Window、Reserve 动态扣减的 `ContextScheduler` 预算管理器；
+  - 实现了 MMR 去重选择策略，加入 Jaccard 相似度 Novelty 惩罚和路径最大数量（2个）限制；
+  - 实现了外部不可信上下文的安全标志拦截 `allow_instruction: false` 阻断注入，以及 Markdown/JSON 等文本的语义截断机制。
+- **P5 质量门禁与本地反馈**：
+  - 实现了格式、字数、图谱一致性、大纲对齐、风格等校验器的统一 `EvaluatorRegistry` 门禁；
+  - 实现了 2 次自纠正修订循环，避免死循环消耗并拦截不合规的实体写入；
+  - 新增数据库版本 2，引入 artifact 反馈存储、累计 3 次 discard 反馈自动提取偏好候选 `PreferenceCandidate` 以及 `PreferenceVersion` 的历史回滚逻辑。
+- **P6 交互计划卡**：
+  - 引入了会话消息流中可折叠的 `SessionPlanCard` 组件，渲染任务总目标、步骤进度和控制选项；
+  - 打通了后端暂停、恢复、取消、单步重试 API 交互，结合 React state 防抖去重和 operation_id 幂等防重击。
+- **P7 自动化 Eval**：
+  - 根目录 `package.json` 接入 `eval:routing`, `eval:planning`, `eval:memory`, `eval:quality`, `eval:recovery`, `eval:security` 门禁脚本；
+  - 全量 92 个测试文件，718 个测试用例 **100% 绿过**。
+
 ## 16. 交接注意
 
 接手时先看这三个文件：
