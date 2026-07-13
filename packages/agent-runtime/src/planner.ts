@@ -1,6 +1,6 @@
 import { loadModelConfig, type ConfigServiceOptions } from "@xiaoshuo/config-service";
 import { DocumentService } from "@xiaoshuo/document-service";
-import { ModelGateway, OpenAICompatibleClient, type ChatCompletionMessage } from "@xiaoshuo/model-client";
+import { OpenAICompatibleClient, type ChatCompletionMessage } from "@xiaoshuo/model-client";
 import { ProjectManifestService } from "@xiaoshuo/project-manifest";
 import { agentPlanResponseSchema, type AgentPlanRequest, type AgentPlanResponse, type DocumentInfo, type FileOperation } from "@xiaoshuo/shared";
 import { isCancellationError, type AgentRunOptions } from "./cancellation.js";
@@ -33,15 +33,14 @@ export class AgentPlanner {
   private readonly config: ConfigServiceOptions;
   private readonly documents: DocumentService;
   private readonly manifest: ProjectManifestService;
-  private readonly gateway: ModelGateway;
+  private readonly modelClient: PlannerModelClient;
 
   constructor(options: AgentPlannerOptions) {
     this.projectRoot = options.projectRoot;
     this.config = options.config ?? {};
     this.documents = new DocumentService({ projectRoot: options.projectRoot });
     this.manifest = new ProjectManifestService(options.projectRoot);
-    const rawClient = options.modelClient ?? new OpenAICompatibleClient();
-    this.gateway = rawClient instanceof ModelGateway ? rawClient : new ModelGateway(rawClient as any);
+    this.modelClient = options.modelClient ?? new OpenAICompatibleClient();
   }
 
   async buildPlan(request: AgentPlanRequest, options: AgentRunOptions = {}): Promise<AgentPlanResponse> {
@@ -79,12 +78,13 @@ export class AgentPlanner {
     }
 
     try {
-      const parsed = await this.gateway.completeStructured(
+      const raw = await this.modelClient.requestCompletion(
         config,
         this.buildPlannerMessages(input.instruction, docs),
-        agentPlanResponseSchema,
-        { purpose: "planning", signal: options.signal }
+        0.1,
+        { signal: options.signal }
       );
+      const parsed = agentPlanResponseSchema.parse(this.parseJson(raw));
       const rawOperations = Array.isArray(parsed.operations) ? parsed.operations : [];
       if (!rawOperations.length) {
         warnings.push("AI 未返回有效 operations。");

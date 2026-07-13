@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   compareCoordinates,
+  isLegacyNarrativeCoordinate,
   isCoordinateWithin,
   MemoryGovernor,
+  validateCoordinateInterval,
   type NarrativeCoordinate,
   type CanonClaim,
   type UserOverride
@@ -32,6 +34,31 @@ describe("MemoryGovernor and NarrativeCoordinate System", () => {
       const sorted = [...coords].sort(compareCoordinates);
 
       expect(sorted).toEqual([c1, c2, c3, c4, c5, c6]);
+    });
+
+    it("orders timeline coordinates only within the same revision and phase", () => {
+      const before = {
+        schemaVersion: 1 as const,
+        timelineId: "main",
+        anchorId: "chapter-2",
+        ordinal: 20,
+        timelineRevision: 4,
+        phase: "before" as const
+      };
+      const at = { ...before, phase: "at" as const };
+      const after = { ...before, phase: "after" as const };
+      expect([after, at, before].sort(compareCoordinates)).toEqual([before, at, after]);
+      expect(() => compareCoordinates(before, { ...before, timelineRevision: 5 }))
+        .toThrowError(expect.objectContaining({ code: "MEMORY_NARRATIVE_COORDINATE_INVALID" }));
+    });
+
+    it("rejects inverted or mixed-version intervals instead of silently comparing them", () => {
+      expect(() => validateCoordinateInterval({ from: { chapter: 3 }, to: { chapter: 3 } }))
+        .toThrowError(expect.objectContaining({ code: "MEMORY_NARRATIVE_COORDINATE_INVALID" }));
+      expect(() => validateCoordinateInterval({
+        from: { schemaVersion: 1, timelineId: "main", anchorId: "a", ordinal: 1, timelineRevision: 1, phase: "at" },
+        to: { schemaVersion: 1, timelineId: "main", anchorId: "b", ordinal: 2, timelineRevision: 2, phase: "at" }
+      })).toThrowError(expect.objectContaining({ code: "MEMORY_NARRATIVE_COORDINATE_INVALID" }));
     });
   });
 
@@ -200,7 +227,9 @@ describe("MemoryGovernor and NarrativeCoordinate System", () => {
       expect(baseline).toHaveLength(1);
       expect(baseline[0]!.object).toBe("天心剑");
       expect(baseline[0]!.status).toBe("confirmed");
-      expect(baseline[0]!.interval.from!.chapter).toBe(2);
+      const from = baseline[0]!.interval.from;
+      if (!isLegacyNarrativeCoordinate(from)) throw new Error("expected legacy coordinate");
+      expect(from.chapter).toBe(2);
       expect(baseline[0]!.revision).toBe(2); // bumped revision
     });
 
@@ -226,8 +255,11 @@ describe("MemoryGovernor and NarrativeCoordinate System", () => {
       gov.shiftTimeline(p1, 4, 2);
 
       const baseline = gov.getClaims(p1);
-      expect(baseline[0]!.interval.from!.chapter).toBe(7); // 5 + 2 = 7
-      expect(baseline[0]!.interval.to!.chapter).toBe(12); // 10 + 2 = 12
+      const from = baseline[0]!.interval.from;
+      const to = baseline[0]!.interval.to;
+      if (!isLegacyNarrativeCoordinate(from) || !isLegacyNarrativeCoordinate(to)) throw new Error("expected legacy coordinates");
+      expect(from.chapter).toBe(7); // 5 + 2 = 7
+      expect(to.chapter).toBe(12); // 10 + 2 = 12
 
     });
   });

@@ -7,6 +7,7 @@ import {
   agentRunStateSchema,
   type AgentExecutionStep,
   type AgentExecutionStepType,
+  type AgentConfirmationTargetBinding,
   type AgentRunDeleteResponse,
   type AgentRunExport,
   type AgentRunBudget,
@@ -26,6 +27,7 @@ import {
   issueDefaultAgentBudget,
   materializeBudgetState,
   validateTrustedBudgetGrant,
+  type AgentBudgetErrorCode,
   type TrustedBudgetProfileIssuer
 } from "./budget-policy.js";
 import { openExecutionStore } from "./execution-store.js";
@@ -36,9 +38,15 @@ import {
   type AgentFeatureFlagRegistry
 } from "./feature-flag-registry.js";
 import type {
+  ExecutionModelBudgetReservation,
   ExecutionControlOperation,
   ExecutionRuntimeInstance,
   ExecutionStorePort,
+  MarkModelBudgetDispatchedInput,
+  ReconcileModelBudgetReservationsResult,
+  ReleaseModelBudgetInput,
+  ReserveModelBudgetInput,
+  SettleModelBudgetInput,
   StoredAgentRunEvent
 } from "./execution-store-port.js";
 import {
@@ -46,6 +54,7 @@ import {
   assertStepStatusTransition,
   requestCooperativeRunControl
 } from "./execution-state-machine.js";
+import { sha256StableJson } from "./confirmation-receipt.js";
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 10_000;
 const DEFAULT_LEASE_TTL_MS = 30_000;
@@ -65,6 +74,8 @@ export type RunCoordinatorOptions = {
 
 export type BeginRunOptions = {
   projectId?: string;
+  /** Immutable governed-memory snapshot consumed when this run was created. */
+  baseMemoryRevision?: number;
   stepType?: AgentExecutionStepType;
   actionId?: string;
   skillId?: string;
@@ -78,6 +89,12 @@ export type DurableRunExecution = {
   request_id: string;
   step_id: string;
   attempt_id: string;
+  confirmation_receipt_id?: string;
+  confirmation_receipt_version?: number;
+  confirmation_scope_fingerprint?: string;
+  confirmation_action_input_hash?: string;
+  confirmation_target_bindings?: AgentConfirmationTargetBinding[];
+  confirmation_action_payload?: Record<string, unknown>;
   signal: AbortSignal;
 };
 
@@ -98,6 +115,7 @@ export class RunRequestReplayError extends Error {
 }
 
 export class RunCoordinatorConflictError extends Error {
+  readonly code = "VERSION_CONFLICT";
   readonly runId: string;
 
   constructor(runId: string, message: string) {
@@ -192,6 +210,7 @@ export class RunCoordinator {
       conversation_id: request.conversation_id || "",
       project_id: options.projectId || projectId(this.projectRoot),
       project_path: this.projectRoot,
+      base_memory_revision: nonNegativeInteger(options.baseMemoryRevision ?? 0),
       goal: {
         instruction: request.content || "",
         autonomy_mode: request.autonomy_mode || "plan",
@@ -256,7 +275,7 @@ export class RunCoordinator {
 
     this.transitionRun(runId, "planning", "run.planning");
     this.transitionRun(runId, "running", "run.started");
-    const attempt = this.store.startAttempt({
+    const started = this.store.startAttemptWithBudget({
       attempt_id: attemptId,
       run_id: runId,
       step_id: stepId,
@@ -265,6 +284,10 @@ export class RunCoordinator {
       idempotency_key: digestJson({ run_id: runId, step_id: stepId, attempt: 1, action: step.action_id }),
       started_at: createdAt
     });
+    if (!started.started) {
+      throw this.budgetBlockedError(started);
+    }
+    const attempt = started.attempt;
 
     const controller = new AbortController();
     const execution: ActiveExecution = {
@@ -439,24 +462,32 @@ export class RunCoordinator {
     }
 
     let run = this.requireRun(runId);
-    try {
-      assertBudgetResumable(run.budget, this.timestamp());
-    } catch (error) {
-      if (error instanceof AgentBudgetPolicyError) {
-        run = this.pauseRunForBudget(run, error);
-      }
-      throw error;
-    }
     const operation = this.createControlOperation(run, operationId, operationType, expectedVersion);
     try {
       if (run.status !== "paused" && run.status !== "failed") {
         throw Object.assign(new Error(`Run ${runId} cannot resume from ${run.status}`), { code: "RUN_NOT_RESUMABLE" });
+      }
+      try {
+        // A paused run can outlive its original runtime (for example after a
+        // terminal/window shutdown). Resolve any orphaned physical dispatch
+        // reservation before checking whether this run still has budget.
+        this.store.reconcileModelBudgetReservations(runId);
+        run = this.requireRun(runId);
+        assertBudgetResumable(run.budget, this.timestamp());
+      } catch (error) {
+        if (error instanceof AgentBudgetPolicyError) {
+          run = this.pauseRunForBudget(run, error);
+        }
+        throw error;
       }
       const stepId = options.stepId || run.current_step_id;
       const step = this.store.getStep(runId, stepId);
       if (!step) {
         throw Object.assign(new Error(`Step ${stepId} does not exist in run ${runId}`), { code: "STEP_NOT_FOUND" });
       }
+      const confirmationReceipt = operationType === "resume"
+        ? this.findTrustedApprovedConfirmation(run, step)
+        : null;
       if (run.status === "failed" && !step.retryable) {
         throw Object.assign(new Error(`Step ${stepId} cannot be replayed safely`), { code: "STEP_NOT_RETRYABLE" });
       }
@@ -498,7 +529,7 @@ export class RunCoordinator {
       const attemptNumber = attemptHistory.reduce((highest, attempt) => Math.max(highest, attempt.attempt), 0) + 1;
       const attemptId = `attempt_${this.idFactory()}`;
       const request = this.getRecoveryRequest(runId);
-      const attempt = this.store.startAttempt({
+      const started = this.store.startAttemptWithBudget({
         attempt_id: attemptId,
         run_id: runId,
         step_id: stepId,
@@ -507,12 +538,24 @@ export class RunCoordinator {
         idempotency_key: digestJson({ run_id: runId, step_id: stepId, attempt: attemptNumber, action: step.action_id }),
         started_at: this.timestamp()
       });
+      if (!started.started) {
+        throw this.budgetBlockedError(started);
+      }
+      const attempt = started.attempt;
       const controller = new AbortController();
       const active: ActiveExecution = {
         run_id: runId,
         request_id: run.request_id,
         step_id: stepId,
         attempt_id: attempt.attempt_id,
+        ...(confirmationReceipt ? {
+          confirmation_receipt_id: confirmationReceipt.confirmation_id,
+          confirmation_receipt_version: confirmationReceipt.version,
+          confirmation_scope_fingerprint: confirmationReceipt.scope_fingerprint,
+          confirmation_action_input_hash: confirmationReceipt.action_input_hash,
+          confirmation_target_bindings: confirmationReceipt.target_bindings,
+          confirmation_action_payload: confirmationReceipt.action_payload
+        } : {}),
         signal: controller.signal,
         controller,
         cleanupExternalSignal: () => undefined,
@@ -541,7 +584,8 @@ export class RunCoordinator {
     confirmationId: string,
     status: "approved" | "rejected",
     operationId: string,
-    expectedVersion: number
+    expectedVersion: number,
+    expectedScopeFingerprint = ""
   ) {
     const existingOperation = this.store.getControlOperation(operationId);
     if (existingOperation) {
@@ -551,6 +595,11 @@ export class RunCoordinator {
       const replay = this.store.getConfirmation(confirmationId);
       if (!replay) {
         throw Object.assign(new Error(`Confirmation ${confirmationId} not found`), { code: "CONFIRMATION_NOT_FOUND" });
+      }
+      if (status === "approved" && replay.scope_fingerprint !== expectedScopeFingerprint) {
+        throw Object.assign(new Error(`Confirmation ${confirmationId} scope fingerprint changed`), {
+          code: "CONFIRMATION_SCOPE_MISMATCH"
+        });
       }
       return replay;
     }
@@ -622,6 +671,7 @@ export class RunCoordinator {
     const resolved = this.store.resolveConfirmation({
       confirmation_id: confirmationId,
       expected_version: expectedVersion,
+      expected_scope_fingerprint: expectedScopeFingerprint,
       status,
       resolved_at: this.timestamp(),
       resolved_by: "user"
@@ -739,12 +789,17 @@ export class RunCoordinator {
         continue;
       }
       try {
-        assertBudgetResumable(claim.value.budget, now);
-        recovered.push(claim.value);
+        // A process may have reached the provider after reserving budget but
+        // before persisting provider usage. Reconcile that ledger before a
+        // recovered run can issue any further outbound request.
+        this.store.reconcileModelBudgetReservations(claim.value.run_id);
+        const reconciled = this.requireRun(claim.value.run_id);
+        assertBudgetResumable(reconciled.budget, now);
+        recovered.push(reconciled);
       } catch (error) {
         recovered.push(error instanceof AgentBudgetPolicyError
-          ? this.pauseRunForBudget(claim.value, error)
-          : claim.value);
+          ? this.pauseRunForBudget(this.requireRun(claim.value.run_id), error)
+          : this.requireRun(claim.value.run_id));
       }
     }
     return recovered;
@@ -758,12 +813,77 @@ export class RunCoordinator {
     return this.store.listRuns({ statuses, limit, before_updated_at: beforeUpdatedAt });
   }
 
+  /**
+   * A memory correction invalidates any active run that was planned against an
+   * earlier memory revision. Pause cooperatively and abort the in-flight model
+   * request so the stale context cannot reach a later write checkpoint.
+   */
+  pauseRunsForMemoryRevision(currentMemoryRevision: number): AgentRunState[] {
+    this.assertOpen();
+    const revision = nonNegativeInteger(currentMemoryRevision);
+    const paused: AgentRunState[] = [];
+    for (const run of this.store.listRuns({ statuses: ["running"], limit: 500 })) {
+      if ((run.base_memory_revision ?? 0) >= revision) {
+        continue;
+      }
+      const active = this.active.get(run.run_id);
+      const error = Object.assign(new Error("项目记忆已变更，当前运行使用的 memory revision 已过期"), {
+        code: "MEMORY_REVISION_STALE"
+      });
+      this.store.appendEventInTransaction(run.run_id, {
+        event_type: "memory.revision_stale",
+        step_id: run.current_step_id,
+        payload: {
+          base_memory_revision: run.base_memory_revision ?? 0,
+          current_memory_revision: revision
+        }
+      });
+      if (active) {
+        active.control = "pause";
+        active.controller.abort(error);
+      }
+      paused.push(this.requestPause(
+        run.run_id,
+        `op_memory_revision_${this.idFactory()}`,
+        this.requireRun(run.run_id).version
+      ));
+    }
+    return paused;
+  }
+
   listEvents(runId: string, after = 0, limit = 200): StoredAgentRunEvent[] {
     return this.store.listEvents(runId, { after, limit });
   }
 
   listCommitJournal(runId?: string) {
     return this.store.listCommitJournal(runId);
+  }
+
+  replanRun(runId: string, expectedVersion: number, steps: AgentExecutionStep[]): AgentRunState {
+    this.assertOpen();
+    this.requireExecutionFeatureFlagSnapshot();
+    const run = this.requireRun(runId);
+    const result = this.store.replaceStepsWithBudget({
+      run_id: runId,
+      expected_run_version: expectedVersion,
+      plan_version: run.plan_version + 1,
+      steps,
+      updated_at: this.timestamp(),
+      event: {
+        event_type: "run.replanned",
+        step_id: run.current_step_id,
+        payload: { previous_plan_version: run.plan_version, next_plan_version: run.plan_version + 1 }
+      }
+    });
+    if (!("applied" in result)) {
+      const error = this.budgetBlockedError(result);
+      this.pauseActiveRunForBudget(runId, error);
+      throw error;
+    }
+    if (result.applied) {
+      return result.value;
+    }
+    throw new RunCoordinatorConflictError(runId, "Run changed while applying replan");
   }
 
   exportRun(runId: string): AgentRunExport {
@@ -861,22 +981,88 @@ export class RunCoordinator {
   ): AgentRunState {
     const createdAt = this.timestamp();
     const confirmationId = `confirmation_${this.idFactory()}`;
+    const currentRun = this.requireRun(active.run_id);
+    const providedScope = response.confirmation_scope;
+    if (!providedScope && step.type === "file_operation") {
+      throw Object.assign(new Error("File confirmation checkpoint is missing a sealed target scope"), {
+        code: "CONFIRMATION_SCOPE_REQUIRED"
+      });
+    }
+    const coordinatorSealedPayload = {
+      intent: response.intent,
+      reply: response.reply,
+      plan: response.plan ?? null,
+      skill_result: response.skill_result ?? null,
+      saved_paths: response.saved_paths ?? []
+    };
+    const scope = providedScope ?? {
+      project_id: currentRun.project_id,
+      plan_version: currentRun.plan_version,
+      action_id: step.action_id,
+      target_bindings: [],
+      action_input_hash: sha256StableJson(coordinatorSealedPayload),
+      scope_fingerprint: "",
+      action_payload: coordinatorSealedPayload
+    };
+    if (
+      scope.project_id !== currentRun.project_id ||
+      scope.plan_version !== currentRun.plan_version
+    ) {
+      throw Object.assign(new Error("Confirmation scope does not match the active run and step"), {
+        code: "CONFIRMATION_SCOPE_MISMATCH"
+      });
+    }
+    const actionInputHash = sha256StableJson(scope.action_payload);
+    if (scope.action_input_hash !== actionInputHash) {
+      throw Object.assign(new Error("Confirmation action input hash does not match its sealed payload"), {
+        code: "CONFIRMATION_HASH_MISMATCH"
+      });
+    }
+    const scopeFingerprint = sha256StableJson({
+      run_id: active.run_id,
+      step_id: active.step_id,
+      project_id: scope.project_id,
+      plan_version: scope.plan_version,
+      action_id: scope.action_id,
+      target_bindings: scope.target_bindings,
+      action_input_hash: actionInputHash,
+      action_payload: scope.action_payload
+    });
+    if (providedScope && scope.scope_fingerprint !== scopeFingerprint) {
+      throw Object.assign(new Error("Confirmation scope fingerprint does not match its sealed scope"), {
+        code: "CONFIRMATION_SCOPE_MISMATCH"
+      });
+    }
     const confirmation = this.store.upsertConfirmation({
+      schema_version: 1,
+      kind: "action_execution",
       confirmation_id: confirmationId,
       version: 1,
       run_id: active.run_id,
       step_id: active.step_id,
-      action: step.action_id,
+      action: scope.action_id,
       risk_level: "high",
       summary: truncate(response.reply || response.skill_result?.result || "操作需要确认", 2_000),
-      target_paths: uniqueStrings(response.saved_paths || []),
-      expected_versions: {},
-      expected_hashes: {},
+      target_paths: uniqueStrings(scope.target_bindings.map((binding) => binding.path)),
+      expected_versions: Object.fromEntries(
+        scope.target_bindings.map((binding) => [binding.path, binding.document_version])
+      ),
+      expected_hashes: Object.fromEntries(
+        scope.target_bindings.map((binding) => [binding.path, binding.base_hash])
+      ),
       proposed_artifact_refs: [],
+      project_id: scope.project_id,
+      plan_version: scope.plan_version,
+      action_input_hash: actionInputHash,
+      scope_fingerprint: scopeFingerprint,
+      target_bindings: scope.target_bindings,
+      action_payload: scope.action_payload,
       status: "pending",
       // The default is deliberately finite so abandoned preview requests do
       // not leave a durable run waiting forever.
-      expires_at: new Date(Date.parse(createdAt) + 15 * 60_000).toISOString()
+      expires_at: new Date(Date.parse(createdAt) + 15 * 60_000).toISOString(),
+      created_at: createdAt,
+      updated_at: createdAt
     }, 0);
     if (!confirmation.applied || !confirmation.value) {
       throw new RunCoordinatorConflictError(active.run_id, "Could not persist confirmation checkpoint");
@@ -1050,8 +1236,41 @@ export class RunCoordinator {
     });
   }
 
+  reserveModelBudget(input: ReserveModelBudgetInput): ExecutionModelBudgetReservation {
+    return this.store.reserveModelBudget(input);
+  }
+
+  markModelBudgetDispatched(input: MarkModelBudgetDispatchedInput): ExecutionModelBudgetReservation {
+    return this.store.markModelBudgetDispatched(input);
+  }
+
+  settleModelBudget(input: SettleModelBudgetInput): ExecutionModelBudgetReservation {
+    return this.store.settleModelBudget(input);
+  }
+
+  releaseModelBudget(input: ReleaseModelBudgetInput): ExecutionModelBudgetReservation {
+    return this.store.releaseModelBudget(input);
+  }
+
+  reconcileModelBudgetReservations(runId?: string): ReconcileModelBudgetReservationsResult {
+    return this.store.reconcileModelBudgetReservations(runId);
+  }
+
+  pauseActiveRunForBudget(runId: string, error: unknown): void {
+    const active = this.active.get(runId);
+    if (!active) {
+      return;
+    }
+    active.control = "pause";
+    active.controller.abort(error);
+  }
+
+  private budgetBlockedError(blocked: { error_code: string; error: string }): AgentBudgetPolicyError {
+    return new AgentBudgetPolicyError(blocked.error_code as AgentBudgetErrorCode, blocked.error);
+  }
+
   private pauseRunForBudget(run: AgentRunState, error: AgentBudgetPolicyError): AgentRunState {
-    if (run.status !== "paused" && run.status !== "failed") {
+    if (run.status !== "running" && run.status !== "failed" && run.status !== "paused") {
       return run;
     }
     return this.updateRun(run, "paused", "run.budget_blocked", {
@@ -1214,6 +1433,43 @@ export class RunCoordinator {
     return run;
   }
 
+  private findTrustedApprovedConfirmation(run: AgentRunState, step: AgentExecutionStep) {
+    const candidates = this.store.listConfirmations(run.run_id, "approved")
+      .filter((confirmation) => confirmation.step_id === step.step_id);
+    if (candidates.length === 0) {
+      return null;
+    }
+    if (candidates.length !== 1) {
+      throw Object.assign(new Error(`Step ${step.step_id} has multiple approved confirmations`), {
+        code: "CONFIRMATION_SCOPE_MISMATCH"
+      });
+    }
+    const confirmation = candidates[0]!;
+    if (
+      confirmation.kind !== "action_execution" ||
+      (confirmation.schema_version ?? 0) < 1 ||
+      confirmation.run_id !== run.run_id ||
+      confirmation.project_id !== run.project_id ||
+      confirmation.plan_version !== run.plan_version ||
+      !confirmation.action ||
+      !confirmation.scope_fingerprint ||
+      !confirmation.action_input_hash ||
+      !confirmation.target_bindings ||
+      !confirmation.action_payload
+    ) {
+      throw Object.assign(new Error(`Confirmation ${confirmation.confirmation_id} has an invalid action scope`), {
+        code: "CONFIRMATION_SCOPE_MISMATCH"
+      });
+    }
+    const expiresAt = Date.parse(confirmation.expires_at);
+    if (!confirmation.expires_at || !Number.isFinite(expiresAt) || expiresAt <= Date.parse(this.timestamp())) {
+      throw Object.assign(new Error(`Confirmation ${confirmation.confirmation_id} has expired`), {
+        code: "CONFIRMATION_EXPIRED"
+      });
+    }
+    return confirmation;
+  }
+
   private assertRunProjectScope(runId: string): AgentRunState {
     const run = this.requireRun(runId);
     if (!run.project_path || path.resolve(run.project_path) !== this.projectRoot) {
@@ -1247,6 +1503,14 @@ function publicExecution(active: ActiveExecution): DurableRunExecution {
     request_id: active.request_id,
     step_id: active.step_id,
     attempt_id: active.attempt_id,
+    ...(active.confirmation_receipt_id ? {
+      confirmation_receipt_id: active.confirmation_receipt_id,
+      confirmation_receipt_version: active.confirmation_receipt_version,
+      confirmation_scope_fingerprint: active.confirmation_scope_fingerprint,
+      confirmation_action_input_hash: active.confirmation_action_input_hash,
+      confirmation_target_bindings: active.confirmation_target_bindings,
+      confirmation_action_payload: active.confirmation_action_payload
+    } : {}),
     signal: active.signal
   };
 }
@@ -1303,6 +1567,14 @@ function truncate(value: string, limit: number): string {
 
 function positiveInterval(value: number | undefined, fallback: number): number {
   return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : fallback;
+}
+
+function nonNegativeInteger(value: unknown): number {
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 0) {
+    throw new Error("Expected a non-negative integer");
+  }
+  return number;
 }
 
 function compactUuid(): string {

@@ -383,7 +383,7 @@ test("Agent Trace approves a durable confirmation and requires an explicit resum
 
   const detail = page.locator("[aria-label='Agent trace detail']");
   await expect(detail).toContainText(run.run_id, { timeout: 15_000 });
-  await expect(detail.getByText("待确认", { exact: true })).toBeVisible();
+  await expect(detail.getByText(/^待确认\s*·\s*01_大纲\/大纲\.txt$/)).toBeVisible();
 
   await detail.getByRole("button", { name: "批准", exact: true }).click();
   await expect(detail.getByText("已批准。请使用“继续”显式恢复任务。", { exact: true })).toBeVisible();
@@ -408,10 +408,10 @@ test("Agent Trace rejects a durable confirmation and fails its run", async ({ pa
 
   const detail = page.locator("[aria-label='Agent trace detail']");
   await expect(detail).toContainText(run.run_id, { timeout: 15_000 });
-  await expect(detail.getByText("待确认", { exact: true })).toBeVisible();
+  await expect(detail.getByText(/^待确认\s*·\s*01_大纲\/大纲\.txt$/)).toBeVisible();
   await detail.getByRole("button", { name: "拒绝", exact: true }).click();
 
-  await expect(detail.getByText("已拒绝", { exact: true })).toBeVisible();
+  await expect(detail.getByText(/^已拒绝\s*·\s*01_大纲\/大纲\.txt$/)).toBeVisible();
   await expect(detail.getByText("失败", { exact: true })).toBeVisible();
   await expect(detail.getByRole("button", { name: "恢复运行", exact: true })).toBeEnabled();
 

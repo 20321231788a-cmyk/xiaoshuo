@@ -579,9 +579,10 @@ describe("agent schemas", () => {
     expect(replay).toMatchObject({ next_sequence: 3, has_more: true, earliest_available_sequence: 2, gap_detected: true });
 
     const command = { operation_id: "operation-1", expected_version: 4 };
+    const confirmationCommand = { ...command, expected_scope_fingerprint: "scope-fingerprint-1" };
     expect(agentRunControlRequestSchema.parse(command)).toEqual(command);
     expect(agentStepRetryRequestSchema.parse(command)).toEqual(command);
-    expect(agentConfirmationResolveRequestSchema.parse(command)).toEqual(command);
+    expect(agentConfirmationResolveRequestSchema.parse(confirmationCommand)).toEqual(confirmationCommand);
     expect(() => agentRunControlRequestSchema.parse({ operation_id: "", expected_version: 4 })).toThrow();
     expect(() => agentStepRetryRequestSchema.parse({ operation_id: "operation-1", expected_version: 0 })).toThrow();
     expect(() => agentRunEventReplayResponseSchema.parse({ events: [], next_after: -1 })).toThrow();

@@ -16,13 +16,14 @@
     "test": "npm run build -w @xiaoshuo/shared && vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
-    "eval:routing": "vitest run packages/agent-runtime/src/routing-eval.test.ts",
-    "eval:planning": "vitest run packages/agent-runtime/src/planner.test.ts",
-    "eval:memory": "vitest run packages/agent-runtime/src/memory.test.ts",
-    "eval:quality": "vitest run packages/agent-runtime/src/evaluator-registry.test.ts",
-    "eval:recovery": "vitest run packages/agent-runtime/src/kernel/run-recovery.e2e.test.ts",
-    "eval:security": "vitest run packages/agent-runtime/src/agent-loop.test.ts",
-    "eval:excluded-capabilities": "vitest run packages/agent-runtime/src/negative-capability-policy.test.ts packages/agent-runtime/src/agent-loop.test.ts packages/agent-runtime/src/memory.test.ts apps/desktop-shell/src/preload/user-gesture-ticket.test.ts"
+    "eval:routing": "node scripts/run-eval.mjs routing packages/agent-runtime/src/routing-eval.test.ts",
+    "eval:planning": "node scripts/run-eval.mjs planning packages/agent-runtime/src/planner.test.ts",
+    "eval:memory": "node scripts/run-eval.mjs memory packages/agent-runtime/src/memory.test.ts",
+    "eval:quality": "node scripts/run-eval.mjs quality packages/agent-runtime/src/evaluator-registry.test.ts",
+    "eval:recovery": "node scripts/run-eval.mjs recovery packages/agent-runtime/src/kernel/run-recovery.e2e.test.ts",
+    "eval:security": "node scripts/run-eval.mjs security packages/agent-runtime/src/agent-loop.test.ts",
+    "eval:excluded-capabilities": "node scripts/run-eval.mjs excluded-capabilities packages/agent-runtime/src/negative-capability-policy.test.ts packages/agent-runtime/src/agent-loop.test.ts packages/agent-runtime/src/memory.test.ts packages/agent-runtime/src/action-confirmation.test.ts packages/agent-runtime/src/file-operation-confirmation.test.ts packages/agent-runtime/src/kernel/execution-store.test.ts packages/agent-runtime/src/kernel/run-coordinator.test.ts apps/desktop-shell/src/preload/user-gesture-ticket.test.ts apps/desktop-shell/src/main/terminal-user-gesture-authorization.test.ts apps/desktop-shell/src/main/project-identity-registry.test.ts apps/desktop-shell/src/main/runtime/project-document-routes.test.ts",
+    "eval:all": "npm run eval:routing && npm run eval:planning && npm run eval:memory && npm run eval:quality && npm run eval:recovery && npm run eval:security && npm run eval:excluded-capabilities"
   },
   "dependencies": {
     "adm-zip": "^0.5.17",

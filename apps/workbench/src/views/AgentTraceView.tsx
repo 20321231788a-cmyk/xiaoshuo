@@ -219,6 +219,9 @@ export function AgentTraceView({ runtime }: { runtime: WorkbenchRuntime }) {
             : await client.retryAgentRunStep(selectedRun.run_id, stepId || selectedRun.current_step_id, payload);
       setRunDetail(next);
       setRuns((current) => current.map((run) => (run.run_id === next.run_id ? next : run)));
+      // Control responses only describe the immediate mutation. Re-read the
+      // durable journal so the trace also shows its persisted control event.
+      await loadRun(next.run_id, next);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -231,7 +234,11 @@ export function AgentTraceView({ runtime }: { runtime: WorkbenchRuntime }) {
     setActing(`${action}:${confirmation.confirmation_id}`);
     setMessage("");
     try {
-      const payload = { operation_id: createOperationId(), expected_version: confirmation.version };
+      const payload = {
+        operation_id: createOperationId(),
+        expected_version: confirmation.version,
+        expected_scope_fingerprint: confirmation.scope_fingerprint || ""
+      };
       const resolved = action === "approve"
         ? await client.approveAgentConfirmation(confirmation.confirmation_id, payload)
         : await client.rejectAgentConfirmation(confirmation.confirmation_id, payload);
@@ -659,7 +666,8 @@ function formatConfirmationStatus(status: AgentConfirmation["status"]): string {
     approved: "已批准",
     rejected: "已拒绝",
     expired: "已过期",
-    superseded: "已替代"
+    superseded: "已替代",
+    consumed: "已消费"
   }[status];
 }
 

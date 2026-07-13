@@ -33,7 +33,9 @@ import { UserGestureTicket } from "./user-gesture-ticket.js";
 
 const terminalUserGesture = new UserGestureTicket();
 const recordTerminalUserGesture = (event: Event) => {
-  terminalUserGesture.recordTrustedGesture(event);
+  if (terminalUserGesture.recordTrustedGesture(event)) {
+    ipcRenderer.send(ipcChannels.terminalAuthorizeUserGesture);
+  }
 };
 
 window.addEventListener("pointerdown", recordTerminalUserGesture, true);
@@ -132,8 +134,7 @@ const desktopApi: XiaoShuoDesktopApi = {
   terminal: {
     create: async (request) => {
       terminalUserGesture.consume();
-      const ticket = await ipcRenderer.invoke(ipcChannels.terminalAcquireTicket);
-      return terminalSessionSchema.parse(await ipcRenderer.invoke(ipcChannels.terminalCreate, { ...(request || {}), ticket }));
+      return terminalSessionSchema.parse(await ipcRenderer.invoke(ipcChannels.terminalCreate, request || {}));
     },
     write: async (request) => {
       await ipcRenderer.invoke(ipcChannels.terminalWrite, request);

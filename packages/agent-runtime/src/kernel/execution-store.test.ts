@@ -37,6 +37,7 @@ import type {
   ExecutionDatabaseOpenOptions,
   ExecutionStoreFileSystem
 } from "./execution-store-port.js";
+import { CONFIRMATION_RECEIPT_CODES } from "./confirmation-receipt.js";
 
 const TABLES = [
   "agent_runs",
@@ -52,6 +53,7 @@ const TABLES = [
   "agent_runtime_instances",
   "agent_schema_migrations",
   "agent_outbound_disclosures",
+  "agent_model_budget_reservations",
   "agent_artifact_feedback",
   "preference_candidates",
   "preference_versions"
@@ -102,6 +104,13 @@ describe("ExecutionStore", () => {
         name: "p5_feedback_store",
         min_reader_version: 2,
         min_writer_version: 2,
+        applied_at: "2026-07-10T00:00:00.000Z"
+      }),
+      expect.objectContaining({
+        version: 3,
+        name: "m4_model_budget_ledger",
+        min_reader_version: 3,
+        min_writer_version: 3,
         applied_at: "2026-07-10T00:00:00.000Z"
       })
     ]);
@@ -212,6 +221,7 @@ describe("ExecutionStore", () => {
         store.resolveConfirmation({
           confirmation_id: "confirmation-1",
           expected_version: 1,
+          expected_scope_fingerprint: "scope-fingerprint-1",
           status: "approved",
           resolved_at: "2026-07-10T00:00:05.000Z",
           resolved_by: "user"
@@ -686,6 +696,315 @@ describe("ExecutionStore", () => {
   });
 });
 
+describe("Confirmation receipt CAS", () => {
+  it("approves a scoped receipt by fingerprint and consumes it exactly once", () => {
+    const projectRoot = temporaryProject();
+    const store = track(ExecutionStore.open(projectRoot));
+    store.createRun(makeRun(projectRoot));
+    store.startAttempt({
+      attempt_id: "attempt-confirmed",
+      run_id: "run-1",
+      step_id: "step-1",
+      attempt: 1,
+      input_digest: "input",
+      idempotency_key: "confirmation-attempt",
+      started_at: "2026-07-10T00:00:00.000Z"
+    });
+    const targetBindings = [{
+      path: "chapters/1.md",
+      canonical_path: path.join(projectRoot, "chapters", "1.md"),
+      document_version: 1,
+      base_hash: "sha256:old",
+      proposed_hash: "sha256:new"
+    }];
+    const receipt = applied(store.upsertConfirmation({
+      schema_version: 1,
+      kind: "action_execution",
+      confirmation_id: "confirmation-scoped",
+      version: 1,
+      run_id: "run-1",
+      step_id: "step-1",
+      action: "run_skill",
+      risk_level: "high",
+      summary: "Run confirmed skill",
+      target_paths: ["chapters/1.md"],
+      expected_versions: { "chapters/1.md": 1 },
+      expected_hashes: { "chapters/1.md": "sha256:old" },
+      proposed_artifact_refs: [],
+      project_id: "project-1",
+      plan_version: 1,
+      action_input_hash: "sha256:input",
+      scope_fingerprint: "sha256:scope",
+      target_bindings: targetBindings,
+      action_payload: { skill_id: "draft" },
+      status: "pending",
+      expires_at: "2099-07-10T01:00:00.000Z",
+      created_at: "2026-07-10T00:00:00.000Z",
+      updated_at: "2026-07-10T00:00:00.000Z"
+    }, 0));
+
+    expect(() => store.resolveConfirmation({
+      confirmation_id: receipt.confirmation_id,
+      expected_version: receipt.version,
+      expected_scope_fingerprint: "wrong",
+      status: "approved"
+    })).toThrowError(expect.objectContaining({ code: CONFIRMATION_RECEIPT_CODES.scopeMismatch }));
+
+    const approved = applied(store.resolveConfirmation({
+      confirmation_id: receipt.confirmation_id,
+      expected_version: receipt.version,
+      expected_scope_fingerprint: receipt.scope_fingerprint,
+      status: "approved"
+    }));
+    const consumed = applied(store.consumeConfirmationReceipt({
+      confirmation_id: approved.confirmation_id,
+      expected_version: approved.version,
+      run_id: "run-1",
+      step_id: "step-1",
+      attempt_id: "attempt-confirmed",
+      action: "run_skill",
+      project_id: "project-1",
+      plan_version: 1,
+      action_input_hash: "sha256:input",
+      scope_fingerprint: "sha256:scope",
+      target_bindings: targetBindings
+    }));
+    expect(consumed).toMatchObject({
+      status: "consumed",
+      consumed_by_attempt_id: "attempt-confirmed"
+    });
+    expect(() => store.consumeConfirmationReceipt({
+      confirmation_id: consumed.confirmation_id,
+      expected_version: consumed.version,
+      run_id: "run-1",
+      step_id: "step-1",
+      attempt_id: "attempt-confirmed",
+      action: "run_skill",
+      project_id: "project-1",
+      plan_version: 1,
+      action_input_hash: "sha256:input",
+      scope_fingerprint: "sha256:scope",
+      target_bindings: targetBindings
+    })).toThrowError(expect.objectContaining({ code: CONFIRMATION_RECEIPT_CODES.alreadyConsumed }));
+  });
+
+  it("keeps historical unscoped confirmations read-only for authorization", () => {
+    const projectRoot = temporaryProject();
+    const store = track(ExecutionStore.open(projectRoot));
+    store.createRun(makeRun(projectRoot));
+    const legacy = applied(store.upsertConfirmation(makeLegacyConfirmation(), 0));
+    expect(legacy).toMatchObject({ schema_version: 0, kind: "legacy_unscoped" });
+    expect(() => store.resolveConfirmation({
+      confirmation_id: legacy.confirmation_id,
+      expected_version: legacy.version,
+      expected_scope_fingerprint: "anything",
+      status: "approved"
+    })).toThrowError(expect.objectContaining({ code: CONFIRMATION_RECEIPT_CODES.legacyUnscoped }));
+  });
+
+  it("atomically reserves against settled and pending model budget totals", () => {
+    const projectRoot = temporaryProject();
+    const store = track(ExecutionStore.open(projectRoot));
+    createBudgetedAttempt(store, projectRoot, {
+      max_model_calls: 1,
+      max_input_tokens: 20,
+      max_output_tokens: 20,
+      max_estimated_cost: 0.02
+    });
+
+    const first = store.reserveModelBudget(modelReservation("reservation-1", "model-call-1", {
+      reserved_input_tokens: 10,
+      reserved_output_tokens: 10,
+      reserved_cost_microusd: 10_000
+    }));
+    expect(first).toMatchObject({ status: "reserved", version: 1, reserved_model_calls: 1 });
+    expect(store.reserveModelBudget(modelReservation("reservation-1", "model-call-1", {
+      reserved_input_tokens: 10,
+      reserved_output_tokens: 10,
+      reserved_cost_microusd: 10_000
+    }))).toMatchObject({ reservation_id: "reservation-1", version: 1 });
+
+    expect(() => store.reserveModelBudget(modelReservation("reservation-2", "model-call-2", {
+      reserved_input_tokens: 1,
+      reserved_output_tokens: 1,
+      reserved_cost_microusd: 1
+    }))).toThrowError(expect.objectContaining({ code: "BUDGET_MODEL_CALLS_EXCEEDED" }));
+    expect(store.listModelBudgetReservations("run-1")).toHaveLength(1);
+    expect(store.getRun("run-1")?.budget).toMatchObject({ used_model_calls: 0 });
+  });
+
+  it("makes model dispatch, settlement, and repeated delivery idempotent", () => {
+    const projectRoot = temporaryProject();
+    const store = track(ExecutionStore.open(projectRoot));
+    createBudgetedAttempt(store, projectRoot);
+    const reserved = store.reserveModelBudget(modelReservation("reservation-settle", "model-call-settle"));
+    const dispatched = store.markModelBudgetDispatched({
+      reservation_id: reserved.reservation_id,
+      expected_version: reserved.version,
+      run_id: "run-1",
+      step_id: "step-1",
+      attempt_id: "attempt-1",
+      dispatched_at: "2026-07-10T00:00:01.000Z"
+    });
+    expect(dispatched).toMatchObject({ version: 2, dispatch_started_at: "2026-07-10T00:00:01.000Z" });
+    expect(store.markModelBudgetDispatched({
+      reservation_id: reserved.reservation_id,
+      expected_version: reserved.version,
+      run_id: "run-1",
+      step_id: "step-1",
+      attempt_id: "attempt-1"
+    })).toMatchObject({ version: 2 });
+
+    const settled = store.settleModelBudget({
+      reservation_id: reserved.reservation_id,
+      expected_version: dispatched.version,
+      run_id: "run-1",
+      charged_input_tokens: 7,
+      charged_output_tokens: 4,
+      charged_cost_microusd: 20,
+      usage_source: "provider",
+      settled_at: "2026-07-10T00:00:02.000Z"
+    });
+    expect(settled).toMatchObject({ status: "settled", version: 3, charged_model_calls: 1, charged_input_tokens: 7 });
+    expect(store.settleModelBudget({
+      reservation_id: reserved.reservation_id,
+      expected_version: dispatched.version,
+      run_id: "run-1",
+      charged_input_tokens: 7,
+      charged_output_tokens: 4,
+      charged_cost_microusd: 20,
+      usage_source: "provider"
+    })).toMatchObject({ status: "settled", version: 3 });
+    expect(store.getRun("run-1")?.budget).toMatchObject({
+      used_model_calls: 1,
+      used_input_tokens: 7,
+      used_output_tokens: 4,
+      estimated_cost: 0.00002
+    });
+  });
+
+  it("reconciles crash leftovers conservatively after dispatch and releases pre-dispatch reservations", () => {
+    const projectRoot = temporaryProject();
+    const store = track(ExecutionStore.open(projectRoot));
+    createBudgetedAttempt(store, projectRoot, {
+      max_model_calls: 2,
+      max_input_tokens: 40,
+      max_output_tokens: 40,
+      max_estimated_cost: 0.04
+    });
+    const undispatched = store.reserveModelBudget(modelReservation("reservation-release", "model-call-release", {
+      reserved_input_tokens: 9,
+      reserved_output_tokens: 8,
+      reserved_cost_microusd: 9_000
+    }));
+    const dispatched = store.reserveModelBudget(modelReservation("reservation-recover", "model-call-recover", {
+      reserved_input_tokens: 11,
+      reserved_output_tokens: 12,
+      reserved_cost_microusd: 12_000
+    }));
+    store.markModelBudgetDispatched({
+      reservation_id: dispatched.reservation_id,
+      expected_version: dispatched.version,
+      run_id: "run-1",
+      step_id: "step-1",
+      attempt_id: "attempt-1"
+    });
+
+    expect(store.reconcileModelBudgetReservations("run-1")).toEqual({ settled: 1, released: 1 });
+    expect(store.getModelBudgetReservation(undispatched.reservation_id)).toMatchObject({ status: "released", charged_model_calls: 0 });
+    expect(store.getModelBudgetReservation(dispatched.reservation_id)).toMatchObject({
+      status: "settled",
+      charged_model_calls: 1,
+      charged_input_tokens: 11,
+      charged_output_tokens: 12,
+      charged_cost_microusd: 12_000,
+      usage_source: "reservation"
+    });
+    expect(store.getRun("run-1")?.budget).toMatchObject({
+      used_model_calls: 1,
+      used_input_tokens: 11,
+      used_output_tokens: 12,
+      estimated_cost: 0.012
+    });
+  });
+
+  it("does not create a retry attempt when the atomic step budget debit is exhausted", () => {
+    const projectRoot = temporaryProject();
+    const store = track(ExecutionStore.open(projectRoot));
+    store.createRun(makeRun(projectRoot, {
+      status: "running",
+      current_step_id: "step-1",
+      budget: {
+        ...((makeRun(projectRoot).budget as unknown as Record<string, unknown>)),
+        max_steps: 1
+      }
+    }));
+    const first = store.startAttemptWithBudget({
+      attempt_id: "attempt-budget-1",
+      run_id: "run-1",
+      step_id: "step-1",
+      attempt: 1,
+      input_digest: "step-budget-1",
+      idempotency_key: "step-budget-1"
+    });
+    expect(first).toMatchObject({ started: true });
+    const firstAttempt = store.getAttempt("attempt-budget-1")!;
+    store.finishAttempt({
+      attempt_id: firstAttempt.attempt_id,
+      expected_version: firstAttempt.version,
+      status: "failed",
+      step_status: "failed",
+      error_code: "RETRY",
+      error: "retry"
+    });
+    const failedStep = store.getStep("run-1", "step-1")!;
+    store.upsertStep("run-1", {
+      ...failedStep,
+      status: "pending",
+      observation_id: "",
+      error_code: "",
+      error: "",
+      started_at: "",
+      ended_at: ""
+    }, failedStep.version);
+
+    const blocked = store.startAttemptWithBudget({
+      attempt_id: "attempt-budget-2",
+      run_id: "run-1",
+      step_id: "step-1",
+      attempt: 2,
+      input_digest: "step-budget-2",
+      idempotency_key: "step-budget-2"
+    });
+    expect(blocked).toMatchObject({ started: false, error_code: "BUDGET_STEPS_EXCEEDED", run: { status: "paused" } });
+    expect(store.listAttempts("run-1", "step-1")).toHaveLength(1);
+    expect(store.getRun("run-1")?.budget).toMatchObject({ used_steps: 1 });
+  });
+
+  it("does not replace a plan when the atomic replan budget debit is exhausted", () => {
+    const projectRoot = temporaryProject();
+    const store = track(ExecutionStore.open(projectRoot));
+    store.createRun(makeRun(projectRoot, {
+      status: "running",
+      budget: {
+        ...((makeRun(projectRoot).budget as unknown as Record<string, unknown>)),
+        max_replans: 0
+      }
+    }));
+    const current = store.getRun("run-1")!;
+    const result = store.replaceStepsWithBudget({
+      run_id: current.run_id,
+      expected_run_version: current.version,
+      plan_version: current.plan_version + 1,
+      steps: [...current.steps, makeStep("step-2", 1)]
+    });
+
+    expect(result).toMatchObject({ started: false, error_code: "BUDGET_REPLANS_EXCEEDED", run: { status: "paused" } });
+    expect(store.getRun("run-1")).toMatchObject({ plan_version: 1, budget: { used_replans: 0 } });
+    expect(store.getStep("run-1", "step-2")).toBeNull();
+  });
+});
+
 function temporaryProject(): string {
   const project = mkdtempSync(path.join(tmpdir(), "execution-store-"));
   projects.push(project);
@@ -744,17 +1063,19 @@ function makeRun(projectRoot: string, overrides: Record<string, unknown> = {}): 
     steps: [makeStep("step-1", 0)],
     artifacts: [],
     budget: {
+      schema_version: 1,
+      budget_id: "budget-run-1",
+      profile_id: "test-profile",
       max_steps: 3,
       max_replans: 1,
-      max_attempts_per_step: 2,
-      max_duration_ms: 300_000,
+      max_model_calls: 3,
       max_input_tokens: 32_000,
       max_output_tokens: 8_000,
-      max_cost: 1,
-      cost_currency: "USD",
-      pricing_snapshot_id: "pricing-1",
+      max_estimated_cost: 1,
+      deadline_at: "2030-07-10T00:00:00.000Z",
       used_steps: 0,
       used_replans: 0,
+      used_model_calls: 0,
       used_input_tokens: 0,
       used_output_tokens: 0,
       estimated_cost: 0
@@ -764,6 +1085,54 @@ function makeRun(projectRoot: string, overrides: Record<string, unknown> = {}): 
     updated_at: "2026-07-10T00:00:00.000Z",
     ...overrides
   } as unknown as AgentRunState;
+}
+
+function createBudgetedAttempt(
+  store: ExecutionStore,
+  projectRoot: string,
+  budgetOverrides: Record<string, unknown> = {}
+): void {
+  store.createRun(makeRun(projectRoot, {
+    status: "running",
+    current_step_id: "step-1",
+    budget: {
+      ...((makeRun(projectRoot).budget as unknown as Record<string, unknown>)),
+      ...budgetOverrides
+    }
+  }));
+  store.startAttempt({
+    attempt_id: "attempt-1",
+    run_id: "run-1",
+    step_id: "step-1",
+    attempt: 1,
+    input_digest: "budget-input",
+    idempotency_key: "budget-attempt",
+    started_at: "2026-07-10T00:00:00.000Z"
+  });
+}
+
+function modelReservation(
+  reservationId: string,
+  modelCallId: string,
+  overrides: Record<string, unknown> = {}
+) {
+  return {
+    reservation_id: reservationId,
+    run_id: "run-1",
+    step_id: "step-1",
+    attempt_id: "attempt-1",
+    model_call_id: modelCallId,
+    budget_id: "budget-run-1",
+    provider: "https://provider.test/v1",
+    model: "test-model",
+    purpose: "chat",
+    pricing_version: "test-price-v1",
+    reserved_input_tokens: 10,
+    reserved_output_tokens: 10,
+    reserved_cost_microusd: 10_000,
+    reserved_at: "2026-07-10T00:00:00.000Z",
+    ...overrides
+  };
 }
 
 function makeStep(stepId: string, index: number): AgentExecutionStep {
@@ -817,6 +1186,8 @@ function makeArtifact(artifactId: string, stepId: string): AgentArtifactRef {
 
 function makeConfirmation(): AgentConfirmation {
   return {
+    schema_version: 1,
+    kind: "action_execution",
     confirmation_id: "confirmation-1",
     version: 1,
     run_id: "run-1",
@@ -828,11 +1199,40 @@ function makeConfirmation(): AgentConfirmation {
     expected_versions: { "chapters/1.md": 1 },
     expected_hashes: { "chapters/1.md": "sha256:old" },
     proposed_artifact_refs: ["artifact-1"],
+    project_id: "project-1",
+    plan_version: 1,
+    action_input_hash: "sha256:input",
+    scope_fingerprint: "scope-fingerprint-1",
+    target_bindings: [{
+      path: "chapters/1.md",
+      canonical_path: "chapters/1.md",
+      document_version: 1,
+      base_hash: "sha256:old",
+      proposed_hash: "sha256:new"
+    }],
+    action_payload: { content: "new chapter" },
     status: "pending",
-    expires_at: "2026-07-10T01:00:00.000Z",
+    expires_at: "2030-07-10T01:00:00.000Z",
     resolved_at: "",
     resolved_by: "user"
   } as AgentConfirmation;
+}
+
+function makeLegacyConfirmation(): AgentConfirmation {
+  const confirmation = { ...makeConfirmation() } as Record<string, unknown>;
+  for (const key of [
+    "schema_version",
+    "kind",
+    "project_id",
+    "plan_version",
+    "action_input_hash",
+    "scope_fingerprint",
+    "target_bindings",
+    "action_payload"
+  ]) {
+    delete confirmation[key];
+  }
+  return confirmation as AgentConfirmation;
 }
 
 function createPreMigrationDatabase(projectRoot: string): string {

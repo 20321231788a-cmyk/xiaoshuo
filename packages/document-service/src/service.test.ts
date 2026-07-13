@@ -165,6 +165,25 @@ describe("document-service", () => {
     await expect(fs.access(path.join(outside, "ledger.json"))).rejects.toThrow();
   });
 
+  it("detects replacement of the project directory at the same lexical path", async () => {
+    const service = new DocumentService({ projectRoot: tempDir });
+    const parkedRoot = `${tempDir}.parked`;
+    await service.canonicalProjectRoot();
+    await fs.rename(tempDir, parkedRoot);
+    await fs.mkdir(tempDir);
+    const replacementTarget = path.join(tempDir, "02_正文", "第一章.txt");
+
+    try {
+      await expect(service.saveDocument("02_正文/第一章.txt", "must-not-write")).rejects.toMatchObject({
+        code: "PROJECT_SCOPE_ROOT_CHANGED"
+      });
+      await expect(fs.access(replacementTarget)).rejects.toThrow();
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await fs.rename(parkedRoot, tempDir);
+    }
+  });
+
   it("rejects blocked file types", async () => {
     const service = new DocumentService({ projectRoot: tempDir });
 

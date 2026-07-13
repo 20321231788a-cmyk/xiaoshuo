@@ -7,6 +7,7 @@ import { openExecutionStore } from "./execution-store.js";
 import { InMemoryAgentFeatureFlagRegistry } from "./feature-flag-registry.js";
 import { AGENT_BUDGET_ERROR_CODES } from "./budget-policy.js";
 import { RunCoordinator, RunRequestReplayError } from "./run-coordinator.js";
+import { sha256StableJson } from "./confirmation-receipt.js";
 
 let tempDir = "";
 const coordinators: RunCoordinator[] = [];
@@ -46,8 +47,27 @@ describe("RunCoordinator", () => {
       "run.created",
       "run.planning",
       "run.started",
+      "budget.step_consumed",
       "run.completed"
     ]);
+  });
+
+  it("binds durable runs to a memory revision and pauses only stale active runs", () => {
+    const coordinator = createCoordinator("runtime-memory-revision");
+    const stale = coordinator.beginRun(request({ request_id: "memory-stale" }), { baseMemoryRevision: 2 });
+    const current = coordinator.beginRun(request({ request_id: "memory-current" }), { baseMemoryRevision: 3 });
+
+    const paused = coordinator.pauseRunsForMemoryRevision(3);
+
+    expect(paused).toHaveLength(1);
+    expect(paused[0]).toMatchObject({ run_id: stale.run_id, status: "running", base_memory_revision: 2 });
+    expect(stale.signal.aborted).toBe(true);
+    expect(coordinator.failRun(stale, stale.signal.reason)).toMatchObject({ status: "paused" });
+    expect(coordinator.getRun(current.run_id)).toMatchObject({ status: "running", base_memory_revision: 3 });
+    expect(coordinator.listEvents(stale.run_id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event_type: "memory.revision_stale", payload: { base_memory_revision: 2, current_memory_revision: 3 } }),
+      expect.objectContaining({ event_type: "run.pause_requested" })
+    ]));
   });
 
   it("rejects disabled and unavailable modes before allocating a run id or writing a run", () => {
@@ -130,13 +150,61 @@ describe("RunCoordinator", () => {
     expect(coordinator.getRun(execution.run_id)?.budget).toMatchObject({
       profile_id: "mutable-test-profile",
       max_steps: 2,
-      used_steps: 0
+      used_steps: 1
     });
 
     maxSteps = 3;
     expect(() => coordinator.beginRun(runRequest)).toThrow(
       expect.objectContaining({ code: AGENT_BUDGET_ERROR_CODES.stateConflict })
     );
+  });
+
+  it("pauses before replacing steps when the atomic replan budget is exhausted", () => {
+    const coordinator = new RunCoordinator({
+      projectRoot: tempDir,
+      runtimeInstanceId: "runtime-replan-budget",
+      autoHeartbeat: false,
+      idFactory: sequenceFactory("replan-budget"),
+      budgetProfileIssuer: ({ issuedAt }) => ({
+        profileId: "replan-zero",
+        envelope: {
+          max_steps: 2,
+          max_replans: 0,
+          max_model_calls: 2,
+          max_input_tokens: 100,
+          max_output_tokens: 100,
+          max_estimated_cost: 1,
+          deadline_at: new Date(Date.parse(issuedAt) + 60_000).toISOString()
+        }
+      })
+    });
+    coordinators.push(coordinator);
+    const execution = coordinator.beginRun(request());
+    const run = coordinator.getRun(execution.run_id)!;
+    const replacementStep = {
+      ...run.steps[0]!,
+      step_id: "replanned-step",
+      index: 1,
+      idempotency_key: "replanned-step-key",
+      status: "pending" as const,
+      attempts: 0,
+      observation_id: "",
+      error_code: "",
+      error: "",
+      started_at: "",
+      ended_at: ""
+    };
+
+    expect(() => coordinator.replanRun(run.run_id, run.version, [...run.steps, replacementStep])).toThrow(
+      expect.objectContaining({ code: AGENT_BUDGET_ERROR_CODES.replansExceeded })
+    );
+    expect(coordinator.getRun(run.run_id)).toMatchObject({
+      status: "paused",
+      plan_version: 1,
+      budget: { used_replans: 0 },
+      error_code: AGENT_BUDGET_ERROR_CODES.replansExceeded
+    });
+    expect(coordinator.store.getStep(run.run_id, "replanned-step")).toBeNull();
   });
 
   it("moves an expired failed run to paused before retry starts a new attempt", () => {
@@ -165,6 +233,20 @@ describe("RunCoordinator", () => {
     const failed = coordinator.failRun(execution, Object.assign(new Error("retry"), { code: "RETRY" }));
     nowMs += 2_000;
 
+    expect(() => coordinator.resumeRun(failed.run_id, "expired-stale-resume", failed.version - 1)).toThrow(
+      expect.objectContaining({ code: "VERSION_CONFLICT" })
+    );
+    expect(coordinator.getRun(failed.run_id)).toMatchObject({
+      status: failed.status,
+      version: failed.version,
+      recovery_reason: failed.recovery_reason,
+      error_code: failed.error_code
+    });
+    expect(coordinator.store.getControlOperation("expired-stale-resume")).toMatchObject({
+      status: "rejected",
+      error_code: "VERSION_CONFLICT"
+    });
+
     expect(() => coordinator.resumeRun(failed.run_id, "expired-retry", failed.version)).toThrow(
       expect.objectContaining({ code: AGENT_BUDGET_ERROR_CODES.deadlineExceeded })
     );
@@ -185,7 +267,7 @@ describe("RunCoordinator", () => {
       ...failed,
       run_id: "legacy-run",
       request_id: "legacy-request",
-      version: 1,
+      version: 2,
       status: "paused",
       current_step_id: legacyStepId,
       budget: {},
@@ -203,6 +285,22 @@ describe("RunCoordinator", () => {
 
     const legacy = coordinator.getRun("legacy-run")!;
     expect(legacy.budget).toMatchObject({ legacy_unbudgeted: true, profile_id: "legacy_unbudgeted" });
+    expect(() => coordinator.resumeRun(
+      legacy.run_id,
+      "legacy-stale-retry",
+      legacy.version - 1,
+      { operationType: "retry", stepId: legacyStepId }
+    )).toThrow(expect.objectContaining({ code: "VERSION_CONFLICT" }));
+    expect(coordinator.getRun(legacy.run_id)).toMatchObject({
+      status: legacy.status,
+      version: legacy.version,
+      recovery_reason: legacy.recovery_reason,
+      error_code: legacy.error_code
+    });
+    expect(coordinator.store.getControlOperation("legacy-stale-retry")).toMatchObject({
+      status: "rejected",
+      error_code: "VERSION_CONFLICT"
+    });
     expect(() => coordinator.resumeRun(legacy.run_id, "legacy-resume", legacy.version)).toThrow(
       expect.objectContaining({ code: AGENT_BUDGET_ERROR_CODES.required })
     );
@@ -287,7 +385,7 @@ describe("RunCoordinator", () => {
     const coordinator = createCoordinator("runtime-confirmation");
     const execution = coordinator.beginRun(request(), { stepType: "file_operation", requiresConfirmation: true });
 
-    const waiting = coordinator.completeRun(execution, response("已生成写入预览"));
+    const waiting = coordinator.completeRun(execution, confirmationResponse(coordinator, execution, "已生成写入预览"));
     const confirmation = coordinator.store.listConfirmations(execution.run_id, "pending")[0]!;
     expect(waiting).toMatchObject({ status: "waiting_confirmation" });
     expect(waiting.steps[0]).toMatchObject({ status: "waiting_confirmation", requires_confirmation: true });
@@ -295,19 +393,42 @@ describe("RunCoordinator", () => {
       { status: "interrupted", error_code: "CONFIRMATION_REQUIRED" }
     ]);
 
-    const approved = coordinator.resolveConfirmation(confirmation.confirmation_id, "approved", "operation-approve", confirmation.version);
+    const approved = coordinator.resolveConfirmation(
+      confirmation.confirmation_id,
+      "approved",
+      "operation-approve",
+      confirmation.version,
+      confirmation.scope_fingerprint
+    );
     expect(approved).toMatchObject({ status: "approved", resolved_by: "user" });
     const paused = coordinator.getRun(execution.run_id)!;
     expect(paused).toMatchObject({ status: "paused", steps: [expect.objectContaining({ status: "pending", requires_confirmation: false })] });
 
     const resumed = coordinator.resumeRun(execution.run_id, "operation-resume-approved", paused.version);
+    expect(resumed).toMatchObject({
+      confirmation_receipt_id: confirmation.confirmation_id,
+      confirmation_scope_fingerprint: confirmation.scope_fingerprint
+    });
+    coordinator.store.consumeConfirmationReceipt({
+      confirmation_id: resumed.confirmation_receipt_id!,
+      expected_version: resumed.confirmation_receipt_version!,
+      run_id: resumed.run_id,
+      step_id: resumed.step_id,
+      attempt_id: resumed.attempt_id,
+      action: confirmation.action,
+      project_id: confirmation.project_id!,
+      plan_version: confirmation.plan_version!,
+      action_input_hash: confirmation.action_input_hash!,
+      scope_fingerprint: confirmation.scope_fingerprint!,
+      target_bindings: confirmation.target_bindings!
+    });
     expect(coordinator.completeRun(resumed, response("确认后完成")).status).toBe("completed");
   });
 
   it("makes repeated matching confirmation decisions idempotent and fails a rejected step", () => {
     const coordinator = createCoordinator("runtime-confirmation-reject");
     const execution = coordinator.beginRun(request(), { stepType: "file_operation", requiresConfirmation: true });
-    coordinator.completeRun(execution, response("预览"));
+    coordinator.completeRun(execution, confirmationResponse(coordinator, execution, "预览"));
     const confirmation = coordinator.store.listConfirmations(execution.run_id, "pending")[0]!;
 
     const rejected = coordinator.resolveConfirmation(confirmation.confirmation_id, "rejected", "operation-reject", confirmation.version);
@@ -333,7 +454,7 @@ describe("RunCoordinator", () => {
     });
     coordinators.push(coordinator);
     const execution = coordinator.beginRun(request(), { stepType: "file_operation", requiresConfirmation: true });
-    coordinator.completeRun(execution, response("预览"));
+    coordinator.completeRun(execution, confirmationResponse(coordinator, execution, "预览"));
 
     nowMs += 16 * 60_000;
     expect(coordinator.expirePendingConfirmations()).toBe(1);
@@ -509,5 +630,40 @@ function response(reply: string): AgentRunResponse {
     skill_result: null,
     saved_paths: [],
     requires_confirmation: false
+  };
+}
+
+function confirmationResponse(
+  coordinator: RunCoordinator,
+  execution: { run_id: string; step_id: string },
+  reply: string
+): AgentRunResponse {
+  const run = coordinator.getRun(execution.run_id)!;
+  const actionPayload = { preview: reply };
+  const actionInputHash = sha256StableJson(actionPayload);
+  const actionId = "run_skill";
+  const targetBindings: never[] = [];
+  const scopeFingerprint = sha256StableJson({
+    run_id: execution.run_id,
+    step_id: execution.step_id,
+    project_id: run.project_id,
+    plan_version: run.plan_version,
+    action_id: actionId,
+    target_bindings: targetBindings,
+    action_input_hash: actionInputHash,
+    action_payload: actionPayload
+  });
+  return {
+    ...response(reply),
+    requires_confirmation: true,
+    confirmation_scope: {
+      project_id: run.project_id,
+      plan_version: run.plan_version,
+      action_id: actionId,
+      target_bindings: targetBindings,
+      action_input_hash: actionInputHash,
+      scope_fingerprint: scopeFingerprint,
+      action_payload: actionPayload
+    }
   };
 }

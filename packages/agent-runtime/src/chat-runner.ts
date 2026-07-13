@@ -30,11 +30,13 @@ import {
 import { applyHumanizerIfEnabled } from "./humanizer.js";
 import { assembleContext } from "./kernel/context-assembler.js";
 import type { AssembledContext, ContextBlock } from "./kernel/context-block.js";
+import { scheduleModelContextBlocks } from "./context-scheduling.js";
 import { ProjectFileResolver } from "./kernel/project-file-resolver.js";
 import { buildReferenceContextBlocks } from "./kernel/reference-context.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import { splitVisibleStreamText } from "./stream.js";
 import { isCancellationError, throwIfAborted, type AgentRunOptions } from "./cancellation.js";
+import type { GovernedConversationMemory } from "./governed-memory-store.js";
 
 const MAX_RUNTIME_CONTEXT_CHARS = 8_000;
 const MAX_USER_INPUT_CHARS = 16_000;
@@ -58,6 +60,20 @@ export type AgentChatRunnerOptions = {
   config?: ConfigServiceOptions;
   modelClient?: ChatModelClient;
   webSearchClient?: WebSearchClient;
+  /** Product-owned toggle. `false` preserves the legacy character-budget assembler. */
+  useContextBudget?: () => boolean;
+  governedConversationMemory?: {
+    /** Runtime-owned flag check. A constructed adapter is not proof that the
+     * optional governed-memory store is enabled for this project. */
+    enabled?(): boolean;
+    load(conversationId: string): Promise<GovernedConversationMemory | null>;
+    upsert(input: Omit<GovernedConversationMemory, "projectId" | "memoryRevision" | "updatedAt">): Promise<GovernedConversationMemory>;
+  };
+  governedMemoryContext?: {
+    /** P4b selector: only confirmed claims may enter model context. */
+    enabled?(): boolean;
+    load(): Promise<string>;
+  };
 };
 
 export class AgentChatRunner {
@@ -69,6 +85,9 @@ export class AgentChatRunner {
   private readonly webSearchClient: WebSearchClient;
   private readonly skills: SkillService;
   private readonly fileResolver: ProjectFileResolver;
+  private readonly governedConversationMemory?: AgentChatRunnerOptions["governedConversationMemory"];
+  private readonly governedMemoryContext?: AgentChatRunnerOptions["governedMemoryContext"];
+  private readonly useContextBudget: () => boolean;
 
   constructor(options: AgentChatRunnerOptions) {
     this.projectRoot = path.resolve(options.projectRoot);
@@ -79,6 +98,9 @@ export class AgentChatRunner {
     this.webSearchClient = options.webSearchClient ?? new DefaultWebSearchClient();
     this.skills = new SkillService({ projectRoot: this.projectRoot });
     this.fileResolver = new ProjectFileResolver({ projectRoot: this.projectRoot, documents: this.documents });
+    this.governedConversationMemory = options.governedConversationMemory;
+    this.governedMemoryContext = options.governedMemoryContext;
+    this.useContextBudget = options.useContextBudget ?? (() => false);
   }
 
   async runAgent(
@@ -397,7 +419,31 @@ export class AgentChatRunner {
       detail = await this.conversations.summarizeConversation(conversationId);
     }
 
+    await this.synchronizeGovernedConversationMemory(detail);
+
     return detail;
+  }
+
+  /**
+   * This is deliberately deterministic and only stores a conversation
+   * projection. It never creates or confirms a CanonClaim.
+   */
+  async synchronizeGovernedConversationMemory(detail: ConversationDetail): Promise<void> {
+    const adapter = this.governedConversationMemory;
+    if (!adapter || adapter.enabled?.() === false) {
+      return;
+    }
+    const derived = deriveGovernedConversationMemory(detail);
+    const existing = await adapter.load(detail.id);
+    await adapter.upsert({
+      ...derived,
+      confirmedFacts: mergeMemoryEntries(existing?.confirmedFacts, derived.confirmedFacts),
+      decisions: mergeMemoryEntries(existing?.decisions, derived.decisions),
+      rejectedOptions: mergeMemoryEntries(existing?.rejectedOptions, derived.rejectedOptions),
+      userPreferences: mergeMemoryEntries(existing?.userPreferences, derived.userPreferences),
+      openTasks: mergeMemoryEntries(existing?.openTasks, derived.openTasks),
+      sourceMessageIds: mergeMemoryEntries(existing?.sourceMessageIds, derived.sourceMessageIds)
+    });
   }
 
   private async persistStoppedAssistantReply(
@@ -434,6 +480,7 @@ export class AgentChatRunner {
   ): Promise<ChatCompletionMessage[]> {
     const continuity = await buildProjectContinuityContext(this.projectRoot);
     const attachments = await this.resolveAttachmentTexts(detail, payload.attachment_ids);
+    const governedSummary = this.governedConversationMemory ? await this.governedConversationMemory.load(detail.id) : null;
     const recentMessages = detail.messages
       .slice(compact ? -5 : -7, -1)
       .filter((message) => message.role === "user" || message.role === "assistant")
@@ -449,7 +496,16 @@ export class AgentChatRunner {
       },
       {
         role: "system",
-        content: buildStableProjectContext(detail, continuity, attachments, compact, contextObserver, compact ? "agent_chat_stable_compact" : "agent_chat_stable")
+        content: buildStableProjectContext(
+          detail,
+          continuity,
+          attachments,
+          governedSummary,
+          compact,
+          this.useContextBudget(),
+          contextObserver,
+          compact ? "agent_chat_stable_compact" : "agent_chat_stable"
+        )
       }
     ];
 
@@ -477,40 +533,49 @@ export class AgentChatRunner {
   ): Promise<string> {
     const runtimeContext = await this.resolveRuntimeContext(payload, compact);
     const referenceBlocks = await this.resolveReferenceBlocks(payload, compact);
+    const governedMemoryContext = await this.resolveGovernedMemoryContext(compact);
     const limit = compact ? 3_000 : 5_000;
     const webSearchContext = await this.buildWebSearchContext(payload.content || "", runtimeContext, compact, webSearchSources);
-    const assembled = assembleContext(
-      [
+    const contextBlocks: ContextBlock[] = [
         {
           id: "turn_instructions",
           title: "本轮动态上下文说明",
-          source: "runtime",
+          source: "runtime" as const,
           priority: "critical",
           content: ["【本轮动态上下文】", "这些内容只用于当前这一轮的回答，优先级低于项目稳定上下文。"].join("\n")
         },
         {
           id: "runtime_context",
           title: "当前文档/选区/前端读取上下文",
-          source: "runtime",
+          source: "runtime" as const,
           priority: "high",
           content: `【当前文档/选区/前端读取上下文】\n${clipText(runtimeContext, limit) || "暂无"}`
         },
         ...referenceBlocks,
+        ...(governedMemoryContext ? [{
+          id: "governed_memory_context",
+          title: "已确认项目记忆",
+          source: "project" as const,
+          priority: "high" as const,
+          content: `【已确认项目记忆】\n${governedMemoryContext}`
+        }] : []),
         {
           id: "web_search_context",
           title: "联网搜索小说素材",
-          source: "web",
+          source: "web" as const,
           priority: "medium",
           content: `【联网搜索小说素材】\n${webSearchContext}`
         },
         {
           id: "user_input",
           title: "用户输入",
-          source: "conversation",
+          source: "conversation" as const,
           priority: "critical",
           content: `【用户输入】\n${clipText(payload.content || "", compact ? 8_000 : MAX_USER_INPUT_CHARS)}`
         }
-      ],
+      ];
+    const assembled = assembleContext(
+      scheduleContextBlocks(contextBlocks, this.useContextBudget(), compact),
       { budget: compact ? MAX_COMPACT_CONTEXT_CHARS : MAX_CONTEXT_CHARS }
     );
     return observeContextAssembly(compact ? "agent_chat_turn_compact" : "agent_chat_turn", assembled, contextObserver);
@@ -559,6 +624,17 @@ export class AgentChatRunner {
       });
     } catch {
       return [];
+    }
+  }
+
+  private async resolveGovernedMemoryContext(compact: boolean): Promise<string> {
+    if (!this.governedMemoryContext?.enabled?.()) {
+      return "";
+    }
+    try {
+      return clipText(await this.governedMemoryContext.load(), compact ? 2_000 : 6_000);
+    } catch {
+      return "";
     }
   }
 
@@ -997,7 +1073,7 @@ export class AgentChatRunner {
       })) as ChatCompletionMessage[];
 
     const systemPrompt = this.buildConversationSystemPrompt(skill, detail.current_agent, thinkingEnabled);
-    const stableContext = buildStableProjectContext(detail, continuity, attachments, compact);
+    const stableContext = buildStableProjectContext(detail, continuity, attachments, null, compact, this.useContextBudget());
     const taskInstruction = this.buildTaskInstruction(detail, skill);
 
     const messages: ChatCompletionMessage[] = [
@@ -1063,6 +1139,7 @@ export class AgentChatRunner {
     const vectorLimit = compact ? 1800 : 4000;
     const userLimit = compact ? 8000 : 16000;
     const referenceBlocks = await this.resolveConversationReferenceBlocks(payload, compact);
+    const governedMemoryContext = await this.resolveGovernedMemoryContext(compact);
 
     let vectorContext = "None";
     const vectorIndex = new VectorIndex(this.projectRoot);
@@ -1082,45 +1159,53 @@ export class AgentChatRunner {
     }
     const webSearchContext = await this.buildWebSearchContext(text, rtContext, compact, webSearchSources);
 
-    const assembled = assembleContext(
-      [
+    const contextBlocks: ContextBlock[] = [
         {
           id: "turn_instructions",
           title: "会话本轮动态上下文说明",
-          source: "runtime",
+          source: "runtime" as const,
           priority: "critical",
           content: ["【本轮动态上下文】", "这些内容每轮可能变化，优先级低于前置项目稳定上下文；只在与用户目标相关时使用。"].join("\n")
         },
         {
           id: "runtime_context",
           title: "当前文档/选区/前端读取上下文",
-          source: "runtime",
+          source: "runtime" as const,
           priority: "high",
           content: `【当前文档/选区/前端读取上下文】\n${clipText(rtContext, runtimeLimit) || "暂无"}`
         },
         ...referenceBlocks,
+        ...(governedMemoryContext ? [{
+          id: "governed_memory_context",
+          title: "已确认项目记忆",
+          source: "project" as const,
+          priority: "high" as const,
+          content: `【已确认项目记忆】\n${governedMemoryContext}`
+        }] : []),
         {
           id: "vector_context",
           title: "长期记忆召回",
-          source: "vector",
+          source: "vector" as const,
           priority: "medium",
           content: `【长期记忆召回】\n${clipText(vectorContext, vectorLimit)}`
         },
         {
           id: "web_search_context",
           title: "联网搜索小说素材",
-          source: "web",
+          source: "web" as const,
           priority: "medium",
           content: `【联网搜索小说素材】\n${webSearchContext}`
         },
         {
           id: "user_input",
           title: "用户输入",
-          source: "conversation",
+          source: "conversation" as const,
           priority: "critical",
           content: `【用户输入】\n${clipText(text, userLimit)}`
         }
-      ],
+      ];
+    const assembled = assembleContext(
+      scheduleContextBlocks(contextBlocks, this.useContextBudget(), compact),
       { budget: compact ? MAX_COMPACT_CONTEXT_CHARS : MAX_CONTEXT_CHARS }
     );
     return assembled.text;
@@ -1240,6 +1325,51 @@ export class AgentChatRunner {
   }
 }
 
+function formatGovernedConversationMemory(summary: GovernedConversationMemory, compact: boolean): string {
+  const sections = [
+    ["已确认会话事实", summary.confirmedFacts],
+    ["已作决定", summary.decisions],
+    ["已拒绝选项", summary.rejectedOptions],
+    ["用户偏好", summary.userPreferences],
+    ["未完成任务", summary.openTasks]
+  ] as const;
+  const body = sections
+    .filter(([, entries]) => entries.length)
+    .map(([title, entries]) => `【${title}】\n${entries.map((entry) => `- ${entry}`).join("\n")}`);
+  if (summary.currentGoal) {
+    body.unshift(`【当前目标】\n${summary.currentGoal}`);
+  }
+  return `结构化会话状态（memory revision ${summary.memoryRevision}，仅作上下文，不改变项目正典）：\n${clipText(body.join("\n"), compact ? 1_200 : 2_400)}`;
+}
+
+function deriveGovernedConversationMemory(detail: ConversationDetail): Omit<GovernedConversationMemory, "projectId" | "memoryRevision" | "updatedAt"> {
+  const userMessages = detail.messages.filter((message) => message.role === "user");
+  const extract = (expression: RegExp): string[] => userMessages.flatMap((message) => message.content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .flatMap((line) => {
+      const match = expression.exec(line);
+      return match?.[1]?.trim() ? [match[1].trim()] : [];
+    }));
+  const latestUser = userMessages.at(-1)?.content.trim() || "";
+  return {
+    conversationId: detail.id,
+    // Only explicit, labelled user statements enter structured fields. Model
+    // output is deliberately excluded from this automatic projection.
+    confirmedFacts: extract(/^(?:确认事实|设定事实|正典)\s*[:：]\s*(.+)$/),
+    decisions: extract(/^(?:决定|选择)\s*[:：]\s*(.+)$/),
+    rejectedOptions: extract(/^(?:拒绝|不采用)\s*[:：]\s*(.+)$/),
+    userPreferences: extract(/^(?:偏好|风格偏好)\s*[:：]\s*(.+)$/),
+    openTasks: extract(/^(?:待办|下一步)\s*[:：]\s*(.+)$/),
+    currentGoal: clipText(latestUser, 1_200),
+    sourceMessageIds: detail.messages.map((message) => message.id)
+  };
+}
+
+function mergeMemoryEntries(existing: readonly string[] | undefined, derived: readonly string[]): string[] {
+  return [...new Set([...(existing ?? []), ...derived].map((entry) => String(entry).trim()).filter(Boolean))];
+}
+
 function resolveWriteBackMode(payload: ConversationMessageRequest): "append" | "replace" {
   if (!payload.write_target?.trim()) {
     return "replace";
@@ -1271,7 +1401,9 @@ function buildStableProjectContext(
   detail: ConversationDetail,
   continuity: Awaited<ReturnType<typeof buildProjectContinuityContext>>,
   attachments: Array<[ConversationAttachment, string]>,
+  governedSummary: GovernedConversationMemory | null,
   compact: boolean,
+  useContextBudget: boolean,
   contextObserver?: ChatContextAssemblyObserver,
   scope = compact ? "stable_project_context_compact" : "stable_project_context"
 ): string {
@@ -1298,6 +1430,16 @@ function buildStableProjectContext(
           source: "runtime",
           priority: "critical",
           content: "【自动压缩】已压缩项目上下文以避免超时，请优先完成用户当前目标。"
+        }
+      : null,
+    governedSummary
+      ? {
+          id: "governed_conversation_memory",
+          title: "结构化会话状态",
+          source: "conversation",
+          priority: "high",
+          maxChars: compact ? 1_200 : 2_400,
+          content: formatGovernedConversationMemory(governedSummary, compact)
         }
       : null,
     {
@@ -1361,13 +1503,19 @@ function buildStableProjectContext(
       content: `【固定上下文】\n${pinned}`
     }
   ].filter((block): block is ContextBlock => Boolean(block));
-  const assembled = assembleContext(blocks, { budget: compact ? MAX_COMPACT_CONTEXT_CHARS : MAX_CONTEXT_CHARS });
+  const assembled = assembleContext(scheduleModelContextBlocks(blocks, useContextBudget, compact), {
+    budget: compact ? MAX_COMPACT_CONTEXT_CHARS : MAX_CONTEXT_CHARS
+  });
   return observeContextAssembly(scope, assembled, contextObserver);
 }
 
 function observeContextAssembly(scope: string, context: AssembledContext, observer?: ChatContextAssemblyObserver): string {
   observer?.({ scope, context });
   return context.text;
+}
+
+function scheduleContextBlocks(blocks: ContextBlock[], enabled: boolean, compact: boolean): ContextBlock[] {
+  return scheduleModelContextBlocks(blocks, enabled, compact);
 }
 
 function clipText(text: string, limit: number): string {

@@ -14,6 +14,7 @@ import { getAgentTraceFilePath } from "./agent-trace.js";
 import { RunCoordinator } from "./kernel/run-coordinator.js";
 import { InMemoryAgentFeatureFlagRegistry } from "./kernel/feature-flag-registry.js";
 import { AgentRuntimeService, closeAllAgentRuntimeServices } from "./runtime.js";
+import { AgentChatRunner } from "./chat-runner.js";
 
 let tempDir = "";
 let configPath = "";
@@ -31,6 +32,188 @@ beforeEach(async () => {
   await fs.writeFile(path.join(tempDir, "01_大纲", "章纲.txt"), "这是测试章纲", "utf8");
   await fs.writeFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "克制冷静", "utf8");
   await fs.writeFile(path.join(tempDir, "00_设定集", "题材库", "题材规则.txt"), "升级流", "utf8");
+});
+
+describe("agent-runtime B2 feature flag branches", () => {
+  const chatRequest = {
+    conversation_id: "",
+    content: "请继续讨论项目",
+    current_path: "",
+    selection: "",
+    project_context_hint: "",
+    skill_id: "",
+    attachment_ids: []
+  };
+
+  it("uses ModelGateway retries only when model_gateway_v2 is enabled", async () => {
+    let gatewayAttempts = 0;
+    const enabled = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      featureFlags: new InMemoryAgentFeatureFlagRegistry({
+        agent_execution_v2_mode: "on",
+        model_gateway_v2: true
+      }),
+      modelClient: {
+        requestCompletion: async () => {
+          gatewayAttempts += 1;
+          if (gatewayAttempts === 1) {
+            throw new Error("simulated gateway timeout");
+          }
+          return "Gateway 已恢复";
+        }
+      }
+    });
+
+    await expect(enabled.runAgent({ ...chatRequest, request_id: "gateway-enabled" })).resolves.toMatchObject({ reply: "Gateway 已恢复" });
+    expect(gatewayAttempts).toBeGreaterThan(1);
+    enabled.close();
+
+    let legacyAttempts = 0;
+    const disabled = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      featureFlags: new InMemoryAgentFeatureFlagRegistry({ agent_execution_v2_mode: "on" }),
+      modelClient: {
+        requestCompletion: async () => {
+          legacyAttempts += 1;
+          throw new Error("simulated legacy validation failure");
+        }
+      }
+    });
+
+    await expect(disabled.runAgent({ ...chatRequest, request_id: "gateway-disabled" })).rejects.toThrow("simulated legacy validation failure");
+    expect(legacyAttempts).toBe(1);
+    disabled.close();
+  });
+
+  it("enforces quality_gate_v2 before generated content is committed", async () => {
+    const flags = new InMemoryAgentFeatureFlagRegistry({
+      agent_execution_v2_mode: "on",
+      model_gateway_v2: true,
+      quality_gate_v2: true
+    });
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath }, featureFlags: flags });
+
+    await expect(runtime.commitGeneratedCache({
+      content: "#不合规标题",
+      source: "test",
+      skill_id: "chat_generated",
+      mode: "replace",
+      target_paths: ["02_正文/质量门拒绝.txt"]
+    })).rejects.toMatchObject({ code: "QUALITY_GATE_REJECTED" });
+    await expect(fs.stat(path.join(tempDir, "02_正文", "质量门拒绝.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(runtime.listDurableRuns(undefined, 10)).toHaveLength(0);
+    runtime.close();
+  });
+
+  it("injects confirmed memory into model context only when memory_context_selector_v2 is enabled", async () => {
+    const enabledFlags = new InMemoryAgentFeatureFlagRegistry({
+      agent_execution_v2_mode: "on",
+      model_gateway_v2: true,
+      agent_replanning_v2: true,
+      context_budget_v2: true,
+      memory_v2: true,
+      memory_context_selector_v2: true
+    });
+    let enabledMessages: ChatCompletionMessage[] = [];
+    const enabled = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      featureFlags: enabledFlags,
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          enabledMessages = messages;
+          return "已读取记忆";
+        }
+      }
+    });
+    const claim = await enabled.createGovernedMemoryClaim({
+      id: "selector-claim",
+      subject: "陆尘",
+      predicate: "境界",
+      object: "练气期",
+      interval: {},
+      status: "draft"
+    });
+    const requested = await enabled.requestGovernedMemoryConfirmation(claim.id, claim.revision);
+    const approved = await enabled.resolveGovernedMemoryConfirmation({
+      confirmationId: requested.confirmation_id,
+      expectedVersion: requested.version,
+      decision: "approved"
+    });
+    await enabled.confirmGovernedMemoryClaim({
+      claimId: claim.id,
+      confirmationId: approved.confirmation_id,
+      expectedConfirmationVersion: approved.version
+    });
+    await enabled.runAgent({ ...chatRequest, request_id: "selector-enabled" });
+    expect(enabledMessages.map((message) => message.content).join("\n")).toContain("陆尘 境界 练气期");
+    enabled.close();
+
+    let disabledMessages: ChatCompletionMessage[] = [];
+    const disabled = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      featureFlags: new InMemoryAgentFeatureFlagRegistry({
+        agent_execution_v2_mode: "on",
+        model_gateway_v2: true,
+        agent_replanning_v2: true,
+        context_budget_v2: true,
+        memory_v2: true,
+        memory_context_selector_v2: false
+      }),
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          disabledMessages = messages;
+          return "不注入记忆";
+        }
+      }
+    });
+    await disabled.runAgent({ ...chatRequest, request_id: "selector-disabled" });
+    expect(disabledMessages.map((message) => message.content).join("\n")).not.toContain("陆尘 境界 练气期");
+    disabled.close();
+  });
+
+  it("allows failed multi-step skill replanning only when agent_replanning_v2 is enabled", async () => {
+    const skillPlan = {
+      should_call_skill: true,
+      selected_reason: "test",
+      confidence: 1,
+      steps: [
+        { skill_id: "missing_first_skill", name: "first", instruction: "", text: "", reason: "test", confidence: 1 },
+        { skill_id: "missing_second_skill", name: "second", instruction: "", text: "", reason: "test", confidence: 1 }
+      ]
+    };
+    const request = { ...chatRequest, content: "运行测试技能计划" };
+
+    const runPlan = async (enabled: boolean) => {
+      const runtime = new AgentRuntimeService({
+        projectRoot: tempDir,
+        config: { configPath },
+        featureFlags: new InMemoryAgentFeatureFlagRegistry({
+          agent_execution_v2_mode: "on",
+          model_gateway_v2: true,
+          agent_replanning_v2: enabled
+        })
+      });
+      const internal = runtime as unknown as {
+        planSkillExecution: () => Promise<typeof skillPlan>;
+        runSkillPlan: (plan: typeof skillPlan, payload: typeof request) => Promise<unknown>;
+      };
+      let replanCalls = 0;
+      internal.planSkillExecution = async () => {
+        replanCalls += 1;
+        return skillPlan;
+      };
+      await internal.runSkillPlan(skillPlan, request);
+      runtime.close();
+      return replanCalls;
+    };
+
+    await expect(runPlan(false)).resolves.toBe(0);
+    await expect(runPlan(true)).resolves.toBe(1);
+  });
 });
 
 afterEach(async () => {
@@ -77,6 +260,172 @@ async function waitForCacheStatus(cache: GeneratedCacheService, cacheId: string,
   const current = await cache.get(cacheId);
   throw new Error(`Cache ${cacheId} did not reach ${status}; current=${current.status}`);
 }
+
+describe("agent-runtime governed memory", () => {
+  it("keeps memory_v2 fail-closed and promotes a claim only through a persistent user receipt", async () => {
+    const disabled = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+    await expect(disabled.listGovernedMemoryClaims()).rejects.toMatchObject({ code: "MEMORY_V2_DISABLED" });
+    disabled.close();
+
+    const flags = new InMemoryAgentFeatureFlagRegistry({
+      agent_execution_v2_mode: "on",
+      model_gateway_v2: true,
+      agent_replanning_v2: true,
+      context_budget_v2: true,
+      memory_v2: true
+    });
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath }, featureFlags: flags });
+    const claim = await runtime.createGovernedMemoryClaim({
+      id: "runtime-memory-claim",
+      subject: "陆尘",
+      predicate: "境界",
+      object: "练气期",
+      interval: {},
+      status: "draft"
+    });
+    const requested = await runtime.requestGovernedMemoryConfirmation(claim.id, claim.revision);
+    const approved = await runtime.resolveGovernedMemoryConfirmation({
+      confirmationId: requested.confirmation_id,
+      expectedVersion: requested.version,
+      decision: "approved"
+    });
+    await expect(runtime.confirmGovernedMemoryClaim({
+      claimId: claim.id,
+      confirmationId: approved.confirmation_id,
+      expectedConfirmationVersion: requested.version
+    })).rejects.toMatchObject({ code: "MEMORY_CONFIRMATION_VERSION_CONFLICT" });
+    const confirmed = await runtime.confirmGovernedMemoryClaim({
+      claimId: claim.id,
+      confirmationId: approved.confirmation_id,
+      expectedConfirmationVersion: approved.version
+    });
+    expect(confirmed).toMatchObject({ status: "confirmed", revision: 1 });
+    runtime.close();
+
+    const reopened = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath }, featureFlags: flags });
+    await expect(reopened.listGovernedMemoryClaims()).resolves.toMatchObject([{ id: claim.id, status: "confirmed", revision: 1 }]);
+    reopened.close();
+  });
+
+  it("snapshots memory revision on a durable run, pauses it after source invalidation, and blocks stale resume", async () => {
+    const flags = new InMemoryAgentFeatureFlagRegistry({
+      agent_execution_v2_mode: "on",
+      model_gateway_v2: true,
+      agent_replanning_v2: true,
+      context_budget_v2: true,
+      memory_v2: true
+    });
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      featureFlags: flags,
+      modelClient: { requestCompletion: async () => await new Promise<string>(() => undefined) }
+    });
+    await runtime.createGovernedMemoryClaim({
+      id: "memory-revision-claim",
+      subject: "陆尘",
+      predicate: "境界",
+      object: "练气期",
+      interval: {},
+      status: "draft",
+      sourceRef: "01_大纲/大纲.txt",
+      sourceRevision: "sha256:old"
+    });
+    const created = await runtime.createDurableRun({
+      request_id: "memory-revision-run",
+      conversation_id: "",
+      content: "继续讨论陆尘的修炼进度",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    });
+    expect(created.run.base_memory_revision).toBe(1);
+
+    await runtime.invalidateGovernedMemorySource({
+      sourceRef: "01_大纲/大纲.txt",
+      currentSourceRevision: "sha256:new"
+    });
+    expect(runtime.listDurableRunEvents(created.run.run_id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event_type: "memory.revision_stale", payload: { base_memory_revision: 1, current_memory_revision: 2 } })
+    ]));
+    expect(() => runtime.resumeDurableRun(created.run.run_id, "resume-stale-memory", runtime.getDurableRun(created.run.run_id)!.version))
+      .toThrow(expect.objectContaining({ code: "MEMORY_REVISION_STALE" }));
+    runtime.close();
+  });
+
+  it("adds a persisted governed conversation summary to chat context only when memory_v2 is enabled", async () => {
+    const flags = new InMemoryAgentFeatureFlagRegistry({
+      agent_execution_v2_mode: "on",
+      model_gateway_v2: true,
+      agent_replanning_v2: true,
+      context_budget_v2: true,
+      memory_v2: true
+    });
+    let capturedMessages: ChatCompletionMessage[] = [];
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      featureFlags: flags,
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          capturedMessages = messages;
+          return "收到。";
+        }
+      }
+    });
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const conversation = await conversations.createConversation({ title: "记忆上下文" });
+    await runtime.upsertGovernedConversationMemory({
+      conversationId: conversation.id,
+      confirmedFacts: ["陆尘目前是练气期"],
+      decisions: ["先完成大纲"],
+      rejectedOptions: [],
+      userPreferences: [],
+      openTasks: ["补第 2 章"],
+      currentGoal: "完成第一卷",
+      sourceMessageIds: ["message-1"]
+    });
+    const runner = new AgentChatRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          capturedMessages = messages;
+          return "收到。";
+        }
+      },
+      governedConversationMemory: {
+        load: (conversationId) => runtime.getGovernedConversationMemory(conversationId),
+        upsert: (input) => runtime.upsertGovernedConversationMemory(input)
+      }
+    });
+    let governedBlockIncluded = false;
+    await runner.runAgent({
+      request_id: "governed-summary-context",
+      conversation_id: conversation.id,
+      content: "继续写作",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    }, "chat", (event) => {
+      if (event.scope === "agent_chat_stable") {
+        governedBlockIncluded = event.context.blocks.some((block) => block.id === "governed_conversation_memory" && block.included);
+      }
+    });
+    expect(capturedMessages.some((message) => message.content.includes("结构化会话状态"))).toBe(true);
+    expect(capturedMessages.some((message) => message.content.includes("陆尘目前是练气期"))).toBe(true);
+    expect(governedBlockIncluded).toBe(true);
+    await expect(runtime.getGovernedConversationMemory(conversation.id)).resolves.toMatchObject({
+      confirmedFacts: ["陆尘目前是练气期"],
+      sourceMessageIds: expect.arrayContaining(["message-1"])
+    });
+    runtime.close();
+  });
+});
 
 describe("agent-runtime stale run recovery", () => {
   it("keeps a stale chat run paused when its durable budget has expired", async () => {
@@ -719,6 +1068,7 @@ describe("agent-runtime chat flow", () => {
       "run.created",
       "run.planning",
       "run.started",
+      "budget.step_consumed",
       "run.completed"
     ]);
     expect(trace).toMatchObject({

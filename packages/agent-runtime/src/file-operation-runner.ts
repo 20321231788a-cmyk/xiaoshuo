@@ -3,6 +3,7 @@ import { DocumentService } from "@xiaoshuo/document-service";
 import { ProjectManifestService } from "@xiaoshuo/project-manifest";
 import type {
   AgentPlanResponse,
+  AgentConfirmationTargetBinding,
   FileOperation,
   AgentRunRequest,
   AgentRunResponse,
@@ -11,22 +12,47 @@ import type {
   ConversationMessage,
   OperationResult
 } from "@xiaoshuo/shared";
+import { agentPlanResponseSchema } from "@xiaoshuo/shared";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import type { AgentPlanner } from "./planner.js";
 import { CommitJournalService } from "./kernel/commit-journal-service.js";
+import {
+  CONFIRMATION_RECEIPT_CODES,
+  ConfirmationReceiptError,
+  sameTargetBindings,
+  sha256StableJson
+} from "./kernel/confirmation-receipt.js";
+import type {
+  ConsumeConfirmationReceiptInput,
+  ExecutionCasResult,
+  StoredAgentConfirmation
+} from "./kernel/execution-store-port.js";
 
 type FileOperationRunnerOptions = {
   planner: AgentPlanner;
   projectRoot: string;
   commitJournal?: CommitJournalService;
+  /** Invoked before any journal or filesystem mutation for generated writes. */
+  assertArtifactQuality?: (entries: Array<{ content: string; targetPath: string; artifactType?: string }>) => Promise<void>;
 };
 
 export type DurableFileOperationContext = {
   runId: string;
   stepId: string;
   attemptId: string;
+  projectId?: string;
+  planVersion?: number;
   requiresConfirmation?: boolean;
+  confirmationReceiptId?: string;
+  confirmationReceiptVersion?: number;
+  confirmationScopeFingerprint?: string;
+  confirmationActionInputHash?: string;
+  confirmationTargetBindings?: AgentConfirmationTargetBinding[];
+  confirmationActionPayload?: Record<string, unknown>;
+  consumeConfirmationReceipt?: (
+    input: ConsumeConfirmationReceiptInput
+  ) => ExecutionCasResult<StoredAgentConfirmation> | Promise<ExecutionCasResult<StoredAgentConfirmation>>;
 };
 
 export class AgentFileOperationRunner {
@@ -35,6 +61,7 @@ export class AgentFileOperationRunner {
   private readonly conversations: ConversationService;
   private readonly manifest: ProjectManifestService;
   private readonly commitJournal?: CommitJournalService;
+  private readonly assertArtifactQuality?: FileOperationRunnerOptions["assertArtifactQuality"];
 
   constructor(options: FileOperationRunnerOptions) {
     this.planner = options.planner;
@@ -42,9 +69,13 @@ export class AgentFileOperationRunner {
     this.conversations = new ConversationService({ projectRoot: options.projectRoot });
     this.manifest = new ProjectManifestService(options.projectRoot);
     this.commitJournal = options.commitJournal;
+    this.assertArtifactQuality = options.assertArtifactQuality;
   }
 
   async runAgent(request: AgentRunRequest, durable?: DurableFileOperationContext): Promise<AgentRunResponse> {
+    if (durable?.confirmationActionPayload) {
+      return this.executeConfirmedPlan(request, durable);
+    }
     const batchReplace = await this.runBatchReplaceOperation(request, durable);
     if (batchReplace) {
       return batchReplace;
@@ -74,29 +105,11 @@ export class AgentFileOperationRunner {
       };
     }
     if (this.documents.operationsRequireDeleteConfirmation(plan.operations)) {
-      return {
-        intent: "file_operation",
-        reply: "已生成删除/归档类文件操作预览，请确认后执行。",
-        conversation: undefined,
-        plan,
-        results: [],
-        skill_result: undefined,
-        saved_paths: [],
-        requires_confirmation: true
-      };
+      return this.confirmationPreview(plan, "已生成删除/归档类文件操作预览，请确认后执行。", durable);
     }
 
     if (durable?.requiresConfirmation) {
-      return {
-        intent: "file_operation",
-        reply: "已生成文件操作预览，请确认后执行。",
-        conversation: undefined,
-        plan,
-        results: [],
-        skill_result: undefined,
-        saved_paths: [],
-        requires_confirmation: true
-      };
+      return this.confirmationPreview(plan, "已生成文件操作预览，请确认后执行。", durable);
     }
 
     const results = await this.executePlanOperations(plan.operations, plan.summary, durable);
@@ -133,6 +146,220 @@ export class AgentFileOperationRunner {
         message: error instanceof Error ? error.message : String(error)
       };
     }
+  }
+
+  private async confirmationPreview(
+    plan: AgentPlanResponse,
+    reply: string,
+    durable?: DurableFileOperationContext
+  ): Promise<AgentRunResponse> {
+    if (!durable?.projectId || !durable.planVersion) {
+      throw new ConfirmationReceiptError(
+        CONFIRMATION_RECEIPT_CODES.required,
+        "A durable project and plan scope is required to confirm file operations"
+      );
+    }
+    const sealedPlan = agentPlanResponseSchema.parse(plan);
+    const targetBindings = await this.buildTargetBindings(sealedPlan.operations);
+    const actionInputHash = sha256StableJson(sealedPlan);
+    const actionId = "execute_file_plan";
+    const scopeFingerprint = sha256StableJson({
+      run_id: durable.runId,
+      step_id: durable.stepId,
+      project_id: durable.projectId,
+      plan_version: durable.planVersion,
+      action_id: actionId,
+      target_bindings: targetBindings,
+      action_input_hash: actionInputHash,
+      action_payload: sealedPlan
+    });
+    return {
+      intent: "file_operation",
+      reply,
+      conversation: undefined,
+      plan: sealedPlan,
+      results: [],
+      skill_result: undefined,
+      saved_paths: [],
+      requires_confirmation: true,
+      confirmation_scope: {
+        project_id: durable.projectId,
+        plan_version: durable.planVersion,
+        action_id: actionId,
+        target_bindings: targetBindings,
+        action_input_hash: actionInputHash,
+        scope_fingerprint: scopeFingerprint,
+        action_payload: sealedPlan
+      }
+    };
+  }
+
+  private async executeConfirmedPlan(
+    request: AgentRunRequest,
+    durable: DurableFileOperationContext
+  ): Promise<AgentRunResponse> {
+    const plan = agentPlanResponseSchema.parse(durable.confirmationActionPayload);
+    const actionInputHash = sha256StableJson(plan);
+    if (
+      !durable.projectId ||
+      !durable.planVersion ||
+      !durable.confirmationReceiptId ||
+      !durable.confirmationReceiptVersion ||
+      !durable.confirmationScopeFingerprint ||
+      !durable.confirmationActionInputHash ||
+      !durable.confirmationTargetBindings ||
+      !durable.consumeConfirmationReceipt
+    ) {
+      throw new ConfirmationReceiptError(
+        CONFIRMATION_RECEIPT_CODES.required,
+        "Confirmed file execution is missing trusted receipt state"
+      );
+    }
+    if (durable.confirmationActionInputHash !== actionInputHash) {
+      throw new ConfirmationReceiptError(
+        CONFIRMATION_RECEIPT_CODES.hashMismatch,
+        "Persisted file plan does not match the confirmed action input hash"
+      );
+    }
+    const currentBindings = await this.buildTargetBindings(plan.operations);
+    this.assertTargetBindingsMatch(durable.confirmationTargetBindings, currentBindings);
+    const consumed = await durable.consumeConfirmationReceipt({
+      confirmation_id: durable.confirmationReceiptId,
+      expected_version: durable.confirmationReceiptVersion,
+      run_id: durable.runId,
+      step_id: durable.stepId,
+      attempt_id: durable.attemptId,
+      action: "execute_file_plan",
+      project_id: durable.projectId,
+      plan_version: durable.planVersion,
+      action_input_hash: actionInputHash,
+      scope_fingerprint: durable.confirmationScopeFingerprint,
+      target_bindings: currentBindings
+    });
+    if (!consumed.applied) {
+      throw new ConfirmationReceiptError(
+        CONFIRMATION_RECEIPT_CODES.versionMismatch,
+        `Confirmation ${durable.confirmationReceiptId} changed before file execution`
+      );
+    }
+    const results = await this.executePlanOperations(plan.operations, plan.summary, durable);
+    const reply = this.summarizeOperationResults(results);
+    const conversation = await this.recordAgentExchange(request, reply);
+    return {
+      intent: "file_operation",
+      reply,
+      conversation,
+      plan,
+      results,
+      skill_result: undefined,
+      saved_paths: results.filter((result) => result.ok).map((result) => result.path),
+      requires_confirmation: false
+    };
+  }
+
+  private async buildTargetBindings(
+    operations: readonly FileOperation[]
+  ): Promise<AgentConfirmationTargetBinding[]> {
+    const paths = [...new Set(operations.flatMap((operation) => [
+      operation.path,
+      ...(operation.target_path ? [operation.target_path] : [])
+    ]).filter(Boolean))];
+    const state = new Map<string, {
+      canonicalPath: string;
+      version: number;
+      baseContent: string;
+      proposedContent: string;
+    }>();
+    for (const filePath of paths) {
+      const canonicalPath = await this.documents.resolveSafePath(filePath, { allowMissing: true });
+      const document = await this.documents.readDocument(filePath).catch(() => null);
+      const baseContent = document?.content ?? "";
+      state.set(filePath, {
+        canonicalPath,
+        version: Math.max(0, Math.trunc(document?.updated_at_ms ?? 0)),
+        baseContent,
+        proposedContent: baseContent
+      });
+    }
+    for (const operation of operations) {
+      const source = state.get(operation.path);
+      if (!source) {
+        continue;
+      }
+      if (operation.action === "create_file") {
+        source.proposedContent = operation.text || "";
+      } else if (operation.action === "append_text") {
+        source.proposedContent += operation.text || "";
+      } else if (operation.action === "replace_text") {
+        if (!operation.old_text || !source.proposedContent.includes(operation.old_text)) {
+          throw new ConfirmationReceiptError(
+            CONFIRMATION_RECEIPT_CODES.hashMismatch,
+            `Cannot seal replace operation for ${operation.path}: base text is missing`
+          );
+        }
+        source.proposedContent = source.proposedContent.replace(operation.old_text, operation.new_text || "");
+      } else if (operation.action === "move_file") {
+        const target = state.get(operation.target_path);
+        if (!target) {
+          throw new ConfirmationReceiptError(
+            CONFIRMATION_RECEIPT_CODES.targetMismatch,
+            `Cannot seal move operation without target ${operation.target_path}`
+          );
+        }
+        target.proposedContent = source.proposedContent;
+        source.proposedContent = "";
+      } else if (operation.action === "archive_file") {
+        source.proposedContent = "";
+      }
+    }
+    return paths.map((filePath) => {
+      const item = state.get(filePath)!;
+      return {
+        path: filePath,
+        canonical_path: item.canonicalPath,
+        document_version: item.version,
+        base_hash: this.hashContent(item.baseContent),
+        proposed_hash: this.hashContent(item.proposedContent)
+      };
+    });
+  }
+
+  private assertTargetBindingsMatch(
+    expected: readonly AgentConfirmationTargetBinding[],
+    actual: readonly AgentConfirmationTargetBinding[]
+  ): void {
+    if (sameTargetBindings(expected, actual)) {
+      return;
+    }
+    for (const binding of expected) {
+      const current = actual.find((item) => item.path === binding.path);
+      if (!current || current.canonical_path !== binding.canonical_path) {
+        throw new ConfirmationReceiptError(
+          CONFIRMATION_RECEIPT_CODES.targetMismatch,
+          `Confirmed target ${binding.path} changed before execution`
+        );
+      }
+      if (current.document_version !== binding.document_version) {
+        throw new ConfirmationReceiptError(
+          CONFIRMATION_RECEIPT_CODES.versionMismatch,
+          `Confirmed target ${binding.path} version changed before execution`
+        );
+      }
+      if (current.base_hash !== binding.base_hash || current.proposed_hash !== binding.proposed_hash) {
+        throw new ConfirmationReceiptError(
+          CONFIRMATION_RECEIPT_CODES.hashMismatch,
+          `Confirmed target ${binding.path} content changed before execution`
+        );
+      }
+    }
+    throw new ConfirmationReceiptError(
+      CONFIRMATION_RECEIPT_CODES.targetMismatch,
+      "Confirmed target set changed before execution"
+    );
+  }
+
+  private hashContent(content: string): string {
+    return createHash("sha256").update(content, "utf8").digest("hex");
   }
 
   private summarizeOperationResults(results: AgentRunResponse["results"]): string {
@@ -222,16 +449,7 @@ export class AgentFileOperationRunner {
       can_execute: true
     };
     if (durable?.requiresConfirmation) {
-      return {
-        intent: "file_operation",
-        reply: "已生成文件操作预览，请确认后执行。",
-        conversation: undefined,
-        plan,
-        results: [],
-        skill_result: undefined,
-        saved_paths: [],
-        requires_confirmation: true
-      };
+      return this.confirmationPreview(plan, "已生成文件操作预览，请确认后执行。", durable);
     }
     const results = await this.executeContentOperation(operation, plan.summary, durable);
     const reply = this.summarizeOperationResults(results);
@@ -405,16 +623,7 @@ export class AgentFileOperationRunner {
         warnings: [],
         can_execute: true
       };
-      return {
-        intent: "file_operation",
-        reply: "已生成批量替换操作预览，请确认后执行。",
-        conversation: undefined,
-        plan,
-        results: [],
-        skill_result: undefined,
-        saved_paths: [],
-        requires_confirmation: true
-      };
+      return this.confirmationPreview(plan, "已生成批量替换操作预览，请确认后执行。", durable);
     }
     const results = await this.executeBatchReplace(oldText, newText, scopePath, durable);
     const changed = results.filter((item) => item.ok && /替换\s*\d+\s*处/.test(item.message));
@@ -572,15 +781,21 @@ export class AgentFileOperationRunner {
     summary: string,
     durable?: DurableFileOperationContext
   ): Promise<OperationResult[]> {
-    if (!durable || !this.commitJournal) {
-      return this.documents.executeOperations(operations, { source: "agent", summary });
-    }
+    const prepared = await this.prepareWritableOperations(operations);
+    await this.assertArtifactQuality?.(prepared.map((entry) => ({
+      content: entry.content,
+      targetPath: entry.operation.path,
+      artifactType: "project_document"
+    })));
 
     const results: OperationResult[] = [];
     for (const operation of operations) {
       try {
         if (["create_file", "append_text", "replace_text"].includes(operation.action)) {
-          const content = await this.resolveOperationContent(operation);
+          const content = prepared.find((entry) => entry.operation === operation)?.content;
+          if (content === undefined) {
+            throw new Error("保存内容预检丢失");
+          }
           await this.saveContent(operation.path, content, operation.action, summary, durable);
           results.push({
             action: operation.action,
@@ -609,13 +824,20 @@ export class AgentFileOperationRunner {
     summary: string,
     durable?: DurableFileOperationContext
   ): Promise<OperationResult[]> {
-    if (!durable || !this.commitJournal) {
-      return this.documents.executeOperations([operation], { source: "agent", summary });
-    }
-
     const content = await this.resolveOperationContent(operation);
+    await this.assertArtifactQuality?.([{ content, targetPath: operation.path, artifactType: "project_document" }]);
     await this.saveContent(operation.path, content, operation.action, summary, durable);
     return [{ action: operation.action, path: operation.path, ok: true, message: "完成" }];
+  }
+
+  private async prepareWritableOperations(operations: FileOperation[]): Promise<Array<{ operation: FileOperation; content: string }>> {
+    const prepared: Array<{ operation: FileOperation; content: string }> = [];
+    for (const operation of operations) {
+      if (["create_file", "append_text", "replace_text"].includes(operation.action)) {
+        prepared.push({ operation, content: await this.resolveOperationContent(operation) });
+      }
+    }
+    return prepared;
   }
 
   private async resolveOperationContent(operation: FileOperation): Promise<string> {

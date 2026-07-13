@@ -1,6 +1,10 @@
 import type { ModelConfig } from "@xiaoshuo/config-service";
 import { z } from "zod";
-import { OpenAICompatibleClient, type ChatCompletionMessage } from "./openai-compatible.js";
+import {
+  OpenAICompatibleClient,
+  type ChatCompletionMessage,
+  type ModelRequestOptions
+} from "./openai-compatible.js";
 import { ModelRetryPolicy } from "./retry-policy.js";
 import { StructuredOutputManager } from "./structured-output.js";
 import { estimateCost, type ModelCallMetrics, type ModelUsage } from "./usage.js";
@@ -16,6 +20,9 @@ export type GatewayRequestOptions = {
   stepId?: string;
   attemptId?: string;
   disableRateLimiter?: boolean;
+  maxOutputTokens?: number;
+  captureUsage?: boolean;
+  dispatchLifecycle?: ModelRequestOptions["dispatchLifecycle"];
 };
 
 export type GatewayRequestHook = (data: {
@@ -157,7 +164,7 @@ export class ModelGateway {
     options: GatewayRequestOptions
   ): Promise<string> {
     return this.executeRequest(config, messages, options, async (activeConfig, activeMessages) => {
-      return this.client.requestCompletion(activeConfig, activeMessages, activeConfig.temperature, { signal: options.signal });
+      return this.client.requestCompletion(activeConfig, activeMessages, activeConfig.temperature, requestOptions(options));
     });
   }
 
@@ -176,7 +183,7 @@ export class ModelGateway {
           content: StructuredOutputManager.buildStrictPrompt(schema, lastMsg.content)
         };
       }
-      return this.client.requestCompletion(activeConfig, strictMessages, 0.1, { signal: options.signal });
+      return this.client.requestCompletion(activeConfig, strictMessages, 0.1, requestOptions(options));
     });
 
     try {
@@ -190,7 +197,7 @@ ${rawText}`;
         const repairedText = await this.executeRequest(config, [
           { role: "user", content: repairPrompt }
         ], { ...options, purpose: "verification" }, async (activeConfig, activeMessages) => {
-          return this.client.requestCompletion(activeConfig, activeMessages, 0.1, { signal: options.signal });
+          return this.client.requestCompletion(activeConfig, activeMessages, 0.1, requestOptions(options));
         });
         return StructuredOutputManager.parseWithSchema(repairedText, schema);
       } catch {
@@ -241,7 +248,7 @@ ${rawText}`;
     const startedAt = Date.now();
 
     try {
-      for await (const chunk of this.client.streamCompletion(config, messages, config.temperature, { signal: options.signal })) {
+      for await (const chunk of this.client.streamCompletion(config, messages, config.temperature, requestOptions(options))) {
         started = true;
         tokensCount++;
         yield chunk;
@@ -286,26 +293,26 @@ ${rawText}`;
     config: ModelConfig,
     messages: ChatCompletionMessage[],
     temperature?: number,
-    options: { signal?: AbortSignal } = {}
+    options: Partial<GatewayRequestOptions> = {}
   ): Promise<string> {
     const activeConfig = { ...config };
     if (temperature !== undefined) {
       activeConfig.temperature = temperature;
     }
-    return this.completeText(activeConfig, messages, { purpose: "chat", signal: options.signal });
+    return this.completeText(activeConfig, messages, { purpose: options.purpose ?? "chat", ...options });
   }
 
   async *streamCompletion(
     config: ModelConfig,
     messages: ChatCompletionMessage[],
     temperature?: number,
-    options: { signal?: AbortSignal } = {}
+    options: Partial<GatewayRequestOptions> = {}
   ): AsyncGenerator<string> {
     const activeConfig = { ...config };
     if (temperature !== undefined) {
       activeConfig.temperature = temperature;
     }
-    yield* this.streamText(activeConfig, messages, { purpose: "chat", signal: options.signal });
+    yield* this.streamText(activeConfig, messages, { purpose: options.purpose ?? "chat", ...options });
   }
 
   private async executeRequest(
@@ -390,4 +397,13 @@ ${rawText}`;
       throw error;
     }
   }
+}
+
+function requestOptions(options: GatewayRequestOptions): ModelRequestOptions {
+  return {
+    signal: options.signal,
+    maxOutputTokens: options.maxOutputTokens,
+    captureUsage: options.captureUsage,
+    dispatchLifecycle: options.dispatchLifecycle
+  };
 }

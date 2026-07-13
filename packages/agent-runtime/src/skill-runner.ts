@@ -11,6 +11,7 @@ import { HUMANIZER_SYSTEM_PROMPT, applyHumanizerIfEnabled } from "./humanizer.js
 import { GeneratedSavePlanner } from "./generated-save-planner.js";
 import { assembleContext } from "./kernel/context-assembler.js";
 import type { ContextBlock } from "./kernel/context-block.js";
+import { scheduleModelContextBlocks } from "./context-scheduling.js";
 import { ProjectFileResolver } from "./kernel/project-file-resolver.js";
 import {
   mergeLoreSectionText,
@@ -71,6 +72,8 @@ export type PromptSkillRunnerOptions = {
   projectRoot: string;
   config?: ConfigServiceOptions;
   modelClient?: StreamingModelClient;
+  /** Product-owned P4a capability. False preserves the legacy assembler. */
+  useContextBudget?: () => boolean;
 };
 
 /**
@@ -92,6 +95,7 @@ export class PromptSkillRunner {
   private readonly modelClient: StreamingModelClient;
   private readonly savePlanner: GeneratedSavePlanner;
   private readonly fileResolver: ProjectFileResolver;
+  private readonly useContextBudget: () => boolean;
 
   constructor(options: PromptSkillRunnerOptions) {
     this.projectRoot = path.resolve(options.projectRoot);
@@ -101,6 +105,7 @@ export class PromptSkillRunner {
     this.cache = new GeneratedCacheService({ projectRoot: this.projectRoot });
     this.conversations = new ConversationService({ projectRoot: this.projectRoot });
     this.modelClient = options.modelClient ?? new OpenAICompatibleClient();
+    this.useContextBudget = options.useContextBudget ?? (() => false);
     this.fileResolver = new ProjectFileResolver({ projectRoot: this.projectRoot, documents: this.documents });
     this.savePlanner = new GeneratedSavePlanner({
       projectRoot: this.projectRoot,
@@ -314,7 +319,7 @@ export class PromptSkillRunner {
     compact: boolean
   ): ChatCompletionMessage[] {
     const prompt = buildSkillPrompt(skill, context, sourceText, instruction, compact);
-    const assembled = assembleContext(prompt, {
+    const assembled = assembleContext(scheduleModelContextBlocks(prompt, this.useContextBudget(), compact), {
       mode: compact ? "compact_retry" : "prompt_skill",
       budget: compact ? MAX_COMPACT_PROMPT_CHARS : undefined,
       separator: "\n\n"

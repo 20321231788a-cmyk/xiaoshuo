@@ -18,6 +18,7 @@ import type {
   AcquireWriteLeaseInput,
   ClaimStaleRunInput,
   CompleteControlOperationInput,
+  ConsumeConfirmationReceiptInput,
   ExecutionCasResult,
   ExecutionCommitJournalEntry,
   ExecutionControlOperation,
@@ -35,6 +36,13 @@ import type {
   ExecutionStoreMigrationRecord,
   ExecutionStoreFileSystem,
   ExecutionStorePort,
+  BudgetBlockedRunResult,
+  ExecutionModelBudgetReservation,
+  MarkModelBudgetDispatchedInput,
+  ReconcileModelBudgetReservationsResult,
+  ReleaseModelBudgetInput,
+  ReserveModelBudgetInput,
+  SettleModelBudgetInput,
   ExecutionWriteLease,
   FinishAttemptInput,
   HeartbeatRunLeaseInput,
@@ -44,8 +52,10 @@ import type {
   ReleaseWriteLeaseInput,
   RenewWriteLeaseInput,
   ReplaceRunStepsInput,
+  ReplaceStepsWithBudgetResult,
   ResolveConfirmationInput,
   StartAttemptInput,
+  StartAttemptWithBudgetResult,
   StoredAgentArtifact,
   StoredAgentConfirmation,
   StoredAgentExecutionStep,
@@ -54,11 +64,16 @@ import type {
   UpdateCommitJournalInput,
   UpdateRunStatusInput
 } from "./execution-store-port.js";
+import {
+  CONFIRMATION_RECEIPT_CODES,
+  ConfirmationReceiptError,
+  sameTargetBindings
+} from "./confirmation-receipt.js";
 
 export * from "./execution-store-port.js";
 
 export const EXECUTION_STORE_RELATIVE_PATH = path.join("00_设定集", ".agent", "agent_runs.sqlite3");
-export const CURRENT_EXECUTION_STORE_SCHEMA_VERSION = 2;
+export const CURRENT_EXECUTION_STORE_SCHEMA_VERSION = 3;
 export const EXECUTION_STORE_BUSY_TIMEOUT_MS = 5_000;
 
 const MIGRATION_ONE_SQL = `
@@ -361,6 +376,44 @@ CREATE TABLE preference_versions (
 );
 `;
 
+const MIGRATION_THREE_SQL = `
+CREATE TABLE agent_model_budget_reservations (
+  reservation_id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  step_id TEXT NOT NULL,
+  attempt_id TEXT NOT NULL,
+  model_call_id TEXT NOT NULL,
+  budget_id TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('reserved', 'settled', 'released')),
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  purpose TEXT NOT NULL,
+  pricing_version TEXT NOT NULL,
+  reserved_model_calls INTEGER NOT NULL CHECK (reserved_model_calls = 1),
+  reserved_input_tokens INTEGER NOT NULL CHECK (reserved_input_tokens >= 0),
+  reserved_output_tokens INTEGER NOT NULL CHECK (reserved_output_tokens >= 0),
+  reserved_cost_microusd INTEGER NOT NULL CHECK (reserved_cost_microusd >= 0),
+  charged_model_calls INTEGER NOT NULL DEFAULT 0 CHECK (charged_model_calls >= 0),
+  charged_input_tokens INTEGER NOT NULL DEFAULT 0 CHECK (charged_input_tokens >= 0),
+  charged_output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (charged_output_tokens >= 0),
+  charged_cost_microusd INTEGER NOT NULL DEFAULT 0 CHECK (charged_cost_microusd >= 0),
+  usage_source TEXT NOT NULL DEFAULT '' CHECK (usage_source IN ('', 'provider', 'reservation')),
+  dispatch_started_at TEXT NOT NULL DEFAULT '',
+  reserved_at TEXT NOT NULL,
+  settled_at TEXT NOT NULL DEFAULT '',
+  released_at TEXT NOT NULL DEFAULT '',
+  metadata_json TEXT NOT NULL DEFAULT '{}',
+  FOREIGN KEY (run_id) REFERENCES agent_runs(run_id) ON DELETE CASCADE,
+  UNIQUE (run_id, model_call_id)
+);
+CREATE INDEX idx_agent_model_budget_reservations_open
+  ON agent_model_budget_reservations (run_id, status, dispatch_started_at, reserved_at)
+  WHERE status = 'reserved';
+CREATE INDEX idx_agent_model_budget_reservations_attempt
+  ON agent_model_budget_reservations (run_id, step_id, attempt_id, reserved_at);
+`;
+
 export type ExecutionStoreMigration = {
   version: number;
   name: string;
@@ -389,6 +442,15 @@ export const EXECUTION_STORE_MIGRATIONS: readonly ExecutionStoreMigration[] = Ob
     minWriterVersion: 2,
     rollbackNotes: "Restore the pre-migration project-local database backup.",
     sql: MIGRATION_TWO_SQL
+  }),
+  Object.freeze({
+    version: 3,
+    name: "m4_model_budget_ledger",
+    checksum: createHash("sha256").update(MIGRATION_THREE_SQL, "utf8").digest("hex"),
+    minReaderVersion: 3,
+    minWriterVersion: 3,
+    rollbackNotes: "Restore the pre-migration project-local database backup.",
+    sql: MIGRATION_THREE_SQL
   })
 ]);
 
@@ -424,6 +486,34 @@ export class ExecutionStoreIntegrityError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "ExecutionStoreIntegrityError";
+  }
+}
+
+export const EXECUTION_BUDGET_ERROR_CODES = Object.freeze({
+  required: "BUDGET_REQUIRED",
+  invalid: "BUDGET_INVALID",
+  deadlineExceeded: "BUDGET_DEADLINE_EXCEEDED",
+  stepsExceeded: "BUDGET_STEPS_EXCEEDED",
+  replansExceeded: "BUDGET_REPLANS_EXCEEDED",
+  modelCallsExceeded: "BUDGET_MODEL_CALLS_EXCEEDED",
+  inputTokensExceeded: "BUDGET_INPUT_TOKENS_EXCEEDED",
+  outputTokensExceeded: "BUDGET_OUTPUT_TOKENS_EXCEEDED",
+  costExceeded: "BUDGET_COST_EXCEEDED",
+  reservationConflict: "BUDGET_RESERVATION_CONFLICT",
+  reservationVersionConflict: "BUDGET_RESERVATION_VERSION_CONFLICT",
+  usageExceededReservation: "BUDGET_USAGE_EXCEEDED_RESERVATION",
+  releaseAfterDispatch: "BUDGET_RELEASE_AFTER_DISPATCH"
+} as const);
+
+export type ExecutionBudgetErrorCode = (typeof EXECUTION_BUDGET_ERROR_CODES)[keyof typeof EXECUTION_BUDGET_ERROR_CODES];
+
+export class ExecutionStoreBudgetError extends Error {
+  constructor(
+    readonly code: ExecutionBudgetErrorCode,
+    message: string
+  ) {
+    super(message);
+    this.name = "ExecutionStoreBudgetError";
   }
 }
 
@@ -911,65 +1001,96 @@ export class ExecutionStore implements ExecutionStorePort {
   }
 
   replaceSteps(input: ReplaceRunStepsInput): ExecutionCasResult<AgentRunState> {
+    return this.transaction(() => this.replaceStepsInTransaction(input));
+  }
+
+  replaceStepsWithBudget(input: ReplaceRunStepsInput): ReplaceStepsWithBudgetResult {
     return this.transaction(() => {
       const current = this.getRun(input.run_id);
       if (!current) {
-        return casMiss<AgentRunState>(null);
+        return { applied: false, current: null, replanned: false };
       }
-      const source = asRecord(current);
-      const currentVersion = positiveVersion(source.version);
-      if (currentVersion !== input.expected_run_version) {
-        return casMiss(current);
+      if (current.version !== input.expected_run_version) {
+        return { applied: false, current, replanned: false };
       }
+      const requestedPlanVersion = input.plan_version ?? current.plan_version;
+      const replanned = requestedPlanVersion > current.plan_version;
+      if (replanned) {
+        const budgetResult = this.consumeRunBudgetResourceInTransaction(current, "replan", 1, input.updated_at);
+        if (!budgetResult.consumed) {
+          return { ...budgetResult.blocked, replanned: true };
+        }
+        input = {
+          ...input,
+          expected_run_version: budgetResult.run.version
+        };
+      }
+      const replaced = this.replaceStepsInTransaction(input);
+      if (!replaced.applied) {
+        return { applied: false, current: replaced.current, replanned };
+      }
+      return { applied: true, value: replaced.value, replanned };
+    });
+  }
 
-      const currentPlanVersion = positiveVersion(source.plan_version);
-      const planVersion = input.plan_version ?? currentPlanVersion;
-      const nextStepIds = new Set(input.steps.map((step) => step.step_id));
-      for (const previous of this.listStepsForPlan(input.run_id, currentPlanVersion)) {
-        if (nextStepIds.has(previous.step_id)) {
-          continue;
-        }
-        const attemptCount = this.countAttempts(input.run_id, previous.step_id);
-        if (planVersion === currentPlanVersion && attemptCount > 0) {
-          throw new ExecutionStoreIntegrityError(
-            `Cannot remove executed step ${previous.step_id} without creating a new plan version`
-          );
-        }
-        if (attemptCount === 0) {
-          this.database
-            .prepare("DELETE FROM agent_steps WHERE run_id = ? AND step_id = ?")
-            .run(input.run_id, previous.step_id);
-        }
+  private replaceStepsInTransaction(input: ReplaceRunStepsInput): ExecutionCasResult<AgentRunState> {
+    const current = this.getRun(input.run_id);
+    if (!current) {
+      return casMiss<AgentRunState>(null);
+    }
+    const source = asRecord(current);
+    const currentVersion = positiveVersion(source.version);
+    if (currentVersion !== input.expected_run_version) {
+      return casMiss(current);
+    }
+
+    const currentPlanVersion = positiveVersion(source.plan_version);
+    const planVersion = input.plan_version ?? currentPlanVersion;
+    const nextStepIds = new Set(input.steps.map((step) => step.step_id));
+    for (const previous of this.listStepsForPlan(input.run_id, currentPlanVersion)) {
+      if (nextStepIds.has(previous.step_id)) {
+        continue;
       }
-      for (const step of input.steps) {
-        const existing = this.getStep(input.run_id, step.step_id);
-        if (existing && existing.plan_version !== planVersion && this.countAttempts(input.run_id, step.step_id) > 0) {
-          throw new ExecutionStoreIntegrityError(
-            `Replanned step_id ${step.step_id} has execution history; use a new step_id`
-          );
-        }
-        this.upsertStepRow(
-          input.run_id,
-          { ...step, version: existing ? existing.version + 1 : positiveVersion(asRecord(step).version), plan_version: planVersion },
-          planVersion
+      const attemptCount = this.countAttempts(input.run_id, previous.step_id);
+      if (planVersion === currentPlanVersion && attemptCount > 0) {
+        throw new ExecutionStoreIntegrityError(
+          `Cannot remove executed step ${previous.step_id} without creating a new plan version`
         );
       }
-      const next: MutableRecord = {
-        ...source,
-        steps: input.steps,
-        plan_version: planVersion,
-        version: currentVersion + 1,
-        updated_at: this.timestamp(input.updated_at)
-      };
-      const preparedEvent = input.event ? this.prepareEvent(input.run_id, input.event, next) : null;
-      if (!this.persistRunRecord(next, currentVersion)) {
-        return casMiss(this.getRun(input.run_id));
+      if (attemptCount === 0) {
+        this.database
+          .prepare("DELETE FROM agent_steps WHERE run_id = ? AND step_id = ?")
+          .run(input.run_id, previous.step_id);
       }
-      if (preparedEvent) {
-        this.insertEventRow(preparedEvent);
+    }
+    for (const step of input.steps) {
+      const existing = this.getStep(input.run_id, step.step_id);
+      if (existing && existing.plan_version !== planVersion && this.countAttempts(input.run_id, step.step_id) > 0) {
+        throw new ExecutionStoreIntegrityError(
+          `Replanned step_id ${step.step_id} has execution history; use a new step_id`
+        );
       }
-      return casApplied(this.requireRun(input.run_id));
-    });
+      this.upsertStepRow(
+        input.run_id,
+        { ...step, version: existing ? existing.version + 1 : positiveVersion(asRecord(step).version), plan_version: planVersion },
+        planVersion
+      );
+    }
+    const next: MutableRecord = {
+      ...source,
+      steps: input.steps,
+      plan_version: planVersion,
+      version: currentVersion + 1,
+      updated_at: this.timestamp(input.updated_at)
+    };
+    const preparedEvent = input.event ? this.prepareEvent(input.run_id, input.event, next) : null;
+    if (!this.persistRunRecord(next, currentVersion)) {
+      return casMiss(this.getRun(input.run_id));
+    }
+    if (preparedEvent) {
+      this.insertEventRow(preparedEvent);
+    }
+    return casApplied(this.requireRun(input.run_id));
   }
 
   upsertStep(
@@ -1250,54 +1371,74 @@ export class ExecutionStore implements ExecutionStorePort {
   }
 
   startAttempt(input: StartAttemptInput): ExecutionStepAttempt {
+    return this.transaction(() => this.startAttemptInTransaction(input));
+  }
+
+  startAttemptWithBudget(input: StartAttemptInput): StartAttemptWithBudgetResult {
     return this.transaction(() => {
       const duplicateById = this.getAttempt(input.attempt_id);
-      if (duplicateById) {
-        return duplicateById;
+      const duplicateByKey = duplicateById ? null : this.getAttemptByIdempotencyKey(input.run_id, input.idempotency_key);
+      const duplicate = duplicateById ?? duplicateByKey;
+      if (duplicate) {
+        return { started: true, attempt: duplicate, run: this.requireRun(input.run_id) };
       }
-      const duplicateByKey = this.getAttemptByIdempotencyKey(input.run_id, input.idempotency_key);
-      if (duplicateByKey) {
-        return duplicateByKey;
+      const run = this.requireRun(input.run_id);
+      const budgetResult = this.consumeRunBudgetResourceInTransaction(run, "step", 1, input.started_at);
+      if (!budgetResult.consumed) {
+        return budgetResult.blocked;
       }
-
-      const step = this.requireStep(input.run_id, input.step_id);
-      const stepSource = asRecord(step);
-      const attemptNumber = input.attempt ?? this.nextAttemptNumber(input.run_id, input.step_id);
-      if (!Number.isInteger(attemptNumber) || attemptNumber <= 0) {
-        throw new Error("Step attempt number must be a positive integer");
-      }
-      const startedAt = this.timestamp(input.started_at);
-      this.database
-        .prepare(`INSERT INTO agent_step_attempts (
-                    attempt_id, run_id, step_id, attempt, version, status, input_digest, observation_id,
-                    idempotency_key, model_call_refs_json, error_code, error, started_at, ended_at
-                  ) VALUES (?, ?, ?, ?, 1, 'running', ?, '', ?, ?, '', '', ?, '')`)
-        .run(
-          requiredString(input.attempt_id, "attempt_id"),
-          input.run_id,
-          input.step_id,
-          attemptNumber,
-          requiredString(input.input_digest, "input_digest"),
-          requiredString(input.idempotency_key, "idempotency_key"),
-          json(input.model_call_refs ?? []),
-          startedAt
-        );
-
-      const currentStatus = stringValue(stepSource.status);
-      if (currentStatus !== "pending" && currentStatus !== "running") {
-        throw new Error(`Cannot start an attempt while step ${input.step_id} is ${currentStatus}`);
-      }
-      stepSource.attempts = Math.max(nonNegativeInteger(stepSource.attempts), attemptNumber);
-      stepSource.status = "running";
-      stepSource.observation_id = "";
-      stepSource.error_code = "";
-      stepSource.error = "";
-      stepSource.started_at = startedAt;
-      stepSource.ended_at = "";
-      stepSource.version = step.version + 1;
-      this.upsertStepRow(input.run_id, stepSource as unknown as StoredAgentExecutionStep, positiveVersion(stepSource.plan_version));
-      return this.requireAttempt(input.attempt_id);
+      const attempt = this.startAttemptInTransaction(input);
+      return { started: true, attempt, run: this.requireRun(input.run_id) };
     });
+  }
+
+  private startAttemptInTransaction(input: StartAttemptInput): ExecutionStepAttempt {
+    const duplicateById = this.getAttempt(input.attempt_id);
+    if (duplicateById) {
+      return duplicateById;
+    }
+    const duplicateByKey = this.getAttemptByIdempotencyKey(input.run_id, input.idempotency_key);
+    if (duplicateByKey) {
+      return duplicateByKey;
+    }
+
+    const step = this.requireStep(input.run_id, input.step_id);
+    const stepSource = asRecord(step);
+    const attemptNumber = input.attempt ?? this.nextAttemptNumber(input.run_id, input.step_id);
+    if (!Number.isInteger(attemptNumber) || attemptNumber <= 0) {
+      throw new Error("Step attempt number must be a positive integer");
+    }
+    const startedAt = this.timestamp(input.started_at);
+    this.database
+      .prepare(`INSERT INTO agent_step_attempts (
+                  attempt_id, run_id, step_id, attempt, version, status, input_digest, observation_id,
+                  idempotency_key, model_call_refs_json, error_code, error, started_at, ended_at
+                ) VALUES (?, ?, ?, ?, 1, 'running', ?, '', ?, ?, '', '', ?, '')`)
+      .run(
+        requiredString(input.attempt_id, "attempt_id"),
+        input.run_id,
+        input.step_id,
+        attemptNumber,
+        requiredString(input.input_digest, "input_digest"),
+        requiredString(input.idempotency_key, "idempotency_key"),
+        json(input.model_call_refs ?? []),
+        startedAt
+      );
+
+    const currentStatus = stringValue(stepSource.status);
+    if (currentStatus !== "pending" && currentStatus !== "running") {
+      throw new Error(`Cannot start an attempt while step ${input.step_id} is ${currentStatus}`);
+    }
+    stepSource.attempts = Math.max(nonNegativeInteger(stepSource.attempts), attemptNumber);
+    stepSource.status = "running";
+    stepSource.observation_id = "";
+    stepSource.error_code = "";
+    stepSource.error = "";
+    stepSource.started_at = startedAt;
+    stepSource.ended_at = "";
+    stepSource.version = step.version + 1;
+    this.upsertStepRow(input.run_id, stepSource as unknown as StoredAgentExecutionStep, positiveVersion(stepSource.plan_version));
+    return this.requireAttempt(input.attempt_id);
   }
 
   finishAttempt(input: FinishAttemptInput): ExecutionCasResult<ExecutionStepAttempt> {
@@ -1503,12 +1644,136 @@ export class ExecutionStore implements ExecutionStorePort {
       if (current.version !== input.expected_version || current.status !== "pending") {
         return casMiss(current);
       }
+      if (input.status === "approved") {
+        if (!current.kind || current.kind === "legacy_unscoped" || (current.schema_version ?? 0) < 1) {
+          throw new ConfirmationReceiptError(
+            CONFIRMATION_RECEIPT_CODES.legacyUnscoped,
+            `Confirmation ${input.confirmation_id} has no trusted action scope`
+          );
+        }
+        if (!input.expected_scope_fingerprint || input.expected_scope_fingerprint !== current.scope_fingerprint) {
+          throw new ConfirmationReceiptError(
+            CONFIRMATION_RECEIPT_CODES.scopeMismatch,
+            `Confirmation ${input.confirmation_id} scope fingerprint does not match`
+          );
+        }
+        const expiresAt = Date.parse(current.expires_at);
+        if (!current.expires_at || !Number.isFinite(expiresAt) || expiresAt <= Date.parse(this.timestamp())) {
+          throw new ConfirmationReceiptError(
+            CONFIRMATION_RECEIPT_CODES.expired,
+            `Confirmation ${input.confirmation_id} is expired or has an invalid expiry`
+          );
+        }
+      }
       const source = asRecord(current);
       source.version = current.version + 1;
       source.status = input.status;
       source.resolved_at = this.timestamp(input.resolved_at);
       source.resolved_by = input.resolved_by ?? "user";
       source.updated_at = this.timestamp();
+      this.upsertConfirmationRow(source);
+      return casApplied(this.requireConfirmation(input.confirmation_id));
+    });
+  }
+
+  consumeConfirmationReceipt(
+    input: ConsumeConfirmationReceiptInput
+  ): ExecutionCasResult<StoredAgentConfirmation> {
+    return this.transaction(() => {
+      const current = this.getConfirmation(input.confirmation_id);
+      if (!current) {
+        return casMiss<StoredAgentConfirmation>(null);
+      }
+      if (current.version !== input.expected_version) {
+        return casMiss(current);
+      }
+      if (!current.kind || current.kind === "legacy_unscoped" || (current.schema_version ?? 0) < 1) {
+        throw new ConfirmationReceiptError(
+          CONFIRMATION_RECEIPT_CODES.legacyUnscoped,
+          `Confirmation ${input.confirmation_id} has no trusted action scope`
+        );
+      }
+      if (current.kind !== "action_execution") {
+        throw new ConfirmationReceiptError(
+          CONFIRMATION_RECEIPT_CODES.scopeMismatch,
+          `Confirmation ${input.confirmation_id} kind ${current.kind} cannot authorize action execution`
+        );
+      }
+      if (current.status === "consumed") {
+        throw new ConfirmationReceiptError(
+          CONFIRMATION_RECEIPT_CODES.alreadyConsumed,
+          `Confirmation ${input.confirmation_id} was already consumed`
+        );
+      }
+      if (current.status !== "approved") {
+        throw new ConfirmationReceiptError(
+          CONFIRMATION_RECEIPT_CODES.notApproved,
+          `Confirmation ${input.confirmation_id} is ${current.status}, not approved`
+        );
+      }
+      const consumedAt = this.timestamp(input.consumed_at);
+      const expiresAt = Date.parse(current.expires_at);
+      if (!current.expires_at || !Number.isFinite(expiresAt) || expiresAt <= Date.parse(consumedAt)) {
+        throw new ConfirmationReceiptError(
+          CONFIRMATION_RECEIPT_CODES.expired,
+          `Confirmation ${input.confirmation_id} expired at ${current.expires_at}`
+        );
+      }
+      if (current.run_id !== input.run_id || current.step_id !== input.step_id) {
+        throw new ConfirmationReceiptError(
+          CONFIRMATION_RECEIPT_CODES.scopeMismatch,
+          `Confirmation ${input.confirmation_id} is not scoped to run ${input.run_id} step ${input.step_id}`
+        );
+      }
+      if (current.action !== input.action) {
+        throw new ConfirmationReceiptError(
+          CONFIRMATION_RECEIPT_CODES.actionMismatch,
+          `Confirmation ${input.confirmation_id} is scoped to action ${current.action}`
+        );
+      }
+      if (current.project_id !== input.project_id) {
+        throw new ConfirmationReceiptError(
+          CONFIRMATION_RECEIPT_CODES.projectMismatch,
+          `Confirmation ${input.confirmation_id} is scoped to another project`
+        );
+      }
+      if (current.plan_version !== input.plan_version) {
+        throw new ConfirmationReceiptError(
+          CONFIRMATION_RECEIPT_CODES.versionMismatch,
+          `Confirmation ${input.confirmation_id} is scoped to plan version ${current.plan_version}`
+        );
+      }
+      if (current.action_input_hash !== input.action_input_hash) {
+        throw new ConfirmationReceiptError(
+          CONFIRMATION_RECEIPT_CODES.hashMismatch,
+          `Confirmation ${input.confirmation_id} action input hash does not match`
+        );
+      }
+      if (current.scope_fingerprint !== input.scope_fingerprint) {
+        throw new ConfirmationReceiptError(
+          CONFIRMATION_RECEIPT_CODES.scopeMismatch,
+          `Confirmation ${input.confirmation_id} scope fingerprint does not match`
+        );
+      }
+      if (!sameTargetBindings(current.target_bindings ?? [], input.target_bindings)) {
+        throw new ConfirmationReceiptError(
+          CONFIRMATION_RECEIPT_CODES.targetMismatch,
+          `Confirmation ${input.confirmation_id} target bindings do not match`
+        );
+      }
+      const attempt = this.getAttempt(input.attempt_id);
+      if (!attempt || attempt.run_id !== input.run_id || attempt.step_id !== input.step_id) {
+        throw new ConfirmationReceiptError(
+          CONFIRMATION_RECEIPT_CODES.scopeMismatch,
+          `Attempt ${input.attempt_id} is not scoped to this confirmation`
+        );
+      }
+      const source = asRecord(current);
+      source.version = current.version + 1;
+      source.status = "consumed";
+      source.consumed_at = consumedAt;
+      source.consumed_by_attempt_id = input.attempt_id;
+      source.updated_at = consumedAt;
       this.upsertConfirmationRow(source);
       return casApplied(this.requireConfirmation(input.confirmation_id));
     });
@@ -2250,6 +2515,785 @@ export class ExecutionStore implements ExecutionStorePort {
       created_at: row.created_at
     }));
   }
+
+  reserveModelBudget(input: ReserveModelBudgetInput): ExecutionModelBudgetReservation {
+    const normalized = normalizeReserveModelBudgetInput(input);
+    return this.transaction(() => {
+      const existingById = this.getModelBudgetReservation(normalized.reservation_id);
+      const existingByCall = this.getModelBudgetReservationByCall(normalized.run_id, normalized.model_call_id);
+      const existing = existingById ?? existingByCall;
+      if (existing) {
+        assertMatchingModelBudgetReservation(existing, normalized);
+        return existing;
+      }
+
+      const run = this.requireRun(normalized.run_id);
+      assertRunCanReserveModelBudget(run);
+      const budget = requireCanonicalModelBudget(run);
+      if (budget.budget_id !== normalized.budget_id) {
+        throw budgetError(
+          EXECUTION_BUDGET_ERROR_CODES.reservationConflict,
+          `Model budget reservation ${normalized.reservation_id} references a different budget`
+        );
+      }
+      assertBudgetDeadline(budget, this.timestamp(normalized.reserved_at));
+      const step = this.requireStep(normalized.run_id, normalized.step_id);
+      const attempt = this.getAttempt(normalized.attempt_id);
+      if (!attempt || attempt.run_id !== normalized.run_id || attempt.step_id !== normalized.step_id || attempt.status !== "running") {
+        throw budgetError(
+          EXECUTION_BUDGET_ERROR_CODES.reservationConflict,
+          `Model budget reservation ${normalized.reservation_id} is not bound to an active step attempt`
+        );
+      }
+      if (step.status !== "running") {
+        throw budgetError(
+          EXECUTION_BUDGET_ERROR_CODES.reservationConflict,
+          `Model budget reservation ${normalized.reservation_id} cannot start while step ${normalized.step_id} is ${step.status}`
+        );
+      }
+
+      const pending = this.pendingModelBudgetTotals(normalized.run_id);
+      assertModelBudgetReservationWithinLimits(budget, pending, normalized);
+      const reservedAt = this.timestamp(normalized.reserved_at);
+      this.database
+        .prepare(`INSERT INTO agent_model_budget_reservations (
+                    reservation_id, run_id, step_id, attempt_id, model_call_id, budget_id, version, status,
+                    provider, model, purpose, pricing_version, reserved_model_calls, reserved_input_tokens,
+                    reserved_output_tokens, reserved_cost_microusd, charged_model_calls, charged_input_tokens,
+                    charged_output_tokens, charged_cost_microusd, usage_source, dispatch_started_at, reserved_at,
+                    settled_at, released_at, metadata_json
+                  ) VALUES (?, ?, ?, ?, ?, ?, 1, 'reserved', ?, ?, ?, ?, 1, ?, ?, ?, 0, 0, 0, 0, '', '', ?, '', '', ?)`)
+        .run(
+          normalized.reservation_id,
+          normalized.run_id,
+          normalized.step_id,
+          normalized.attempt_id,
+          normalized.model_call_id,
+          normalized.budget_id,
+          normalized.provider,
+          normalized.model,
+          normalized.purpose,
+          normalized.pricing_version,
+          normalized.reserved_input_tokens,
+          normalized.reserved_output_tokens,
+          normalized.reserved_cost_microusd,
+          reservedAt,
+          json(normalized.metadata)
+        );
+      this.recordModelBudgetRunEvent(run, "budget.model_reserved", {
+        reservation_id: normalized.reservation_id,
+        model_call_id: normalized.model_call_id,
+        budget_id: normalized.budget_id,
+        reserved_input_tokens: normalized.reserved_input_tokens,
+        reserved_output_tokens: normalized.reserved_output_tokens,
+        reserved_cost_microusd: normalized.reserved_cost_microusd
+      });
+      return this.requireModelBudgetReservation(normalized.reservation_id);
+    });
+  }
+
+  getModelBudgetReservation(reservationId: string): ExecutionModelBudgetReservation | null {
+    this.assertOpen();
+    const source = row(
+      this.database.prepare("SELECT * FROM agent_model_budget_reservations WHERE reservation_id = ?").get(reservationId)
+    );
+    return source ? mapModelBudgetReservationRow(source) : null;
+  }
+
+  listModelBudgetReservations(runId?: string): ExecutionModelBudgetReservation[] {
+    this.assertOpen();
+    const result = runId
+      ? this.database
+        .prepare("SELECT * FROM agent_model_budget_reservations WHERE run_id = ? ORDER BY reserved_at ASC, reservation_id ASC")
+        .all(runId)
+      : this.database
+        .prepare("SELECT * FROM agent_model_budget_reservations ORDER BY reserved_at ASC, reservation_id ASC")
+        .all();
+    return rows(result).map(mapModelBudgetReservationRow);
+  }
+
+  markModelBudgetDispatched(input: MarkModelBudgetDispatchedInput): ExecutionModelBudgetReservation {
+    const normalized = normalizeMarkModelBudgetDispatchedInput(input);
+    return this.transaction(() => {
+      const current = this.requireModelBudgetReservation(normalized.reservation_id);
+      assertModelBudgetReservationScope(current, normalized);
+      if (current.status !== "reserved") {
+        if (current.dispatch_started_at) {
+          return current;
+        }
+        throw budgetError(
+          EXECUTION_BUDGET_ERROR_CODES.reservationConflict,
+          `Model budget reservation ${current.reservation_id} is ${current.status}, not reservable for dispatch`
+        );
+      }
+      if (current.dispatch_started_at) {
+        return current;
+      }
+      assertReservationVersion(current, normalized.expected_version);
+      const run = this.requireRun(current.run_id);
+      assertRunCanReserveModelBudget(run);
+      const attempt = this.getAttempt(current.attempt_id);
+      if (!attempt || attempt.status !== "running") {
+        throw budgetError(EXECUTION_BUDGET_ERROR_CODES.reservationConflict, `Model budget reservation ${current.reservation_id} no longer has an active attempt`);
+      }
+      const dispatchedAt = this.timestamp(normalized.dispatched_at);
+      const updated = this.database
+        .prepare(`UPDATE agent_model_budget_reservations
+                     SET version = version + 1, dispatch_started_at = ?
+                   WHERE reservation_id = ? AND version = ? AND status = 'reserved' AND dispatch_started_at = ''`)
+        .run(dispatchedAt, current.reservation_id, normalized.expected_version);
+      if (changes(updated) !== 1) {
+        const fresh = this.requireModelBudgetReservation(current.reservation_id);
+        if (fresh.dispatch_started_at) {
+          return fresh;
+        }
+        throw budgetError(EXECUTION_BUDGET_ERROR_CODES.reservationVersionConflict, `Model budget reservation ${current.reservation_id} changed before dispatch`);
+      }
+      this.recordModelBudgetRunEvent(run, "budget.model_dispatched", {
+        reservation_id: current.reservation_id,
+        model_call_id: current.model_call_id
+      });
+      return this.requireModelBudgetReservation(current.reservation_id);
+    });
+  }
+
+  settleModelBudget(input: SettleModelBudgetInput): ExecutionModelBudgetReservation {
+    const normalized = normalizeSettleModelBudgetInput(input);
+    return this.transaction(() => {
+      const current = this.requireModelBudgetReservation(normalized.reservation_id);
+      if (current.run_id !== normalized.run_id) {
+        throw budgetError(EXECUTION_BUDGET_ERROR_CODES.reservationConflict, `Model budget reservation ${current.reservation_id} belongs to another run`);
+      }
+      if (current.status === "settled") {
+        assertMatchingModelBudgetSettlement(current, normalized);
+        return current;
+      }
+      if (current.status === "released") {
+        throw budgetError(EXECUTION_BUDGET_ERROR_CODES.reservationConflict, `Released model budget reservation ${current.reservation_id} cannot settle`);
+      }
+      assertReservationVersion(current, normalized.expected_version);
+      if (!current.dispatch_started_at) {
+        throw budgetError(EXECUTION_BUDGET_ERROR_CODES.reservationConflict, `Model budget reservation ${current.reservation_id} cannot settle before dispatch`);
+      }
+      return this.settleModelBudgetReservationInTransaction(current, normalized, this.timestamp(normalized.settled_at));
+    });
+  }
+
+  releaseModelBudget(input: ReleaseModelBudgetInput): ExecutionModelBudgetReservation {
+    const normalized = normalizeReleaseModelBudgetInput(input);
+    return this.transaction(() => {
+      const current = this.requireModelBudgetReservation(normalized.reservation_id);
+      if (current.run_id !== normalized.run_id) {
+        throw budgetError(EXECUTION_BUDGET_ERROR_CODES.reservationConflict, `Model budget reservation ${current.reservation_id} belongs to another run`);
+      }
+      if (current.status === "released") {
+        return current;
+      }
+      if (current.status === "settled") {
+        throw budgetError(EXECUTION_BUDGET_ERROR_CODES.reservationConflict, `Settled model budget reservation ${current.reservation_id} cannot release`);
+      }
+      if (current.dispatch_started_at) {
+        throw budgetError(EXECUTION_BUDGET_ERROR_CODES.releaseAfterDispatch, `Dispatched model budget reservation ${current.reservation_id} must settle conservatively`);
+      }
+      assertReservationVersion(current, normalized.expected_version);
+      return this.releaseModelBudgetReservationInTransaction(current, this.timestamp(normalized.released_at));
+    });
+  }
+
+  reconcileModelBudgetReservations(runId?: string): ReconcileModelBudgetReservationsResult {
+    return this.transaction(() => {
+      const candidates = runId
+        ? rows(this.database
+          .prepare("SELECT * FROM agent_model_budget_reservations WHERE run_id = ? AND status = 'reserved' ORDER BY reserved_at ASC, reservation_id ASC")
+          .all(runId))
+        : rows(this.database
+          .prepare("SELECT * FROM agent_model_budget_reservations WHERE status = 'reserved' ORDER BY reserved_at ASC, reservation_id ASC")
+          .all());
+      let settled = 0;
+      let released = 0;
+      for (const source of candidates) {
+        const current = mapModelBudgetReservationRow(source);
+        if (current.dispatch_started_at) {
+          this.settleModelBudgetReservationInTransaction(current, {
+            reservation_id: current.reservation_id,
+            expected_version: current.version,
+            run_id: current.run_id,
+            charged_input_tokens: current.reserved_input_tokens,
+            charged_output_tokens: current.reserved_output_tokens,
+            charged_cost_microusd: current.reserved_cost_microusd,
+            usage_source: "reservation"
+          }, this.timestamp());
+          settled++;
+        } else {
+          this.releaseModelBudgetReservationInTransaction(current, this.timestamp());
+          released++;
+        }
+      }
+      return { settled, released };
+    });
+  }
+
+  private getModelBudgetReservationByCall(runId: string, modelCallId: string): ExecutionModelBudgetReservation | null {
+    const source = row(
+      this.database
+        .prepare("SELECT * FROM agent_model_budget_reservations WHERE run_id = ? AND model_call_id = ?")
+        .get(runId, modelCallId)
+    );
+    return source ? mapModelBudgetReservationRow(source) : null;
+  }
+
+  private requireModelBudgetReservation(reservationId: string): ExecutionModelBudgetReservation {
+    const reservation = this.getModelBudgetReservation(reservationId);
+    if (!reservation) {
+      throw budgetError(EXECUTION_BUDGET_ERROR_CODES.reservationConflict, `Model budget reservation ${reservationId} does not exist`);
+    }
+    return reservation;
+  }
+
+  private pendingModelBudgetTotals(runId: string): ModelBudgetTotals {
+    const source = row(
+      this.database
+        .prepare(`SELECT COALESCE(SUM(reserved_model_calls), 0) AS model_calls,
+                         COALESCE(SUM(reserved_input_tokens), 0) AS input_tokens,
+                         COALESCE(SUM(reserved_output_tokens), 0) AS output_tokens,
+                         COALESCE(SUM(reserved_cost_microusd), 0) AS cost_microusd
+                    FROM agent_model_budget_reservations
+                   WHERE run_id = ? AND status = 'reserved'`)
+        .get(runId)
+    );
+    return {
+      model_calls: nonNegativeSafeInteger(source?.model_calls, "pending model calls"),
+      input_tokens: nonNegativeSafeInteger(source?.input_tokens, "pending input tokens"),
+      output_tokens: nonNegativeSafeInteger(source?.output_tokens, "pending output tokens"),
+      cost_microusd: nonNegativeSafeInteger(source?.cost_microusd, "pending cost")
+    };
+  }
+
+  private settleModelBudgetReservationInTransaction(
+    current: ExecutionModelBudgetReservation,
+    input: SettleModelBudgetInput,
+    settledAt: string
+  ): ExecutionModelBudgetReservation {
+    assertSettlementDoesNotExceedReservation(current, input);
+    const updated = this.database
+      .prepare(`UPDATE agent_model_budget_reservations
+                   SET version = version + 1, status = 'settled', charged_model_calls = 1,
+                       charged_input_tokens = ?, charged_output_tokens = ?, charged_cost_microusd = ?,
+                       usage_source = ?, settled_at = ?
+                 WHERE reservation_id = ? AND version = ? AND status = 'reserved'`)
+      .run(
+        input.charged_input_tokens,
+        input.charged_output_tokens,
+        input.charged_cost_microusd,
+        input.usage_source,
+        settledAt,
+        current.reservation_id,
+        input.expected_version
+      );
+    if (changes(updated) !== 1) {
+      const fresh = this.requireModelBudgetReservation(current.reservation_id);
+      if (fresh.status === "settled") {
+        assertMatchingModelBudgetSettlement(fresh, input);
+        return fresh;
+      }
+      throw budgetError(EXECUTION_BUDGET_ERROR_CODES.reservationVersionConflict, `Model budget reservation ${current.reservation_id} changed before settlement`);
+    }
+
+    const run = this.requireRun(current.run_id);
+    const budget = requireCanonicalModelBudget(run);
+    if (budget.budget_id !== current.budget_id) {
+      throw budgetError(EXECUTION_BUDGET_ERROR_CODES.reservationConflict, `Model budget reservation ${current.reservation_id} no longer matches run budget`);
+    }
+    const nextBudget = {
+      ...budget,
+      used_model_calls: budget.used_model_calls + 1,
+      used_input_tokens: budget.used_input_tokens + input.charged_input_tokens,
+      used_output_tokens: budget.used_output_tokens + input.charged_output_tokens,
+      estimated_cost: fromMicrousd(toMicrousdCeil(budget.estimated_cost) + input.charged_cost_microusd)
+    };
+    assertChargedModelBudgetWithinLimits(nextBudget);
+    this.recordModelBudgetRunEvent(run, "budget.model_settled", {
+      reservation_id: current.reservation_id,
+      model_call_id: current.model_call_id,
+      charged_input_tokens: input.charged_input_tokens,
+      charged_output_tokens: input.charged_output_tokens,
+      charged_cost_microusd: input.charged_cost_microusd,
+      usage_source: input.usage_source
+    }, nextBudget);
+    return this.requireModelBudgetReservation(current.reservation_id);
+  }
+
+  private releaseModelBudgetReservationInTransaction(
+    current: ExecutionModelBudgetReservation,
+    releasedAt: string
+  ): ExecutionModelBudgetReservation {
+    const updated = this.database
+      .prepare(`UPDATE agent_model_budget_reservations
+                   SET version = version + 1, status = 'released', released_at = ?
+                 WHERE reservation_id = ? AND version = ? AND status = 'reserved' AND dispatch_started_at = ''`)
+      .run(releasedAt, current.reservation_id, current.version);
+    if (changes(updated) !== 1) {
+      const fresh = this.requireModelBudgetReservation(current.reservation_id);
+      if (fresh.status === "released") {
+        return fresh;
+      }
+      throw budgetError(EXECUTION_BUDGET_ERROR_CODES.reservationVersionConflict, `Model budget reservation ${current.reservation_id} changed before release`);
+    }
+    const run = this.requireRun(current.run_id);
+    this.recordModelBudgetRunEvent(run, "budget.model_released", {
+      reservation_id: current.reservation_id,
+      model_call_id: current.model_call_id
+    });
+    return this.requireModelBudgetReservation(current.reservation_id);
+  }
+
+  private consumeRunBudgetResourceInTransaction(
+    run: AgentRunState,
+    resource: "step" | "replan",
+    amount: number,
+    updatedAt?: string
+  ):
+    | { consumed: true; run: AgentRunState }
+    | { consumed: false; blocked: BudgetBlockedRunResult } {
+    const budget = requireCanonicalModelBudget(run);
+    const now = this.timestamp(updatedAt);
+    try {
+      assertBudgetDeadline(budget, now);
+    } catch (error) {
+      if (error instanceof ExecutionStoreBudgetError) {
+        const code = error.code === EXECUTION_BUDGET_ERROR_CODES.deadlineExceeded
+          ? error.code
+          : EXECUTION_BUDGET_ERROR_CODES.invalid;
+        return { consumed: false, blocked: this.pauseRunForBudgetInTransaction(run, code, error.message, now) };
+      }
+      throw error;
+    }
+    const nextBudget: MutableRecord = { ...budget };
+    const maximum = resource === "step" ? budget.max_steps : budget.max_replans;
+    const usedKey = resource === "step" ? "used_steps" : "used_replans";
+    const code = resource === "step"
+      ? EXECUTION_BUDGET_ERROR_CODES.stepsExceeded
+      : EXECUTION_BUDGET_ERROR_CODES.replansExceeded;
+    const nextUsed = nonNegativeSafeInteger(nextBudget[usedKey], `budget ${usedKey}`) + amount;
+    if (!Number.isSafeInteger(nextUsed) || nextUsed > maximum) {
+      const message = `Agent run ${resource} budget is exhausted`;
+      return { consumed: false, blocked: this.pauseRunForBudgetInTransaction(run, code, message, now) };
+    }
+    nextBudget[usedKey] = nextUsed;
+    const updated = this.recordRunBudgetEvent(run, `budget.${resource}_consumed`, {
+      budget_id: budget.budget_id,
+      resource,
+      amount,
+      used: nextUsed,
+      maximum
+    }, nextBudget, now);
+    return { consumed: true, run: updated };
+  }
+
+  private pauseRunForBudgetInTransaction(
+    run: AgentRunState,
+    code: BudgetBlockedRunResult["error_code"],
+    message: string,
+    timestamp: string
+  ): BudgetBlockedRunResult {
+    const source = asRecord(run);
+    const expectedVersion = positiveVersion(source.version);
+    const next: MutableRecord = {
+      ...source,
+      status: "paused",
+      recovery_reason: code,
+      error_code: code,
+      error: message,
+      version: expectedVersion + 1,
+      updated_at: timestamp
+    };
+    const event = this.prepareEvent(run.run_id, {
+      event_type: "run.budget_blocked",
+      step_id: run.current_step_id,
+      payload: { error_code: code, budget_id: requireCanonicalModelBudget(run).budget_id }
+    }, next);
+    if (!this.persistRunRecord(next, expectedVersion)) {
+      throw new ExecutionStoreIntegrityError(`Run ${run.run_id} changed while applying budget block`);
+    }
+    this.insertEventRow(event);
+    return {
+      started: false,
+      run: this.requireRun(run.run_id),
+      error_code: code,
+      error: message
+    };
+  }
+
+  private recordModelBudgetRunEvent(
+    run: AgentRunState,
+    eventType: string,
+    payload: Record<string, unknown>,
+    budget?: MutableRecord
+  ): AgentRunState {
+    return this.recordRunBudgetEvent(run, eventType, payload, budget);
+  }
+
+  private recordRunBudgetEvent(
+    run: AgentRunState,
+    eventType: string,
+    payload: Record<string, unknown>,
+    budget?: MutableRecord,
+    updatedAt?: string
+  ): AgentRunState {
+    const source = asRecord(run);
+    const expectedVersion = positiveVersion(source.version);
+    source.version = expectedVersion + 1;
+    source.updated_at = this.timestamp(updatedAt);
+    if (budget) {
+      source.budget = budget;
+    }
+    const event = this.prepareEvent(run.run_id, { event_type: eventType, step_id: run.current_step_id, payload }, source);
+    if (!this.persistRunRecord(source, expectedVersion)) {
+      throw new ExecutionStoreIntegrityError(`Run ${run.run_id} changed while recording ${eventType}`);
+    }
+    this.insertEventRow(event);
+    return this.requireRun(run.run_id);
+  }
+}
+
+type ModelBudgetTotals = {
+  model_calls: number;
+  input_tokens: number;
+  output_tokens: number;
+  cost_microusd: number;
+};
+
+type CanonicalModelBudget = {
+  budget_id: string;
+  max_steps: number;
+  max_replans: number;
+  max_model_calls: number;
+  max_input_tokens: number;
+  max_output_tokens: number;
+  max_estimated_cost: number;
+  used_steps: number;
+  used_replans: number;
+  used_model_calls: number;
+  used_input_tokens: number;
+  used_output_tokens: number;
+  estimated_cost: number;
+  deadline_at: string;
+} & MutableRecord;
+
+function normalizeReserveModelBudgetInput(input: ReserveModelBudgetInput): ReserveModelBudgetInput & { metadata: Record<string, unknown> } {
+  return {
+    reservation_id: requiredString(input.reservation_id, "budget reservation_id"),
+    run_id: requiredString(input.run_id, "budget run_id"),
+    step_id: requiredString(input.step_id, "budget step_id"),
+    attempt_id: requiredString(input.attempt_id, "budget attempt_id"),
+    model_call_id: requiredString(input.model_call_id, "budget model_call_id"),
+    budget_id: requiredString(input.budget_id, "budget budget_id"),
+    provider: requiredString(input.provider, "budget provider"),
+    model: requiredString(input.model, "budget model"),
+    purpose: requiredString(input.purpose, "budget purpose"),
+    pricing_version: requiredString(input.pricing_version, "budget pricing_version"),
+    reserved_input_tokens: nonNegativeSafeInteger(input.reserved_input_tokens, "reserved input tokens"),
+    reserved_output_tokens: nonNegativeSafeInteger(input.reserved_output_tokens, "reserved output tokens"),
+    reserved_cost_microusd: nonNegativeSafeInteger(input.reserved_cost_microusd, "reserved cost"),
+    metadata: isPlainRecord(input.metadata) ? input.metadata : {},
+    reserved_at: input.reserved_at
+  };
+}
+
+function normalizeMarkModelBudgetDispatchedInput(input: MarkModelBudgetDispatchedInput): MarkModelBudgetDispatchedInput {
+  return {
+    reservation_id: requiredString(input.reservation_id, "budget reservation_id"),
+    expected_version: positiveVersion(input.expected_version),
+    run_id: requiredString(input.run_id, "budget run_id"),
+    step_id: requiredString(input.step_id, "budget step_id"),
+    attempt_id: requiredString(input.attempt_id, "budget attempt_id"),
+    dispatched_at: input.dispatched_at
+  };
+}
+
+function normalizeSettleModelBudgetInput(input: SettleModelBudgetInput): SettleModelBudgetInput {
+  if (input.usage_source !== "provider" && input.usage_source !== "reservation") {
+    throw budgetError(EXECUTION_BUDGET_ERROR_CODES.invalid, "Model budget settlement usage_source is invalid");
+  }
+  return {
+    reservation_id: requiredString(input.reservation_id, "budget reservation_id"),
+    expected_version: positiveVersion(input.expected_version),
+    run_id: requiredString(input.run_id, "budget run_id"),
+    charged_input_tokens: nonNegativeSafeInteger(input.charged_input_tokens, "charged input tokens"),
+    charged_output_tokens: nonNegativeSafeInteger(input.charged_output_tokens, "charged output tokens"),
+    charged_cost_microusd: nonNegativeSafeInteger(input.charged_cost_microusd, "charged cost"),
+    usage_source: input.usage_source,
+    settled_at: input.settled_at
+  };
+}
+
+function normalizeReleaseModelBudgetInput(input: ReleaseModelBudgetInput): ReleaseModelBudgetInput {
+  return {
+    reservation_id: requiredString(input.reservation_id, "budget reservation_id"),
+    expected_version: positiveVersion(input.expected_version),
+    run_id: requiredString(input.run_id, "budget run_id"),
+    released_at: input.released_at
+  };
+}
+
+function requireCanonicalModelBudget(run: AgentRunState): CanonicalModelBudget {
+  const budget = asRecord(run.budget);
+  if (budget.schema_version !== 1 || budget.legacy_unbudgeted === true) {
+    throw budgetError(EXECUTION_BUDGET_ERROR_CODES.required, `Run ${run.run_id} has no canonical budget`);
+  }
+  const deadlineAt = requiredString(budget.deadline_at, "budget deadline_at");
+  const parsedDeadline = Date.parse(deadlineAt);
+  if (!Number.isFinite(parsedDeadline)) {
+    throw budgetError(EXECUTION_BUDGET_ERROR_CODES.invalid, `Run ${run.run_id} has an invalid budget deadline`);
+  }
+  return {
+    ...budget,
+    budget_id: requiredString(budget.budget_id, "budget budget_id"),
+    max_steps: positiveSafeInteger(budget.max_steps, "budget max_steps"),
+    max_replans: nonNegativeSafeInteger(budget.max_replans, "budget max_replans"),
+    max_model_calls: positiveSafeInteger(budget.max_model_calls, "budget max_model_calls"),
+    max_input_tokens: positiveSafeInteger(budget.max_input_tokens, "budget max_input_tokens"),
+    max_output_tokens: positiveSafeInteger(budget.max_output_tokens, "budget max_output_tokens"),
+    max_estimated_cost: finitePositiveNumber(budget.max_estimated_cost, "budget max_estimated_cost"),
+    used_steps: nonNegativeSafeInteger(budget.used_steps, "budget used_steps"),
+    used_replans: nonNegativeSafeInteger(budget.used_replans, "budget used_replans"),
+    used_model_calls: nonNegativeSafeInteger(budget.used_model_calls, "budget used_model_calls"),
+    used_input_tokens: nonNegativeSafeInteger(budget.used_input_tokens, "budget used_input_tokens"),
+    used_output_tokens: nonNegativeSafeInteger(budget.used_output_tokens, "budget used_output_tokens"),
+    estimated_cost: finiteNonNegativeNumber(budget.estimated_cost, "budget estimated_cost"),
+    deadline_at: deadlineAt
+  };
+}
+
+function assertBudgetDeadline(budget: CanonicalModelBudget, timestamp: string): void {
+  const timestampMs = Date.parse(timestamp);
+  if (!Number.isFinite(timestampMs)) {
+    throw budgetError(EXECUTION_BUDGET_ERROR_CODES.invalid, "Model budget timestamp is invalid");
+  }
+  if (Date.parse(budget.deadline_at) <= timestampMs) {
+    throw budgetError(EXECUTION_BUDGET_ERROR_CODES.deadlineExceeded, "Agent run has exceeded its budget deadline");
+  }
+}
+
+function assertRunCanReserveModelBudget(run: AgentRunState): void {
+  if (run.status !== "running") {
+    throw budgetError(
+      EXECUTION_BUDGET_ERROR_CODES.reservationConflict,
+      `Run ${run.run_id} is ${run.status}, not eligible to start a model request`
+    );
+  }
+}
+
+function assertModelBudgetReservationWithinLimits(
+  budget: CanonicalModelBudget,
+  pending: ModelBudgetTotals,
+  input: ReserveModelBudgetInput
+): void {
+  assertBudgetAtMost(
+    budget.used_model_calls + pending.model_calls + 1,
+    budget.max_model_calls,
+    EXECUTION_BUDGET_ERROR_CODES.modelCallsExceeded,
+    "model call"
+  );
+  assertBudgetAtMost(
+    budget.used_input_tokens + pending.input_tokens + input.reserved_input_tokens,
+    budget.max_input_tokens,
+    EXECUTION_BUDGET_ERROR_CODES.inputTokensExceeded,
+    "input token"
+  );
+  assertBudgetAtMost(
+    budget.used_output_tokens + pending.output_tokens + input.reserved_output_tokens,
+    budget.max_output_tokens,
+    EXECUTION_BUDGET_ERROR_CODES.outputTokensExceeded,
+    "output token"
+  );
+  assertBudgetAtMost(
+    toMicrousdCeil(budget.estimated_cost) + pending.cost_microusd + input.reserved_cost_microusd,
+    toMicrousdFloor(budget.max_estimated_cost),
+    EXECUTION_BUDGET_ERROR_CODES.costExceeded,
+    "cost"
+  );
+}
+
+function assertChargedModelBudgetWithinLimits(budget: CanonicalModelBudget): void {
+  assertBudgetAtMost(budget.used_model_calls, budget.max_model_calls, EXECUTION_BUDGET_ERROR_CODES.modelCallsExceeded, "model call");
+  assertBudgetAtMost(budget.used_input_tokens, budget.max_input_tokens, EXECUTION_BUDGET_ERROR_CODES.inputTokensExceeded, "input token");
+  assertBudgetAtMost(budget.used_output_tokens, budget.max_output_tokens, EXECUTION_BUDGET_ERROR_CODES.outputTokensExceeded, "output token");
+  assertBudgetAtMost(
+    toMicrousdCeil(budget.estimated_cost),
+    toMicrousdFloor(budget.max_estimated_cost),
+    EXECUTION_BUDGET_ERROR_CODES.costExceeded,
+    "cost"
+  );
+}
+
+function assertBudgetAtMost(current: number, maximum: number, code: ExecutionBudgetErrorCode, resource: string): void {
+  if (!Number.isSafeInteger(current) || current > maximum) {
+    throw budgetError(code, `Agent run ${resource} budget is exhausted`);
+  }
+}
+
+function assertMatchingModelBudgetReservation(
+  current: ExecutionModelBudgetReservation,
+  input: ReserveModelBudgetInput
+): void {
+  const same =
+    current.reservation_id === input.reservation_id &&
+    current.run_id === input.run_id &&
+    current.step_id === input.step_id &&
+    current.attempt_id === input.attempt_id &&
+    current.model_call_id === input.model_call_id &&
+    current.budget_id === input.budget_id &&
+    current.provider === input.provider &&
+    current.model === input.model &&
+    current.purpose === input.purpose &&
+    current.pricing_version === input.pricing_version &&
+    current.reserved_input_tokens === input.reserved_input_tokens &&
+    current.reserved_output_tokens === input.reserved_output_tokens &&
+    current.reserved_cost_microusd === input.reserved_cost_microusd;
+  if (!same) {
+    throw budgetError(EXECUTION_BUDGET_ERROR_CODES.reservationConflict, `Model budget reservation ${current.reservation_id} conflicts with its idempotency key`);
+  }
+}
+
+function assertModelBudgetReservationScope(
+  current: ExecutionModelBudgetReservation,
+  input: MarkModelBudgetDispatchedInput
+): void {
+  if (
+    current.run_id !== input.run_id ||
+    current.step_id !== input.step_id ||
+    current.attempt_id !== input.attempt_id
+  ) {
+    throw budgetError(EXECUTION_BUDGET_ERROR_CODES.reservationConflict, `Model budget reservation ${current.reservation_id} scope mismatch`);
+  }
+}
+
+function assertMatchingModelBudgetSettlement(
+  current: ExecutionModelBudgetReservation,
+  input: SettleModelBudgetInput
+): void {
+  if (
+    current.charged_input_tokens !== input.charged_input_tokens ||
+    current.charged_output_tokens !== input.charged_output_tokens ||
+    current.charged_cost_microusd !== input.charged_cost_microusd ||
+    current.usage_source !== input.usage_source
+  ) {
+    throw budgetError(EXECUTION_BUDGET_ERROR_CODES.reservationConflict, `Model budget reservation ${current.reservation_id} has a conflicting settlement`);
+  }
+}
+
+function assertSettlementDoesNotExceedReservation(
+  current: ExecutionModelBudgetReservation,
+  input: SettleModelBudgetInput
+): void {
+  if (
+    input.charged_input_tokens > current.reserved_input_tokens ||
+    input.charged_output_tokens > current.reserved_output_tokens ||
+    input.charged_cost_microusd > current.reserved_cost_microusd
+  ) {
+    throw budgetError(
+      EXECUTION_BUDGET_ERROR_CODES.usageExceededReservation,
+      `Provider usage exceeds the pre-dispatch budget reservation ${current.reservation_id}`
+    );
+  }
+}
+
+function assertReservationVersion(current: ExecutionModelBudgetReservation, expectedVersion: number): void {
+  if (current.version !== expectedVersion) {
+    throw budgetError(EXECUTION_BUDGET_ERROR_CODES.reservationVersionConflict, `Model budget reservation ${current.reservation_id} version changed`);
+  }
+}
+
+function mapModelBudgetReservationRow(source: SqlRow): ExecutionModelBudgetReservation {
+  return {
+    reservation_id: stringValue(source.reservation_id),
+    run_id: stringValue(source.run_id),
+    step_id: stringValue(source.step_id),
+    attempt_id: stringValue(source.attempt_id),
+    model_call_id: stringValue(source.model_call_id),
+    budget_id: stringValue(source.budget_id),
+    version: positiveVersion(source.version),
+    status: stringValue(source.status) as ExecutionModelBudgetReservation["status"],
+    provider: stringValue(source.provider),
+    model: stringValue(source.model),
+    purpose: stringValue(source.purpose),
+    pricing_version: stringValue(source.pricing_version),
+    reserved_model_calls: nonNegativeSafeInteger(source.reserved_model_calls, "stored reserved model calls"),
+    reserved_input_tokens: nonNegativeSafeInteger(source.reserved_input_tokens, "stored reserved input tokens"),
+    reserved_output_tokens: nonNegativeSafeInteger(source.reserved_output_tokens, "stored reserved output tokens"),
+    reserved_cost_microusd: nonNegativeSafeInteger(source.reserved_cost_microusd, "stored reserved cost"),
+    charged_model_calls: nonNegativeSafeInteger(source.charged_model_calls, "stored charged model calls"),
+    charged_input_tokens: nonNegativeSafeInteger(source.charged_input_tokens, "stored charged input tokens"),
+    charged_output_tokens: nonNegativeSafeInteger(source.charged_output_tokens, "stored charged output tokens"),
+    charged_cost_microusd: nonNegativeSafeInteger(source.charged_cost_microusd, "stored charged cost"),
+    usage_source: stringValue(source.usage_source) as ExecutionModelBudgetReservation["usage_source"],
+    dispatch_started_at: stringValue(source.dispatch_started_at),
+    reserved_at: stringValue(source.reserved_at),
+    settled_at: stringValue(source.settled_at),
+    released_at: stringValue(source.released_at),
+    metadata: parseJson<Record<string, unknown>>(source.metadata_json, {})
+  };
+}
+
+function nonNegativeSafeInteger(value: unknown, field: string): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    throw budgetError(EXECUTION_BUDGET_ERROR_CODES.invalid, `${field} must be a non-negative safe integer`);
+  }
+  return parsed;
+}
+
+function positiveSafeInteger(value: unknown, field: string): number {
+  const parsed = nonNegativeSafeInteger(value, field);
+  if (parsed <= 0) {
+    throw budgetError(EXECUTION_BUDGET_ERROR_CODES.invalid, `${field} must be a positive safe integer`);
+  }
+  return parsed;
+}
+
+function finitePositiveNumber(value: unknown, field: string): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw budgetError(EXECUTION_BUDGET_ERROR_CODES.invalid, `${field} must be a positive finite number`);
+  }
+  return parsed;
+}
+
+function finiteNonNegativeNumber(value: unknown, field: string): number {
+  const parsed = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw budgetError(EXECUTION_BUDGET_ERROR_CODES.invalid, `${field} must be a non-negative finite number`);
+  }
+  return parsed;
+}
+
+function toMicrousdFloor(value: number): number {
+  const scaled = Math.floor(value * 1_000_000 + Number.EPSILON);
+  if (!Number.isSafeInteger(scaled) || scaled < 0) {
+    throw budgetError(EXECUTION_BUDGET_ERROR_CODES.invalid, "Budget cost cannot be represented in micro-USD");
+  }
+  return scaled;
+}
+
+function toMicrousdCeil(value: number): number {
+  const scaled = Math.ceil(value * 1_000_000 - Number.EPSILON);
+  if (!Number.isSafeInteger(scaled) || scaled < 0) {
+    throw budgetError(EXECUTION_BUDGET_ERROR_CODES.invalid, "Budget cost cannot be represented in micro-USD");
+  }
+  return scaled;
+}
+
+function fromMicrousd(value: number): number {
+  return value / 1_000_000;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function budgetError(code: ExecutionBudgetErrorCode, message: string): ExecutionStoreBudgetError {
+  return new ExecutionStoreBudgetError(code, message);
 }
 
 function configureConnection(database: ExecutionDatabase, readOnly: boolean): void {
@@ -2684,7 +3728,22 @@ function mapConfirmationRow(source: SqlRow): StoredAgentConfirmation {
   const stored = asRecord(parseJson(source.confirmation_json, {}));
   const resolvedAt = stringValue(source.resolved_at);
   const resolvedBy = stringValue(source.resolved_by);
+  const schemaVersion = nonNegativeInteger(stored.schema_version);
+  const kind = stringValue(stored.kind);
+  const hasCanonicalScope =
+    schemaVersion >= 1 &&
+    kind.length > 0 &&
+    stringValue(stored.project_id).length > 0 &&
+    nonNegativeInteger(stored.plan_version) > 0 &&
+    stringValue(stored.action_input_hash).length > 0 &&
+    stringValue(stored.scope_fingerprint).length > 0 &&
+    Array.isArray(stored.target_bindings) &&
+    stored.action_payload !== null &&
+    typeof stored.action_payload === "object" &&
+    !Array.isArray(stored.action_payload);
   Object.assign(stored, {
+    schema_version: hasCanonicalScope ? schemaVersion : 0,
+    kind: hasCanonicalScope ? kind : "legacy_unscoped",
     confirmation_id: stringValue(source.confirmation_id),
     run_id: stringValue(source.run_id),
     step_id: stringValue(source.step_id),
@@ -2693,6 +3752,14 @@ function mapConfirmationRow(source: SqlRow): StoredAgentConfirmation {
     risk_level: stringValue(source.risk_level),
     status: stringValue(source.status),
     expires_at: stringValue(source.expires_at),
+    project_id: stringValue(stored.project_id),
+    plan_version: nonNegativeInteger(stored.plan_version),
+    action_input_hash: stringValue(stored.action_input_hash),
+    scope_fingerprint: stringValue(stored.scope_fingerprint),
+    target_bindings: Array.isArray(stored.target_bindings) ? stored.target_bindings : [],
+    action_payload: asRecord(stored.action_payload),
+    consumed_at: stringValue(stored.consumed_at),
+    consumed_by_attempt_id: stringValue(stored.consumed_by_attempt_id),
     created_at: stringValue(source.created_at),
     updated_at: stringValue(source.updated_at)
   });

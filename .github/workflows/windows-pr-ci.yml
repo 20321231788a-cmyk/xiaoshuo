@@ -37,6 +37,45 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      - name: Eval routing
+        id: eval-routing
+        continue-on-error: true
+        run: npm run eval:routing
+
+      - name: Eval planning
+        id: eval-planning
+        continue-on-error: true
+        run: npm run eval:planning
+
+      - name: Eval memory
+        id: eval-memory
+        continue-on-error: true
+        run: npm run eval:memory
+
+      - name: Eval quality
+        id: eval-quality
+        continue-on-error: true
+        run: npm run eval:quality
+
+      - name: Eval recovery
+        id: eval-recovery
+        continue-on-error: true
+        run: npm run eval:recovery
+
+      - name: Eval security
+        id: eval-security
+        continue-on-error: true
+        run: npm run eval:security
+
+      - name: Eval excluded capabilities
+        id: eval-excluded-capabilities
+        continue-on-error: true
+        run: npm run eval:excluded-capabilities
+
+      - name: Enforce eval results
+        if: ${{ steps.eval-routing.outcome == 'failure' || steps.eval-planning.outcome == 'failure' || steps.eval-memory.outcome == 'failure' || steps.eval-quality.outcome == 'failure' || steps.eval-recovery.outcome == 'failure' || steps.eval-security.outcome == 'failure' || steps.eval-excluded-capabilities.outcome == 'failure' }}
+        run: exit 1
+
       - name: Build workbench
         run: npm run build:workbench
 
@@ -50,7 +89,7 @@ jobs:
         run: npm run smoke:desktop
 
       - name: Upload Playwright diagnostics
-        if: failure()
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: playwright-diagnostics-${{ github.sha }}
@@ -58,4 +97,13 @@ jobs:
             test-results
             playwright-report
           if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Upload eval manifests and redacted failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-evidence-${{ github.sha }}
+          path: output/evals
+          if-no-files-found: warn
           retention-days: 14

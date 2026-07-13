@@ -54,6 +54,14 @@ export async function handleGeneratedCacheRoutes(
         });
         return null;
       }
+      if (runtimeErrorCode(error) === "QUALITY_GATE_REJECTED") {
+        deps.writeJson(response, 422, {
+          detail: error instanceof Error ? error.message : "生成内容未通过质量门，未写入文件。",
+          code: "QUALITY_GATE_REJECTED",
+          report: error && typeof error === "object" && "report" in error ? (error as { report?: unknown }).report : undefined
+        });
+        return null;
+      }
       throw error;
     }
   };

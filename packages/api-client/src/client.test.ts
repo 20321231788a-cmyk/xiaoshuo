@@ -49,6 +49,34 @@ describe("api-client", () => {
     ]);
   });
 
+  it("uses the receipt-bound memory confirmation route instead of a direct confirmed write", async () => {
+    const requests: Array<{ url: string; method: string; body: string }> = [];
+    const client = createApiClient({
+      baseUrl: "http://127.0.0.1:18452",
+      fetchFn: async (input, init) => {
+        requests.push({ url: String(input), method: String(init?.method || "GET"), body: String(init?.body || "") });
+        return new Response(JSON.stringify({
+          confirmation: {
+            confirmation_id: "memconf-1",
+            claim_id: "claim-1",
+            version: 1,
+            status: "requested",
+            expires_at: "2026-07-13T01:00:00.000Z"
+          }
+        }), { status: 201, headers: { "Content-Type": "application/json" } });
+      }
+    });
+
+    const result = await client.requestGovernedMemoryConfirmation("claim-1", 3);
+
+    expect(result.confirmation.status).toBe("requested");
+    expect(requests).toEqual([{
+      url: "http://127.0.0.1:18452/api/memory/claims/claim-1/confirmations",
+      method: "POST",
+      body: JSON.stringify({ source_revision: 3 })
+    }]);
+  });
+
   it("preserves slashes when encoding path placeholders", () => {
     const url = buildApiUrl("http://127.0.0.1:18452", "/api/documents/{rel_path}", {
       rel_path: "01_大纲/章纲.txt"
@@ -461,7 +489,8 @@ describe("api-client", () => {
     await client.retryAgentRunStep("run-one", "step-one", { operation_id: "operation-retry", expected_version: 4 });
     const approved = await client.approveAgentConfirmation("confirmation-one", {
       operation_id: "operation-approve",
-      expected_version: 5
+      expected_version: 5,
+      expected_scope_fingerprint: "scope-fingerprint-1"
     });
     const rejected = await client.rejectAgentConfirmation("confirmation-one", {
       operation_id: "operation-reject",
@@ -495,12 +524,12 @@ describe("api-client", () => {
       {
         url: "http://127.0.0.1:18452/api/agent/confirmations/confirmation-one/approve",
         method: "POST",
-        body: JSON.stringify({ operation_id: "operation-approve", expected_version: 5 })
+        body: JSON.stringify({ operation_id: "operation-approve", expected_version: 5, expected_scope_fingerprint: "scope-fingerprint-1" })
       },
       {
         url: "http://127.0.0.1:18452/api/agent/confirmations/confirmation-one/reject",
         method: "POST",
-        body: JSON.stringify({ operation_id: "operation-reject", expected_version: 6 })
+        body: JSON.stringify({ operation_id: "operation-reject", expected_version: 6, expected_scope_fingerprint: "" })
       }
     ]);
   });

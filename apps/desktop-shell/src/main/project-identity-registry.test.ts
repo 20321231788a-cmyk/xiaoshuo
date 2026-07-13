@@ -30,7 +30,70 @@ describe("ProjectIdentityRegistry", () => {
 
     const restarted = new ProjectIdentityRegistry(registryPath);
     await expect(restarted.confirm(projectPath, projectId)).resolves.toMatchObject({ projectId, reassociated: false });
-    expect((await restarted.snapshot()).projects).toHaveLength(1);
+    expect(await restarted.snapshot()).toMatchObject({
+      version: 2,
+      projects: [{
+        project_id: projectId,
+        requires_reconfirmation: false,
+        filesystem_identity: { scheme: "stat-dev-ino-v1" }
+      }]
+    });
+  });
+
+  it("fails closed after restart when a project directory is replaced at the same canonical path", async () => {
+    const root = await createRoot();
+    const projectPath = path.join(root, "project");
+    const displacedPath = path.join(root, "displaced");
+    const registryPath = path.join(root, "state", "project-identities.json");
+    await fs.mkdir(projectPath);
+
+    await new ProjectIdentityRegistry(registryPath).confirm(projectPath, projectId);
+    await fs.rename(projectPath, displacedPath);
+    await fs.mkdir(projectPath);
+
+    const restarted = new ProjectIdentityRegistry(registryPath);
+    await expect(restarted.confirm(projectPath, projectId)).rejects.toMatchObject({ code: projectIdentityConflictCode });
+    expectIdentityUnconfirmed(() => restarted.assertWritable(projectPath, projectId));
+  });
+
+  it("requires an explicit user re-confirmation before migrating a v1 record", async () => {
+    const root = await createRoot();
+    const projectPath = path.join(root, "project");
+    const registryPath = path.join(root, "state", "project-identities.json");
+    await fs.mkdir(projectPath);
+    await fs.mkdir(path.dirname(registryPath), { recursive: true });
+    await fs.writeFile(registryPath, JSON.stringify({
+      version: 1,
+      projects: [identityRecord(projectId, projectPath)]
+    }), "utf8");
+
+    const restarted = new ProjectIdentityRegistry(registryPath);
+    await expect(restarted.confirm(projectPath, projectId)).rejects.toMatchObject({ code: projectIdentityUnconfirmedCode });
+    expectIdentityUnconfirmed(() => restarted.assertWritable(projectPath, projectId));
+
+    await expect(restarted.reconfirm(projectPath, projectId)).resolves.toMatchObject({ projectId, reassociated: false });
+    await expect(fs.readFile(registryPath, "utf8")).resolves.toContain('"version": 2');
+    expect((await restarted.snapshot()).projects[0]).toMatchObject({
+      requires_reconfirmation: false,
+      filesystem_identity: { scheme: "stat-dev-ino-v1" }
+    });
+
+    const afterMigration = new ProjectIdentityRegistry(registryPath);
+    await expect(afterMigration.confirm(projectPath, projectId)).resolves.toMatchObject({ projectId, reassociated: false });
+  });
+
+  it("does not auto-associate a copied directory after the original disappeared", async () => {
+    const root = await createRoot();
+    const original = path.join(root, "original");
+    const copy = path.join(root, "copy");
+    const registryPath = path.join(root, "state", "project-identities.json");
+    await fs.mkdir(original);
+    await new ProjectIdentityRegistry(registryPath).confirm(original, projectId);
+    await fs.cp(original, copy, { recursive: true });
+    await fs.rm(original, { recursive: true });
+
+    const restarted = new ProjectIdentityRegistry(registryPath);
+    await expect(restarted.confirm(copy, projectId)).rejects.toMatchObject({ code: projectIdentityConflictCode });
   });
 
   it("serializes competing same-UUID paths and rejects the unconfirmed copy", async () => {
@@ -110,6 +173,22 @@ describe("ProjectIdentityRegistry", () => {
     await expect(registry.confirm(projectPath, projectId)).rejects.toMatchObject({ code: projectIdentityConflictCode });
   });
 
+  it.each([
+    ["invalid record", [{ project_id: "not-a-uuid", canonical_path: "relative", previous_paths: [], updated_at: "" }]],
+    ["duplicate UUID", [identityRecord(projectId, "first"), identityRecord(projectId, "second")]],
+    ["duplicate canonical path", [identityRecord(projectId, "same"), identityRecord(otherProjectId, "same")]]
+  ])("fails closed for %s instead of silently dropping registry entries", async (_label, projects) => {
+    const root = await createRoot();
+    const projectPath = path.join(root, "project");
+    const registryPath = path.join(root, "state", "project-identities.json");
+    await fs.mkdir(projectPath);
+    await fs.mkdir(path.dirname(registryPath), { recursive: true });
+    await fs.writeFile(registryPath, JSON.stringify({ version: 1, projects }), "utf8");
+    const registry = new ProjectIdentityRegistry(registryPath);
+
+    await expect(registry.confirm(projectPath, projectId)).rejects.toMatchObject({ code: projectIdentityConflictCode });
+  });
+
   it("fails closed when the project root has no canonical realpath", async () => {
     const root = await createRoot();
     const missingProject = path.join(root, "missing-project");
@@ -123,4 +202,23 @@ async function createRoot(): Promise<string> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "arcwriter-project-identity-"));
   tempRoots.push(root);
   return root;
+}
+
+function identityRecord(identity: string, pathName: string) {
+  return {
+    project_id: identity,
+    canonical_path: path.resolve(pathName),
+    previous_paths: [],
+    updated_at: "2026-07-11T00:00:00.000Z"
+  };
+}
+
+function expectIdentityUnconfirmed(action: () => void): void {
+  let error: unknown;
+  try {
+    action();
+  } catch (caught) {
+    error = caught;
+  }
+  expect(error).toMatchObject({ code: projectIdentityUnconfirmedCode });
 }

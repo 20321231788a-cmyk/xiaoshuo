@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { DocumentSaveConflictError } from "@xiaoshuo/document-service";
 import { handleProjectDocumentRoutes } from "./project-document-routes.js";
@@ -7,9 +7,16 @@ import type { RuntimeContext } from "./types.js";
 const mockArchiveDocument = vi.fn();
 const mockListTimeline = vi.fn();
 const mockSaveDocument = vi.fn();
+const mockReadDocument = vi.fn();
+const mockRollbackTimelineEntry = vi.fn();
 const mockProjectChromeSnapshot = vi.fn();
+const mockGetProjectId = vi.fn();
 const mockMarkChanged = vi.fn();
 const mockVectorClose = vi.fn();
+const { mockInvalidateGovernedMemorySource, mockGetProjectAgentRuntime } = vi.hoisted(() => ({
+  mockInvalidateGovernedMemorySource: vi.fn(),
+  mockGetProjectAgentRuntime: vi.fn()
+}));
 
 vi.mock("@xiaoshuo/document-service", () => ({
   DocumentSaveConflictError: class extends Error {
@@ -27,12 +34,15 @@ vi.mock("@xiaoshuo/document-service", () => ({
     archiveDocument = mockArchiveDocument;
     listTimeline = mockListTimeline;
     saveDocument = mockSaveDocument;
+    readDocument = mockReadDocument;
+    rollbackTimelineEntry = mockRollbackTimelineEntry;
   }
 }));
 
 vi.mock("@xiaoshuo/project-manifest", () => ({
   ProjectManifestService: class {
     projectChromeSnapshot = mockProjectChromeSnapshot;
+    getProjectId = mockGetProjectId;
   }
 }));
 
@@ -41,6 +51,10 @@ vi.mock("@xiaoshuo/vector-service", () => ({
     markChanged = mockMarkChanged;
     close = mockVectorClose;
   }
+}));
+
+vi.mock("./agent-runtime-registry.js", () => ({
+  getProjectAgentRuntime: mockGetProjectAgentRuntime
 }));
 
 function createContext(): RuntimeContext {
@@ -84,6 +98,13 @@ function createDeps(overrides?: Partial<Parameters<typeof handleProjectDocumentR
 }
 
 describe("handleProjectDocumentRoutes", () => {
+  beforeEach(() => {
+    mockGetProjectAgentRuntime.mockResolvedValue({
+      invalidateGovernedMemorySource: mockInvalidateGovernedMemorySource,
+      evaluateArtifactQuality: vi.fn().mockResolvedValue(null)
+    });
+  });
+
   afterEach(() => {
     vi.clearAllMocks();
   });
@@ -126,6 +147,35 @@ describe("handleProjectDocumentRoutes", () => {
       detail: "删除/归档文件需要用户确认"
     });
     expect(mockArchiveDocument).not.toHaveBeenCalled();
+  });
+
+  it("rejects a hard quality-gate failure before any document save", async () => {
+    const writeJson = vi.fn();
+    const report = { artifact_type: "project_document", passed: false, issues: [{ code: "QUALITY_FORMATTING" }] };
+    mockGetProjectAgentRuntime.mockResolvedValue({
+      invalidateGovernedMemorySource: mockInvalidateGovernedMemorySource,
+      evaluateArtifactQuality: vi.fn().mockResolvedValue(report)
+    });
+    const deps = createDeps({
+      writeJson,
+      readJsonBody: vi.fn().mockResolvedValue({ content: "#不合规标题" })
+    });
+
+    const handled = await handleProjectDocumentRoutes(
+      { method: "PUT" } as IncomingMessage,
+      createResponse(),
+      "/api/documents/chapters/ch1.txt",
+      new URLSearchParams(),
+      createContext(),
+      deps
+    );
+
+    expect(handled).toBe(true);
+    expect(mockSaveDocument).not.toHaveBeenCalled();
+    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 422, expect.objectContaining({
+      code: "QUALITY_GATE_REJECTED",
+      report
+    }));
   });
 
   it("passes project chrome query options through to the manifest snapshot", async () => {
@@ -182,6 +232,31 @@ describe("handleProjectDocumentRoutes", () => {
     expect(deps.moveDocumentSession).toHaveBeenCalledWith(context.documentSessions, "D:\\projects\\novel", "D:\\projects\\Renamed");
     expect(deps.rebuildProjectManifest).toHaveBeenCalledWith("D:\\projects\\Renamed");
     expect(deps.writeJson).toHaveBeenCalledWith(expect.anything(), 200, renamed);
+  });
+
+  it("uses an explicit open action to re-confirm a legacy project identity", async () => {
+    const context = createContext();
+    const opened = { path: "D:\\projects\\novel", name: "Novel" };
+    const reconfirm = vi.fn().mockResolvedValue({ projectId: "f745c8a6-21c2-4f33-bf72-66cab8d0eb30" });
+    vi.mocked(context.projectSession.openProject).mockResolvedValue(opened);
+    context.projectIdentityRegistry = { reconfirm } as unknown as RuntimeContext["projectIdentityRegistry"];
+    mockGetProjectId.mockResolvedValue("f745c8a6-21c2-4f33-bf72-66cab8d0eb30");
+    const deps = createDeps({ readJsonBody: vi.fn().mockResolvedValue({ path: opened.path }) });
+
+    const handled = await handleProjectDocumentRoutes(
+      { method: "POST" } as IncomingMessage,
+      createResponse(),
+      "/api/projects/open",
+      new URLSearchParams(),
+      context,
+      deps
+    );
+
+    expect(handled).toBe(true);
+    expect(mockGetProjectId).toHaveBeenCalled();
+    expect(reconfirm).toHaveBeenCalledWith(opened.path, "f745c8a6-21c2-4f33-bf72-66cab8d0eb30");
+    expect(deps.startDocumentSession).toHaveBeenCalledWith(context.documentSessions, opened.path);
+    expect(deps.writeJson).toHaveBeenCalledWith(expect.anything(), 200, opened);
   });
 
   it("returns 409 when document save detects a stale base version", async () => {
@@ -274,6 +349,67 @@ describe("handleProjectDocumentRoutes", () => {
     expect(deps.rebuildProjectManifest).toHaveBeenCalledWith("D:\\projects\\novel");
     expect(mockMarkChanged).toHaveBeenCalledWith(["chapters/ch1.txt"], "upsert");
     expect(mockVectorClose).toHaveBeenCalled();
+    expect(mockInvalidateGovernedMemorySource).toHaveBeenCalledWith({
+      sourceRef: "chapters/ch1.txt",
+      currentSourceRevision: "sha256:fe32608c9ef5b6cf7e3f946480253ff76f24f4ec0678f3d0f07f9844cbff9601"
+    });
+  });
+
+  it("keeps document save available when governed memory is disabled", async () => {
+    const deps = createDeps({
+      readJsonBody: vi.fn().mockResolvedValue({ content: "new content" })
+    });
+    mockSaveDocument.mockResolvedValue({
+      path: "chapters/ch1.txt",
+      content: "new content",
+      updated_at: "2026-06-01 12:00:00",
+      updated_at_ms: 123,
+      changed: true
+    });
+    mockInvalidateGovernedMemorySource.mockRejectedValue(Object.assign(new Error("disabled"), { code: "MEMORY_V2_DISABLED" }));
+
+    const handled = await handleProjectDocumentRoutes(
+      { method: "PUT" } as IncomingMessage,
+      createResponse(),
+      "/api/documents/chapters/ch1.txt",
+      new URLSearchParams(),
+      createContext(),
+      deps
+    );
+
+    expect(handled).toBe(true);
+    expect(deps.writeJson).toHaveBeenCalledWith(expect.anything(), 200, expect.objectContaining({ changed: true }));
+  });
+
+  it("hashes the restored document rather than its truncated timeline excerpt", async () => {
+    const deps = createDeps({
+      matchDocumentRoute: vi.fn().mockReturnValue(""),
+      matchTimelineRoute: vi.fn().mockReturnValue({ id: "timeline-1", action: "rollback" }),
+      readRequestFields: vi.fn().mockResolvedValue({ confirm_delete: true })
+    });
+    mockRollbackTimelineEntry.mockResolvedValue({
+      ok: true,
+      message: "已回滚",
+      requires_confirmation: false,
+      entry: { files: [{ path: "01_大纲/大纲.txt", after_exists: true, after_excerpt: "截断摘要" }] }
+    });
+    mockReadDocument.mockResolvedValue({ path: "01_大纲/大纲.txt", content: "完整恢复内容" });
+
+    const handled = await handleProjectDocumentRoutes(
+      { method: "POST" } as IncomingMessage,
+      createResponse(),
+      "/api/timeline/timeline-1/rollback",
+      new URLSearchParams(),
+      createContext(),
+      deps
+    );
+
+    expect(handled).toBe(true);
+    expect(mockReadDocument).toHaveBeenCalledWith("01_大纲/大纲.txt");
+    expect(mockInvalidateGovernedMemorySource).toHaveBeenCalledWith({
+      sourceRef: "01_大纲/大纲.txt",
+      currentSourceRevision: "sha256:4b0a25a24a699e0de9cfcba7c885b2e500721da899b05e041895b76def06152a"
+    });
   });
 
   it("keeps legacy changed-content behavior when save response has no changed field", async () => {

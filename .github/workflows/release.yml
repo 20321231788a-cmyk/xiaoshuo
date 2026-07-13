@@ -41,6 +41,48 @@ jobs:
       - name: Unit tests
         run: npm test
 
+      - name: Eval routing
+        id: eval-routing
+        continue-on-error: true
+        run: npm run eval:routing
+
+      - name: Eval planning
+        id: eval-planning
+        continue-on-error: true
+        run: npm run eval:planning
+
+      - name: Eval memory
+        id: eval-memory
+        continue-on-error: true
+        run: npm run eval:memory
+
+      - name: Eval quality
+        id: eval-quality
+        continue-on-error: true
+        run: npm run eval:quality
+
+      - name: Eval recovery
+        id: eval-recovery
+        continue-on-error: true
+        run: npm run eval:recovery
+
+      - name: Eval security
+        id: eval-security
+        continue-on-error: true
+        run: npm run eval:security
+
+      - name: Eval excluded capabilities
+        id: eval-excluded-capabilities
+        continue-on-error: true
+        run: npm run eval:excluded-capabilities
+
+      - name: Enforce eval results
+        if: ${{ steps.eval-routing.outcome == 'failure' || steps.eval-planning.outcome == 'failure' || steps.eval-memory.outcome == 'failure' || steps.eval-quality.outcome == 'failure' || steps.eval-recovery.outcome == 'failure' || steps.eval-security.outcome == 'failure' || steps.eval-excluded-capabilities.outcome == 'failure' }}
+        run: exit 1
+
+      - name: Verify RC eval dataset and sealed holdout evidence
+        run: node scripts/verify-rc-eval-evidence.mjs --dataset-manifest evals/rc-dataset-manifest.json --eval-root output/evals
+
       - name: Build workbench
         run: npm run build:workbench
 
@@ -70,10 +112,21 @@ jobs:
         shell: pwsh
         run: ./apps/desktop-shell/scripts/smoke-installed-desktop.ps1 -InstallerPath (Get-ChildItem apps/desktop-shell/release/ArcWriter-Setup-*.exe | Select-Object -First 1).FullName -OutputPath artifacts/installed-smoke.json
 
+      - name: Download previous installer for upgrade smoke
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./apps/desktop-shell/scripts/download-previous-release-installer.ps1 -Repository $env:GITHUB_REPOSITORY -ExcludeTag $env:GITHUB_REF_NAME -OutputPath artifacts/baseline/ArcWriter-Setup-baseline.exe
+
+      - name: Run upgrade and rollback smoke
+        shell: pwsh
+        run: ./apps/desktop-shell/scripts/smoke-upgrade-rollback-desktop.ps1 -BaselineInstallerPath artifacts/baseline/ArcWriter-Setup-baseline.exe -CandidateInstallerPath (Get-ChildItem apps/desktop-shell/release/ArcWriter-Setup-*.exe | Select-Object -First 1).FullName -OutputPath artifacts/upgrade-rollback-smoke.json
+
       - name: Create same-commit release evidence
-        run: node apps/desktop-shell/scripts/verify-release-evidence.mjs --artifact-dir apps/desktop-shell/release --installed-evidence artifacts/installed-smoke.json --channel release --out artifacts/release-evidence.json
+        run: node apps/desktop-shell/scripts/verify-release-evidence.mjs --artifact-dir apps/desktop-shell/release --installed-evidence artifacts/installed-smoke.json --upgrade-rollback-evidence artifacts/upgrade-rollback-smoke.json --channel release --out artifacts/release-evidence.json
 
       - name: Publish release assets
+        if: success()
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
@@ -83,4 +136,15 @@ jobs:
             apps/desktop-shell/release/ArcWriter-Setup-*.exe.blockmap
             apps/desktop-shell/release/latest.yml
             artifacts/installed-smoke.json
+            artifacts/upgrade-rollback-smoke.json
             artifacts/release-evidence.json
+            evals/rc-dataset-manifest.json
+
+      - name: Upload eval manifests and redacted failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-evidence-release-${{ github.sha }}
+          path: output/evals
+          if-no-files-found: warn
+          retention-days: 30

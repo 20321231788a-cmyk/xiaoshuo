@@ -7,7 +7,9 @@ import {
   type CurrentProject
 } from "@xiaoshuo/shared";
 import { VectorIndex } from "@xiaoshuo/vector-service";
+import { createHash } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { getProjectAgentRuntime } from "./agent-runtime-registry.js";
 import type { RuntimeContext } from "./types.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -52,6 +54,13 @@ export async function handleProjectDocumentRoutes(
   if (request.method === "POST" && pathname === "/api/projects/open") {
     const payload = projectOpenRequestSchema.parse(await deps.readJsonBody(request));
     const opened = await context.projectSession.openProject(payload.path);
+    // Opening a project is the explicit user action that may migrate a legacy
+    // v1 identity record. Routine background/request confirmation is never
+    // allowed to upgrade a record that lacks an OS file identity.
+    if (context.projectIdentityRegistry) {
+      const projectId = await new ProjectManifestService(opened.path).getProjectId();
+      await context.projectIdentityRegistry.reconfirm(opened.path, projectId);
+    }
     deps.startDocumentSession(context.documentSessions, opened.path);
     deps.writeJson(response, 200, opened);
     return true;
@@ -113,10 +122,23 @@ export async function handleProjectDocumentRoutes(
       const index = new VectorIndex(currentProject.path);
       index.markChanged([documentPath], "delete");
       index.close();
+      await invalidateGovernedMemorySource(context, currentProject.path, documentPath, "", true);
       deps.writeJson(response, 200, { ok: true, path: archived.path, archived_path: archived.archived_path });
       return true;
     }
     const payload = saveDocumentRequestSchema.parse(await deps.readJsonBody(request));
+    const runtime = await getProjectAgentRuntime(context, currentProject.path);
+    if ("evaluateArtifactQuality" in runtime && typeof runtime.evaluateArtifactQuality === "function") {
+      const report = await runtime.evaluateArtifactQuality(payload.content, "project_document");
+      if (report && !report.passed) {
+        deps.writeJson(response, 422, {
+          detail: "内容未通过质量门，未保存文件。",
+          code: "QUALITY_GATE_REJECTED",
+          report
+        });
+        return true;
+      }
+    }
     let saved;
     try {
       saved = await documents.saveDocument(documentPath, payload.content, {
@@ -143,6 +165,7 @@ export async function handleProjectDocumentRoutes(
       const index = new VectorIndex(currentProject.path);
       index.markChanged([documentPath], "upsert");
       index.close();
+       await invalidateGovernedMemorySource(context, currentProject.path, documentPath, saved.content);
     }
     deps.writeJson(response, 200, saved);
     return true;
@@ -241,14 +264,25 @@ export async function handleProjectDocumentRoutes(
     }
     if (timelineRoute.action === "rollback" && request.method === "POST") {
       const payload = await deps.readRequestFields(request);
-      deps.writeJson(
-        response,
-        200,
-        await documents.rollbackTimelineEntry(timelineRoute.id, {
+      const rolledBack = await documents.rollbackTimelineEntry(timelineRoute.id, {
           confirmDelete: deps.booleanValue(payload.confirm_delete ?? payload.confirmDelete),
           session: deps.ensureDocumentSession(context.documentSessions, currentProject.path)
-        })
-      );
+        });
+      if (rolledBack.ok && rolledBack.entry) {
+        for (const file of rolledBack.entry.files) {
+          const sourceContent = file.after_exists
+            ? (await documents.readDocument(file.path)).content
+            : "deleted";
+          await invalidateGovernedMemorySource(
+            context,
+            currentProject.path,
+            file.path,
+            sourceContent,
+            !file.after_exists
+          );
+        }
+      }
+      deps.writeJson(response, 200, rolledBack);
       return true;
     }
   }
@@ -299,4 +333,32 @@ export async function handleProjectDocumentRoutes(
   }
 
   return false;
+}
+
+async function invalidateGovernedMemorySource(
+  context: RuntimeContext,
+  projectPath: string,
+  sourceRef: string,
+  content: string,
+  deleted = false
+): Promise<void> {
+  const runtime = await getProjectAgentRuntime(context, projectPath);
+  try {
+    await runtime.invalidateGovernedMemorySource({
+      sourceRef: sourceRef.replace(/\\/g, "/"),
+      currentSourceRevision: deleted
+        ? "deleted"
+        : `sha256:${createHash("sha256").update(content).digest("hex")}`
+    });
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error
+      ? String((error as { code?: unknown }).code || "")
+      : "";
+    // memory_v2 is optional. When disabled, document operations retain their
+    // normal behavior and do not create a governed-memory store.
+    if (code === "MEMORY_V2_DISABLED") {
+      return;
+    }
+    throw error;
+  }
 }

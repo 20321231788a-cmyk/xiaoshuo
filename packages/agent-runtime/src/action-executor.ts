@@ -1,13 +1,35 @@
 import fs from "node:fs";
 import path from "node:path";
+import type { AgentConfirmationTargetBinding } from "@xiaoshuo/shared";
 import { ACTION_DESCRIPTORS } from "./action-registry.js";
 import { NegativeCapabilityPolicy, NegativeCapabilityPolicyError, NEGATIVE_CAPABILITY_CODES } from "./negative-capability-policy.js";
+import {
+  CONFIRMATION_RECEIPT_CODES,
+  ConfirmationReceiptError,
+  sha256StableJson
+} from "./kernel/confirmation-receipt.js";
+import type { ConsumeConfirmationReceiptInput, ExecutionCasResult, StoredAgentConfirmation } from "./kernel/execution-store-port.js";
+
+export type TrustedActionConfirmationReceipt = {
+  confirmationId: string;
+  version: number;
+  scopeFingerprint: string;
+  actionInputHash: string;
+  targetBindings: AgentConfirmationTargetBinding[];
+};
 
 export type TrustedActionExecutionScope = {
   projectId: string;
   runId: string;
   budgetId: string;
+  stepId?: string;
+  attemptId?: string;
+  planVersion?: number;
   confirmationId?: string;
+  confirmationReceipt?: TrustedActionConfirmationReceipt;
+  consumeConfirmationReceipt?: (
+    input: ConsumeConfirmationReceiptInput
+  ) => ExecutionCasResult<StoredAgentConfirmation> | Promise<ExecutionCasResult<StoredAgentConfirmation>>;
   targetProjectId?: string;
 };
 
@@ -45,6 +67,13 @@ export class ActionExecutor {
     if (allowedPermissions.has("project.write") && args.bypassService) {
       throw new Error(`[ActionExecutor] 阻止：禁止绕过受控服务直写盘: ${action}`);
     }
+    if (action === "propose_save" && args.bypassDocumentService) {
+      throw new Error("[ActionExecutor] 阻止：禁止绕过 DocumentService 直写文件");
+    }
+
+    if (descriptor.confirmation_policy === "always") {
+      await this.consumeRequiredConfirmation(action, args);
+    }
 
     switch (action) {
       case "read_project_files":
@@ -56,9 +85,6 @@ export class ActionExecutor {
       case "search_web_material":
         return { sources: [] };
       case "propose_save": {
-        if (args.bypassDocumentService) {
-          throw new Error("[ActionExecutor] 阻止：禁止绕过 DocumentService 直写文件");
-        }
         const projectRoot = this.runtimeContext.projectRoot;
         if (projectRoot && args.path) {
           const canonicalProjectRoot = fs.realpathSync(projectRoot);
@@ -86,6 +112,46 @@ export class ActionExecutor {
       }
       default:
         return { ok: true, message: `Action ${action} executed.` };
+    }
+  }
+
+  private async consumeRequiredConfirmation(action: string, args: Record<string, any>): Promise<void> {
+    const receipt = this.executionScope.confirmationReceipt;
+    const consume = this.executionScope.consumeConfirmationReceipt;
+    const stepId = this.executionScope.stepId;
+    const attemptId = this.executionScope.attemptId;
+    const planVersion = this.executionScope.planVersion;
+    if (!receipt || !consume || !stepId || !attemptId || !planVersion) {
+      throw new ConfirmationReceiptError(
+        CONFIRMATION_RECEIPT_CODES.required,
+        `Action ${action} requires a trusted confirmation receipt`
+      );
+    }
+    const actionInputHash = sha256StableJson(args);
+    if (receipt.actionInputHash !== actionInputHash) {
+      throw new ConfirmationReceiptError(
+        CONFIRMATION_RECEIPT_CODES.hashMismatch,
+        `Action ${action} arguments do not match the confirmed input`
+      );
+    }
+    const consumed = await consume({
+      confirmation_id: receipt.confirmationId,
+      expected_version: receipt.version,
+      run_id: this.executionScope.runId,
+      step_id: stepId,
+      attempt_id: attemptId,
+      action,
+      project_id: this.executionScope.projectId,
+      plan_version: planVersion,
+      action_input_hash: actionInputHash,
+      scope_fingerprint: receipt.scopeFingerprint,
+      target_bindings: receipt.targetBindings
+    });
+    if (!consumed.applied) {
+      throw new ConfirmationReceiptError(
+        CONFIRMATION_RECEIPT_CODES.versionMismatch,
+        `Confirmation ${receipt.confirmationId} changed before action execution`
+      );
     }
   }
 }

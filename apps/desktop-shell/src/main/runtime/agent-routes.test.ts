@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import os from "node:os";
 import path from "node:path";
-import { RunCoordinator } from "@xiaoshuo/agent-runtime";
+import { RunCoordinator, sha256StableJson } from "@xiaoshuo/agent-runtime";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { handleAgentRoutes } from "./agent-routes.js";
 import type { RuntimeContext } from "./types.js";
@@ -13,6 +13,7 @@ const runtime = vi.hoisted(() => ({
   getDurableRun: vi.fn(),
   listDurableRunConfirmations: vi.fn(),
   listDurableRunEvents: vi.fn(),
+  isAgentEventStreamEnabled: vi.fn(),
   exportDurableRun: vi.fn(),
   deleteDurableRun: vi.fn(),
   pauseDurableRun: vi.fn(),
@@ -24,9 +25,10 @@ const runtime = vi.hoisted(() => ({
   runAgent: vi.fn(),
   streamAgentRun: vi.fn()
 }));
+const mockGetProjectAgentRuntime = vi.hoisted(() => vi.fn(() => runtime));
 
 vi.mock("./agent-runtime-registry.js", () => ({
-  getProjectAgentRuntime: vi.fn(() => runtime)
+  getProjectAgentRuntime: mockGetProjectAgentRuntime
 }));
 
 vi.mock("./license-guard.js", () => ({
@@ -35,9 +37,31 @@ vi.mock("./license-guard.js", () => ({
 
 afterEach(() => {
   vi.clearAllMocks();
+  mockGetProjectAgentRuntime.mockImplementation(() => runtime);
 });
 
 describe("agent lifecycle routes", () => {
+  it("maps project scope rejection to a stable non-500 response", async () => {
+    const writeJson = vi.fn();
+    mockGetProjectAgentRuntime.mockRejectedValueOnce(Object.assign(new Error("scope changed"), {
+      code: "PROJECT_SCOPE_ROOT_CHANGED"
+    }));
+
+    const handled = await handleAgentRoutes(
+      request("GET"),
+      response(),
+      "/api/agent/runs",
+      context(),
+      deps(writeJson)
+    );
+
+    expect(handled).toBe(true);
+    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 409, {
+      detail: "scope changed",
+      code: "PROJECT_SCOPE_ROOT_CHANGED"
+    });
+  });
+
   it("lists durable runs with status and cursor pagination", async () => {
     const writeJson = vi.fn();
     const first = runState("run-1", 3, "completed", "2026-07-10T04:00:00.000Z");
@@ -262,7 +286,7 @@ describe("agent lifecycle routes", () => {
       deps(writeJson, { operation_id: "op-confirm", expected_version: 2 })
     );
 
-    expect(runtime.resolveDurableConfirmation).toHaveBeenCalledWith("confirmation-1", "approved", "op-confirm", 2);
+    expect(runtime.resolveDurableConfirmation).toHaveBeenCalledWith("confirmation-1", "approved", "op-confirm", 2, "");
     expect(writeJson).toHaveBeenCalledWith(expect.anything(), 409, {
       detail: "Confirmation version changed",
       code: "VERSION_CONFLICT"
@@ -283,22 +307,14 @@ describe("agent lifecycle routes", () => {
         skill_id: "",
         attachment_ids: []
       }, { stepType: "file_operation", requiresConfirmation: true });
-      const waiting = coordinator.completeRun(execution, {
-        intent: "file_operation",
-        reply: "待写入预览",
-        conversation: null,
-        results: [],
-        skill_result: null,
-        saved_paths: [],
-        requires_confirmation: true
-      });
+      const waiting = coordinator.completeRun(execution, sealedFileConfirmationResponse(coordinator, execution));
       const confirmation = coordinator.store.listConfirmations(execution.run_id, "pending")[0]!;
       expect(waiting.status).toBe("waiting_confirmation");
 
       runtime.getDurableRun.mockImplementation((runId: string) => coordinator.getRun(runId));
       runtime.listDurableRunConfirmations.mockImplementation((runId: string) => coordinator.store.listConfirmations(runId));
-      runtime.resolveDurableConfirmation.mockImplementation((confirmationId: string, status: "approved" | "rejected", operationId: string, version: number) =>
-        coordinator.resolveConfirmation(confirmationId, status, operationId, version)
+      runtime.resolveDurableConfirmation.mockImplementation((confirmationId: string, status: "approved" | "rejected", operationId: string, version: number, fingerprint = "") =>
+        coordinator.resolveConfirmation(confirmationId, status, operationId, version, fingerprint)
       );
       runtime.resumeDurableRun.mockImplementation((runId: string, operationId: string, version: number) => {
         coordinator.resumeRun(runId, operationId, version);
@@ -309,7 +325,11 @@ describe("agent lifecycle routes", () => {
       await handleAgentRoutes(request("GET"), response(), `/api/agent/runs/${execution.run_id}/confirmations`, context(), deps(writeJson));
       expect(writeJson).toHaveBeenLastCalledWith(expect.anything(), 200, [expect.objectContaining({ confirmation_id: confirmation.confirmation_id, status: "pending" })]);
 
-      const approval = { operation_id: "operation-approve", expected_version: confirmation.version };
+      const approval = {
+        operation_id: "operation-approve",
+        expected_version: confirmation.version,
+        expected_scope_fingerprint: confirmation.scope_fingerprint
+      };
       await handleAgentRoutes(request("POST"), response(), `/api/agent/confirmations/${confirmation.confirmation_id}/approve`, context(), deps(writeJson, approval));
       await handleAgentRoutes(request("POST"), response(), `/api/agent/confirmations/${confirmation.confirmation_id}/approve`, context(), deps(writeJson, approval));
       expect(writeJson).toHaveBeenLastCalledWith(expect.anything(), 200, expect.objectContaining({ status: "approved" }));
@@ -337,12 +357,12 @@ describe("agent lifecycle routes", () => {
     try {
       const createWaitingRun = () => {
         const execution = coordinator.beginRun({ request_id: `confirmation-${nowMs}`, conversation_id: "", content: "删除文件", current_path: "", selection: "", project_context_hint: "", skill_id: "", attachment_ids: [] }, { stepType: "file_operation", requiresConfirmation: true });
-        coordinator.completeRun(execution, { intent: "file_operation", reply: "预览", conversation: null, results: [], skill_result: null, saved_paths: [], requires_confirmation: true });
+        coordinator.completeRun(execution, sealedFileConfirmationResponse(coordinator, execution));
         return { execution, confirmation: coordinator.store.listConfirmations(execution.run_id, "pending")[0]! };
       };
       const rejected = createWaitingRun();
-      runtime.resolveDurableConfirmation.mockImplementation((confirmationId: string, status: "approved" | "rejected", operationId: string, version: number) =>
-        coordinator.resolveConfirmation(confirmationId, status, operationId, version)
+      runtime.resolveDurableConfirmation.mockImplementation((confirmationId: string, status: "approved" | "rejected", operationId: string, version: number, fingerprint = "") =>
+        coordinator.resolveConfirmation(confirmationId, status, operationId, version, fingerprint)
       );
       const writeJson = vi.fn();
       await handleAgentRoutes(request("POST"), response(), `/api/agent/confirmations/${rejected.confirmation.confirmation_id}/reject`, context(), deps(writeJson, { operation_id: "operation-reject", expected_version: rejected.confirmation.version }));
@@ -396,6 +416,25 @@ describe("agent lifecycle routes", () => {
     expect(runtime.listDurableRunEvents).toHaveBeenNthCalledWith(3, "run-stream", 2, 200);
   });
 
+  it("requires event polling when agent_event_stream_v2 is disabled", async () => {
+    const writeJson = vi.fn();
+    runtime.isAgentEventStreamEnabled.mockReturnValue(false);
+
+    await handleAgentRoutes(
+      request("GET"),
+      response(),
+      "/api/agent/runs/run-stream/events/stream",
+      context(),
+      deps(writeJson)
+    );
+
+    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 409, {
+      detail: "Agent 事件流已关闭，请使用事件轮询接口。",
+      code: "AGENT_EVENT_STREAM_V2_DISABLED"
+    });
+    expect(runtime.getDurableRun).not.toHaveBeenCalled();
+  });
+
   it("does not bind durable execution to an HTTP response lifecycle", async () => {
     const writeJson = vi.fn();
     const responseValue = response();
@@ -440,6 +479,44 @@ function request(method: string): IncomingMessage {
   const value = new EventEmitter() as IncomingMessage;
   Object.assign(value, { method, headers: {} });
   return value;
+}
+
+function sealedFileConfirmationResponse(
+  coordinator: RunCoordinator,
+  execution: { run_id: string; step_id: string }
+) {
+  const run = coordinator.getRun(execution.run_id)!;
+  const actionPayload = { preview: "sealed-file-operation" };
+  const actionInputHash = sha256StableJson(actionPayload);
+  const targetBindings: [] = [];
+  const scopeFingerprint = sha256StableJson({
+    run_id: execution.run_id,
+    step_id: execution.step_id,
+    project_id: run.project_id,
+    plan_version: run.plan_version,
+    action_id: "execute_file_plan",
+    target_bindings: targetBindings,
+    action_input_hash: actionInputHash,
+    action_payload: actionPayload
+  });
+  return {
+    intent: "file_operation" as const,
+    reply: "待写入预览",
+    conversation: null,
+    results: [],
+    skill_result: null,
+    saved_paths: [],
+    requires_confirmation: true,
+    confirmation_scope: {
+      project_id: run.project_id,
+      plan_version: run.plan_version,
+      action_id: "execute_file_plan",
+      target_bindings: targetBindings,
+      action_input_hash: actionInputHash,
+      scope_fingerprint: scopeFingerprint,
+      action_payload: actionPayload
+    }
+  };
 }
 
 function response(): ServerResponse {

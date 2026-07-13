@@ -26,10 +26,10 @@ export const ACTION_DESCRIPTORS: Record<string, ActionDescriptor> = {
     input_schema: {},
     output_schema: {},
     required_permissions: ["project.read", "model.invoke"],
-    has_side_effects: true,
+    has_side_effects: false,
     retryable: true,
     timeout_ms: 30000,
-    confirmation_policy: "always"
+    confirmation_policy: "never"
   },
   run_workflow: {
     action: "run_workflow",

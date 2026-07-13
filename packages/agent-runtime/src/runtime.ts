@@ -2,9 +2,22 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { GoalBuilder } from "./goal-builder.js";
 import { PlanValidator } from "./plan-validator.js";
 import { ActionExecutor } from "./action-executor.js";
-import { assertBudgetResumable } from "./kernel/budget-policy.js";
 
-const runContextStorage = new AsyncLocalStorage<{ runId: string }>();
+const runContextStorage = new AsyncLocalStorage<{ runId: string; stepId: string; attemptId: string }>();
+const MAX_DURABLE_MODEL_OUTPUT_TOKENS_PER_DISPATCH = 2_048;
+const MODEL_PRICING_VERSION = "model-client-catalog-v1";
+
+type DurableModelDispatchReservation = {
+  reservationId: string;
+  version: number;
+  runId: string;
+  stepId: string;
+  attemptId: string;
+  reservedInputTokens: number;
+  reservedOutputTokens: number;
+  reservedCostMicrousd: number;
+  providerUsage?: ModelUsage;
+};
 import type {
   AgentRunRequest,
   AgentRunDeleteResponse,
@@ -45,7 +58,14 @@ import { ConversationService } from "@xiaoshuo/conversation-service";
 import { DocumentService } from "@xiaoshuo/document-service";
 import { createHash, randomUUID } from "node:crypto";
 import { loadModelConfig, loadWebSearchConfig, type ConfigServiceOptions } from "@xiaoshuo/config-service";
-import { ModelGateway, OpenAICompatibleClient, type ChatCompletionMessage } from "@xiaoshuo/model-client";
+import {
+  ModelGateway,
+  OpenAICompatibleClient,
+  estimateCost,
+  type ChatCompletionMessage,
+  type ModelDispatchInput,
+  type ModelUsage
+} from "@xiaoshuo/model-client";
 import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
 import { ProjectManifestService } from "@xiaoshuo/project-manifest";
 import { GeneratedCacheService, type PreparedGeneratedCacheCommit } from "@xiaoshuo/generated-cache";
@@ -74,6 +94,20 @@ import {
 } from "./kernel/feature-flag-registry.js";
 import { CommitJournalService } from "./kernel/commit-journal-service.js";
 import { DurableWorkflowCheckpointStore } from "./kernel/workflow-checkpoint.js";
+import {
+  GovernedMemoryStore,
+  type ConfirmGovernedMemoryClaimInput,
+  type CreateGovernedMemoryClaimInput,
+  type CreateGovernedMemoryOverrideInput,
+  type InvalidateGovernedMemorySourceInput,
+  type RegisterGovernedTimelineAnchorsInput,
+  type RebaseGovernedTimelineClaimsInput,
+  type UpsertGovernedConversationMemoryInput,
+  type ResolveGovernedMemoryConfirmationInput
+} from "./governed-memory-store.js";
+import { GovernedMemoryProjectionService } from "./governed-memory-projection-service.js";
+import { EvaluatorRegistry } from "./evaluator-registry.js";
+import { FeedbackLearner, type ArtifactFeedback } from "./feedback-learner.js";
 import {
   buildSectionedGeneratedSavePlan,
   isSectionedGeneratedSkillId,
@@ -159,6 +193,8 @@ export class AgentRuntimeService {
   private readonly commitJournal: CommitJournalService;
   private readonly projectManifest: ProjectManifestService;
   private readonly featureFlags: AgentFeatureFlagRegistry;
+  private readonly feedbackLearner: FeedbackLearner;
+  private governedMemoryStore: GovernedMemoryStore | null = null;
 
   constructor(options: AgentRuntimeOptions) {
     this.config = options.config ?? {};
@@ -167,44 +203,45 @@ export class AgentRuntimeService {
     // pre-Feature-Flag direct-construction behavior without weakening Desktop.
     this.featureFlags = options.featureFlags ?? new InMemoryAgentFeatureFlagRegistry({ agent_execution_v2_mode: "on" });
     const rawClient = options.modelClient ?? new OpenAICompatibleClient();
-    const gatewayInstance = rawClient instanceof ModelGateway ? rawClient : new ModelGateway(rawClient as any);
+    const useModelGateway = this.featureFlags.snapshot().model_gateway_v2;
+    const modelClient = useModelGateway && !(rawClient instanceof ModelGateway)
+      ? new ModelGateway(rawClient as OpenAICompatibleClient)
+      : rawClient;
     const self = this;
-    const originalRequestCompletion = gatewayInstance.requestCompletion.bind(gatewayInstance);
-    gatewayInstance.requestCompletion = async function(
+    const originalRequestCompletion = modelClient.requestCompletion.bind(modelClient);
+    modelClient.requestCompletion = async function(
       config: any,
       messages: any,
       temperature?: number,
       options: any = {}
     ) {
-      const runId = options.runId || runContextStorage.getStore()?.runId;
-      if (runId) {
-        const run = self.runCoordinator.getRun(runId);
-        if (run && !("legacy_unbudgeted" in run.budget)) {
-          assertBudgetResumable(run.budget, new Date().toISOString());
-        }
-      }
-
-      const response = await originalRequestCompletion(config, messages, temperature, options);
-
-      if (runId) {
-        const inputChars = messages.reduce((acc: number, m: any) => acc + String(m.content || "").length, 0);
-        const outputChars = String(response || "").length;
-        const inputTokens = Math.max(1, Math.ceil(inputChars * 0.7));
-        const outputTokens = Math.max(1, Math.ceil(outputChars * 0.7));
-        const usage = {
-          modelCalls: 1,
-          inputTokens,
-          outputTokens,
-          cost: (inputTokens * 0.0015 + outputTokens * 0.002) / 1000
-        };
-        self.runCoordinator.consumeBudget(runId, usage);
-      }
-
-      return response;
+      return originalRequestCompletion(
+        config,
+        messages,
+        temperature,
+        self.withDurableModelBudget(config, messages, options)
+      );
     };
-    this.modelClient = gatewayInstance;
+    if (modelClient.streamCompletion) {
+      const originalStreamCompletion = modelClient.streamCompletion.bind(modelClient);
+      modelClient.streamCompletion = async function*(
+        config: any,
+        messages: any,
+        temperature?: number,
+        options: any = {}
+      ) {
+        yield* originalStreamCompletion(
+          config,
+          messages,
+          temperature,
+          self.withDurableModelBudget(config, messages, options)
+        );
+      };
+    }
+    this.modelClient = modelClient;
 
-    gatewayInstance.registerBeforeRequestCallback((data) => {
+    if (modelClient instanceof ModelGateway) {
+      modelClient.registerBeforeRequestCallback((data) => {
       const runId = data.runId || "unknown_run";
       const stepId = data.stepId || "unknown_step";
       const attemptId = data.attemptIdFromOption || data.attemptId;
@@ -230,19 +267,49 @@ export class AgentRuntimeService {
       } catch {
         // Safe fallback if run is not created in isolated tests
       }
-    });
+      });
+    }
 
-    this.webSearchClient = options.webSearchClient ?? new DefaultWebSearchClient();
-    this.planner = new AgentPlanner(options);
-    this.skillRunner = new PromptSkillRunner(options);
-    this.skillDrafts = new SkillDraftService(options);
-    this.chatRunner = new AgentChatRunner(options);
     this.runCoordinator = new RunCoordinator({ projectRoot: options.projectRoot, featureFlags: this.featureFlags });
+    this.feedbackLearner = new FeedbackLearner(this.runCoordinator.store);
     this.commitJournal = new CommitJournalService({ store: this.runCoordinator.store, projectRoot: options.projectRoot });
+    // All production Agent components must share the governed gateway. Passing
+    // the raw constructor options here previously let planner/chat/skill paths
+    // create independent clients and bypass durable-run accounting.
+    const governedRuntimeOptions: AgentRuntimeOptions = {
+      ...options,
+      modelClient: this.modelClient
+    };
+    this.webSearchClient = options.webSearchClient ?? new DefaultWebSearchClient();
+    this.planner = new AgentPlanner(governedRuntimeOptions);
+    this.skillRunner = new PromptSkillRunner({
+      ...governedRuntimeOptions,
+      useContextBudget: () => this.featureFlags.snapshot().context_budget_v2
+    });
+    this.skillDrafts = new SkillDraftService(governedRuntimeOptions);
+    this.chatRunner = new AgentChatRunner({
+      ...governedRuntimeOptions,
+      useContextBudget: () => this.featureFlags.snapshot().context_budget_v2,
+      governedMemoryContext: {
+        enabled: () => this.featureFlags.snapshot().memory_context_selector_v2,
+        load: () => this.getConfirmedGovernedMemoryContext()
+      },
+      governedConversationMemory: {
+        enabled: () => this.featureFlags.snapshot().memory_v2,
+        load: async (conversationId) => {
+          if (!this.featureFlags.snapshot().memory_v2) {
+            return null;
+          }
+          return this.getGovernedConversationMemory(conversationId);
+        },
+        upsert: (input) => this.upsertGovernedConversationMemory(input)
+      }
+    });
     this.fileOperationRunner = new AgentFileOperationRunner({
       planner: this.planner,
       projectRoot: options.projectRoot,
-      commitJournal: this.commitJournal
+      commitJournal: this.commitJournal,
+      assertArtifactQuality: (entries) => this.assertArtifactQuality(entries)
     });
     this.skills = new SkillService({ projectRoot: options.projectRoot });
     this.conversations = new ConversationService({ projectRoot: options.projectRoot });
@@ -267,8 +334,340 @@ export class AgentRuntimeService {
   }
 
   close(): void {
+    this.governedMemoryStore?.close();
+    this.governedMemoryStore = null;
     this.runCoordinator.close();
     activeAgentRuntimeServices.delete(this);
+  }
+
+  /**
+   * The governed-memory API deliberately derives project identity from the
+   * manifest instead of accepting it from renderer/model payloads. This keeps
+   * project isolation at the same trust boundary as durable runs.
+   */
+  async listGovernedMemoryClaims() {
+    const { store, projectId } = await this.requireGovernedMemory();
+    return store.listClaims(projectId);
+  }
+
+  private async getConfirmedGovernedMemoryContext(): Promise<string> {
+    const { store, projectId } = await this.requireGovernedMemory();
+    return store
+      .listClaims(projectId)
+      .filter((claim) => claim.status === "confirmed")
+      .map((claim) => `${claim.subject} ${claim.predicate} ${claim.object}`)
+      .join("\n");
+  }
+
+  async getGovernedConversationMemory(conversationId: string) {
+    const { store, projectId } = await this.requireGovernedMemory();
+    return store.getConversationMemory(projectId, conversationId);
+  }
+
+  async upsertGovernedConversationMemory(input: UpsertGovernedConversationMemoryInput) {
+    const { store, projectId } = await this.requireGovernedMemory();
+    return store.upsertConversationMemory(projectId, input);
+  }
+
+  async createGovernedMemoryClaim(input: CreateGovernedMemoryClaimInput) {
+    const { store, projectId } = await this.requireGovernedMemory();
+    const claim = store.createClaim(projectId, input);
+    this.pauseStaleMemoryRuns(projectId, store.getMemoryRevision(projectId));
+    return claim;
+  }
+
+  async requestGovernedMemoryConfirmation(claimId: string, sourceRevision: number) {
+    const { store, projectId } = await this.requireGovernedMemory();
+    return store.requestConfirmation({ projectId, claimId, sourceRevision });
+  }
+
+  async resolveGovernedMemoryConfirmation(input: ResolveGovernedMemoryConfirmationInput) {
+    const { store } = await this.requireGovernedMemory();
+    return store.resolveConfirmation(input);
+  }
+
+  async confirmGovernedMemoryClaim(input: Omit<ConfirmGovernedMemoryClaimInput, "projectId">) {
+    const { store, projectId } = await this.requireGovernedMemory();
+    const claim = store.confirmClaim({ ...input, projectId });
+    this.pauseStaleMemoryRuns(projectId, store.getMemoryRevision(projectId));
+    return claim;
+  }
+
+  async forgetGovernedMemoryClaim(claimId: string) {
+    const { store, projectId } = await this.requireGovernedMemory();
+    const claim = store.forgetClaim(projectId, claimId);
+    this.pauseStaleMemoryRuns(projectId, store.getMemoryRevision(projectId));
+    return claim;
+  }
+
+  async invalidateGovernedMemorySource(input: Omit<InvalidateGovernedMemorySourceInput, "projectId">) {
+    const { store, projectId } = await this.requireGovernedMemory();
+    const claims = store.invalidateSource({ ...input, projectId });
+    if (claims.length) {
+      this.pauseStaleMemoryRuns(projectId, store.getMemoryRevision(projectId));
+    }
+    return claims;
+  }
+
+  async registerGovernedTimelineAnchors(input: Omit<RegisterGovernedTimelineAnchorsInput, "projectId">) {
+    const { store, projectId } = await this.requireGovernedMemory();
+    const revision = store.registerTimelineAnchors({ ...input, projectId });
+    this.pauseStaleMemoryRuns(projectId, revision);
+    return revision;
+  }
+
+  async rebaseGovernedTimelineClaims(input: Omit<RebaseGovernedTimelineClaimsInput, "projectId">) {
+    const { store, projectId } = await this.requireGovernedMemory();
+    const claims = store.rebaseTimelineClaims({ ...input, projectId });
+    if (claims.length) {
+      this.pauseStaleMemoryRuns(projectId, store.getMemoryRevision(projectId));
+    }
+    return claims;
+  }
+
+  async createGovernedMemoryOverride(input: Omit<CreateGovernedMemoryOverrideInput, "projectId">) {
+    const { store, projectId } = await this.requireGovernedMemory();
+    const override = store.createOverride({ ...input, projectId });
+    this.pauseStaleMemoryRuns(projectId, store.getMemoryRevision(projectId));
+    return override;
+  }
+
+  async listGovernedMemoryOverrides(includeRevoked = false) {
+    const { store, projectId } = await this.requireGovernedMemory();
+    return store.listOverrides(projectId, includeRevoked);
+  }
+
+  async revokeGovernedMemoryOverride(overrideId: string) {
+    const { store, projectId } = await this.requireGovernedMemory();
+    const override = store.revokeOverride(projectId, overrideId);
+    this.pauseStaleMemoryRuns(projectId, store.getMemoryRevision(projectId));
+    return override;
+  }
+
+  async exportGovernedMemory() {
+    const { store, projectId } = await this.requireGovernedMemory();
+    return store.exportProject(projectId);
+  }
+
+  async rebuildGovernedMemoryProjections() {
+    const { store, projectId } = await this.requireGovernedMemory();
+    return new GovernedMemoryProjectionService(this.projectManifestProjectRoot(), store).rebuild(projectId);
+  }
+
+  async listGovernedMemoryProjectionStatuses() {
+    const { store, projectId } = await this.requireGovernedMemory();
+    return store.listProjectionStatuses(projectId);
+  }
+
+  private async requireGovernedMemory(): Promise<{ store: GovernedMemoryStore; projectId: string }> {
+    if (!this.featureFlags.snapshot().memory_v2) {
+      throw Object.assign(new Error("Governed memory is disabled"), { code: "MEMORY_V2_DISABLED" });
+    }
+    const projectId = await this.projectManifest.getProjectId();
+    return { store: this.getGovernedMemoryStore(), projectId };
+  }
+
+  private getGovernedMemoryStore(): GovernedMemoryStore {
+    this.governedMemoryStore ??= new GovernedMemoryStore(this.projectManifestProjectRoot());
+    return this.governedMemoryStore;
+  }
+
+  private currentGovernedMemoryRevision(projectId: string): number {
+    return this.featureFlags.snapshot().memory_v2
+      ? this.getGovernedMemoryStore().getMemoryRevision(projectId)
+      : 0;
+  }
+
+  private pauseStaleMemoryRuns(projectId: string, currentRevision: number): void {
+    for (const run of this.runCoordinator.pauseRunsForMemoryRevision(currentRevision)) {
+      if (run.project_id !== projectId) {
+        continue;
+      }
+    }
+  }
+
+  private assertDurableMemoryRevisionCurrent(runId: string): void {
+    if (!this.featureFlags.snapshot().memory_v2) {
+      return;
+    }
+    const run = this.runCoordinator.getRun(runId);
+    if (!run) {
+      return;
+    }
+    const currentRevision = this.currentGovernedMemoryRevision(run.project_id);
+    if ((run.base_memory_revision ?? 0) >= currentRevision) {
+      return;
+    }
+    this.runCoordinator.store.appendEventInTransaction(runId, {
+      event_type: "memory.resume_blocked",
+      step_id: run.current_step_id,
+      payload: {
+        base_memory_revision: run.base_memory_revision ?? 0,
+        current_memory_revision: currentRevision
+      }
+    });
+    throw Object.assign(new Error("项目记忆已变更，请重新规划后再继续运行"), { code: "MEMORY_REVISION_STALE" });
+  }
+
+  private projectManifestProjectRoot(): string {
+    // ProjectManifestService keeps this private; the runtime already owns the
+    // same canonical root through the coordinator, which is the authoritative
+    // path used by all durable project-local stores.
+    return this.runCoordinator.store.projectRoot;
+  }
+
+  /**
+   * Adds the durable budget lifecycle at the physical provider-dispatch
+   * boundary. The OpenAI-compatible client invokes this lifecycle separately
+   * for streaming, non-stream fallbacks and retry attempts.
+   */
+  private withDurableModelBudget(
+    config: { model: string; base_url: string },
+    messages: ChatCompletionMessage[],
+    options: Record<string, unknown> = {}
+  ): Record<string, unknown> {
+    const executionContext = runContextStorage.getStore();
+    const runId = stringOption(options.runId) || executionContext?.runId || "";
+    if (!runId) {
+      return options;
+    }
+    const run = this.runCoordinator.getRun(runId);
+    if (!run || "legacy_unbudgeted" in run.budget) {
+      throw budgetLifecycleError("BUDGET_REQUIRED", "Durable model dispatch requires a trusted run budget");
+    }
+    assertDurableModelBudgetDeadline(run.budget.deadline_at);
+    const stepId = stringOption(options.stepId) || executionContext?.stepId || "";
+    const attemptId = stringOption(options.attemptId) || executionContext?.attemptId || "";
+    if (!stepId || !attemptId) {
+      throw budgetLifecycleError("BUDGET_EXECUTION_SCOPE_REQUIRED", "Durable model dispatch is missing its step or attempt scope");
+    }
+
+    const remainingOutput = run.budget.max_output_tokens - run.budget.used_output_tokens;
+    const inheritedCap = positiveIntegerOption(options.maxOutputTokens);
+    const outputCap = Math.min(
+      MAX_DURABLE_MODEL_OUTPUT_TOKENS_PER_DISPATCH,
+      remainingOutput,
+      inheritedCap ?? Number.MAX_SAFE_INTEGER
+    );
+    if (outputCap <= 0) {
+      const error = budgetLifecycleError("BUDGET_OUTPUT_TOKENS_EXCEEDED", "Agent run output token budget is exhausted");
+      this.runCoordinator.pauseActiveRunForBudget(runId, error);
+      throw error;
+    }
+
+    const inheritedPurpose = stringOption(options.purpose) || "chat";
+    return {
+      ...options,
+      runId,
+      stepId,
+      attemptId,
+      maxOutputTokens: outputCap,
+      captureUsage: true,
+      dispatchLifecycle: {
+        beforeDispatch: (input: ModelDispatchInput): DurableModelDispatchReservation => {
+          try {
+            const inputTokens = conservativeInputTokenReservation(input.messages);
+            const reservedOutputTokens = Math.min(input.maxOutputTokens ?? outputCap, outputCap);
+            const reservedCostMicrousd = costMicrousd(input.config.model, inputTokens, reservedOutputTokens);
+            const reservationId = `budget_model_${randomUUID()}`;
+            const reserved = this.runCoordinator.reserveModelBudget({
+              reservation_id: reservationId,
+              run_id: runId,
+              step_id: stepId,
+              attempt_id: attemptId,
+              model_call_id: `model_call_${randomUUID()}`,
+              budget_id: run.budget.budget_id,
+              provider: input.config.base_url,
+              model: input.config.model,
+              purpose: inheritedPurpose,
+              pricing_version: MODEL_PRICING_VERSION,
+              reserved_input_tokens: inputTokens,
+              reserved_output_tokens: reservedOutputTokens,
+              reserved_cost_microusd: reservedCostMicrousd,
+              metadata: {
+                source: "openai-compatible-dispatch",
+                stream: input.stream,
+                output_cap: reservedOutputTokens
+              }
+            });
+            return {
+              reservationId: reserved.reservation_id,
+              version: reserved.version,
+              runId,
+              stepId,
+              attemptId,
+              reservedInputTokens: reserved.reserved_input_tokens,
+              reservedOutputTokens: reserved.reserved_output_tokens,
+              reservedCostMicrousd: reserved.reserved_cost_microusd
+            };
+          } catch (error) {
+            this.runCoordinator.pauseActiveRunForBudget(runId, error);
+            throw error;
+          }
+        },
+        onDispatchStarted: (event: ModelDispatchInput & { context: unknown }): void => {
+          const reservation = asDurableModelDispatchReservation(event.context);
+          if (!reservation) {
+            throw budgetLifecycleError("BUDGET_RESERVATION_CONFLICT", "Model dispatch did not retain its budget reservation");
+          }
+          try {
+            const marked = this.runCoordinator.markModelBudgetDispatched({
+              reservation_id: reservation.reservationId,
+              expected_version: reservation.version,
+              run_id: reservation.runId,
+              step_id: reservation.stepId,
+              attempt_id: reservation.attemptId
+            });
+            reservation.version = marked.version;
+          } catch (error) {
+            try {
+              this.runCoordinator.releaseModelBudget({
+                reservation_id: reservation.reservationId,
+                expected_version: reservation.version,
+                run_id: reservation.runId
+              });
+            } catch {
+              // If dispatch marking raced, the store keeps the reservation for
+              // restart reconciliation instead of allowing an unsafe release.
+            }
+            this.runCoordinator.pauseActiveRunForBudget(runId, error);
+            throw error;
+          }
+        },
+        onUsage: (event: ModelDispatchInput & { context: unknown; usage: ModelUsage }): void => {
+          const reservation = asDurableModelDispatchReservation(event.context);
+          if (reservation) {
+            reservation.providerUsage = event.usage;
+          }
+        },
+        onDispatchFinished: (event: ModelDispatchInput & { context: unknown; usage?: ModelUsage; error?: unknown }): void => {
+          const reservation = asDurableModelDispatchReservation(event.context);
+          if (!reservation) {
+            return;
+          }
+          try {
+            const usage = !event.error ? (event.usage ?? reservation.providerUsage) : undefined;
+            const chargedInputTokens = usage?.promptTokens ?? reservation.reservedInputTokens;
+            const chargedOutputTokens = usage?.completionTokens ?? reservation.reservedOutputTokens;
+            const chargedCostMicrousd = usage
+              ? costMicrousd(event.config.model, chargedInputTokens, chargedOutputTokens)
+              : reservation.reservedCostMicrousd;
+            this.runCoordinator.settleModelBudget({
+              reservation_id: reservation.reservationId,
+              expected_version: reservation.version,
+              run_id: reservation.runId,
+              charged_input_tokens: chargedInputTokens,
+              charged_output_tokens: chargedOutputTokens,
+              charged_cost_microusd: chargedCostMicrousd,
+              usage_source: usage ? "provider" : "reservation"
+            });
+          } catch (error) {
+            this.runCoordinator.pauseActiveRunForBudget(runId, error);
+            throw error;
+          }
+        }
+      }
+    };
   }
 
   async plan(request: AgentPlanRequest, options: AgentRunOptions = {}): Promise<AgentPlanResponse> {
@@ -382,8 +781,10 @@ export class AgentRuntimeService {
     request: AgentRunRequest,
     options: AgentRunOptions
   ): Promise<DurableRunExecution> {
+    const projectId = await this.projectManifest.getProjectId();
     return this.runCoordinator.beginRun(request, {
-      projectId: await this.projectManifest.getProjectId(),
+      projectId,
+      baseMemoryRevision: this.currentGovernedMemoryRevision(projectId),
       stepType: "skill",
       actionId: `skill.${skillId}.run`,
       skillId,
@@ -409,8 +810,11 @@ export class AgentRuntimeService {
     });
     const startedAt = Date.now();
     this.addSkillRequestContextToTrace(trace, request);
-    this.runCoordinator.consumeBudget(execution.run_id, { steps: 1 });
-    return runContextStorage.run({ runId: execution.run_id }, async () => {
+    return runContextStorage.run({
+      runId: execution.run_id,
+      stepId: execution.step_id,
+      attemptId: execution.attempt_id
+    }, async () => {
       try {
         trace.mark("workflow_started", { selected_skill_id: skillId });
         const prepared = await this.skillRunner.runSkill(skillId, request, {
@@ -798,6 +1202,10 @@ export class AgentRuntimeService {
       const sectioned = sectionedCommitMetadata.get(commit.target_path);
       return sectioned ? { ...commit, action_key: sectioned.actionKey } : commit;
     });
+    await this.assertArtifactQuality(commits.map((commit) => ({
+      content: commit.content,
+      targetPath: commit.target_path
+    })));
     throwIfAborted(options.signal);
 
     let execution = options.execution;
@@ -821,8 +1229,10 @@ export class AgentRuntimeService {
         disable_auto_references: true
       };
       try {
+        const projectId = await this.projectManifest.getProjectId();
         execution = this.runCoordinator.beginRun(request, {
-          projectId: await this.projectManifest.getProjectId(),
+          projectId,
+          baseMemoryRevision: this.currentGovernedMemoryRevision(projectId),
           stepType: "file_operation",
           actionId: "agent.generated_cache_commit",
           skillId: "generated_cache_commit",
@@ -965,8 +1375,11 @@ export class AgentRuntimeService {
     });
     const startedAt = Date.now();
     this.addAgentRequestContextToTrace(trace, request);
-    this.runCoordinator.consumeBudget(execution.run_id, { steps: 1 });
-    return runContextStorage.run({ runId: execution.run_id }, async () => {
+    return runContextStorage.run({
+      runId: execution.run_id,
+      stepId: execution.step_id,
+      attemptId: execution.attempt_id
+    }, async () => {
       try {
         await this.addRoutingTrace(request, trace);
         let response: AgentRunResponse = {
@@ -1048,11 +1461,21 @@ export class AgentRuntimeService {
     trace?.mark("classified", { intent });
     if (intent === "file_operation") {
       const step = execution && this.runCoordinator.store.getStep(execution.run_id, execution.step_id);
+      const run = execution && this.runCoordinator.getRun(execution.run_id);
       return this.fileOperationRunner.runAgent(request, execution && {
         runId: execution.run_id,
         stepId: execution.step_id,
         attemptId: execution.attempt_id,
-        requiresConfirmation: step?.requires_confirmation === true
+        projectId: run?.project_id,
+        planVersion: run?.plan_version,
+        requiresConfirmation: step?.requires_confirmation === true,
+        confirmationReceiptId: execution.confirmation_receipt_id,
+        confirmationReceiptVersion: execution.confirmation_receipt_version,
+        confirmationScopeFingerprint: execution.confirmation_scope_fingerprint,
+        confirmationActionInputHash: execution.confirmation_action_input_hash,
+        confirmationTargetBindings: execution.confirmation_target_bindings,
+        confirmationActionPayload: execution.confirmation_action_payload,
+        consumeConfirmationReceipt: (input) => this.runCoordinator.store.consumeConfirmationReceipt(input)
       });
     }
     if (intent === "skill") {
@@ -1118,7 +1541,10 @@ export class AgentRuntimeService {
     try {
       await this.addRoutingTrace(request, trace);
       let finalPayload: AgentRunResponse | null = null;
-      for await (const sourceEvent of this.streamAgentRunInternal(request, trace, runOptions, execution)) {
+      for await (const sourceEvent of this.withDurableRunContext(
+        execution,
+        this.streamAgentRunInternal(request, trace, runOptions, execution)
+      )) {
         const inlinePlan = sourceEvent.type === "start" ? this.inlinePlanMetadata(execution.run_id) : null;
         if (sourceEvent.type === "start" && inlinePlan) {
           // Persist a pending assistant message before yielding the stream start.
@@ -1181,6 +1607,24 @@ export class AgentRuntimeService {
     }
   }
 
+  private async *withDurableRunContext<T>(
+    execution: DurableRunExecution,
+    source: AsyncIterable<T>
+  ): AsyncGenerator<T> {
+    const iterator = source[Symbol.asyncIterator]();
+    while (true) {
+      const next = await runContextStorage.run({
+        runId: execution.run_id,
+        stepId: execution.step_id,
+        attemptId: execution.attempt_id
+      }, () => iterator.next());
+      if (next.done) {
+        return;
+      }
+      yield next.value;
+    }
+  }
+
   private async *streamAgentRunInternal(
     request: AgentRunRequest,
     trace?: AgentTraceRecorder,
@@ -1214,11 +1658,21 @@ export class AgentRuntimeService {
     trace?.mark("classified", { intent });
     if (intent === "file_operation") {
       const step = execution && this.runCoordinator.store.getStep(execution.run_id, execution.step_id);
+      const run = execution && this.runCoordinator.getRun(execution.run_id);
       yield* this.fileOperationRunner.streamAgentRun(request, execution && {
         runId: execution.run_id,
         stepId: execution.step_id,
         attemptId: execution.attempt_id,
-        requiresConfirmation: step?.requires_confirmation === true
+        projectId: run?.project_id,
+        planVersion: run?.plan_version,
+        requiresConfirmation: step?.requires_confirmation === true,
+        confirmationReceiptId: execution.confirmation_receipt_id,
+        confirmationReceiptVersion: execution.confirmation_receipt_version,
+        confirmationScopeFingerprint: execution.confirmation_scope_fingerprint,
+        confirmationActionInputHash: execution.confirmation_action_input_hash,
+        confirmationTargetBindings: execution.confirmation_target_bindings,
+        confirmationActionPayload: execution.confirmation_action_payload,
+        consumeConfirmationReceipt: (input) => this.runCoordinator.store.consumeConfirmationReceipt(input)
       });
       return;
     }
@@ -1293,6 +1747,10 @@ export class AgentRuntimeService {
     return this.runCoordinator.listEvents(runId, after, limit);
   }
 
+  isAgentEventStreamEnabled(): boolean {
+    return this.featureFlags.snapshot().agent_event_stream_v2;
+  }
+
   listDurableRunConfirmations(runId: string) {
     return this.runCoordinator.store.listConfirmations(runId);
   }
@@ -1344,6 +1802,7 @@ export class AgentRuntimeService {
     const recovered: AgentRunState[] = [];
     for (const run of claimed) {
       try {
+        this.assertDurableMemoryRevisionCurrent(run.run_id);
         const request = this.runCoordinator.getRecoveryRequest(run.run_id);
         if (classifyAgentIntent(request.content || "", request.skill_id || "", []) === "file_operation") {
           this.runCoordinator.store.appendEventInTransaction(run.run_id, {
@@ -1381,13 +1840,56 @@ export class AgentRuntimeService {
     confirmationId: string,
     status: "approved" | "rejected",
     operationId: string,
-    expectedVersion: number
+    expectedVersion: number,
+    expectedScopeFingerprint = ""
   ) {
-    return this.runCoordinator.resolveConfirmation(confirmationId, status, operationId, expectedVersion);
+    return this.runCoordinator.resolveConfirmation(
+      confirmationId,
+      status,
+      operationId,
+      expectedVersion,
+      expectedScopeFingerprint
+    );
   }
 
   private assertExecutionV2Enabled(): void {
     assertAgentExecutionV2Enabled(this.featureFlags.snapshot());
+  }
+
+  async evaluateArtifactQuality(content: string, artifactType = "generated_text") {
+    if (!this.featureFlags.snapshot().quality_gate_v2) {
+      return null;
+    }
+    const registry = new EvaluatorRegistry();
+    return registry.runPipeline(content, { artifactType });
+  }
+
+  async recordArtifactFeedback(feedback: ArtifactFeedback): Promise<void> {
+    await this.feedbackLearner.addFeedback(feedback);
+  }
+
+  listPreferenceCandidates() {
+    return this.feedbackLearner.getPreferenceCandidates();
+  }
+
+  approvePreferenceCandidate(candidateId: string, confirmedBy: string, evalManifestRef: string) {
+    return this.feedbackLearner.approveCandidate(candidateId, confirmedBy, evalManifestRef);
+  }
+
+  rejectPreferenceCandidate(candidateId: string, confirmedBy: string) {
+    return this.feedbackLearner.rejectCandidate(candidateId, confirmedBy);
+  }
+
+  private async assertArtifactQuality(entries: Array<{ content: string; targetPath: string; artifactType?: string }>): Promise<void> {
+    for (const entry of entries) {
+      const report = await this.evaluateArtifactQuality(entry.content, entry.artifactType || "generated_text");
+      if (report && !report.passed) {
+        throw Object.assign(
+          new Error(`生成内容未通过质量门，拒绝写入 ${entry.targetPath || "目标文件"}`),
+          { code: "QUALITY_GATE_REJECTED", report }
+        );
+      }
+    }
   }
 
   private inlinePlanMetadata(runId: string): InlinePlanMetadata | null {
@@ -1514,6 +2016,7 @@ export class AgentRuntimeService {
     operationType: "resume" | "retry"
   ) {
     this.assertExecutionV2Enabled();
+    this.assertDurableMemoryRevisionCurrent(runId);
     let execution: DurableRunExecution;
     try {
       execution = this.runCoordinator.resumeRun(runId, operationId, expectedVersion, { stepId, operationType });
@@ -1554,8 +2057,10 @@ export class AgentRuntimeService {
     const writeRequested = initialIntent === "file_operation" || hasExplicitWriteIntent(request.content || "");
     const retryable = initialIntent !== "file_operation" || !writeRequested;
     const requiresConfirmation = options.requiresConfirmation !== false && initialIntent === "file_operation";
+    const projectId = await this.projectManifest.getProjectId();
     return this.runCoordinator.beginRun(request, {
-      projectId: await this.projectManifest.getProjectId(),
+      projectId,
+      baseMemoryRevision: this.currentGovernedMemoryRevision(projectId),
       stepType,
       actionId: `agent.${initialIntent}`,
       skillId: request.skill_id || "",
@@ -2724,7 +3229,28 @@ export class AgentRuntimeService {
     const executor = new ActionExecutor(this, {
       projectId: durableRun?.project_id || "",
       runId: execution?.run_id || "",
-      budgetId: durableRun && !("legacy_unbudgeted" in durableRun.budget) ? durableRun.budget.budget_id : ""
+      budgetId: durableRun && !("legacy_unbudgeted" in durableRun.budget) ? durableRun.budget.budget_id : "",
+      stepId: execution?.step_id,
+      attemptId: execution?.attempt_id,
+      planVersion: durableRun?.plan_version,
+      confirmationId: execution?.confirmation_receipt_id,
+      ...(execution?.confirmation_receipt_id &&
+      execution.confirmation_receipt_version &&
+      execution.confirmation_scope_fingerprint &&
+      execution.confirmation_action_input_hash &&
+      execution.confirmation_target_bindings
+        ? {
+            confirmationReceipt: {
+              confirmationId: execution.confirmation_receipt_id,
+              version: execution.confirmation_receipt_version,
+              scopeFingerprint: execution.confirmation_scope_fingerprint,
+              actionInputHash: execution.confirmation_action_input_hash,
+              targetBindings: execution.confirmation_target_bindings
+            },
+            consumeConfirmationReceipt: (input) =>
+              this.runCoordinator.store.consumeConfirmationReceipt(input)
+          }
+        : {})
     });
 
     let index = 0;
@@ -2770,7 +3296,9 @@ export class AgentRuntimeService {
         const message = error instanceof Error ? error.message : String(error);
         
         // 3. Dynamic Re-planning Loop
-        const shouldReplan = !message.includes("已取消") && index < steps.length - 1;
+        const shouldReplan = this.featureFlags.snapshot().agent_replanning_v2
+          && !message.includes("已取消")
+          && index < steps.length - 1;
         if (shouldReplan) {
           try {
             const replanned = await this.planSkillExecution(request, options);
@@ -3493,6 +4021,7 @@ export class AgentRuntimeService {
     if ((nextDetail.messages.length >= 10 && !nextDetail.summary) || nextDetail.messages.length % 6 === 0) {
       nextDetail = await this.conversations.summarizeConversation(nextDetail.id);
     }
+    await this.chatRunner.synchronizeGovernedConversationMemory(nextDetail);
     return nextDetail;
   }
 
@@ -3769,8 +4298,10 @@ export class AgentRuntimeService {
     let ownsExecution = false;
     let syntheticRunCompleted = false;
     try {
+      const projectId = await this.projectManifest.getProjectId();
       execution = this.runCoordinator.beginRun(request, {
-        projectId: await this.projectManifest.getProjectId(),
+        projectId,
+        baseMemoryRevision: this.currentGovernedMemoryRevision(projectId),
         stepType: "file_operation",
         actionId: "agent.card_draw_select",
         skillId: "card_draw_select",
@@ -4090,6 +4621,65 @@ export type AgentRuntimeOptions = AgentPlannerOptions & {
   /** Safe mode keeps stale runs untouched until an operator explicitly exits it. */
   autoRecoverStaleRuns?: boolean;
 };
+
+function asDurableModelDispatchReservation(value: unknown): DurableModelDispatchReservation | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const candidate = value as Partial<DurableModelDispatchReservation>;
+  return typeof candidate.reservationId === "string" && candidate.reservationId &&
+    typeof candidate.version === "number" && Number.isInteger(candidate.version) && candidate.version > 0 &&
+    typeof candidate.runId === "string" && candidate.runId &&
+    typeof candidate.stepId === "string" && candidate.stepId &&
+    typeof candidate.attemptId === "string" && candidate.attemptId &&
+    typeof candidate.reservedInputTokens === "number" && Number.isInteger(candidate.reservedInputTokens) && candidate.reservedInputTokens >= 0 &&
+    typeof candidate.reservedOutputTokens === "number" && Number.isInteger(candidate.reservedOutputTokens) && candidate.reservedOutputTokens >= 0 &&
+    typeof candidate.reservedCostMicrousd === "number" && Number.isInteger(candidate.reservedCostMicrousd) && candidate.reservedCostMicrousd >= 0
+    ? candidate as DurableModelDispatchReservation
+    : null;
+}
+
+function conservativeInputTokenReservation(messages: readonly ChatCompletionMessage[]): number {
+  // UTF-8 byte length is deliberately a safe pre-dispatch upper bound for
+  // byte-pair style provider tokenizers. Provider-reported usage replaces it
+  // at settlement; a provider without usage consumes the full reservation.
+  const bytes = Buffer.byteLength(messages.map((message) => `${message.role}\n${message.content}`).join("\n"), "utf8");
+  return Math.max(1, bytes);
+}
+
+function assertDurableModelBudgetDeadline(deadlineAt: string): void {
+  const deadline = Date.parse(deadlineAt);
+  if (!Number.isFinite(deadline) || deadline <= Date.now()) {
+    throw budgetLifecycleError("BUDGET_DEADLINE_EXCEEDED", "Agent run budget deadline has passed");
+  }
+}
+
+function costMicrousd(model: string, inputTokens: number, outputTokens: number): number {
+  const cost = estimateCost(model, {
+    promptTokens: inputTokens,
+    completionTokens: outputTokens,
+    totalTokens: inputTokens + outputTokens
+  });
+  const microusd = Math.ceil(cost * 1_000_000 - Number.EPSILON);
+  if (!Number.isSafeInteger(microusd) || microusd < 0) {
+    throw budgetLifecycleError("BUDGET_PRICING_INVALID", "Model pricing cannot be represented safely in micro-USD");
+  }
+  return microusd;
+}
+
+function stringOption(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function positiveIntegerOption(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value > 0
+    ? value
+    : undefined;
+}
+
+function budgetLifecycleError(code: string, message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
+}
 
 function generatedCacheCommitResponse(cacheId: string, savedPaths: string[]): AgentRunResponse {
   return {

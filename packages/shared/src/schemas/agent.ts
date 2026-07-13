@@ -506,9 +506,38 @@ export const actionDescriptorSchema = z
     has_side_effects: z.boolean().default(false),
     retryable: z.boolean().default(true),
     timeout_ms: z.number().default(30000),
-    confirmation_policy: z.string().default("always")
+    confirmation_policy: z.enum(["never", "always"]).default("always")
   })
   .passthrough();
+
+export const agentConfirmationKindSchema = z.enum([
+  "action_execution",
+  "cross_project_write",
+  "memory_confirmation",
+  "legacy_unscoped"
+]);
+
+export const agentConfirmationTargetBindingSchema = z
+  .object({
+    path: z.string().min(1),
+    canonical_path: z.string().min(1),
+    document_version: z.number().int().nonnegative(),
+    base_hash: z.string(),
+    proposed_hash: z.string()
+  })
+  .strict();
+
+export const agentActionConfirmationScopeSchema = z
+  .object({
+    project_id: z.string().min(1),
+    plan_version: z.number().int().positive(),
+    action_id: z.string().min(1),
+    target_bindings: z.array(agentConfirmationTargetBindingSchema),
+    action_input_hash: z.string().min(1),
+    scope_fingerprint: z.string().min(1),
+    action_payload: z.record(z.unknown())
+  })
+  .strict();
 
 export const agentGoalSchema = z
   .object({
@@ -524,6 +553,8 @@ export const agentGoalSchema = z
 
 export const agentConfirmationSchema = z
   .object({
+    schema_version: z.number().int().nonnegative().optional(),
+    kind: agentConfirmationKindSchema.optional(),
     confirmation_id: z.string(),
     version: z.number().int().positive().default(1),
     run_id: z.string(),
@@ -535,10 +566,20 @@ export const agentConfirmationSchema = z
     expected_versions: z.record(z.number().int().nonnegative()).default({}),
     expected_hashes: z.record(z.string()).default({}),
     proposed_artifact_refs: z.array(z.string()).default([]),
-    status: z.enum(["pending", "approved", "rejected", "expired", "superseded"]).default("pending"),
+    project_id: z.string().optional(),
+    plan_version: z.number().int().nonnegative().optional(),
+    action_input_hash: z.string().optional(),
+    scope_fingerprint: z.string().optional(),
+    target_bindings: z.array(agentConfirmationTargetBindingSchema).optional(),
+    action_payload: z.record(z.unknown()).optional(),
+    status: z.enum(["pending", "approved", "rejected", "expired", "superseded", "consumed"]).default("pending"),
     expires_at: z.string().default(""),
     resolved_at: z.string().optional(),
-    resolved_by: z.enum(["user", "policy"]).optional()
+    resolved_by: z.enum(["user", "policy"]).optional(),
+    consumed_at: z.string().optional(),
+    consumed_by_attempt_id: z.string().optional(),
+    created_at: z.string().optional(),
+    updated_at: z.string().optional()
   })
   .passthrough();
 
@@ -656,6 +697,7 @@ export const agentRunStateSchema = z
     conversation_id: z.string().default(""),
     project_id: z.string().default(""),
     project_path: z.string().default(""),
+    base_memory_revision: z.number().int().nonnegative().default(0),
     goal: agentGoalSchema,
     goal_revision: z.number().int().positive().default(1),
     plan_version: z.number().int().positive().default(1),
@@ -794,7 +836,9 @@ export const agentRunControlRequestSchema = z
 
 export const agentStepRetryRequestSchema = agentRunControlRequestSchema.extend({});
 
-export const agentConfirmationResolveRequestSchema = agentRunControlRequestSchema.extend({});
+export const agentConfirmationResolveRequestSchema = agentRunControlRequestSchema.extend({
+  expected_scope_fingerprint: z.string().default("")
+});
 
 export const agentRecoverableRequestSchema = z.object({
   request_id: z.string().default(""),
@@ -871,6 +915,7 @@ export const agentRunResponseSchema = z
     skill_steps: z.array(skillPlanStepSchema).optional(),
     skill_plan: skillPlanSchema.optional(),
     inline_plan: inlinePlanMetadataSchema.optional(),
+    confirmation_scope: agentActionConfirmationScopeSchema.optional(),
     selected_reason: z.string().optional(),
     confidence: z.number().min(0).max(1).optional()
   })
@@ -1043,6 +1088,9 @@ export type AgentFeatureFlagSnapshot = z.infer<typeof agentFeatureFlagSnapshotSc
 export type AgentGoalRequestSnapshot = z.infer<typeof agentGoalRequestSnapshotSchema>;
 export type AgentGoal = z.infer<typeof agentGoalSchema>;
 export type AgentConfirmation = z.infer<typeof agentConfirmationSchema>;
+export type AgentConfirmationKind = z.infer<typeof agentConfirmationKindSchema>;
+export type AgentConfirmationTargetBinding = z.infer<typeof agentConfirmationTargetBindingSchema>;
+export type AgentActionConfirmationScope = z.infer<typeof agentActionConfirmationScopeSchema>;
 export type AgentRunEvent = z.infer<typeof agentRunEventSchema>;
 export type AgentRunState = z.infer<typeof agentRunStateSchema>;
 export type InlinePlanMetadata = z.infer<typeof inlinePlanMetadataSchema>;

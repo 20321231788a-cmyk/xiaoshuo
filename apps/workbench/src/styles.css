@@ -6597,6 +6597,44 @@ body {
   flex: 0 0 auto;
 }
 
+.xw-memory-list {
+  display: grid;
+  gap: 10px;
+  overflow: auto;
+  padding: 4px;
+}
+
+.xw-memory-card,
+.xw-memory-confirmation {
+  border: 1px solid var(--xw-line);
+  background: #fff;
+  border-radius: 8px;
+  padding: 12px;
+}
+
+.xw-memory-card-head,
+.xw-memory-actions,
+.xw-memory-edit,
+.xw-memory-confirmation > div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.xw-memory-card-head { justify-content: space-between; }
+.xw-memory-card p { margin: 8px 0 5px; white-space: pre-wrap; }
+.xw-memory-card small { color: var(--xw-muted); }
+.xw-memory-actions { flex-wrap: wrap; margin-top: 10px; }
+.xw-memory-edit { margin-top: 10px; }
+.xw-memory-edit input { min-width: 0; flex: 1; }
+.xw-memory-confirmation { margin: 0 0 12px; display: grid; gap: 10px; }
+.xw-memory-confirmation > div { justify-content: space-between; }
+.xw-memory-message { color: var(--xw-muted); }
+.xw-memory-status { font-size: 12px; font-weight: 700; }
+.xw-memory-status.confirmed { color: #197141; }
+.xw-memory-status.superseded, .xw-memory-status.rejected { color: var(--xw-muted); }
+.xw-memory-status.draft, .xw-memory-status.proposed, .xw-memory-status.planned { color: #996600; }
+
 button:focus-visible,
 input:focus-visible,
 textarea:focus-visible,

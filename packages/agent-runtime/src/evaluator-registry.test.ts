@@ -383,4 +383,27 @@ describe("FeedbackLearner (Preference Agg Triggers & Reversion Paths)", () => {
     expect(v2?.status).toBe("rolled_back");
     expect(v1?.status).toBe("active"); // parent is restored to active
   });
+
+  it("keeps feedback as a pending candidate until an explicit user confirmation binds an eval manifest", async () => {
+    for (const feedbackId of ["fb_confirm_1", "fb_confirm_2", "fb_confirm_3"]) {
+      await learner.addFeedback({
+        feedback_id: feedbackId,
+        run_id: "run_test",
+        artifact_id: `artifact_${feedbackId}`,
+        action: "discard",
+        task_type: "chapter"
+      });
+    }
+    const candidate = (await learner.getPreferenceCandidates()).find((item) => item.target === "chapter");
+    expect(candidate?.status).toBe("pending");
+    await expect(learner.approveCandidate(candidate!.candidate_id, "", "manifest.json")).rejects.toMatchObject({
+      code: "PREFERENCE_CONFIRMATION_REQUIRED"
+    });
+
+    const version = await learner.approveCandidate(candidate!.candidate_id, "user-1", "output/evals/quality/manifest.json");
+    expect(version.status).toBe("active");
+    expect(version.eval_manifest_ref).toBe("output/evals/quality/manifest.json");
+    expect(version.applied_candidate_ids).toEqual([candidate!.candidate_id]);
+    expect((await learner.getPreferenceCandidates()).find((item) => item.candidate_id === candidate!.candidate_id)?.status).toBe("approved");
+  });
 });

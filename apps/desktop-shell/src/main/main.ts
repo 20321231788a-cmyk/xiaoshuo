@@ -1,8 +1,7 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type IpcMainEvent, type IpcMainInvokeEvent } from "electron";
 import contextMenu from "electron-context-menu";
 import { download } from "electron-dl";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
 import { resolveProjectRoot } from "./backend.js";
 import { getShellCapabilities } from "./capabilities.js";
 import {
@@ -20,6 +19,10 @@ import { defaultProjectArchiveName, ensureZipExtension, exportProjectArchive, im
 import { CloudProjectService } from "./cloud-projects.js";
 import { isSafeExternalUrl, isTrustedRendererUrl as hasTrustedRendererUrl } from "./renderer-security.js";
 import {
+  TerminalUserGestureAuthorizationStore,
+  type TerminalRendererAuthorizationIdentity
+} from "./terminal-user-gesture-authorization.js";
+import {
   cloudProjectDeleteRequestSchema,
   cloudProjectDownloadRequestSchema,
   cloudProjectUploadRequestSchema,
@@ -29,6 +32,7 @@ import {
 } from "../shared/channels.js";
 
 const runtimeState: RuntimeServerState = {};
+const terminalUserGestureAuthorizations = new TerminalUserGestureAuthorizationStore();
 const appIconPath = path.join(app.getAppPath(), "assets", "quill.ico");
 const appDisplayTitle = `ArcWriter ${app.getVersion()}`;
 const updateService = new UpdateService({
@@ -139,7 +143,11 @@ async function createWindow(): Promise<BrowserWindow> {
   });
   const windowWebContentsId = window.webContents.id;
   window.on("closed", () => {
+    terminalUserGestureAuthorizations.revoke(windowWebContentsId);
     killTerminalsForOwner(windowWebContentsId);
+  });
+  window.webContents.on("did-start-navigation", () => {
+    terminalUserGestureAuthorizations.revoke(windowWebContentsId);
   });
   window.webContents.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown" || !(input.control || input.meta)) {
@@ -289,16 +297,15 @@ function registerIpc(): void {
   ipcMain.handle(ipcChannels.localStateSyncProject, (_event, request) => syncProjectLocalState(request));
   ipcMain.handle(ipcChannels.localStatePatchSettings, (_event, request) => patchWorkbenchSettings(request));
   ipcMain.handle(ipcChannels.localStateTrackGeneratedCache, (_event, request) => trackGeneratedCacheMetadata(request));
-  ipcMain.handle(ipcChannels.terminalAcquireTicket, (event) => {
-    assertTrustedTerminalRenderer(event);
-    const origin = new URL(event.senderFrame!.url).origin;
-    return acquireTerminalTicket(event.sender.id, origin);
+  ipcMain.on(ipcChannels.terminalAuthorizeUserGesture, (event) => {
+    if (!isTrustedRuntimeRenderer(event)) {
+      return;
+    }
+    terminalUserGestureAuthorizations.authorize(terminalRendererIdentity(event));
   });
   ipcMain.handle(ipcChannels.terminalCreate, (event, request) => {
     assertTrustedTerminalRenderer(event);
-    const req = request as { ticket?: string };
-    const origin = new URL(event.senderFrame!.url).origin;
-    consumeTerminalTicket(req.ticket, event.sender.id, origin);
+    terminalUserGestureAuthorizations.consume(terminalRendererIdentity(event));
     return createTerminalSession(request, event.sender.id);
   });
   ipcMain.handle(ipcChannels.terminalWrite, (event, request) => {
@@ -360,7 +367,7 @@ async function proxyRuntimeRequest(event: IpcMainInvokeEvent, request: unknown) 
   };
 }
 
-function isTrustedRuntimeRenderer(event: IpcMainInvokeEvent): boolean {
+function isTrustedRuntimeRenderer(event: IpcMainEvent | IpcMainInvokeEvent): boolean {
   const window = BrowserWindow.fromWebContents(event.sender);
   return Boolean(
     window &&
@@ -374,6 +381,18 @@ function assertTrustedTerminalRenderer(event: IpcMainInvokeEvent): void {
   if (!isTrustedRuntimeRenderer(event)) {
     throw new Error("拒绝非受信任渲染进程访问本地终端");
   }
+}
+
+function terminalRendererIdentity(event: IpcMainEvent | IpcMainInvokeEvent): TerminalRendererAuthorizationIdentity {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  if (!window || !event.senderFrame) {
+    throw new Error("拒绝无法绑定窗口的渲染进程访问本地终端");
+  }
+  return {
+    webContentsId: event.sender.id,
+    browserWindowId: window.id,
+    rendererUrl: event.senderFrame.url
+  };
 }
 
 function isTrustedRendererUrl(value: string): boolean {
@@ -413,34 +432,3 @@ app.on("before-quit", () => {
 app.on("window-all-closed", () => {
   app.quit();
 });
-
-const activeTerminalTickets = new Map<string, {
-  token: string;
-  expiresAt: number;
-  webContentsId: number;
-  origin: string;
-}>();
-
-function acquireTerminalTicket(webContentsId: number, origin: string): string {
-  const token = `tkt-${randomUUID()}`;
-  const expiresAt = Date.now() + 1500;
-  activeTerminalTickets.set(token, { token, expiresAt, webContentsId, origin });
-  return token;
-}
-
-function consumeTerminalTicket(token: string | undefined, webContentsId: number, origin: string): void {
-  if (!token) {
-    throw new Error("TERMINAL_USER_GESTURE_REQUIRED: 拒绝创建终端，必须提供有效手势票据");
-  }
-  const record = activeTerminalTickets.get(token);
-  if (!record) {
-    throw new Error("TERMINAL_USER_GESTURE_REQUIRED: 无效的终端手势票据");
-  }
-  activeTerminalTickets.delete(token);
-  if (record.webContentsId !== webContentsId || record.origin !== origin) {
-    throw new Error("TERMINAL_USER_GESTURE_REQUIRED: 票据绑定信息不匹配");
-  }
-  if (Date.now() >= record.expiresAt) {
-    throw new Error("TERMINAL_USER_GESTURE_REQUIRED: 票据已过期");
-  }
-}

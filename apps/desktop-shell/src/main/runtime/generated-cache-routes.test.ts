@@ -142,6 +142,37 @@ describe("handleGeneratedCacheRoutes", () => {
     );
   });
 
+  it("returns a stable quality report when the runtime rejects a generated save", async () => {
+    runtimeMocks.commitGeneratedCache.mockRejectedValue(Object.assign(new Error("quality rejected"), {
+      code: "QUALITY_GATE_REJECTED",
+      report: { artifact_type: "generated_text", passed: false }
+    }));
+    const writeJson = vi.fn();
+    const deps = createDeps(writeJson);
+    vi.mocked(deps.readJsonBody).mockResolvedValue({
+      cache_id: "",
+      content: "#不合规标题",
+      skill_id: "chat_generated",
+      mode: "replace",
+      target_paths: ["02_正文/第一章.txt"],
+      target_path: "",
+      chapter: 1
+    });
+
+    const handled = await handleGeneratedCacheRoutes(
+      { method: "POST" } as IncomingMessage,
+      {} as ServerResponse,
+      "/api/agent/generated/save",
+      createContext(),
+      deps
+    );
+
+    expect(handled).toBe(true);
+    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 422, expect.objectContaining({
+      code: "QUALITY_GATE_REJECTED"
+    }));
+  });
+
   it("delegates cached sectioned saves without writing through PromptSkillRunner", async () => {
     runtimeMocks.commitGeneratedCache.mockResolvedValueOnce({
       run_id: "run_style",

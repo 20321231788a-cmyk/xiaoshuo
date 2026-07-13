@@ -121,6 +121,30 @@ export type AgentRunEventStreamHandlers = {
   onEnd?: (event: { run_id: string; after: number; status?: string; reason?: string }) => void | Promise<void>;
 };
 
+const governedMemoryClaimSchema = z.object({
+  id: z.string(),
+  subject: z.string(),
+  predicate: z.string(),
+  object: z.string(),
+  status: z.enum(["draft", "proposed", "confirmed", "planned", "rejected", "superseded"]),
+  revision: z.number().int().nonnegative(),
+  sourceRef: z.string().optional(),
+  sourceRevision: z.string().optional(),
+  perspective: z.enum(["objective", "narrator", "character", "rumor"]).optional(),
+  confidence: z.number().min(0).max(1).optional()
+}).passthrough();
+
+const governedMemoryConfirmationSchema = z.object({
+  confirmation_id: z.string(),
+  claim_id: z.string(),
+  version: z.number().int().positive(),
+  status: z.enum(["requested", "approved", "rejected", "expired", "consumed"]),
+  expires_at: z.string()
+}).passthrough();
+
+export type GovernedMemoryClaim = z.infer<typeof governedMemoryClaimSchema>;
+export type GovernedMemoryConfirmation = z.infer<typeof governedMemoryConfirmationSchema>;
+
 const agentRunEventStreamLineSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("event"), event: agentRunEventSchema }),
   z.object({ type: z.literal("heartbeat"), run_id: z.string(), after: z.number().int().nonnegative(), at: z.string() }),
@@ -580,6 +604,52 @@ export function createApiClient(options: ApiClientOptions) {
       requestWithSchema(apiContracts.agentTrace.path, agentRunTraceSchema, {
         method: apiContracts.agentTrace.method,
         pathParams: { run_id: runId }
+      }),
+    listGovernedMemoryClaims: () =>
+      requestWithSchema("/api/memory/claims", z.object({ claims: z.array(governedMemoryClaimSchema) }), { method: "GET" }),
+    exportGovernedMemory: () =>
+      requestWithSchema("/api/memory/export", z.object({
+        project_id: z.string(),
+        memory_revision: z.number().int().nonnegative(),
+        claims: z.array(governedMemoryClaimSchema)
+      }).passthrough(), { method: "GET" }),
+    rebuildGovernedMemoryProjections: () =>
+      requestWithSchema("/api/memory/projections/rebuild", z.object({
+        memory_revision: z.number().int().nonnegative(),
+        projection_path: z.string(),
+        statuses: z.array(z.object({ projection_name: z.string(), status: z.string(), memory_revision: z.number().int().nonnegative() }).passthrough())
+      }), { method: "POST" }),
+    requestGovernedMemoryConfirmation: (claimId: string, sourceRevision: number) =>
+      requestWithSchema("/api/memory/claims/{claim_id}/confirmations", z.object({ confirmation: governedMemoryConfirmationSchema }), {
+        method: "POST",
+        pathParams: { claim_id: claimId },
+        body: JSON.stringify({ source_revision: sourceRevision })
+      }),
+    resolveGovernedMemoryConfirmation: (
+      confirmationId: string,
+      expectedVersion: number,
+      decision: "approved" | "rejected"
+    ) =>
+      requestWithSchema("/api/memory/confirmations/{confirmation_id}/resolve", z.object({ confirmation: governedMemoryConfirmationSchema }), {
+        method: "POST",
+        pathParams: { confirmation_id: confirmationId },
+        body: JSON.stringify({ expected_version: expectedVersion, decision })
+      }),
+    confirmGovernedMemoryClaim: (claimId: string, confirmationId: string, expectedVersion: number) =>
+      requestWithSchema("/api/memory/claims/{claim_id}/confirm", z.object({ claim: governedMemoryClaimSchema }), {
+        method: "POST",
+        pathParams: { claim_id: claimId },
+        body: JSON.stringify({ confirmation_id: confirmationId, expected_version: expectedVersion })
+      }),
+    forgetGovernedMemoryClaim: (claimId: string) =>
+      requestWithSchema("/api/memory/claims/{claim_id}", z.object({ claim: governedMemoryClaimSchema }), {
+        method: "DELETE",
+        pathParams: { claim_id: claimId }
+      }),
+    createGovernedMemoryOverride: (claimId: string, object: string) =>
+      requestWithSchema("/api/memory/overrides", z.object({ override: z.object({ override_id: z.string(), claimId: z.string() }).passthrough() }), {
+        method: "POST",
+        body: JSON.stringify({ claim_id: claimId, override_object: object })
       }),
     resolveProjectFiles: (payload: z.input<typeof projectFileResolveRequestSchema>) =>
       requestWithSchema("/api/project/resolve-files", projectFileResolveResponseSchema, {

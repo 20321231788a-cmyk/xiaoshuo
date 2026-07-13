@@ -122,6 +122,84 @@ describe("model-client", () => {
     expect(fallbackBody.top_p).toBe(0.88);
   });
 
+  it("runs the budget lifecycle for every physical dispatch and forwards a trusted output cap", async () => {
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('{"error":{"message":"streaming unsupported"}}', { status: 400 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "fallback result" } }],
+            usage: { prompt_tokens: 5, completion_tokens: 7, total_tokens: 12 }
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+      );
+    const before = vi.fn((input) => ({ id: `${input.stream ? "stream" : "plain"}-${input.maxOutputTokens}` }));
+    const started = vi.fn();
+    const usage = vi.fn();
+    const finished = vi.fn();
+    const client = new OpenAICompatibleClient({ fetchFn: fetchFn as typeof fetch });
+
+    await expect(client.requestCompletion(configuredModel, [{ role: "user", content: "hi" }], undefined, {
+      maxOutputTokens: 23,
+      captureUsage: true,
+      dispatchLifecycle: {
+        beforeDispatch: before,
+        onDispatchStarted: started,
+        onUsage: usage,
+        onDispatchFinished: finished
+      }
+    })).resolves.toBe("fallback result");
+
+    expect(before).toHaveBeenCalledTimes(2);
+    expect(started).toHaveBeenCalledTimes(2);
+    expect(finished).toHaveBeenCalledTimes(2);
+    expect(usage).toHaveBeenCalledWith(expect.objectContaining({
+      stream: false,
+      usage: { promptTokens: 5, completionTokens: 7, totalTokens: 12 }
+    }));
+    for (const call of fetchFn.mock.calls) {
+      expect(JSON.parse(String(call[1]?.body || "{}"))).toMatchObject({ max_tokens: 23 });
+    }
+    expect(JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body || "{}"))).toMatchObject({
+      stream: true,
+      stream_options: { include_usage: true }
+    });
+  });
+
+  it("forwards terminal stream usage to the physical dispatch lifecycle", async () => {
+    const receivedUsage: unknown[] = [];
+    const client = new OpenAICompatibleClient({
+      fetchFn: vi.fn(async () =>
+        new Response(
+          [
+            'data: {"choices":[{"delta":{"content":"预算"}}]}',
+            'data: {"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}',
+            "data: [DONE]"
+          ].join("\n"),
+          { status: 200 }
+        )
+      ) as typeof fetch
+    });
+
+    const chunks: string[] = [];
+    for await (const chunk of client.streamCompletion(configuredModel, [{ role: "user", content: "hi" }], undefined, {
+      captureUsage: true,
+      dispatchLifecycle: {
+        beforeDispatch: () => "reservation-1",
+        onUsage: (event) => {
+          receivedUsage.push(event.usage);
+        }
+      }
+    })) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual(["预算"]);
+    expect(receivedUsage).toEqual([{ promptTokens: 3, completionTokens: 2, totalTokens: 5 }]);
+  });
+
   it("passes an abort signal to fetch and preserves caller cancellation", async () => {
     let requestInit: RequestInit | undefined;
     const fetchFn = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {

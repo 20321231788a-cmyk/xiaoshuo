@@ -2128,17 +2128,36 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     onError?: (error: unknown) => void
   ): () => void {
     const controller = new AbortController();
+    let refreshing = false;
     const refresh = async () => {
-      if (!controller.signal.aborted) {
+      if (controller.signal.aborted || refreshing) {
+        return;
+      }
+      refreshing = true;
+      try {
         onRun(await client.getAgentRun(runId));
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          onError?.(error);
+        }
+      } finally {
+        refreshing = false;
       }
     };
-    void client.streamAgentRunEvents(runId, { onEvent: refresh, onGap: refresh }, 0, controller.signal).catch((error) => {
+    void refresh();
+    // The journal stream remains the fast path. A bounded polling fallback
+    // covers renderer reloads and transport completion while a cooperative
+    // pause is still waiting for its durable checkpoint.
+    const refreshTimer = window.setInterval(() => void refresh(), 1_000);
+    void client.streamAgentRunEvents(runId, { onEvent: refresh, onGap: refresh, onEnd: refresh }, 0, controller.signal).catch((error) => {
       if (!controller.signal.aborted) {
         onError?.(error);
       }
     });
-    return () => controller.abort();
+    return () => {
+      window.clearInterval(refreshTimer);
+      controller.abort();
+    };
   }
 
   async function controlConversationPlanRun(

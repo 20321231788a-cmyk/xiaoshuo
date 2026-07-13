@@ -1,4 +1,5 @@
 import type { ModelConfig } from "@xiaoshuo/config-service";
+import type { ModelUsage } from "./usage.js";
 
 export type ChatCompletionMessage = {
   role: "system" | "user" | "assistant";
@@ -12,11 +13,47 @@ export type OpenAICompatibleClientOptions = {
 
 export type ModelRequestOptions = {
   signal?: AbortSignal;
+  /** Trusted hard cap applied to the provider request; never supplied by model text. */
+  maxOutputTokens?: number;
+  /** Request provider usage in stream terminal events when the provider supports it. */
+  captureUsage?: boolean;
+  /**
+   * Lifecycle callbacks for each physical HTTP dispatch. They intentionally
+   * live below requestCompletion so stream fallback and retry paths cannot
+   * hide an outbound call from a durable budget governor.
+   */
+  dispatchLifecycle?: ModelDispatchLifecycle;
+};
+
+export type ModelDispatchInput = {
+  config: Pick<ModelConfig, "base_url" | "model">;
+  messages: ChatCompletionMessage[];
+  stream: boolean;
+  maxOutputTokens?: number;
+};
+
+export type ModelDispatchLifecycle = {
+  beforeDispatch?: (input: ModelDispatchInput) => unknown | Promise<unknown>;
+  onDispatchStarted?: (input: ModelDispatchInput & { context: unknown }) => void | Promise<void>;
+  onUsage?: (input: ModelDispatchInput & { context: unknown; usage: ModelUsage }) => void | Promise<void>;
+  onDispatchFinished?: (input: ModelDispatchInput & {
+    context: unknown;
+    usage?: ModelUsage;
+    error?: unknown;
+  }) => void | Promise<void>;
+};
+
+type DispatchRecord = {
+  input: ModelDispatchInput;
+  context: unknown;
+  lifecycle: ModelDispatchLifecycle;
+  usage?: ModelUsage;
 };
 
 export class OpenAICompatibleClient {
   private readonly fetchFn: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly dispatchRecords = new WeakMap<Response, DispatchRecord>();
 
   constructor(options: OpenAICompatibleClientOptions = {}) {
     this.fetchFn = options.fetchFn ?? fetch;
@@ -55,17 +92,28 @@ export class OpenAICompatibleClient {
       options
     );
 
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(formatApiError(response.status, text));
-    }
+    try {
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        throw new Error(formatApiError(response.status, text));
+      }
 
-    const payload = await response.json();
-    const result = extractMessageText(payload).trim();
-    if (result) {
-      return result;
+      const payload = await response.json();
+      const usage = extractProviderUsage(payload);
+      if (usage) {
+        await this.recordDispatchUsage(response, usage);
+      }
+      const result = extractMessageText(payload).trim();
+      if (result) {
+        return result;
+      }
+      throw new Error(streamError ? `模型返回空内容（流式错误：${streamError}）` : "模型返回空内容");
+    } catch (error) {
+      await this.finishDispatch(response, error);
+      throw error;
+    } finally {
+      await this.finishDispatch(response);
     }
-    throw new Error(streamError ? `模型返回空内容（流式错误：${streamError}）` : "模型返回空内容");
   }
 
   async *streamCompletion(config: ModelConfig, messages: ChatCompletionMessage[], temperature?: number, options: ModelRequestOptions = {}): AsyncGenerator<string> {
@@ -76,27 +124,30 @@ export class OpenAICompatibleClient {
         messages,
         temperature: temperature ?? config.temperature,
         top_p: config.top_p,
-        stream: true
+        stream: true,
+        ...(options.captureUsage ? { stream_options: { include_usage: true } } : {})
       },
       options
     );
 
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(formatApiError(response.status, text));
-    }
-    if (!response.body) {
-      throw new Error("模型流式响应不可用");
-    }
-
-    const reader = response.body.getReader();
-    const cancelReader = () => {
-      void reader.cancel().catch(() => {});
-    };
-    options.signal?.addEventListener("abort", cancelReader, { once: true });
-    const decoder = new TextDecoder();
-    let buffer = "";
+    let cancelReader: (() => void) | undefined;
+    let dispatchError: unknown;
     try {
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        throw new Error(formatApiError(response.status, text));
+      }
+      if (!response.body) {
+        throw new Error("模型流式响应不可用");
+      }
+
+      const reader = response.body.getReader();
+      cancelReader = () => {
+        void reader.cancel().catch(() => {});
+      };
+      options.signal?.addEventListener("abort", cancelReader, { once: true });
+      const decoder = new TextDecoder();
+      let buffer = "";
       while (true) {
         throwIfSignalAborted(options.signal);
         const { done, value } = await reader.read();
@@ -105,7 +156,11 @@ export class OpenAICompatibleClient {
         const lines = buffer.split(/\r?\n/);
         buffer = lines.pop() || "";
         for (const line of lines) {
-          for (const chunk of extractStreamLineChunks(line)) {
+          const parsed = parseStreamLinePayload(line);
+          if (parsed?.usage) {
+            await this.recordDispatchUsage(response, parsed.usage);
+          }
+          for (const chunk of parsed?.chunks || []) {
             yield chunk;
           }
         }
@@ -113,17 +168,25 @@ export class OpenAICompatibleClient {
           break;
         }
       }
-      for (const chunk of extractStreamLineChunks(buffer)) {
+      const finalPayload = parseStreamLinePayload(buffer);
+      if (finalPayload?.usage) {
+        await this.recordDispatchUsage(response, finalPayload.usage);
+      }
+      for (const chunk of finalPayload?.chunks || []) {
         throwIfSignalAborted(options.signal);
         yield chunk;
       }
     } catch (error) {
+      dispatchError = error;
       if (isAbortLike(error, options.signal)) {
         throw createAbortError();
       }
       throw error;
     } finally {
-      options.signal?.removeEventListener("abort", cancelReader);
+      if (cancelReader) {
+        options.signal?.removeEventListener("abort", cancelReader);
+      }
+      await this.finishDispatch(response, dispatchError);
     }
   }
 
@@ -135,6 +198,7 @@ export class OpenAICompatibleClient {
       temperature: number;
       top_p: number;
       stream?: boolean;
+      stream_options?: { include_usage: boolean };
     },
     options: ModelRequestOptions = {}
   ): Promise<Response> {
@@ -142,6 +206,15 @@ export class OpenAICompatibleClient {
       throw new Error("未配置可用的大模型 API");
     }
     throwIfSignalAborted(options.signal);
+    const maxOutputTokens = normalizeMaxOutputTokens(options.maxOutputTokens);
+    const dispatchInput: ModelDispatchInput = {
+      config: { base_url: config.base_url, model: config.model },
+      messages: body.messages,
+      stream: body.stream === true,
+      ...(maxOutputTokens ? { maxOutputTokens } : {})
+    };
+    const lifecycle = options.dispatchLifecycle;
+    const dispatchContext = lifecycle?.beforeDispatch ? await lifecycle.beforeDispatch(dispatchInput) : undefined;
     const baseUrl = normalizeBaseUrl(config.base_url);
     const controller = new AbortController();
     let timedOut = false;
@@ -152,18 +225,29 @@ export class OpenAICompatibleClient {
     const abortFromCaller = () => controller.abort();
     options.signal?.addEventListener("abort", abortFromCaller, { once: true });
     try {
-      return await this.fetchFn(new URL("chat/completions", baseUrl), {
+      if (lifecycle?.onDispatchStarted) {
+        await lifecycle.onDispatchStarted({ ...dispatchInput, context: dispatchContext });
+      }
+      const response = await this.fetchFn(new URL("chat/completions", baseUrl), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${config.api_key}`
         },
         body: JSON.stringify({
-          ...body
+          ...body,
+          ...(maxOutputTokens ? { max_tokens: maxOutputTokens } : {})
         }),
         signal: controller.signal
       });
+      if (lifecycle) {
+        this.dispatchRecords.set(response, { input: dispatchInput, context: dispatchContext, lifecycle });
+      }
+      return response;
     } catch (error) {
+      if (lifecycle?.onDispatchFinished) {
+        await lifecycle.onDispatchFinished({ ...dispatchInput, context: dispatchContext, error });
+      }
       if (timedOut) {
         throw new Error("接口请求超时，请检查网络或降低单次生成长度。");
       }
@@ -174,6 +258,33 @@ export class OpenAICompatibleClient {
     } finally {
       clearTimeout(timer);
       options.signal?.removeEventListener("abort", abortFromCaller);
+    }
+  }
+
+  private async recordDispatchUsage(response: Response, usage: ModelUsage): Promise<void> {
+    const record = this.dispatchRecords.get(response);
+    if (!record) {
+      return;
+    }
+    record.usage = usage;
+    if (record.lifecycle.onUsage) {
+      await record.lifecycle.onUsage({ ...record.input, context: record.context, usage });
+    }
+  }
+
+  private async finishDispatch(response: Response, error?: unknown): Promise<void> {
+    const record = this.dispatchRecords.get(response);
+    if (!record) {
+      return;
+    }
+    this.dispatchRecords.delete(response);
+    if (record.lifecycle.onDispatchFinished) {
+      await record.lifecycle.onDispatchFinished({
+        ...record.input,
+        context: record.context,
+        ...(record.usage ? { usage: record.usage } : {}),
+        ...(error === undefined ? {} : { error })
+      });
     }
   }
 }
@@ -235,18 +346,49 @@ function extractDeltaText(payload: unknown): string {
   return content || extractTopLevelText(payload);
 }
 
-function extractStreamLineChunks(line: string): string[] {
+function parseStreamLinePayload(line: string): { chunks: string[]; usage?: ModelUsage } | null {
   const payloadText = normalizeStreamPayloadLine(line);
   if (!payloadText) {
-    return [];
+    return null;
   }
   try {
     const parsed = JSON.parse(payloadText);
     const chunk = extractDeltaText(parsed);
-    return chunk ? [chunk] : [];
+    const usage = extractProviderUsage(parsed);
+    return {
+      chunks: chunk ? [chunk] : [],
+      ...(usage ? { usage } : {})
+    };
   } catch {
-    return [];
+    return null;
   }
+}
+
+function extractProviderUsage(payload: unknown): ModelUsage | null {
+  const usage = asRecord(asRecord(payload)?.usage);
+  if (!usage) {
+    return null;
+  }
+  const promptTokens = integerUsageValue(usage.prompt_tokens ?? usage.input_tokens);
+  const completionTokens = integerUsageValue(usage.completion_tokens ?? usage.output_tokens);
+  const totalTokens = integerUsageValue(usage.total_tokens)
+    ?? (promptTokens !== null && completionTokens !== null ? promptTokens + completionTokens : null);
+  if (promptTokens === null || completionTokens === null || totalTokens === null) {
+    return null;
+  }
+  return { promptTokens, completionTokens, totalTokens };
+}
+
+function integerUsageValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+function normalizeMaxOutputTokens(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  const parsed = Math.floor(value);
+  return parsed > 0 ? parsed : undefined;
 }
 
 function normalizeStreamPayloadLine(line: string): string {

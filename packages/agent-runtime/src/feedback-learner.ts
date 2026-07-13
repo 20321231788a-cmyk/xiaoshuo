@@ -1,4 +1,4 @@
-import { ExecutionStore } from "./kernel/execution-store.js";
+import type { ExecutionStorePort } from "./kernel/execution-store-port.js";
 
 export interface ArtifactFeedback {
   feedback_id: string;
@@ -41,7 +41,7 @@ export interface PreferenceVersion {
 }
 
 export class FeedbackLearner {
-  constructor(private readonly store: ExecutionStore) {}
+  constructor(private readonly store: ExecutionStorePort) {}
 
   /**
    * 将用户接受/放弃的反馈存储到 agent_artifact_feedback 数据库中
@@ -235,5 +235,64 @@ export class FeedbackLearner {
       resolved_at: row.resolved_at,
       created_at: row.created_at
     }));
+  }
+
+  /**
+   * Feedback only produces a pending candidate. This is the sole path that
+   * promotes it to a preference version, and it requires a user identity plus
+   * the eval manifest that justified the change.
+   */
+  async approveCandidate(candidateId: string, confirmedBy: string, evalManifestRef: string): Promise<PreferenceVersion> {
+    if (!String(confirmedBy || "").trim() || !String(evalManifestRef || "").trim()) {
+      throw Object.assign(new Error("应用偏好候选需要用户确认和 eval manifest"), { code: "PREFERENCE_CONFIRMATION_REQUIRED" });
+    }
+    const db = (this.store as any).getDatabase ? (this.store as any).getDatabase() : (this.store as any).database;
+    const candidate = db.prepare("SELECT * FROM preference_candidates WHERE candidate_id = ?").get(candidateId) as any;
+    if (!candidate) {
+      throw Object.assign(new Error(`找不到偏好候选: ${candidateId}`), { code: "PREFERENCE_CANDIDATE_NOT_FOUND" });
+    }
+    if (candidate.status !== "pending") {
+      throw Object.assign(new Error(`偏好候选不是待确认状态: ${candidateId}`), { code: "PREFERENCE_CANDIDATE_NOT_PENDING" });
+    }
+
+    const now = new Date().toISOString();
+    const preferenceVersion = `pref_${Date.now().toString(36)}_${candidateId.slice(-8)}`;
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.prepare("UPDATE preference_candidates SET status = 'approved', resolved_by = ?, resolved_at = ? WHERE candidate_id = ? AND status = 'pending'")
+        .run(confirmedBy, now, candidateId);
+      db.prepare(`
+        INSERT INTO preference_versions (
+          preference_version, parent_version, scope, applied_candidate_ids, rubric_versions, router_version, eval_manifest_ref, status, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        preferenceVersion,
+        null,
+        candidate.scope,
+        JSON.stringify([candidateId]),
+        "{}",
+        "feedback-candidate-v1",
+        evalManifestRef,
+        "active",
+        now
+      );
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+    return (await this.getPreferenceVersion(preferenceVersion))!;
+  }
+
+  async rejectCandidate(candidateId: string, confirmedBy: string): Promise<void> {
+    if (!String(confirmedBy || "").trim()) {
+      throw Object.assign(new Error("拒绝偏好候选需要用户确认"), { code: "PREFERENCE_CONFIRMATION_REQUIRED" });
+    }
+    const db = (this.store as any).getDatabase ? (this.store as any).getDatabase() : (this.store as any).database;
+    const result = db.prepare("UPDATE preference_candidates SET status = 'rejected', resolved_by = ?, resolved_at = ? WHERE candidate_id = ? AND status = 'pending'")
+      .run(confirmedBy, new Date().toISOString(), candidateId);
+    if (!result.changes) {
+      throw Object.assign(new Error(`偏好候选不可拒绝: ${candidateId}`), { code: "PREFERENCE_CANDIDATE_NOT_PENDING" });
+    }
   }
 }

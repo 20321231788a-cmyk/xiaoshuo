@@ -1,4 +1,5 @@
 import type {
+  AgentConfirmationTargetBinding,
   AgentArtifactRef,
   AgentConfirmation,
   AgentExecutionStep,
@@ -118,6 +119,22 @@ export type ReplaceRunStepsInput = {
   event?: ExecutionRunEventInput;
 };
 
+export type BudgetBlockedRunResult = {
+  started: false;
+  run: AgentRunState;
+  error_code: "BUDGET_REQUIRED" | "BUDGET_INVALID" | "BUDGET_DEADLINE_EXCEEDED" | "BUDGET_STEPS_EXCEEDED" | "BUDGET_REPLANS_EXCEEDED";
+  error: string;
+};
+
+export type StartAttemptWithBudgetResult =
+  | { started: true; attempt: ExecutionStepAttempt; run: AgentRunState }
+  | BudgetBlockedRunResult;
+
+export type ReplaceStepsWithBudgetResult =
+  | { applied: true; value: AgentRunState; replanned: boolean }
+  | { applied: false; current: AgentRunState | null; replanned: boolean }
+  | (BudgetBlockedRunResult & { replanned: true });
+
 export type StoredAgentExecutionStep = AgentExecutionStep & {
   version: number;
   plan_version?: number;
@@ -166,9 +183,25 @@ export type StoredAgentConfirmation = AgentConfirmation & {
 export type ResolveConfirmationInput = {
   confirmation_id: string;
   expected_version: number;
+  expected_scope_fingerprint?: string;
   status: "approved" | "rejected" | "expired" | "superseded";
   resolved_at?: string;
   resolved_by?: "user" | "policy";
+};
+
+export type ConsumeConfirmationReceiptInput = {
+  confirmation_id: string;
+  expected_version: number;
+  run_id: string;
+  step_id: string;
+  attempt_id: string;
+  action: string;
+  project_id: string;
+  plan_version: number;
+  action_input_hash: string;
+  scope_fingerprint: string;
+  target_bindings: AgentConfirmationTargetBinding[];
+  consumed_at?: string;
 };
 
 export type ExecutionEventListOptions = {
@@ -350,6 +383,95 @@ export type AgentOutboundDisclosure = {
   created_at: string;
 };
 
+/**
+ * A durable accounting record for one physical model request. A reservation
+ * becomes chargeable as soon as dispatch begins; recovery then settles that
+ * reservation conservatively if the process dies before provider usage is
+ * available.
+ */
+export type ExecutionBudgetReservationStatus = "reserved" | "settled" | "released";
+
+export type ExecutionBudgetUsageSource = "provider" | "reservation";
+
+export type ExecutionModelBudgetReservation = {
+  reservation_id: string;
+  run_id: string;
+  step_id: string;
+  attempt_id: string;
+  model_call_id: string;
+  budget_id: string;
+  version: number;
+  status: ExecutionBudgetReservationStatus;
+  provider: string;
+  model: string;
+  purpose: string;
+  pricing_version: string;
+  reserved_model_calls: number;
+  reserved_input_tokens: number;
+  reserved_output_tokens: number;
+  reserved_cost_microusd: number;
+  charged_model_calls: number;
+  charged_input_tokens: number;
+  charged_output_tokens: number;
+  charged_cost_microusd: number;
+  usage_source: ExecutionBudgetUsageSource | "";
+  dispatch_started_at: string;
+  reserved_at: string;
+  settled_at: string;
+  released_at: string;
+  metadata: Record<string, unknown>;
+};
+
+export type ReserveModelBudgetInput = {
+  reservation_id: string;
+  run_id: string;
+  step_id: string;
+  attempt_id: string;
+  model_call_id: string;
+  budget_id: string;
+  provider: string;
+  model: string;
+  purpose: string;
+  pricing_version: string;
+  reserved_input_tokens: number;
+  reserved_output_tokens: number;
+  reserved_cost_microusd: number;
+  metadata?: Record<string, unknown>;
+  reserved_at?: string;
+};
+
+export type MarkModelBudgetDispatchedInput = {
+  reservation_id: string;
+  expected_version: number;
+  run_id: string;
+  step_id: string;
+  attempt_id: string;
+  dispatched_at?: string;
+};
+
+export type SettleModelBudgetInput = {
+  reservation_id: string;
+  expected_version: number;
+  run_id: string;
+  charged_input_tokens: number;
+  charged_output_tokens: number;
+  charged_cost_microusd: number;
+  usage_source: ExecutionBudgetUsageSource;
+  settled_at?: string;
+};
+
+export type ReleaseModelBudgetInput = {
+  reservation_id: string;
+  expected_version: number;
+  run_id: string;
+  released_at?: string;
+};
+
+export type ReconcileModelBudgetReservationsResult = {
+  settled: number;
+  released: number;
+};
+
 export interface ExecutionStorePort {
   readonly projectRoot: string;
   readonly databasePath: string;
@@ -370,11 +492,13 @@ export interface ExecutionStorePort {
   updateRunStatus(input: UpdateRunStatusInput): ExecutionCasResult<AgentRunState>;
   heartbeatRunLease(input: HeartbeatRunLeaseInput): boolean;
   replaceSteps(input: ReplaceRunStepsInput): ExecutionCasResult<AgentRunState>;
+  replaceStepsWithBudget(input: ReplaceRunStepsInput): ReplaceStepsWithBudgetResult;
   upsertStep(runId: string, step: AgentExecutionStep, expectedVersion?: number): ExecutionCasResult<StoredAgentExecutionStep>;
   getStep(runId: string, stepId: string): StoredAgentExecutionStep | null;
   listSteps(runId: string, planVersion?: number): StoredAgentExecutionStep[];
   listAllSteps(runId: string): StoredAgentExecutionStep[];
   startAttempt(input: StartAttemptInput): ExecutionStepAttempt;
+  startAttemptWithBudget(input: StartAttemptInput): StartAttemptWithBudgetResult;
   finishAttempt(input: FinishAttemptInput): ExecutionCasResult<ExecutionStepAttempt>;
   getAttempt(attemptId: string): ExecutionStepAttempt | null;
   listAttempts(runId: string, stepId?: string): ExecutionStepAttempt[];
@@ -391,6 +515,9 @@ export interface ExecutionStorePort {
   getConfirmation(confirmationId: string): StoredAgentConfirmation | null;
   listConfirmations(runId: string, status?: string): StoredAgentConfirmation[];
   resolveConfirmation(input: ResolveConfirmationInput): ExecutionCasResult<StoredAgentConfirmation>;
+  consumeConfirmationReceipt(
+    input: ConsumeConfirmationReceiptInput
+  ): ExecutionCasResult<StoredAgentConfirmation>;
   appendEventInTransaction(runId: string, event: ExecutionRunEventInput): StoredAgentRunEvent;
   listEvents(runId: string, options?: ExecutionEventListOptions): StoredAgentRunEvent[];
   markEventsPublished(eventIds: readonly string[], publishedAt?: string): number;
@@ -414,4 +541,11 @@ export interface ExecutionStorePort {
   updateCommitJournal(input: UpdateCommitJournalInput): ExecutionCasResult<ExecutionCommitJournalEntry>;
   createOutboundDisclosure(disclosure: AgentOutboundDisclosure): AgentOutboundDisclosure;
   listOutboundDisclosures(runId?: string): AgentOutboundDisclosure[];
+  reserveModelBudget(input: ReserveModelBudgetInput): ExecutionModelBudgetReservation;
+  getModelBudgetReservation(reservationId: string): ExecutionModelBudgetReservation | null;
+  listModelBudgetReservations(runId?: string): ExecutionModelBudgetReservation[];
+  markModelBudgetDispatched(input: MarkModelBudgetDispatchedInput): ExecutionModelBudgetReservation;
+  settleModelBudget(input: SettleModelBudgetInput): ExecutionModelBudgetReservation;
+  releaseModelBudget(input: ReleaseModelBudgetInput): ExecutionModelBudgetReservation;
+  reconcileModelBudgetReservations(runId?: string): ReconcileModelBudgetReservationsResult;
 }

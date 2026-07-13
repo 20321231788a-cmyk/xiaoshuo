@@ -57,6 +57,16 @@ describe("getProjectAgentRuntime", () => {
     });
     expect(assertWritable).not.toHaveBeenCalled();
   });
+
+  it("fails closed when the runtime context has no identity registry", async () => {
+    const projectRoot = await temporaryRoot("runtime-project-");
+    await writeManifest(projectRoot, projectId);
+    const context = { agentRuntimes: new Map() } as unknown as RuntimeContext;
+
+    await expect(getProjectAgentRuntime(context, projectRoot)).rejects.toMatchObject({
+      code: "PROJECT_IDENTITY_UNCONFIRMED"
+    });
+  });
 });
 
 async function temporaryRoot(prefix: string): Promise<string> {

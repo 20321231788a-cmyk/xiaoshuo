@@ -1,8 +1,24 @@
-export interface NarrativeCoordinate {
+export interface LegacyNarrativeCoordinate {
   chapter: number;
   section?: number;
   scene?: number;
 }
+
+/**
+ * Stable narrative coordinate for governed memory. `ordinal` is comparable
+ * only within the same timeline revision; callers must rebase through the
+ * anchor registry before comparing different revisions.
+ */
+export interface TimelineNarrativeCoordinate {
+  schemaVersion: 1;
+  timelineId: string;
+  anchorId: string;
+  ordinal: number;
+  timelineRevision: number;
+  phase: "before" | "at" | "after";
+}
+
+export type NarrativeCoordinate = LegacyNarrativeCoordinate | TimelineNarrativeCoordinate;
 
 export interface CoordinateInterval {
   from?: NarrativeCoordinate;
@@ -18,6 +34,14 @@ export interface CanonClaim {
   interval: CoordinateInterval;
   status: "draft" | "proposed" | "confirmed" | "planned" | "rejected" | "superseded";
   revision: number;
+  /** Stable source identity and version used to invalidate derived memory. */
+  sourceRef?: string;
+  sourceRevision?: string;
+  evidenceRefs?: string[];
+  perspective?: "objective" | "narrator" | "character" | "rumor";
+  perspectiveEntityId?: string;
+  confidence?: number;
+  storyTime?: NarrativeCoordinate;
 }
 
 export interface UserOverride {
@@ -45,7 +69,27 @@ export class ConfirmedMemoryError extends Error {
   }
 }
 
+export class NarrativeCoordinateError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "NarrativeCoordinateError";
+    Object.assign(this, { code: "MEMORY_NARRATIVE_COORDINATE_INVALID" });
+  }
+}
+
 export function compareCoordinates(a: NarrativeCoordinate, b: NarrativeCoordinate): number {
+  if (isTimelineNarrativeCoordinate(a) || isTimelineNarrativeCoordinate(b)) {
+    if (!isTimelineNarrativeCoordinate(a) || !isTimelineNarrativeCoordinate(b)) {
+      throw new NarrativeCoordinateError("不能比较 legacy chapter coordinate 与 timeline coordinate");
+    }
+    if (a.timelineId !== b.timelineId || a.timelineRevision !== b.timelineRevision) {
+      throw new NarrativeCoordinateError("不同 timeline 或 timeline revision 必须先通过 anchor registry 重基准");
+    }
+    if (a.ordinal !== b.ordinal) {
+      return a.ordinal - b.ordinal;
+    }
+    return phaseOrder(a.phase) - phaseOrder(b.phase);
+  }
   if (a.chapter !== b.chapter) {
     return a.chapter - b.chapter;
   }
@@ -57,6 +101,62 @@ export function compareCoordinates(a: NarrativeCoordinate, b: NarrativeCoordinat
   const aScene = a.scene ?? 0;
   const bScene = b.scene ?? 0;
   return aScene - bScene;
+}
+
+export function validateNarrativeCoordinate(value: unknown): NarrativeCoordinate {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new NarrativeCoordinateError("narrative coordinate 必须是对象");
+  }
+  const raw = value as Record<string, unknown>;
+  if (raw.schemaVersion === 1 || raw.timelineId !== undefined || raw.timelineRevision !== undefined) {
+    const phase = raw.phase;
+    if (
+      raw.schemaVersion !== 1 ||
+      !nonEmptyText(raw.timelineId) ||
+      !nonEmptyText(raw.anchorId) ||
+      !Number.isInteger(raw.ordinal) ||
+      !Number.isInteger(raw.timelineRevision) ||
+      (phase !== "before" && phase !== "at" && phase !== "after")
+    ) {
+      throw new NarrativeCoordinateError("timeline coordinate 缺少稳定 anchor、ordinal、revision 或 phase");
+    }
+    return {
+      schemaVersion: 1,
+      timelineId: String(raw.timelineId),
+      anchorId: String(raw.anchorId),
+      ordinal: Number(raw.ordinal),
+      timelineRevision: Number(raw.timelineRevision),
+      phase
+    };
+  }
+  if (!Number.isInteger(raw.chapter) || Number(raw.chapter) < 0 ||
+    (raw.section !== undefined && (!Number.isInteger(raw.section) || Number(raw.section) < 0)) ||
+    (raw.scene !== undefined && (!Number.isInteger(raw.scene) || Number(raw.scene) < 0))) {
+    throw new NarrativeCoordinateError("legacy chapter coordinate 无效");
+  }
+  return {
+    chapter: Number(raw.chapter),
+    section: raw.section === undefined ? undefined : Number(raw.section),
+    scene: raw.scene === undefined ? undefined : Number(raw.scene)
+  };
+}
+
+export function validateCoordinateInterval(value: unknown): CoordinateInterval {
+  if (value === undefined || value === null) {
+    return {};
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new NarrativeCoordinateError("coordinate interval 必须是对象");
+  }
+  const raw = value as Record<string, unknown>;
+  const interval = {
+    from: raw.from === undefined ? undefined : validateNarrativeCoordinate(raw.from),
+    to: raw.to === undefined ? undefined : validateNarrativeCoordinate(raw.to)
+  };
+  if (interval.from && interval.to && compareCoordinates(interval.from, interval.to) >= 0) {
+    throw new NarrativeCoordinateError("coordinate interval 必须是半开区间 [from, to) 且 from < to");
+  }
+  return interval;
 }
 
 export function isCoordinateWithin(
@@ -90,10 +190,9 @@ export class MemoryGovernor {
     }
     this.claims.set(claim.id, {
       ...claim,
-      interval: {
-        from: claim.interval.from ? { ...claim.interval.from } : undefined,
-        to: claim.interval.to ? { ...claim.interval.to } : undefined
-      }
+      evidenceRefs: claim.evidenceRefs ? [...claim.evidenceRefs] : undefined,
+      storyTime: claim.storyTime ? cloneCoordinate(claim.storyTime) : undefined,
+      interval: cloneInterval(claim.interval)
     });
   }
 
@@ -193,10 +292,10 @@ export class MemoryGovernor {
       if (claim.projectUuid !== projectUuid) {
         continue;
       }
-      if (claim.interval.from && claim.interval.from.chapter >= fromChapter) {
+      if (isLegacyNarrativeCoordinate(claim.interval.from) && claim.interval.from.chapter >= fromChapter) {
         claim.interval.from.chapter += shiftAmount;
       }
-      if (claim.interval.to && claim.interval.to.chapter >= fromChapter) {
+      if (isLegacyNarrativeCoordinate(claim.interval.to) && claim.interval.to.chapter >= fromChapter) {
         claim.interval.to.chapter += shiftAmount;
       }
     }
@@ -205,10 +304,9 @@ export class MemoryGovernor {
   private cloneClaim(c: CanonClaim): CanonClaim {
     return {
       ...c,
-      interval: {
-        from: c.interval.from ? { ...c.interval.from } : undefined,
-        to: c.interval.to ? { ...c.interval.to } : undefined
-      }
+      evidenceRefs: c.evidenceRefs ? [...c.evidenceRefs] : undefined,
+      storyTime: c.storyTime ? cloneCoordinate(c.storyTime) : undefined,
+      interval: cloneInterval(c.interval)
     };
   }
 
@@ -225,4 +323,31 @@ export class MemoryGovernor {
       throw new ConfirmedMemoryError("confirmed memory 需要有效的用户二次确认事件");
     }
   }
+}
+
+export function isTimelineNarrativeCoordinate(value: NarrativeCoordinate | undefined): value is TimelineNarrativeCoordinate {
+  return Boolean(value && "timelineId" in value);
+}
+
+export function isLegacyNarrativeCoordinate(value: NarrativeCoordinate | undefined): value is LegacyNarrativeCoordinate {
+  return Boolean(value && "chapter" in value);
+}
+
+function cloneCoordinate(value: NarrativeCoordinate): NarrativeCoordinate {
+  return isTimelineNarrativeCoordinate(value) ? { ...value } : { ...value };
+}
+
+function cloneInterval(interval: CoordinateInterval): CoordinateInterval {
+  return {
+    from: interval.from ? cloneCoordinate(interval.from) : undefined,
+    to: interval.to ? cloneCoordinate(interval.to) : undefined
+  };
+}
+
+function phaseOrder(phase: TimelineNarrativeCoordinate["phase"]): number {
+  return phase === "before" ? 0 : phase === "at" ? 1 : 2;
+}
+
+function nonEmptyText(value: unknown): boolean {
+  return typeof value === "string" && Boolean(value.trim());
 }

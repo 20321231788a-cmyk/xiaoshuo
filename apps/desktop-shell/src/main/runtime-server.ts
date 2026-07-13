@@ -1,6 +1,6 @@
 import { encodeNdjsonEvent } from "@xiaoshuo/agent-runtime";
 import { loadPublicConfig, savePublicConfig } from "@xiaoshuo/config-service";
-import { DocumentService, type DocumentTimelineSession } from "@xiaoshuo/document-service";
+import { CanonicalProjectPathGuardError, DocumentService, type DocumentTimelineSession } from "@xiaoshuo/document-service";
 import { JobManager } from "@xiaoshuo/job-service";
 import { ProjectManifestService } from "@xiaoshuo/project-manifest";
 import { ProjectSessionService } from "@xiaoshuo/project-session";
@@ -29,6 +29,7 @@ import {
   handleAgentTraceRoutes,
   handleBaseRuntimeRoutes,
   handleConversationRoutes,
+  handleFeedbackRoutes,
   handleGeneratedCacheRoutes,
   handleJobRoutes,
   handleProjectDocumentRoutes,
@@ -36,6 +37,7 @@ import {
   handleSkillRoutes,
   handleVectorRoutes,
   handleGraphRoutes,
+  handleMemoryRoutes,
   handleWebsiteAiRoutes,
   runtimeRequestAccessStatus,
   listRuntimeJobs,
@@ -128,8 +130,9 @@ export async function startRuntimeServer(options: RuntimeServerOptions): Promise
       allowedOrigins
     }).catch((error) => {
       options.state.lastError = error instanceof Error ? error.message : String(error);
-      if (error instanceof ProjectIdentityRegistryError) {
-        writeJson(response, 409, { detail: options.state.lastError, code: error.code });
+      const code = runtimeScopeErrorCode(error);
+      if (error instanceof ProjectIdentityRegistryError || error instanceof CanonicalProjectPathGuardError || code) {
+        writeJson(response, 409, { detail: options.state.lastError, code: code || "PROJECT_SCOPE_REJECTED" });
         return;
       }
       writeJson(response, 500, { detail: options.state.lastError });
@@ -145,6 +148,13 @@ export async function startRuntimeServer(options: RuntimeServerOptions): Promise
       resolve();
     });
   });
+}
+
+function runtimeScopeErrorCode(error: unknown): string {
+  const code = error && typeof error === "object" && "code" in error
+    ? String((error as { code?: unknown }).code || "")
+    : "";
+  return code.startsWith("PROJECT_SCOPE_") || code.startsWith("PROJECT_IDENTITY_") ? code : "";
 }
 
 export async function stopRuntimeServer(state: RuntimeServerState): Promise<void> {
@@ -236,6 +246,14 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
 
   if (await handleAgentTraceRoutes(request, response, pathname, url.searchParams, context, {
     ensureProjectSessionCurrent,
+    writeJson
+  })) {
+    return;
+  }
+
+  if (await handleFeedbackRoutes(request, response, pathname, context, {
+    ensureProjectSessionCurrent,
+    readJsonBody,
     writeJson
   })) {
     return;
@@ -346,6 +364,14 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
     ensureProjectSessionCurrent,
     readJsonBody,
     stringValue,
+    writeJson
+  })) {
+    return;
+  }
+
+  if (await handleMemoryRoutes(request, response, pathname, context, {
+    ensureProjectSessionCurrent,
+    readJsonBody,
     writeJson
   })) {
     return;

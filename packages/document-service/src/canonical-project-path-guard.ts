@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import type { BigIntStats } from "node:fs";
 import path from "node:path";
 
 export const canonicalProjectPathGuardCodes = {
@@ -28,22 +29,26 @@ export class CanonicalProjectPathGuardError extends Error {
  */
 export class CanonicalProjectPathGuard {
   readonly projectRoot: string;
-  private initialCanonicalRoot: Promise<string> | null = null;
+  private initialRootIdentity: Promise<PhysicalDirectoryIdentity> | null = null;
 
   constructor(projectRoot: string) {
     this.projectRoot = path.resolve(projectRoot);
   }
 
   async canonicalRoot(): Promise<string> {
-    const initial = await this.getInitialCanonicalRoot();
-    const current = await realpathRequired(this.projectRoot, canonicalProjectPathGuardCodes.rootUnavailable);
-    if (!samePath(initial, current)) {
+    const initial = await this.getInitialRootIdentity();
+    const current = await physicalDirectoryIdentity(this.projectRoot);
+    if (
+      !samePath(initial.canonicalPath, current.canonicalPath)
+      || initial.device !== current.device
+      || initial.inode !== current.inode
+    ) {
       throw new CanonicalProjectPathGuardError(
         canonicalProjectPathGuardCodes.rootChanged,
         "项目物理目录在授权后发生变化，已拒绝文件访问"
       );
     }
-    return initial;
+    return initial.canonicalPath;
   }
 
   async assertPath(targetPath: string, options: { allowMissing?: boolean } = {}): Promise<string> {
@@ -66,13 +71,36 @@ export class CanonicalProjectPathGuard {
     return absoluteTarget;
   }
 
-  private getInitialCanonicalRoot(): Promise<string> {
-    this.initialCanonicalRoot ??= realpathRequired(
-      this.projectRoot,
-      canonicalProjectPathGuardCodes.rootUnavailable
-    );
-    return this.initialCanonicalRoot;
+  private getInitialRootIdentity(): Promise<PhysicalDirectoryIdentity> {
+    this.initialRootIdentity ??= physicalDirectoryIdentity(this.projectRoot);
+    return this.initialRootIdentity;
   }
+}
+
+type PhysicalDirectoryIdentity = {
+  canonicalPath: string;
+  device: bigint;
+  inode: bigint;
+};
+
+async function physicalDirectoryIdentity(projectRoot: string): Promise<PhysicalDirectoryIdentity> {
+  const canonicalPath = await realpathRequired(projectRoot, canonicalProjectPathGuardCodes.rootUnavailable);
+  let stats: BigIntStats;
+  try {
+    stats = await fs.stat(canonicalPath, { bigint: true });
+  } catch {
+    throw new CanonicalProjectPathGuardError(
+      canonicalProjectPathGuardCodes.rootUnavailable,
+      "无法读取项目物理目录身份，已拒绝文件访问"
+    );
+  }
+  if (!stats.isDirectory() || stats.ino <= 0n) {
+    throw new CanonicalProjectPathGuardError(
+      canonicalProjectPathGuardCodes.rootUnavailable,
+      "当前文件系统无法提供稳定项目目录身份，已拒绝文件访问"
+    );
+  }
+  return { canonicalPath, device: stats.dev, inode: stats.ino };
 }
 
 async function physicalPathThroughNearestAncestor(targetPath: string, allowMissing: boolean): Promise<string> {

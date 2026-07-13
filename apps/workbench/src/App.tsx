@@ -41,6 +41,7 @@ import {
   Link,
   MessageSquarePlus,
   MessageSquareText,
+  Brain,
   Pin,
   RefreshCw,
   Save,
@@ -76,6 +77,7 @@ import { LegacyWorkbenchView, type LegacyWorkbenchTab } from "./features/legacy/
 import { LogsFeaturePage } from "./features/revision/LogsFeaturePage.js";
 import { AutoReviewGeneratedToggle, ProjectFileSelect } from "./features/workflow/WorkflowControls.js";
 import { AgentTraceView } from "./views/AgentTraceView.js";
+import { MemoryGovernanceView } from "./views/MemoryGovernanceView.js";
 import { readWorkbenchRuntime } from "./lib/runtime.js";
 import { describeGeneratedSaveAction } from "./lib/workflow.js";
 import { buildRailStatusSummary } from "./lib/railStatus.js";
@@ -114,6 +116,7 @@ type CenterFeature =
   | "revision"
   | "skills"
   | "traces"
+  | "memory"
   | "vector_test"
   | "consistency"
   | "settings"
@@ -303,7 +306,7 @@ export function App() {
       controller.setActiveTab("config");
       return;
     }
-    if (feature === "timeline" || feature === "ledger" || feature === "revision" || feature === "traces" || feature === "vector_test") {
+    if (feature === "timeline" || feature === "ledger" || feature === "revision" || feature === "traces" || feature === "memory" || feature === "vector_test") {
       controller.setActiveTab("overview");
       return;
     }
@@ -839,6 +842,10 @@ function FeatureWorkbenchPanel({
                 <Activity size={15} />
                 <span>运行</span>
               </button>
+              <button type="button" role="menuitem" onClick={(event) => openStatusFeature(event, "memory")}>
+                <Brain size={15} />
+                <span>项目记忆</span>
+              </button>
               <button type="button" role="menuitem" onClick={(event) => openStatusFeature(event, "vector_test")}>
                 <Database size={15} />
                 <span>向量测试</span>
@@ -1127,6 +1134,7 @@ function featureTitle(feature: CenterFeature, activeDocument: OpenDocumentTab | 
     revision: "日志",
     skills: "技能",
     traces: "Agent 运行",
+    memory: "项目记忆",
     vector_test: "向量测试",
     consistency: "一致性检查",
     settings: "设置",
@@ -1226,6 +1234,9 @@ function FeatureContentSurface({
   }
   if (feature === "traces") {
     return <AgentTraceView runtime={controller.runtime} />;
+  }
+  if (feature === "memory") {
+    return <MemoryGovernanceView runtime={controller.runtime} />;
   }
   if (feature === "vector_test") {
     return <VectorTestFeaturePage controller={controller} />;

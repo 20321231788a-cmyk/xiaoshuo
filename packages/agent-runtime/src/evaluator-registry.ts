@@ -1,29 +1,28 @@
 import type { ModelGateway } from "@xiaoshuo/model-client";
 import type { ModelConfig } from "@xiaoshuo/config-service";
+import { qualityReportSchema, type QualityIssue as SharedQualityIssue, type QualityReport as SharedQualityReport } from "@xiaoshuo/shared";
 
-export interface QualityIssue {
+export interface LegacyQualityIssue {
   type: "formatting" | "length" | "graph" | "outline" | "style" | string;
   severity: "blocking" | "major" | "minor";
   message: string;
 }
 
-export interface QualityReport {
-  score: number;
-  passed: boolean;
-  issues: QualityIssue[];
-}
+export type QualityIssue = SharedQualityIssue & { type: LegacyQualityIssue["type"] };
+export type QualityReport = SharedQualityReport & { issues: QualityIssue[] };
 
 export interface EvaluatorContext {
   expectedLength?: { min?: number; max?: number };
   outline?: string;
   graphEntities?: string[];
   styleRules?: string[];
+  artifactType?: string;
   [key: string]: any;
 }
 
 export interface Validator {
   name: string;
-  validate(content: string, context: EvaluatorContext): Promise<QualityIssue[]>;
+  validate(content: string, context: EvaluatorContext): Promise<LegacyQualityIssue[]>;
 }
 
 /**
@@ -34,8 +33,8 @@ export interface Validator {
 export class FormattingValidator implements Validator {
   name = "formatting";
 
-  async validate(content: string, context: EvaluatorContext): Promise<QualityIssue[]> {
-    const issues: QualityIssue[] = [];
+  async validate(content: string, context: EvaluatorContext): Promise<LegacyQualityIssue[]> {
+    const issues: LegacyQualityIssue[] = [];
 
     // 1. Markdown 标题检查
     const lines = content.split("\n");
@@ -92,8 +91,8 @@ export class FormattingValidator implements Validator {
 export class LengthValidator implements Validator {
   name = "length";
 
-  async validate(content: string, context: EvaluatorContext): Promise<QualityIssue[]> {
-    const issues: QualityIssue[] = [];
+  async validate(content: string, context: EvaluatorContext): Promise<LegacyQualityIssue[]> {
+    const issues: LegacyQualityIssue[] = [];
     const limits = context.expectedLength;
     if (!limits) return issues;
 
@@ -125,8 +124,8 @@ export class LengthValidator implements Validator {
 export class GraphConsistencyValidator implements Validator {
   name = "graph";
 
-  async validate(content: string, context: EvaluatorContext): Promise<QualityIssue[]> {
-    const issues: QualityIssue[] = [];
+  async validate(content: string, context: EvaluatorContext): Promise<LegacyQualityIssue[]> {
+    const issues: LegacyQualityIssue[] = [];
     const entities = context.graphEntities;
     if (!entities || entities.length === 0) return issues;
 
@@ -166,8 +165,8 @@ export class GraphConsistencyValidator implements Validator {
 export class OutlineAlignmentValidator implements Validator {
   name = "outline";
 
-  async validate(content: string, context: EvaluatorContext): Promise<QualityIssue[]> {
-    const issues: QualityIssue[] = [];
+  async validate(content: string, context: EvaluatorContext): Promise<LegacyQualityIssue[]> {
+    const issues: LegacyQualityIssue[] = [];
     const outline = context.outline;
     if (!outline) return issues;
 
@@ -199,8 +198,8 @@ export class OutlineAlignmentValidator implements Validator {
 export class StyleValidator implements Validator {
   name = "style";
 
-  async validate(content: string, context: EvaluatorContext): Promise<QualityIssue[]> {
-    const issues: QualityIssue[] = [];
+  async validate(content: string, context: EvaluatorContext): Promise<LegacyQualityIssue[]> {
+    const issues: LegacyQualityIssue[] = [];
     const rules = context.styleRules;
     if (!rules || rules.length === 0) return issues;
 
@@ -257,14 +256,15 @@ export class EvaluatorRegistry {
   }
 
   async runPipeline(content: string, context: EvaluatorContext): Promise<QualityReport> {
-    const allIssues: QualityIssue[] = [];
+    const allIssues: LegacyQualityIssue[] = [];
     for (const v of this.validators) {
       const issues = await v.validate(content, context);
       allIssues.push(...issues);
     }
 
+    const issues = allIssues.map((issue) => normalizeQualityIssue(issue, content));
     let score = 100;
-    for (const issue of allIssues) {
+    for (const issue of issues) {
       if (issue.severity === "blocking") {
         score -= 40;
       } else if (issue.severity === "major") {
@@ -275,18 +275,52 @@ export class EvaluatorRegistry {
     }
     if (score < 0) score = 0;
 
-    const hasBlockingOrMajor = allIssues.some(
-      issue => issue.severity === "blocking" || issue.severity === "major"
+    // Only evidence-backed hard-gate findings can stop persistence. Subjective
+    // feedback remains in the report for the user and never edits text itself.
+    const hasBlockingOrMajor = issues.some(
+      (issue) => issue.category === "hard_gate" && Boolean(issue.evidence.trim()) && (issue.severity === "blocking" || issue.severity === "major")
     );
 
-    const passed = !hasBlockingOrMajor && score >= 60;
+    const passed = !hasBlockingOrMajor;
 
-    return {
+    return qualityReportSchema.parse({
+      artifact_type: String(context.artifactType || "generated_text"),
       score,
       passed,
-      issues: allIssues
-    };
+      issues,
+      evaluator_versions: {
+        formatting: "1",
+        length: "1",
+        graph: "1",
+        outline: "1",
+        style: "1"
+      }
+    }) as QualityReport;
   }
+}
+
+function normalizeQualityIssue(issue: LegacyQualityIssue, content: string): QualityIssue {
+  const category = issue.type === "style" ? "subjective" : "hard_gate";
+  return {
+    type: issue.type,
+    code: `QUALITY_${String(issue.type || "unknown").toUpperCase()}`,
+    category,
+    severity: issue.severity,
+    message: issue.message,
+    evidence: deterministicEvidence(issue, content),
+    source_ref: "local_evaluator",
+    suggested_fix: category === "subjective" ? "请用户确认后再应用文风建议。" : "修复报告中列出的可验证问题后重新保存。"
+  };
+}
+
+function deterministicEvidence(issue: LegacyQualityIssue, content: string): string {
+  if (issue.type === "length") {
+    return `content_length=${content.length}`;
+  }
+  if (issue.type === "style") {
+    return issue.message;
+  }
+  return issue.message || "local evaluator finding";
 }
 
 /**

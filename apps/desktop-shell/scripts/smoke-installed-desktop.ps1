@@ -6,7 +6,9 @@ param(
   [Parameter(Mandatory = $true)]
   [string]$OutputPath,
 
-  [string]$SourceCommit = $env:GITHUB_SHA
+  [string]$SourceCommit = $env:GITHUB_SHA,
+
+  [switch]$AllowDirtyWorkspace
 )
 
 $ErrorActionPreference = "Stop"
@@ -70,6 +72,7 @@ try {
 $evidence = [ordered]@{
   schema_version = 1
   source_commit = $SourceCommit
+  workspace_dirty = [bool]$AllowDirtyWorkspace
   generated_at = [DateTime]::UtcNow.ToString("o")
   installer_path = (Resolve-Path -LiteralPath $InstallerPath).Path
   installer_sha256 = Get-Sha256 $InstallerPath
