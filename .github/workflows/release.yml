@@ -4,9 +4,9 @@ on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
 
 permissions:
+  actions: read
   contents: write
 
 concurrency:
@@ -15,136 +15,185 @@ concurrency:
 
 jobs:
   windows:
-    name: Windows release gate
+    name: Publish the verified RC artifact
     runs-on: windows-latest
     environment: production
     timeout-minutes: 60
-    env:
-      CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-      CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
     steps:
-      - name: Checkout
+      - name: Checkout tagged source
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Unit tests
-        run: npm test
-
-      - name: Eval routing
-        id: eval-routing
-        continue-on-error: true
-        run: npm run eval:routing
-
-      - name: Eval planning
-        id: eval-planning
-        continue-on-error: true
-        run: npm run eval:planning
-
-      - name: Eval memory
-        id: eval-memory
-        continue-on-error: true
-        run: npm run eval:memory
-
-      - name: Eval quality
-        id: eval-quality
-        continue-on-error: true
-        run: npm run eval:quality
-
-      - name: Eval recovery
-        id: eval-recovery
-        continue-on-error: true
-        run: npm run eval:recovery
-
-      - name: Eval security
-        id: eval-security
-        continue-on-error: true
-        run: npm run eval:security
-
-      - name: Eval excluded capabilities
-        id: eval-excluded-capabilities
-        continue-on-error: true
-        run: npm run eval:excluded-capabilities
-
-      - name: Enforce eval results
-        if: ${{ steps.eval-routing.outcome == 'failure' || steps.eval-planning.outcome == 'failure' || steps.eval-memory.outcome == 'failure' || steps.eval-quality.outcome == 'failure' || steps.eval-recovery.outcome == 'failure' || steps.eval-security.outcome == 'failure' || steps.eval-excluded-capabilities.outcome == 'failure' }}
-        run: exit 1
-
-      - name: Verify RC eval dataset and sealed holdout evidence
-        run: node scripts/verify-rc-eval-evidence.mjs --dataset-manifest evals/rc-dataset-manifest.json --eval-root output/evals
-
-      - name: Build workbench
-        run: npm run build:workbench
-
-      - name: Build desktop
-        run: npm run build:desktop
-
-      - name: Browser E2E
-        run: npm run test:e2e
-
-      - name: Desktop source smoke
-        run: npm run smoke:desktop
-
-      - name: Verify tag matches desktop version
+      - name: Resolve and validate tagged candidate
+        id: candidate
         shell: pwsh
         run: |
+          $tagType = (git cat-file -t "refs/tags/$env:GITHUB_REF_NAME").Trim()
+          if ($tagType -ne 'tag') { throw 'Release tags must be annotated tags' }
+          $sourceCommit = (git rev-list -n 1 $env:GITHUB_REF).Trim()
+          if ($sourceCommit -notmatch '^[0-9a-f]{40}$') { throw "Unable to resolve the tagged source commit" }
+          $checkoutCommit = (git rev-parse HEAD).Trim()
+          if ($checkoutCommit -ne $sourceCommit) { throw "Checkout $checkoutCommit does not match tag target $sourceCommit" }
           $version = (Get-Content apps/desktop-shell/package.json -Raw | ConvertFrom-Json).version
           if ($env:GITHUB_REF_NAME -ne "v$version") { throw "Tag $env:GITHUB_REF_NAME does not match desktop version v$version" }
+          "source_commit=$sourceCommit" >> $env:GITHUB_OUTPUT
+          "desktop_version=$version" >> $env:GITHUB_OUTPUT
 
-      - name: Package installer
-        run: npm run dist -w @xiaoshuo/desktop-shell
-
-      - name: Verify signing and timestamp
-        shell: pwsh
-        run: ./apps/desktop-shell/scripts/verify-authenticode.ps1 -InstallerPath (Get-ChildItem apps/desktop-shell/release/ArcWriter-Setup-*.exe | Select-Object -First 1).FullName
-
-      - name: Run installed-build smoke
-        shell: pwsh
-        run: ./apps/desktop-shell/scripts/smoke-installed-desktop.ps1 -InstallerPath (Get-ChildItem apps/desktop-shell/release/ArcWriter-Setup-*.exe | Select-Object -First 1).FullName -OutputPath artifacts/installed-smoke.json
-
-      - name: Download previous installer for upgrade smoke
+      - name: Find successful same-commit RC artifacts
+        id: rc
         shell: pwsh
         env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: ./apps/desktop-shell/scripts/download-previous-release-installer.ps1 -Repository $env:GITHUB_REPOSITORY -ExcludeTag $env:GITHUB_REF_NAME -OutputPath artifacts/baseline/ArcWriter-Setup-baseline.exe
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ steps.candidate.outputs.source_commit }}
+        run: |
+          $runResponse = gh api "/repos/$env:GITHUB_REPOSITORY/actions/workflows/desktop-rc.yml/runs?head_sha=$env:SOURCE_COMMIT&event=workflow_dispatch&status=completed&per_page=100" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to query RC workflow runs' }
+          if ($runResponse.total_count -gt $runResponse.workflow_runs.Count) { throw 'More than 100 same-commit workflow runs exist; refusing an ambiguous promotion' }
+          $runs = @($runResponse.workflow_runs | Where-Object {
+            $_.head_sha -eq $env:SOURCE_COMMIT -and
+            $_.event -eq 'workflow_dispatch' -and
+            $_.status -eq 'completed' -and
+            $_.conclusion -eq 'success' -and
+            $_.head_repository.full_name -eq $env:GITHUB_REPOSITORY
+          })
+          if (-not $runs.Count) { throw "No successful manually-dispatched RC run exists for $env:SOURCE_COMMIT" }
+          $installerArtifactName = "arcwriter-rc-$env:SOURCE_COMMIT"
+          $evalArtifactName = "eval-evidence-rc-$env:SOURCE_COMMIT"
+          $selected = $null
+          foreach ($run in $runs) {
+            $artifactResponse = gh api "/repos/$env:GITHUB_REPOSITORY/actions/runs/$($run.id)/artifacts?per_page=100" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0) { throw "Unable to query artifacts for RC run $($run.id)" }
+            if ($artifactResponse.total_count -gt $artifactResponse.artifacts.Count) { throw "RC run $($run.id) has more than 100 artifacts" }
+            $installerArtifacts = @($artifactResponse.artifacts | Where-Object { $_.name -eq $installerArtifactName -and -not $_.expired })
+            $evalArtifacts = @($artifactResponse.artifacts | Where-Object { $_.name -eq $evalArtifactName -and -not $_.expired })
+            if ($installerArtifacts.Count -gt 1 -or $evalArtifacts.Count -gt 1) { throw "RC run $($run.id) has duplicate required artifacts" }
+            if ($installerArtifacts.Count -eq 1 -and $evalArtifacts.Count -eq 1) {
+              $selected = @{
+                run_id = $run.id
+                run_attempt = $run.run_attempt
+                installer_id = $installerArtifacts[0].id
+                eval_id = $evalArtifacts[0].id
+              }
+              break
+            }
+          }
+          if (-not $selected) { throw "No successful RC run has both required, unexpired same-commit artifacts" }
+          "run_id=$($selected.run_id)" >> $env:GITHUB_OUTPUT
+          "run_attempt=$($selected.run_attempt)" >> $env:GITHUB_OUTPUT
+          "installer_artifact_id=$($selected.installer_id)" >> $env:GITHUB_OUTPUT
+          "eval_artifact_id=$($selected.eval_id)" >> $env:GITHUB_OUTPUT
 
-      - name: Run upgrade and rollback smoke
+      - name: Download immutable RC artifacts
         shell: pwsh
-        run: ./apps/desktop-shell/scripts/smoke-upgrade-rollback-desktop.ps1 -BaselineInstallerPath artifacts/baseline/ArcWriter-Setup-baseline.exe -CandidateInstallerPath (Get-ChildItem apps/desktop-shell/release/ArcWriter-Setup-*.exe | Select-Object -First 1).FullName -OutputPath artifacts/upgrade-rollback-smoke.json
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC_RUN_ID: ${{ steps.rc.outputs.run_id }}
+          SOURCE_COMMIT: ${{ steps.candidate.outputs.source_commit }}
+          INSTALLER_ARTIFACT_ID: ${{ steps.rc.outputs.installer_artifact_id }}
+          EVAL_ARTIFACT_ID: ${{ steps.rc.outputs.eval_artifact_id }}
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts/rc-installer, artifacts/rc-evals | Out-Null
+          gh run download $env:RC_RUN_ID --repo $env:GITHUB_REPOSITORY --name "arcwriter-rc-$env:SOURCE_COMMIT" --dir artifacts/rc-installer
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to download the selected installer artifact' }
+          gh run download $env:RC_RUN_ID --repo $env:GITHUB_REPOSITORY --name "eval-evidence-rc-$env:SOURCE_COMMIT" --dir artifacts/rc-evals
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to download the selected evaluation artifact' }
 
-      - name: Create same-commit release evidence
-        run: node apps/desktop-shell/scripts/verify-release-evidence.mjs --artifact-dir apps/desktop-shell/release --installed-evidence artifacts/installed-smoke.json --upgrade-rollback-evidence artifacts/upgrade-rollback-smoke.json --channel release --out artifacts/release-evidence.json
+      - name: Reverify downloaded RC evidence
+        shell: pwsh
+        env:
+          XIAOSHUO_SOURCE_COMMIT: ${{ steps.candidate.outputs.source_commit }}
+          RC_RUN_ID: ${{ steps.rc.outputs.run_id }}
+          RC_RUN_ATTEMPT: ${{ steps.rc.outputs.run_attempt }}
+          RC_INSTALLER_ARTIFACT_ID: ${{ steps.rc.outputs.installer_artifact_id }}
+          RC_EVAL_ARTIFACT_ID: ${{ steps.rc.outputs.eval_artifact_id }}
+          DESKTOP_VERSION: ${{ steps.candidate.outputs.desktop_version }}
+        run: |
+          $releaseDirectory = Join-Path $env:GITHUB_WORKSPACE 'artifacts/rc-installer/release'
+          $evidenceDirectory = Join-Path $env:GITHUB_WORKSPACE 'artifacts/rc-installer/evidence'
+          $datasetDirectory = Join-Path $env:GITHUB_WORKSPACE 'artifacts/rc-installer/dataset'
+          $installer = Join-Path $releaseDirectory "ArcWriter-Setup-$env:DESKTOP_VERSION.exe"
+          $blockmap = "$installer.blockmap"
+          $latestYml = Join-Path $releaseDirectory 'latest.yml'
+          $installedEvidence = Join-Path $evidenceDirectory 'installed-smoke.json'
+          $upgradeEvidence = Join-Path $evidenceDirectory 'upgrade-rollback-smoke.json'
+          $stateContract = Join-Path $evidenceDirectory 'upgrade-state-contract.json'
+          $baselineMetadata = Join-Path $evidenceDirectory 'baseline-release.json'
+          $releaseEvidence = Join-Path $evidenceDirectory 'release-evidence.json'
+          $datasetManifest = Join-Path $datasetDirectory 'rc-dataset-manifest.json'
+          foreach ($required in @($installer, $blockmap, $latestYml, $installedEvidence, $upgradeEvidence, $stateContract, $baselineMetadata, $releaseEvidence, $datasetManifest)) {
+            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) { throw "Downloaded RC artifact is missing $required" }
+          }
+          $releaseFiles = @(Get-ChildItem -LiteralPath $releaseDirectory -File)
+          if ($releaseFiles.Count -ne 3) { throw 'Downloaded RC artifact has unexpected release files' }
+          ./apps/desktop-shell/scripts/verify-authenticode.ps1 -InstallerPath $installer
+          $promotedReleaseEvidence = Join-Path $env:GITHUB_WORKSPACE 'artifacts/release-evidence.json'
+          node apps/desktop-shell/scripts/verify-release-evidence.mjs --artifact-dir $releaseDirectory --installed-evidence $installedEvidence --upgrade-rollback-evidence $upgradeEvidence --state-contract $stateContract --baseline-metadata $baselineMetadata --repository $env:GITHUB_REPOSITORY --existing-evidence $releaseEvidence --channel release --rc-run-id $env:RC_RUN_ID --rc-run-attempt $env:RC_RUN_ATTEMPT --installer-artifact-id $env:RC_INSTALLER_ARTIFACT_ID --eval-artifact-id $env:RC_EVAL_ARTIFACT_ID --out $promotedReleaseEvidence
+          if ($LASTEXITCODE -ne 0) { throw 'Downloaded RC release evidence failed verification' }
+          node scripts/verify-rc-eval-evidence.mjs --dataset-manifest $datasetManifest --eval-root artifacts/rc-evals --out artifacts/release-eval-verification.json
+          if ($LASTEXITCODE -ne 0) { throw 'Downloaded RC evaluation evidence failed verification' }
+          "PUBLISH_INSTALLER=$installer" >> $env:GITHUB_ENV
+          "PUBLISH_BLOCKMAP=$blockmap" >> $env:GITHUB_ENV
+          "PUBLISH_LATEST_YML=$latestYml" >> $env:GITHUB_ENV
+          "PUBLISH_RELEASE_EVIDENCE=$promotedReleaseEvidence" >> $env:GITHUB_ENV
 
-      - name: Publish release assets
-        if: success()
-        uses: softprops/action-gh-release@v2
-        with:
-          name: ${{ github.ref_name }}
-          make_latest: true
-          files: |
-            apps/desktop-shell/release/ArcWriter-Setup-*.exe
-            apps/desktop-shell/release/ArcWriter-Setup-*.exe.blockmap
-            apps/desktop-shell/release/latest.yml
-            artifacts/installed-smoke.json
-            artifacts/upgrade-rollback-smoke.json
-            artifacts/release-evidence.json
-            evals/rc-dataset-manifest.json
+      - name: Assemble release assets from RC artifact
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts/publish | Out-Null
+          Copy-Item -LiteralPath $env:PUBLISH_INSTALLER, $env:PUBLISH_BLOCKMAP, $env:PUBLISH_LATEST_YML, $env:PUBLISH_RELEASE_EVIDENCE -Destination artifacts/publish
 
-      - name: Upload eval manifests and redacted failure evidence
+      - name: Preserve release verification evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: eval-evidence-release-${{ github.sha }}
-          path: output/evals
+          name: release-verification-${{ steps.candidate.outputs.source_commit }}
+          path: |
+            artifacts/release-evidence.json
+            artifacts/release-eval-verification.json
           if-no-files-found: warn
           retention-days: 30
+          overwrite: true
+
+      - name: Revalidate provenance and publish downloaded RC assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_COMMIT: ${{ steps.candidate.outputs.source_commit }}
+          RC_RUN_ID: ${{ steps.rc.outputs.run_id }}
+          RC_RUN_ATTEMPT: ${{ steps.rc.outputs.run_attempt }}
+          INSTALLER_ARTIFACT_ID: ${{ steps.rc.outputs.installer_artifact_id }}
+          EVAL_ARTIFACT_ID: ${{ steps.rc.outputs.eval_artifact_id }}
+        run: |
+          $run = gh api "/repos/$env:GITHUB_REPOSITORY/actions/runs/$env:RC_RUN_ID" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $run.head_sha -ne $env:SOURCE_COMMIT -or $run.event -ne 'workflow_dispatch' -or $run.status -ne 'completed' -or $run.conclusion -ne 'success' -or $run.run_attempt -ne [int]$env:RC_RUN_ATTEMPT -or $run.head_repository.full_name -ne $env:GITHUB_REPOSITORY) {
+            throw 'RC run provenance changed before publication'
+          }
+          $expectedArtifacts = @(
+            @{ id = [long]$env:INSTALLER_ARTIFACT_ID; name = "arcwriter-rc-$env:SOURCE_COMMIT" },
+            @{ id = [long]$env:EVAL_ARTIFACT_ID; name = "eval-evidence-rc-$env:SOURCE_COMMIT" }
+          )
+          foreach ($expected in $expectedArtifacts) {
+            $artifact = gh api "/repos/$env:GITHUB_REPOSITORY/actions/artifacts/$($expected.id)" | ConvertFrom-Json
+            if ($LASTEXITCODE -ne 0 -or $artifact.id -ne $expected.id -or $artifact.name -ne $expected.name -or $artifact.expired -ne $false -or $artifact.workflow_run.id -ne [long]$env:RC_RUN_ID -or $artifact.workflow_run.head_sha -ne $env:SOURCE_COMMIT) {
+              throw "RC artifact $($expected.id) is no longer the selected same-commit artifact"
+            }
+          }
+          $tagRef = gh api "/repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:GITHUB_REF_NAME" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $tagRef.object.type -ne 'tag') { throw 'Remote release tag is missing or is no longer annotated' }
+          $tagObject = gh api "/repos/$env:GITHUB_REPOSITORY/git/tags/$($tagRef.object.sha)" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $tagObject.object.type -ne 'commit' -or $tagObject.object.sha -ne $env:SOURCE_COMMIT) {
+            throw 'Remote release tag no longer targets the verified RC commit'
+          }
+          $publishInstaller = Get-Item -LiteralPath $env:PUBLISH_INSTALLER
+          $publishBlockmap = Get-Item -LiteralPath $env:PUBLISH_BLOCKMAP
+          $publishLatest = Get-Item -LiteralPath $env:PUBLISH_LATEST_YML
+          $publishEvidence = Get-Item -LiteralPath $env:PUBLISH_RELEASE_EVIDENCE
+          gh release create $env:GITHUB_REF_NAME $publishInstaller.FullName $publishBlockmap.FullName $publishLatest.FullName $publishEvidence.FullName --verify-tag --title $env:GITHUB_REF_NAME --latest --notes "Promoted from verified RC run $env:RC_RUN_ID for $env:SOURCE_COMMIT."
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub Release publication failed' }

@@ -1,16 +1,26 @@
-import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import {
+  CASE_MANIFEST_SCHEMA_VERSION,
+  RC_CASE_HASH_ALGORITHM,
+  RC_DATASET_HASH_ALGORITHM,
+  WORKSPACE_CASE_HASH_ALGORITHM,
+  WORKSPACE_DATASET_HASH_ALGORITHM,
+  WORKSPACE_DATASET_VERSION,
+  parseCaseManifestBytes,
+  sha256,
+  stableJson
+} from "./eval-evidence-contract.mjs";
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const [evalName, ...testFiles] = process.argv.slice(2);
+const { evalName, testFiles, caseManifestArgument } = parseRunArgs(process.argv.slice(2));
 
 if (!evalName || !testFiles.length) {
-  throw new Error("Usage: node scripts/run-eval.mjs <eval-name> <vitest test files...>");
+  throw new Error("Usage: node scripts/run-eval.mjs <eval-name> [--case-manifest <path>] <vitest test files...>");
 }
 
 const outputDir = path.resolve(process.env.XIAOSHUO_EVAL_OUTPUT_DIR || path.join(rootDir, "output", "evals"), evalName);
@@ -18,6 +28,10 @@ const resultPath = path.join(outputDir, "vitest-result.json");
 const manifestPath = path.join(outputDir, "manifest.json");
 const seed = String(process.env.XIAOSHUO_EVAL_SEED || "20260713");
 const startedAt = new Date();
+const caseManifestPath = caseManifestArgument ? path.resolve(rootDir, caseManifestArgument) : "";
+const caseManifest = caseManifestPath
+  ? parseCaseManifestBytes(await fs.readFile(caseManifestPath))
+  : null;
 
 await fs.mkdir(outputDir, { recursive: true });
 await fs.rm(resultPath, { force: true });
@@ -26,18 +40,27 @@ const vitestEntry = path.join(rootDir, "node_modules", "vitest", "vitest.mjs");
 const command = [vitestEntry, "run", ...testFiles, "--reporter=json", "--outputFile", resultPath];
 const result = await run(process.execPath, command, {
   cwd: rootDir,
-  env: { ...process.env, XIAOSHUO_EVAL_SEED: seed }
+  env: {
+    ...process.env,
+    XIAOSHUO_EVAL_SEED: seed,
+    ...(caseManifestPath ? { XIAOSHUO_EVAL_CASE_MANIFEST: caseManifestPath } : {})
+  }
 });
 
 const vitestResult = await readJson(resultPath);
-const cases = extractCases(vitestResult, result);
+const extractedCases = extractCases(vitestResult, result);
+const cases = caseManifest ? bindCasesToManifest(extractedCases, caseManifest) : extractedCases;
 const fixtureHashes = await collectFixtureHashes(rootDir, testFiles);
 const failures = cases.filter((testCase) => testCase.status !== "passed");
 const manifest = {
   manifest_schema_version: 1,
   eval_name: evalName,
-  dataset_version: "workspace-fixtures-v1",
-  dataset_hash: sha256(JSON.stringify(fixtureHashes)),
+  dataset_id: caseManifest?.dataset_id || evalName,
+  dataset_version: caseManifest?.dataset_version || WORKSPACE_DATASET_VERSION,
+  dataset_hash: caseManifest?.dataset_hash || sha256(stableJson(fixtureHashes)),
+  dataset_hash_algorithm: caseManifest ? RC_DATASET_HASH_ALGORITHM : WORKSPACE_DATASET_HASH_ALGORITHM,
+  case_manifest_schema_version: caseManifest ? CASE_MANIFEST_SCHEMA_VERSION : null,
+  case_hash_algorithm: caseManifest ? RC_CASE_HASH_ALGORITHM : WORKSPACE_CASE_HASH_ALGORITHM,
   fixture_hashes: fixtureHashes,
   code_commit: await gitCommit(rootDir),
   command: `${process.execPath} ${command.join(" ")}`,
@@ -85,6 +108,78 @@ await fs.writeFile(path.join(outputDir, "security-recovery-counters.json"), `${J
 await fs.rm(resultPath, { force: true });
 console.log(`[eval-manifest] ${manifest.status} ${manifestPath}`);
 process.exitCode = result.code || failures.length ? 1 : 0;
+
+function parseRunArgs(argv) {
+  const [evalName, ...values] = argv;
+  const testFiles = [];
+  let caseManifestArgument = String(process.env.XIAOSHUO_EVAL_CASE_MANIFEST || "").trim();
+  for (let index = 0; index < values.length; index += 1) {
+    const value = values[index];
+    if (value === "--case-manifest") {
+      const candidate = values[index + 1];
+      if (!candidate || candidate.startsWith("--")) {
+        throw new Error("--case-manifest requires a path");
+      }
+      if (caseManifestArgument && path.resolve(rootDir, caseManifestArgument) !== path.resolve(rootDir, candidate)) {
+        throw new Error("case manifest differs between --case-manifest and XIAOSHUO_EVAL_CASE_MANIFEST");
+      }
+      caseManifestArgument = candidate;
+      index += 1;
+      continue;
+    }
+    if (value.startsWith("--")) {
+      throw new Error(`Unknown run-eval option: ${value}`);
+    }
+    testFiles.push(value);
+  }
+  return { evalName, testFiles, caseManifestArgument };
+}
+
+function bindCasesToManifest(observedCases, caseManifest) {
+  const expected = new Map(caseManifest.cases.map((entry) => [entry.case_id, entry]));
+  const seen = new Set();
+  const bound = observedCases.map((observed) => {
+    if (seen.has(observed.case_id)) {
+      return {
+        ...observed,
+        status: "failed",
+        failure: `Duplicate observed case_id: ${observed.case_id}`
+      };
+    }
+    seen.add(observed.case_id);
+    const expectedCase = expected.get(observed.case_id);
+    if (!expectedCase) {
+      return {
+        ...observed,
+        status: "failed",
+        failure: `Observed case is absent from the bound case manifest: ${observed.case_id}`
+      };
+    }
+    return {
+      ...observed,
+      case_hash: expectedCase.case_hash,
+      content_hash: expectedCase.content_hash,
+      expected_hash: expectedCase.expected_hash,
+      partition: expectedCase.partition,
+      project_group: expectedCase.project_group
+    };
+  });
+  for (const expectedCase of caseManifest.cases) {
+    if (seen.has(expectedCase.case_id)) continue;
+    bound.push({
+      case_id: expectedCase.case_id,
+      case_hash: expectedCase.case_hash,
+      content_hash: expectedCase.content_hash,
+      expected_hash: expectedCase.expected_hash,
+      partition: expectedCase.partition,
+      project_group: expectedCase.project_group,
+      status: "failed",
+      duration_ms: 0,
+      failure: `Bound case was not emitted by Vitest: ${expectedCase.case_id}`
+    });
+  }
+  return bound;
+}
 
 async function run(commandName, args, options) {
   return new Promise((resolve) => {
@@ -187,10 +282,6 @@ async function gitCommit(cwd) {
     child.once("error", () => resolve("workspace-uncommitted"));
     child.once("exit", (code) => resolve(code === 0 && output.trim() ? output.trim() : "workspace-uncommitted"));
   });
-}
-
-function sha256(value) {
-  return createHash("sha256").update(value).digest("hex");
 }
 
 function redact(value) {

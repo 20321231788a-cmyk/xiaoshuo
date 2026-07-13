@@ -18,6 +18,7 @@ import { UpdateService } from "./update-service.js";
 import { defaultProjectArchiveName, ensureZipExtension, exportProjectArchive, importProjectArchive } from "./project-archive.js";
 import { CloudProjectService } from "./cloud-projects.js";
 import { isSafeExternalUrl, isTrustedRendererUrl as hasTrustedRendererUrl } from "./renderer-security.js";
+import { parseUpgradeSmokeProbeRequest, runUpgradeSmokeProbe } from "./upgrade-smoke-probe.js";
 import {
   TerminalUserGestureAuthorizationStore,
   type TerminalRendererAuthorizationIdentity
@@ -404,6 +405,7 @@ function isTrustedRendererUrl(value: string): boolean {
 }
 
 app.whenReady().then(async () => {
+  const upgradeSmokeProbe = parseUpgradeSmokeProbeRequest(process.argv, app.isPackaged);
   registerApplicationMenu();
   registerIpc();
   const projectRoot = resolveProjectRoot(app.getAppPath());
@@ -420,6 +422,17 @@ app.whenReady().then(async () => {
     runtimeState.lastError = error instanceof Error ? error.message : "Runtime server failed to start";
   }
   await createWindow();
+  if (upgradeSmokeProbe) {
+    try {
+      await runUpgradeSmokeProbe(upgradeSmokeProbe, {
+        runtimeUrl,
+        sessionToken: runtimeState.sessionToken || "",
+        appVersion: app.getVersion()
+      });
+    } catch (error) {
+      runtimeState.lastError = error instanceof Error ? error.message : String(error);
+    }
+  }
   updateService.scheduleStartupCheck();
 });
 

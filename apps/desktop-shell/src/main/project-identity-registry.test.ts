@@ -82,6 +82,60 @@ describe("ProjectIdentityRegistry", () => {
     await expect(afterMigration.confirm(projectPath, projectId)).resolves.toMatchObject({ projectId, reassociated: false });
   });
 
+  it("reconfirms a v1 record when canonical path spellings identify the same physical directory", async () => {
+    const root = await createRoot();
+    const projectPath = path.join(root, "project");
+    const canonicalAlias = path.join(root, "canonical-project");
+    const registryPath = path.join(root, "state", "project-identities.json");
+    await fs.mkdir(projectPath);
+    await fs.mkdir(path.dirname(registryPath), { recursive: true });
+    await fs.writeFile(registryPath, JSON.stringify({
+      version: 1,
+      projects: [identityRecord(projectId, projectPath)]
+    }), "utf8");
+    const filesystemIdentity = { scheme: "stat-dev-ino-v1" as const, dev: "7", ino: "11" };
+    const registry = new ProjectIdentityRegistry(registryPath, {
+      canonicalize: async () => canonicalAlias,
+      pathExists: async () => true,
+      filesystemIdentity: async () => filesystemIdentity
+    });
+
+    await expect(registry.reconfirm(projectPath, projectId)).resolves.toMatchObject({
+      projectId,
+      canonicalPath: canonicalAlias,
+      reassociated: false
+    });
+    expect((await registry.snapshot()).projects[0]).toMatchObject({
+      canonical_path: canonicalAlias,
+      previous_paths: [],
+      requires_reconfirmation: false,
+      filesystem_identity: filesystemIdentity
+    });
+  });
+
+  it("rejects a v1 reconfirmation when both path spellings identify different physical directories", async () => {
+    const root = await createRoot();
+    const projectPath = path.join(root, "project");
+    const canonicalAlias = path.join(root, "canonical-project");
+    const registryPath = path.join(root, "state", "project-identities.json");
+    await fs.mkdir(projectPath);
+    await fs.mkdir(path.dirname(registryPath), { recursive: true });
+    await fs.writeFile(registryPath, JSON.stringify({
+      version: 1,
+      projects: [identityRecord(projectId, projectPath)]
+    }), "utf8");
+    const registry = new ProjectIdentityRegistry(registryPath, {
+      canonicalize: async () => canonicalAlias,
+      pathExists: async () => true,
+      filesystemIdentity: async (candidate) => candidate === canonicalAlias
+        ? { scheme: "stat-dev-ino-v1", dev: "7", ino: "11" }
+        : { scheme: "stat-dev-ino-v1", dev: "7", ino: "12" }
+    });
+
+    await expect(registry.reconfirm(projectPath, projectId)).rejects.toMatchObject({ code: projectIdentityConflictCode });
+    expect((await registry.snapshot()).projects[0]).toMatchObject({ requires_reconfirmation: true });
+  });
+
   it("does not auto-associate a copied directory after the original disappeared", async () => {
     const root = await createRoot();
     const original = path.join(root, "original");

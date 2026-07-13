@@ -188,17 +188,22 @@ export class ProjectIdentityRegistry {
           "旧版项目身份记录缺少物理目录身份；请通过“打开项目”重新确认后再写入"
         );
       }
-      if (currentForId.canonical_path !== canonicalPath && await this.pathExists(currentForId.canonical_path)) {
-        throw new ProjectIdentityRegistryError(
-          projectIdentityConflictCode,
-          "旧版项目 UUID 位于两个有效目录；重新确认前已拒绝写入"
-        );
+      const canonicalPathChanged = currentForId.canonical_path !== canonicalPath;
+      const formerPathExists = canonicalPathChanged && await this.pathExists(currentForId.canonical_path);
+      if (formerPathExists) {
+        const formerFilesystemIdentity = await this.getFilesystemIdentity(currentForId.canonical_path);
+        if (!sameFilesystemIdentity(formerFilesystemIdentity, filesystemIdentity)) {
+          throw new ProjectIdentityRegistryError(
+            projectIdentityConflictCode,
+            "旧版项目 UUID 位于两个有效目录；重新确认前已拒绝写入"
+          );
+        }
       }
-      const reassociated = currentForId.canonical_path !== canonicalPath;
+      const reassociated = canonicalPathChanged && !formerPathExists;
       if (reassociated) {
         currentForId.previous_paths = uniquePaths([...currentForId.previous_paths, currentForId.canonical_path]);
-        currentForId.canonical_path = canonicalPath;
       }
+      currentForId.canonical_path = canonicalPath;
       currentForId.requires_reconfirmation = false;
       currentForId.filesystem_identity = filesystemIdentity;
       currentForId.updated_at = this.now();

@@ -1,8 +1,9 @@
 name: Desktop RC and Nightly
 
 on:
-  schedule:
-    - cron: "17 2 * * *"
+  push:
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       channel:
@@ -18,22 +19,27 @@ permissions:
   contents: read
 
 concurrency:
-  group: desktop-rc-${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'nightly' }}-${{ github.ref }}
-  cancel-in-progress: false
+  group: desktop-rc-${{ github.event_name == 'workflow_dispatch' && inputs.channel == 'rc' && format('rc-{0}', github.run_id) || format('nightly-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || inputs.channel != 'rc' }}
 
 jobs:
   package:
     name: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'nightly' }} package and evidence
     runs-on: windows-latest
-    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.channel == 'rc' && 'release-candidate' || 'nightly' }}
-    timeout-minutes: 60
+    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.channel == 'rc' && 'release-candidate' || null }}
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && inputs.channel == 'rc' && 180 || 90 }}
     env:
       RELEASE_CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || 'nightly' }}
-      CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-      CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+      RC_BUNDLE_ROOT: output/rc-bundle
+      RC_EVAL_ROOT: output/rc-evals
+      ARTIFACT_RETENTION_DAYS: ${{ github.event_name == 'workflow_dispatch' && inputs.channel == 'rc' && '30' || '7' }}
+      CSC_LINK: ${{ github.event_name == 'workflow_dispatch' && inputs.channel == 'rc' && secrets.WIN_CSC_LINK || '' }}
+      CSC_KEY_PASSWORD: ${{ github.event_name == 'workflow_dispatch' && inputs.channel == 'rc' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -89,8 +95,13 @@ jobs:
         if: ${{ steps.eval-routing.outcome == 'failure' || steps.eval-planning.outcome == 'failure' || steps.eval-memory.outcome == 'failure' || steps.eval-quality.outcome == 'failure' || steps.eval-recovery.outcome == 'failure' || steps.eval-security.outcome == 'failure' || steps.eval-excluded-capabilities.outcome == 'failure' }}
         run: exit 1
 
+      - name: Run manifest-bound RC evaluations
+        if: ${{ env.RELEASE_CHANNEL == 'rc' }}
+        run: node scripts/run-rc-evals.mjs --dataset-manifest evals/rc-dataset-manifest.json --runner-manifest evals/rc-runner-manifest.json --output-root $env:RC_EVAL_ROOT
+
       - name: Verify RC eval dataset and sealed holdout evidence
-        run: node scripts/verify-rc-eval-evidence.mjs --dataset-manifest evals/rc-dataset-manifest.json --eval-root output/evals
+        if: ${{ env.RELEASE_CHANNEL == 'rc' }}
+        run: node scripts/verify-rc-eval-evidence.mjs --dataset-manifest evals/rc-dataset-manifest.json --eval-root $env:RC_EVAL_ROOT --out $env:RC_BUNDLE_ROOT/evidence/rc-eval-evidence.json
 
       - name: Build workbench
         run: npm run build:workbench
@@ -104,52 +115,117 @@ jobs:
       - name: Desktop source smoke
         run: npm run smoke:desktop
 
+      - name: Prepare upgrade and rollback state contract
+        shell: pwsh
+        run: node apps/desktop-shell/scripts/prepare-upgrade-rollback-state.mjs --project-root output/upgrade-state/project --out $env:RC_BUNDLE_ROOT/evidence/upgrade-state-contract.json --source-commit $env:GITHUB_SHA
+
       - name: Package Windows installer
         run: npm run dist -w @xiaoshuo/desktop-shell
+
+      - name: Stage exact release files
+        shell: pwsh
+        run: |
+          $version = [string](Get-Content apps/desktop-shell/package.json -Raw | ConvertFrom-Json).version
+          if ($version -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') { throw "Invalid desktop version: $version" }
+          $sourceDirectory = Join-Path $env:GITHUB_WORKSPACE 'apps/desktop-shell/release'
+          $destination = Join-Path $env:GITHUB_WORKSPACE "$env:RC_BUNDLE_ROOT/release"
+          New-Item -ItemType Directory -Force -Path $destination | Out-Null
+          $installerName = "ArcWriter-Setup-$version.exe"
+          $requiredFiles = @($installerName, "$installerName.blockmap", 'latest.yml')
+          foreach ($name in $requiredFiles) {
+            $source = Join-Path $sourceDirectory $name
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Required package output is missing: $source" }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $destination $name)
+          }
+          $stagedFiles = @(Get-ChildItem -LiteralPath $destination -File)
+          if ($stagedFiles.Count -ne $requiredFiles.Count) { throw 'The staged release directory contains unexpected files' }
+          "ARCWRITER_INSTALLER_PATH=$(Join-Path $destination $installerName)" >> $env:GITHUB_ENV
+          "ARCWRITER_RELEASE_DIR=$destination" >> $env:GITHUB_ENV
+          "ARCWRITER_CANDIDATE_VERSION=$version" >> $env:GITHUB_ENV
 
       - name: Verify RC signing and timestamp
         if: ${{ env.RELEASE_CHANNEL == 'rc' }}
         shell: pwsh
-        run: ./apps/desktop-shell/scripts/verify-authenticode.ps1 -InstallerPath (Get-ChildItem apps/desktop-shell/release/ArcWriter-Setup-*.exe | Select-Object -First 1).FullName
+        run: ./apps/desktop-shell/scripts/verify-authenticode.ps1 -InstallerPath $env:ARCWRITER_INSTALLER_PATH
 
       - name: Run installed-build smoke
         shell: pwsh
-        run: ./apps/desktop-shell/scripts/smoke-installed-desktop.ps1 -InstallerPath (Get-ChildItem apps/desktop-shell/release/ArcWriter-Setup-*.exe | Select-Object -First 1).FullName -OutputPath artifacts/installed-smoke.json
+        run: ./apps/desktop-shell/scripts/smoke-installed-desktop.ps1 -InstallerPath $env:ARCWRITER_INSTALLER_PATH -OutputPath $env:RC_BUNDLE_ROOT/evidence/installed-smoke.json
 
       - name: Download previous installer for upgrade smoke
         shell: pwsh
         env:
           GITHUB_TOKEN: ${{ github.token }}
-        run: ./apps/desktop-shell/scripts/download-previous-release-installer.ps1 -Repository $env:GITHUB_REPOSITORY -ExcludeTag $env:GITHUB_REF_NAME -OutputPath artifacts/baseline/ArcWriter-Setup-baseline.exe
+        run: ./apps/desktop-shell/scripts/download-previous-release-installer.ps1 -Repository $env:GITHUB_REPOSITORY -ExcludeTag $env:GITHUB_REF_NAME -OutputPath output/baseline/ArcWriter-Setup-baseline.exe -MetadataOutputPath $env:RC_BUNDLE_ROOT/evidence/baseline-release.json -CandidateVersion $env:ARCWRITER_CANDIDATE_VERSION
 
       - name: Run upgrade and rollback smoke
         shell: pwsh
-        run: ./apps/desktop-shell/scripts/smoke-upgrade-rollback-desktop.ps1 -BaselineInstallerPath artifacts/baseline/ArcWriter-Setup-baseline.exe -CandidateInstallerPath (Get-ChildItem apps/desktop-shell/release/ArcWriter-Setup-*.exe | Select-Object -First 1).FullName -OutputPath artifacts/upgrade-rollback-smoke.json
+        run: ./apps/desktop-shell/scripts/smoke-upgrade-rollback-desktop.ps1 -BaselineInstallerPath output/baseline/ArcWriter-Setup-baseline.exe -CandidateInstallerPath $env:ARCWRITER_INSTALLER_PATH -BaselineMetadataPath $env:RC_BUNDLE_ROOT/evidence/baseline-release.json -CandidateVersion $env:ARCWRITER_CANDIDATE_VERSION -Repository $env:GITHUB_REPOSITORY -OutputPath $env:RC_BUNDLE_ROOT/evidence/upgrade-rollback-smoke.json -StateContractPath $env:RC_BUNDLE_ROOT/evidence/upgrade-state-contract.json
 
       - name: Create release evidence
-        run: node apps/desktop-shell/scripts/verify-release-evidence.mjs --artifact-dir apps/desktop-shell/release --installed-evidence artifacts/installed-smoke.json --upgrade-rollback-evidence artifacts/upgrade-rollback-smoke.json --channel $env:RELEASE_CHANNEL --out artifacts/release-evidence.json
+        run: node apps/desktop-shell/scripts/verify-release-evidence.mjs --artifact-dir $env:ARCWRITER_RELEASE_DIR --installed-evidence $env:RC_BUNDLE_ROOT/evidence/installed-smoke.json --upgrade-rollback-evidence $env:RC_BUNDLE_ROOT/evidence/upgrade-rollback-smoke.json --state-contract $env:RC_BUNDLE_ROOT/evidence/upgrade-state-contract.json --baseline-metadata $env:RC_BUNDLE_ROOT/evidence/baseline-release.json --repository $env:GITHUB_REPOSITORY --channel $env:RELEASE_CHANNEL --out $env:RC_BUNDLE_ROOT/evidence/release-evidence.json
+
+      - name: Stage declared RC dataset metadata
+        if: ${{ env.RELEASE_CHANNEL == 'rc' }}
+        shell: pwsh
+        run: |
+          $datasetRoot = (Resolve-Path -LiteralPath evals).Path.TrimEnd([IO.Path]::DirectorySeparatorChar)
+          $manifestPath = Join-Path $datasetRoot 'rc-dataset-manifest.json'
+          $runnerManifestPath = Join-Path $datasetRoot 'rc-runner-manifest.json'
+          if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) { throw 'RC dataset manifest is missing' }
+          if (-not (Test-Path -LiteralPath $runnerManifestPath -PathType Leaf)) { throw 'RC runner manifest is missing' }
+          $declaration = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+          if ($declaration.schema_version -ne 2 -or -not $declaration.datasets) { throw 'RC dataset declaration is invalid' }
+          $destinationRoot = Join-Path $env:GITHUB_WORKSPACE "$env:RC_BUNDLE_ROOT/dataset"
+          New-Item -ItemType Directory -Force -Path $destinationRoot | Out-Null
+          Copy-Item -LiteralPath $manifestPath -Destination (Join-Path $destinationRoot 'rc-dataset-manifest.json')
+          Copy-Item -LiteralPath $runnerManifestPath -Destination (Join-Path $destinationRoot 'rc-runner-manifest.json')
+          $allowedPrefix = $datasetRoot + [IO.Path]::DirectorySeparatorChar
+          foreach ($dataset in @($declaration.datasets)) {
+            $relativePath = [string]$dataset.case_manifest_path
+            if ([string]::IsNullOrWhiteSpace($relativePath) -or [IO.Path]::IsPathRooted($relativePath)) { throw 'Dataset case manifest path must be relative' }
+            $source = [IO.Path]::GetFullPath((Join-Path $datasetRoot $relativePath))
+            if (-not $source.StartsWith($allowedPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw "Dataset case manifest escapes evals: $relativePath" }
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw "Dataset case manifest is missing: $relativePath" }
+            $destination = [IO.Path]::GetFullPath((Join-Path $destinationRoot $relativePath))
+            $destinationPrefix = $destinationRoot.TrimEnd([IO.Path]::DirectorySeparatorChar) + [IO.Path]::DirectorySeparatorChar
+            if (-not $destination.StartsWith($destinationPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw "Dataset destination escapes bundle: $relativePath" }
+            New-Item -ItemType Directory -Force -Path (Split-Path -Parent $destination) | Out-Null
+            Copy-Item -LiteralPath $source -Destination $destination
+          }
+
+      - name: Upload successful eval evidence
+        if: ${{ success() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-evidence-${{ env.RELEASE_CHANNEL }}-${{ github.sha }}
+          path: ${{ env.RELEASE_CHANNEL == 'rc' && env.RC_EVAL_ROOT || 'output/evals' }}
+          if-no-files-found: error
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          overwrite: true
 
       - name: Upload installer and immutable evidence
-        if: always()
+        if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
           name: arcwriter-${{ env.RELEASE_CHANNEL }}-${{ github.sha }}
           path: |
-            apps/desktop-shell/release/ArcWriter-Setup-*.exe
-            apps/desktop-shell/release/ArcWriter-Setup-*.exe.blockmap
-            apps/desktop-shell/release/latest.yml
-            artifacts/installed-smoke.json
-            artifacts/upgrade-rollback-smoke.json
-            artifacts/release-evidence.json
-            evals/rc-dataset-manifest.json
+            ${{ env.RC_BUNDLE_ROOT }}/release
+            ${{ env.RC_BUNDLE_ROOT }}/evidence
+            ${{ env.RC_BUNDLE_ROOT }}/dataset
           if-no-files-found: error
-          retention-days: 30
+          retention-days: ${{ env.ARTIFACT_RETENTION_DAYS }}
+          overwrite: true
 
-      - name: Upload eval manifests and redacted failure evidence
-        if: always()
+      - name: Upload redacted failure diagnostics
+        if: ${{ failure() }}
         uses: actions/upload-artifact@v4
         with:
-          name: eval-evidence-${{ env.RELEASE_CHANNEL }}-${{ github.sha }}
-          path: output/evals
-          if-no-files-found: warn
-          retention-days: 30
+          name: diagnostics-${{ env.RELEASE_CHANNEL }}-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            output/evals
+            ${{ env.RC_EVAL_ROOT }}
+            ${{ env.RC_BUNDLE_ROOT }}/evidence
+          if-no-files-found: ignore
+          retention-days: 7
+          overwrite: true

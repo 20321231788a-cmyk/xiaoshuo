@@ -17,9 +17,35 @@ function Get-Sha256([string]$Path) {
   return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant()
 }
 
-if (-not $SourceCommit -or $SourceCommit -notmatch "^[0-9a-fA-F]{7,64}$") {
+function Get-WorkspaceState([string]$ExpectedCommit, [bool]$AllowDirty) {
+  $repositoryRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..\..\..")).Path
+  $actualCommit = (& git -C $repositoryRoot rev-parse HEAD 2>$null | Out-String).Trim()
+  if ($LASTEXITCODE -ne 0 -or $actualCommit -notmatch "^[0-9a-fA-F]{40}$") {
+    throw "Unable to verify the source Git commit for installed smoke"
+  }
+  if ($actualCommit -ne $ExpectedCommit) {
+    throw "Installed smoke source commit $actualCommit does not match $ExpectedCommit"
+  }
+  $statusLines = @(& git -C $repositoryRoot status --porcelain=v1 --untracked-files=all 2>$null)
+  if ($LASTEXITCODE -ne 0) {
+    throw "Unable to verify whether the source workspace is clean"
+  }
+  $dirty = $statusLines.Count -gt 0
+  if ($dirty -and -not $AllowDirty) {
+    throw "Installed smoke requires a clean source workspace; use -AllowDirtyWorkspace only for non-release local rehearsal"
+  }
+  return [ordered]@{
+    repository_root = $repositoryRoot
+    source_commit = $actualCommit
+    dirty = $dirty
+  }
+}
+
+if (-not $SourceCommit -or $SourceCommit -notmatch "^[0-9a-fA-F]{40}$") {
   throw "SourceCommit or GITHUB_SHA must contain the source commit"
 }
+$workspaceState = Get-WorkspaceState $SourceCommit ([bool]$AllowDirtyWorkspace)
+$SourceCommit = [string]$workspaceState.source_commit
 if (-not (Test-Path -LiteralPath $InstallerPath -PathType Leaf)) {
   throw "Installer not found: $InstallerPath"
 }
@@ -72,7 +98,7 @@ try {
 $evidence = [ordered]@{
   schema_version = 1
   source_commit = $SourceCommit
-  workspace_dirty = [bool]$AllowDirtyWorkspace
+  workspace_dirty = [bool]$workspaceState.dirty
   generated_at = [DateTime]::UtcNow.ToString("o")
   installer_path = (Resolve-Path -LiteralPath $InstallerPath).Path
   installer_sha256 = Get-Sha256 $InstallerPath
