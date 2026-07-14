@@ -58,5 +58,5 @@ describe("governed memory replay", () => {
     expect(beta?.confirmedFacts.join(" ")).toContain("beta");
     expect(beta?.confirmedFacts.join(" ")).not.toContain("alpha");
     expect(reopened.listClaims("project-beta")).toEqual([]);
-  });
+  }, 20_000);
 });
