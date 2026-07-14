@@ -34,7 +34,7 @@ export async function loadLicenseStatusForRoot(projectRoot: string, configOverri
     };
   }
 
-  const config = configOverride || (await loadPublicConfig({ rootDir: projectRoot }));
+  const config = configOverride || (await loadPublicConfig({ rootDir: projectRoot, env: process.env }));
   const websiteProfile: Partial<AiConfigProfile> = config.website_profile || {};
   const tokenKey = stringValue(websiteProfile.license_account_key || websiteProfile.api_key || config.license_account_key).trim();
 

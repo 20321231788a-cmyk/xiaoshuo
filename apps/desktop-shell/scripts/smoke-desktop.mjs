@@ -391,7 +391,7 @@ try {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        path: "D:/xiaoshuo/ts-migration/sandbox-projects",
+        path: path.join(rootDir, "sandbox-projects"),
         project_name: smokeProjectName,
         create_in_parent: true
       })
@@ -444,7 +444,7 @@ try {
       })
     }).then((response) => response.json());
     if (!agentPlan.can_execute || !Array.isArray(agentPlan.operations) || agentPlan.operations[0]?.action !== "move_file") {
-      throw new Error("TS runtime agent-plan route did not return the expected rename plan");
+      throw new Error(`TS runtime agent-plan route did not return the expected rename plan: ${JSON.stringify(agentPlan)}`);
     }
     if (agentPlan.operations[0]?.target_path !== "01_大纲/新大纲.txt") {
       throw new Error("TS runtime agent-plan route did not normalize the rename target path");

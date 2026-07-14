@@ -79,6 +79,10 @@ describe("handleBaseRuntimeRoutes", () => {
     );
 
     expect(handled).toBe(true);
+    expect(loadPublicConfig).toHaveBeenCalledWith({
+      rootDir: "D:\\xiaoshuo\\ts-migration",
+      env: process.env
+    });
     expect(writeJson).toHaveBeenCalledWith(
       expect.anything(),
       200,
