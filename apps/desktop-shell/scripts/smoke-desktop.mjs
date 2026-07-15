@@ -407,6 +407,61 @@ try {
     if (!manifestStatus.ready || !String(manifestStatus.path || "").includes("project_manifest.json")) {
       throw new Error("TS runtime manifest-status route did not return a ready manifest");
     }
+    const novelProject = await page.evaluate((projectRoot) =>
+      window.xiaoshuoDesktop.novelAgent.identifyProject({ project_root: projectRoot }),
+      createdProject.path
+    );
+    const novelSnapshot = await page.evaluate((project) => window.xiaoshuoDesktop.novelAgent.snapshot(project), novelProject);
+    if (!Array.isArray(novelSnapshot.catalog) || novelSnapshot.catalog.length < 4) {
+      throw new Error("Novel Agent built-in tool catalog was not exposed through the desktop bridge");
+    }
+    const storyIndexTool = novelSnapshot.catalog.find((tool) => tool.tool_id === "novel_story_index");
+    if (!storyIndexTool) {
+      throw new Error("Novel Agent story-index tool is missing from the built-in catalog");
+    }
+    const toolProposal = await page.evaluate(({ project, tool }) => window.xiaoshuoDesktop.novelAgent.proposeTool({
+      ...project,
+      run_id: "smoke-novel-run",
+      budget_id: "smoke-novel-budget",
+      tool_id: tool.tool_id,
+      version: tool.version,
+      reason: "desktop smoke"
+    }), { project: novelProject, tool: storyIndexTool });
+    const installWithoutGesture = await page.evaluate(async ({ proposal, catalogSha }) => {
+      try {
+        await window.xiaoshuoDesktop.novelAgent.installTool({
+          proposal_id: proposal.proposal_id,
+          expected_catalog_sha256: catalogSha,
+          confirmation_id: "smoke-no-gesture"
+        });
+        return "";
+      } catch (error) {
+        return String(error?.code || error?.message || error);
+      }
+    }, { proposal: toolProposal, catalogSha: novelSnapshot.catalog_sha256 });
+    if (!installWithoutGesture.includes("NOVEL_USER_GESTURE_REQUIRED")) {
+      throw new Error("Novel tool activation unexpectedly succeeded without a real user gesture");
+    }
+    await page.getByTestId("novel-install").click();
+    const installedNovelTool = await page.evaluate(({ proposal, catalogSha }) => window.xiaoshuoDesktop.novelAgent.installTool({
+      proposal_id: proposal.proposal_id,
+      expected_catalog_sha256: catalogSha,
+      confirmation_id: "smoke-install-confirmed"
+    }), { proposal: toolProposal, catalogSha: novelSnapshot.catalog_sha256 });
+    if (installedNovelTool.status !== "installed") {
+      throw new Error("Novel built-in tool activation did not complete through typed IPC");
+    }
+    await page.getByTestId("novel-action").click();
+    const novelAction = await page.evaluate((project) => window.xiaoshuoDesktop.novelAgent.runAction({
+      ...project,
+      action: "rebuild_index",
+      confirmation_id: `smoke-index-${crypto.randomUUID()}`,
+      operation_id: `smoke-index-${crypto.randomUUID()}`
+    }), novelProject);
+    if (!novelAction.ok || novelAction.output_path !== "00_设定集/.agent/story-index.md") {
+      throw new Error("Novel typed index action did not complete through the desktop bridge");
+    }
+    await fs.access(path.join(createdProject.path, "00_设定集", ".agent", "story-index.md"));
     const projectChrome = await fetch(`${backendStatus.url}/api/project/chrome?force=1`).then((response) => response.json());
     if (!Array.isArray(projectChrome.tree) || !projectChrome.tree.some((node) => node.path === "01_大纲")) {
       throw new Error("TS runtime project-chrome route did not include the starter tree");

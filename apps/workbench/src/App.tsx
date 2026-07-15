@@ -75,6 +75,7 @@ import { VectorTestFeaturePage } from "./features/vector/VectorTestFeaturePage.j
 import { LedgerFeaturePage } from "./features/ledger/LedgerFeaturePage.js";
 import { LegacyWorkbenchView, type LegacyWorkbenchTab } from "./features/legacy/LegacyWorkbenchView.js";
 import { LogsFeaturePage } from "./features/revision/LogsFeaturePage.js";
+import { NovelAgentWorkspace } from "./features/novel-agent/NovelAgentWorkspace.js";
 import { AutoReviewGeneratedToggle, ProjectFileSelect } from "./features/workflow/WorkflowControls.js";
 import { AgentTraceView } from "./views/AgentTraceView.js";
 import { MemoryGovernanceView } from "./views/MemoryGovernanceView.js";
@@ -96,7 +97,7 @@ const TerminalView = lazy(() => import("./views/TerminalView.js").then((module) 
 
 const runtime = readWorkbenchRuntime();
 const DEFAULT_RIGHT_WIDTH = 440;
-const APP_WINDOW_TITLE = "ArcWriter 0.4.0";
+const APP_WINDOW_TITLE = "ArcWriter 0.9 Preview";
 const WEBSITE_HOME_URL = "https://matian.online/";
 const WEBSITE_REGISTER_URL = "https://matian.online/?page=api-relay&auth=register";
 
@@ -117,6 +118,7 @@ type CenterFeature =
   | "skills"
   | "traces"
   | "memory"
+  | "novel_agent"
   | "vector_test"
   | "consistency"
   | "settings"
@@ -306,7 +308,7 @@ export function App() {
       controller.setActiveTab("config");
       return;
     }
-    if (feature === "timeline" || feature === "ledger" || feature === "revision" || feature === "traces" || feature === "memory" || feature === "vector_test") {
+    if (feature === "timeline" || feature === "ledger" || feature === "revision" || feature === "traces" || feature === "memory" || feature === "novel_agent" || feature === "vector_test") {
       controller.setActiveTab("overview");
       return;
     }
@@ -846,6 +848,10 @@ function FeatureWorkbenchPanel({
                 <Brain size={15} />
                 <span>项目记忆</span>
               </button>
+              <button type="button" role="menuitem" onClick={(event) => openStatusFeature(event, "novel_agent")}>
+                <Bot size={15} />
+                <span>小说 Agent</span>
+              </button>
               <button type="button" role="menuitem" onClick={(event) => openStatusFeature(event, "vector_test")}>
                 <Database size={15} />
                 <span>向量测试</span>
@@ -1135,6 +1141,7 @@ function featureTitle(feature: CenterFeature, activeDocument: OpenDocumentTab | 
     skills: "技能",
     traces: "Agent 运行",
     memory: "项目记忆",
+    novel_agent: "小说 Agent 编辑室",
     vector_test: "向量测试",
     consistency: "一致性检查",
     settings: "设置",
@@ -1237,6 +1244,17 @@ function FeatureContentSurface({
   }
   if (feature === "memory") {
     return <MemoryGovernanceView runtime={controller.runtime} />;
+  }
+  if (feature === "novel_agent") {
+    return (
+      <NovelAgentWorkspace
+        projectRoot={controller.snapshot?.currentProject.path || ""}
+        activePath={activeDocument?.path || ""}
+        activeContent={activeDocument?.content || ""}
+        sourceRevision={activeDocument?.updatedAt || ""}
+        onOpenSkills={() => onSelectFeature("skills")}
+      />
+    );
   }
   if (feature === "vector_test") {
     return <VectorTestFeaturePage controller={controller} />;

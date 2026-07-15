@@ -213,7 +213,13 @@ describe("agent schemas", () => {
           memory_context_selector_v2: false,
           quality_gate_v2: false,
           agent_event_stream_v2: false,
-          agent_inline_plan_ui: false
+          agent_inline_plan_ui: false,
+          novel_agent_room_v1: false,
+          novel_tool_catalog_v1: false,
+          novel_typed_actions_v1: false,
+          novel_background_tasks_v1: false,
+          novel_project_transfer_v1: false,
+          novel_memory_batch_review_v1: false
         }
       }
     });
@@ -466,7 +472,13 @@ describe("agent schemas", () => {
         memory_context_selector_v2: false,
         quality_gate_v2: false,
         agent_event_stream_v2: false,
-        agent_inline_plan_ui: false
+        agent_inline_plan_ui: false,
+        novel_agent_room_v1: false,
+        novel_tool_catalog_v1: false,
+        novel_typed_actions_v1: false,
+        novel_background_tasks_v1: false,
+        novel_project_transfer_v1: false,
+        novel_memory_batch_review_v1: false
       }
     });
     expect("legacy_unbudgeted" in run.budget).toBe(false);
@@ -508,14 +520,20 @@ describe("agent schemas", () => {
     expect(request).not.toHaveProperty("nested_private_payload");
   });
 
-  it("requires a complete strict feature flag snapshot", () => {
-    expect(() =>
-      agentGoalSchema.parse({
+  it("backfills new feature flags in old snapshots while rejecting unknown flags", () => {
+    expect(agentGoalSchema.parse({
         request_snapshot: {
           feature_flag_snapshot: { schema_version: 1, agent_execution_v2_mode: "on" }
         }
-      })
-    ).toThrow();
+      }).request_snapshot.feature_flag_snapshot).toMatchObject({
+        agent_execution_v2_mode: "on",
+        novel_agent_room_v1: false,
+        novel_tool_catalog_v1: false,
+        novel_typed_actions_v1: false,
+        novel_background_tasks_v1: false,
+        novel_project_transfer_v1: false,
+        novel_memory_batch_review_v1: false
+      });
     expect(() =>
       agentGoalSchema.parse({
         request_snapshot: {

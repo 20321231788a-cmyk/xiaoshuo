@@ -44,9 +44,22 @@ import type {
   SkillDefinition,
   SkillPatchResponse,
   GeneratedSavePlan,
-  GeneratedCacheMeta
+  GeneratedCacheMeta,
+  NovelMemoryBatchReviewRequest,
+  NovelMemoryBatchReviewResult,
+  NovelMemoryBatchPrepareResult,
+  NovelBackgroundTaskKind,
+  NovelRoomRequest,
+  NovelRoomResponse
 } from "@xiaoshuo/shared";
-import { generatedSavePlanSchema, skillRunRequestSchema, skillRunResponseSchema } from "@xiaoshuo/shared";
+import {
+  generatedSavePlanSchema,
+  novelMemoryBatchReviewRequestSchema,
+  novelMemoryBatchReviewResultSchema,
+  novelMemoryBatchPrepareResultSchema,
+  skillRunRequestSchema,
+  skillRunResponseSchema
+} from "@xiaoshuo/shared";
 import { AgentChatRunner, type ChatContextAssemblyObserver } from "./chat-runner.js";
 import { classifyAgentIntent, classifySkillManagementIntent, hasSkillAction, isReadContextIntent, rankSkillRoutes, type SkillManagementIntent } from "./intent-router.js";
 import { AgentPlanner, type AgentPlannerOptions } from "./planner.js";
@@ -96,6 +109,7 @@ import { CommitJournalService } from "./kernel/commit-journal-service.js";
 import { DurableWorkflowCheckpointStore } from "./kernel/workflow-checkpoint.js";
 import {
   GovernedMemoryStore,
+  governedMemoryClaimContentHash,
   type ConfirmGovernedMemoryClaimInput,
   type CreateGovernedMemoryClaimInput,
   type CreateGovernedMemoryOverrideInput,
@@ -105,6 +119,8 @@ import {
   type UpsertGovernedConversationMemoryInput,
   type ResolveGovernedMemoryConfirmationInput
 } from "./governed-memory-store.js";
+import { NovelRoomCoordinator } from "./novel-room-coordinator.js";
+import type { CanonClaim } from "./memory-governor.js";
 import { GovernedMemoryProjectionService } from "./governed-memory-projection-service.js";
 import { EvaluatorRegistry } from "./evaluator-registry.js";
 import { FeedbackLearner, type ArtifactFeedback } from "./feedback-learner.js";
@@ -159,6 +175,27 @@ export type GeneratedCacheCommitOptions = AgentRunOptions & {
   };
 };
 
+export type NovelBackgroundUnitInput = {
+  request_id: string;
+  project_id: string;
+  kind: NovelBackgroundTaskKind;
+  relative_path: string;
+  input_revision: string;
+  content: string;
+  max_input_tokens: number;
+  max_output_tokens: number;
+  max_cost_usd: number;
+};
+
+export type NovelBackgroundUnitResult = {
+  run_id: string;
+  report: string;
+  used_model_calls: number;
+  used_input_tokens: number;
+  used_output_tokens: number;
+  used_cost_usd: number;
+};
+
 type DeferredPromptSkillCommit = {
   kind: "prompt_skill_generated_cache";
   cache_id: string;
@@ -194,6 +231,7 @@ export class AgentRuntimeService {
   private readonly projectManifest: ProjectManifestService;
   private readonly featureFlags: AgentFeatureFlagRegistry;
   private readonly feedbackLearner: FeedbackLearner;
+  private readonly novelRoom: NovelRoomCoordinator;
   private governedMemoryStore: GovernedMemoryStore | null = null;
 
   constructor(options: AgentRuntimeOptions) {
@@ -314,6 +352,11 @@ export class AgentRuntimeService {
     this.skills = new SkillService({ projectRoot: options.projectRoot });
     this.conversations = new ConversationService({ projectRoot: options.projectRoot });
     this.documents = new DocumentService({ projectRoot: options.projectRoot });
+    this.novelRoom = new NovelRoomCoordinator({
+      projectRoot: options.projectRoot,
+      config: this.config,
+      gateway: this.modelClient instanceof ModelGateway ? this.modelClient : undefined
+    });
     this.cache = new GeneratedCacheService({ projectRoot: options.projectRoot, documentService: this.documents });
     this.savePlanner = new GeneratedSavePlanner({
       projectRoot: options.projectRoot,
@@ -348,6 +391,258 @@ export class AgentRuntimeService {
   async listGovernedMemoryClaims() {
     const { store, projectId } = await this.requireGovernedMemory();
     return store.listClaims(projectId);
+  }
+
+  async reviewNovelRoom(request: NovelRoomRequest, signal?: AbortSignal): Promise<NovelRoomResponse> {
+    if (!this.featureFlags.snapshot().novel_agent_room_v1) {
+      throw Object.assign(new Error("小说多角色编辑室当前已关闭"), { code: "NOVEL_AGENT_ROOM_DISABLED" });
+    }
+    const projectId = await this.projectManifest.getProjectId();
+    if (request.project_id !== projectId) {
+      throw codedRuntimeError("NOVEL_PROJECT_ID_MISMATCH", "小说审校请求与当前项目 UUID 不匹配");
+    }
+    const execution = this.runCoordinator.beginRun({
+      request_id: request.run_id,
+      autonomy_mode: "assist",
+      conversation_id: "",
+      content: request.instruction,
+      current_path: request.current_path,
+      selection: request.draft,
+      project_context_hint: "",
+      skill_id: "novel_room_review",
+      attachment_ids: [],
+      reference_paths: request.context_paths
+    }, {
+      projectId,
+      baseMemoryRevision: this.currentGovernedMemoryRevision(projectId),
+      stepType: "skill",
+      actionId: "novel.review",
+      skillId: "novel_room_review",
+      retryable: true,
+      requiresConfirmation: false,
+      signal
+    });
+    const run = this.runCoordinator.getRun(execution.run_id);
+    if (!run || "legacy_unbudgeted" in run.budget) {
+      this.runCoordinator.failRun(execution, codedRuntimeError("BUDGET_REQUIRED", "小说审校必须使用可信 durable 预算"));
+      throw codedRuntimeError("BUDGET_REQUIRED", "小说审校必须使用可信 durable 预算");
+    }
+    const governedRequest = {
+      ...request,
+      run_id: execution.run_id,
+      budget_id: run.budget.budget_id
+    };
+    return runContextStorage.run({
+      runId: execution.run_id,
+      stepId: execution.step_id,
+      attemptId: execution.attempt_id
+    }, async () => {
+      try {
+        const response = await this.novelRoom.review(governedRequest, execution.signal);
+        this.runCoordinator.completeRun(execution, {
+          run_id: execution.run_id,
+          intent: "skill",
+          reply: response.merged_summary,
+          results: [],
+          saved_paths: [],
+          requires_confirmation: false,
+          current_skill: "novel_room_review"
+        });
+        return response;
+      } catch (error) {
+        this.runCoordinator.failRun(execution, error);
+        throw error;
+      }
+    });
+  }
+
+  async runNovelBackgroundUnit(input: NovelBackgroundUnitInput, signal?: AbortSignal): Promise<NovelBackgroundUnitResult> {
+    if (!this.featureFlags.snapshot().novel_background_tasks_v1) {
+      throw codedRuntimeError("NOVEL_BACKGROUND_TASKS_DISABLED", "小说后台任务当前已关闭");
+    }
+    const projectId = await this.projectManifest.getProjectId();
+    if (input.project_id !== projectId) {
+      throw codedRuntimeError("NOVEL_PROJECT_ID_MISMATCH", "小说后台任务与当前项目 UUID 不匹配");
+    }
+    const content = String(input.content || "").slice(0, 60_000);
+    if (!content.trim()) {
+      throw codedRuntimeError("NOVEL_BACKGROUND_SOURCE_EMPTY", "小说后台任务没有可分析的内容");
+    }
+    const request: AgentRunRequest = {
+      request_id: input.request_id,
+      autonomy_mode: "assist",
+      conversation_id: "",
+      content: novelBackgroundInstruction(input.kind, input.relative_path),
+      current_path: input.relative_path,
+      selection: content,
+      project_context_hint: `输入 revision：${input.input_revision}`,
+      skill_id: `novel_background_${input.kind}`,
+      attachment_ids: []
+    };
+    const config = await loadModelConfig(this.config, "primary");
+    if (!config.configured) {
+      throw codedRuntimeError("MODEL_NOT_CONFIGURED", "小说后台任务需要先配置主线路模型");
+    }
+    const messages = buildNovelBackgroundMessages(input.kind, input.relative_path, content);
+    const estimatedInputTokens = conservativeInputTokenReservation(messages);
+    const outputCap = Math.max(1, Math.min(2_048, input.max_output_tokens));
+    if (estimatedInputTokens > input.max_input_tokens) {
+      throw codedRuntimeError("NOVEL_TASK_INPUT_TOKEN_BUDGET_EXHAUSTED", "小说后台任务剩余输入 token 预算不足");
+    }
+    const maximumCost = estimateCost(config.model, {
+      promptTokens: estimatedInputTokens,
+      completionTokens: outputCap,
+      totalTokens: estimatedInputTokens + outputCap
+    });
+    if (maximumCost > input.max_cost_usd) {
+      throw codedRuntimeError("NOVEL_TASK_COST_BUDGET_EXHAUSTED", "小说后台任务剩余费用预算不足");
+    }
+    let execution: DurableRunExecution;
+    try {
+      execution = this.runCoordinator.beginRun(request, {
+        projectId,
+        baseMemoryRevision: this.currentGovernedMemoryRevision(projectId),
+        stepType: "skill",
+        actionId: `novel.background.${input.kind}`,
+        skillId: `novel_background_${input.kind}`,
+        retryable: true,
+        requiresConfirmation: false,
+        signal
+      });
+    } catch (error) {
+      if (!(error instanceof RunRequestReplayError) || error.run.status !== "completed") {
+        throw error;
+      }
+      const exported = this.runCoordinator.exportRun(error.run.run_id);
+      const report = exported.observations.at(-1)?.summary || "该小说后台单元已完成。";
+      return novelBackgroundResult(error.run, report);
+    }
+    return runContextStorage.run({
+      runId: execution.run_id,
+      stepId: execution.step_id,
+      attemptId: execution.attempt_id
+    }, async () => {
+      try {
+        const report = await this.modelClient.requestCompletion(config, messages, 0.2, {
+          purpose: "verification",
+          dataClassification: "project",
+          signal: execution.signal,
+          runId: execution.run_id,
+          stepId: execution.step_id,
+          attemptId: execution.attempt_id,
+          maxOutputTokens: outputCap,
+          captureUsage: true
+        } as any);
+        this.runCoordinator.completeRun(execution, {
+          run_id: execution.run_id,
+          intent: "skill",
+          reply: report,
+          results: [],
+          saved_paths: [],
+          requires_confirmation: false,
+          current_skill: `novel_background_${input.kind}`
+        });
+        const completed = this.runCoordinator.getRun(execution.run_id);
+        if (!completed) throw codedRuntimeError("NOVEL_BACKGROUND_RUN_MISSING", "小说后台 durable run 完成后丢失");
+        return novelBackgroundResult(completed, report);
+      } catch (error) {
+        this.runCoordinator.failRun(execution, error);
+        throw error;
+      }
+    });
+  }
+
+  async prepareGovernedMemoryBatch(): Promise<NovelMemoryBatchPrepareResult> {
+    if (!this.featureFlags.snapshot().novel_memory_batch_review_v1) {
+      throw Object.assign(new Error("小说记忆批量审核当前已关闭"), { code: "NOVEL_MEMORY_BATCH_DISABLED" });
+    }
+    const { store, projectId } = await this.requireGovernedMemory();
+    const claims = store.listClaims(projectId);
+    const reviewable = claims.filter((claim) => claim.status === "draft" || claim.status === "proposed" || claim.status === "planned");
+    return novelMemoryBatchPrepareResultSchema.parse({
+      project_id: projectId,
+      items: reviewable.map((claim) => ({
+        claim_id: claim.id,
+        project_id: projectId,
+        source_path: claim.sourceRef || "memory://project",
+        source_revision: String(claim.revision),
+        content_hash: governedMemoryClaimContentHash(claim),
+        content: `${claim.subject} ${claim.predicate} ${claim.object}`,
+        claim_type: claim.predicate,
+        perspective: claim.perspective || "objective",
+        story_time: claim.storyTime ? JSON.stringify(claim.storyTime) : "",
+        subjective: claim.status === "planned" || claim.perspective === "character" || claim.perspective === "rumor",
+        conflict_summary: governedMemoryConflictSummary(claim, claims)
+      })),
+      excluded_claim_ids: claims.filter((claim) => !reviewable.includes(claim)).map((claim) => claim.id)
+    });
+  }
+
+  async confirmGovernedMemoryBatch(value: NovelMemoryBatchReviewRequest): Promise<NovelMemoryBatchReviewResult> {
+    if (!this.featureFlags.snapshot().novel_memory_batch_review_v1) {
+      throw Object.assign(new Error("小说记忆批量审核当前已关闭"), { code: "NOVEL_MEMORY_BATCH_DISABLED" });
+    }
+    const request = novelMemoryBatchReviewRequestSchema.parse(value);
+    const { store, projectId } = await this.requireGovernedMemory();
+    if (request.project_id !== projectId) {
+      throw Object.assign(new Error("批量记忆审核不能跨项目执行"), { code: "MEMORY_PROJECT_MISMATCH" });
+    }
+    const confirmed: string[] = [];
+    const rejected: string[] = [];
+    const stale: string[] = [];
+    for (const item of request.items) {
+      const claim = store.getClaim(projectId, item.claim_id);
+      if (!claim || String(claim.revision) !== item.source_revision || governedMemoryClaimContentHash(claim) !== item.content_hash) {
+        stale.push(item.claim_id);
+        continue;
+      }
+      if (item.subjective
+        || claim.status === "planned"
+        || claim.perspective === "character"
+        || claim.perspective === "rumor"
+        || governedMemoryConflictSummary(claim, store.listClaims(projectId))) {
+        rejected.push(item.claim_id);
+        continue;
+      }
+      const confirmationId = request.confirmation_ids[item.claim_id];
+      if (!confirmationId) {
+        rejected.push(item.claim_id);
+        continue;
+      }
+      try {
+        const requested = store.requestConfirmation({
+          projectId,
+          claimId: item.claim_id,
+          sourceRevision: claim.revision,
+          confirmationId
+        });
+        const approved = store.resolveConfirmation({
+          confirmationId: requested.confirmation_id,
+          expectedVersion: requested.version,
+          decision: "approved"
+        });
+        store.confirmClaim({
+          projectId,
+          claimId: item.claim_id,
+          confirmationId: approved.confirmation_id,
+          expectedConfirmationVersion: approved.version
+        });
+        confirmed.push(item.claim_id);
+      } catch {
+        stale.push(item.claim_id);
+      }
+    }
+    if (confirmed.length) {
+      this.pauseStaleMemoryRuns(projectId, store.getMemoryRevision(projectId));
+    }
+    return novelMemoryBatchReviewResultSchema.parse({
+      project_id: projectId,
+      batch_id: request.batch_id,
+      confirmed_claim_ids: confirmed,
+      rejected_claim_ids: rejected,
+      stale_claim_ids: stale,
+      status: confirmed.length === request.items.length ? "completed" : confirmed.length ? "partial" : "failed"
+    });
   }
 
   private async getConfirmedGovernedMemoryContext(): Promise<string> {
@@ -4741,6 +5036,67 @@ function durableAgentRequestToSkillRequest(request: AgentRunRequest): SkillRunRe
     confirmed_reference_paths: request.confirmed_reference_paths || [],
     disable_auto_references: Boolean(request.disable_auto_references)
   });
+}
+
+function novelBackgroundInstruction(kind: NovelBackgroundTaskKind, relativePath: string): string {
+  const target = relativePath || "当前小说项目";
+  return ({
+    full_consistency_scan: `检查 ${target} 的人物、设定、时间线、伏笔和前后逻辑一致性`,
+    story_index_rebuild: `从 ${target} 提取人物、关系、伏笔和时间线索引`,
+    batch_chapter_quality: `评估 ${target} 的剧情推进、节奏、视角、人物动机和可读性`,
+    material_summary: `整理并摘要小说素材 ${target}，区分事实、灵感和待核实内容`,
+    approved_chapter_drafts: `依据已确认的章纲和设定，为 ${target} 生成章节草稿，不直接写入正文`
+  } as const)[kind];
+}
+
+function buildNovelBackgroundMessages(
+  kind: NovelBackgroundTaskKind,
+  relativePath: string,
+  content: string
+): ChatCompletionMessage[] {
+  const format = kind === "approved_chapter_drafts"
+    ? "输出可供用户审阅的章节草稿；不要声称已经保存，也不要包含任何系统操作指令。"
+    : "输出结构化 Markdown 报告，列出证据、问题严重度和可执行建议；没有文本证据时明确标记为待核实。";
+  return [
+    {
+      role: "system",
+      content: [
+        "你是 ArcWriter 的小说创作后台处理器，只处理当前小说项目。",
+        "不得执行工具安装、Shell、跨项目写入、运行内核修改或 Confirmed Memory 确认。",
+        format
+      ].join("\n")
+    },
+    {
+      role: "user",
+      content: `${novelBackgroundInstruction(kind, relativePath)}\n\n【输入内容】\n${content}`
+    }
+  ];
+}
+
+function novelBackgroundResult(run: AgentRunState, report: string): NovelBackgroundUnitResult {
+  if ("legacy_unbudgeted" in run.budget) {
+    throw codedRuntimeError("BUDGET_REQUIRED", "小说后台任务不能使用 legacy unbudgeted run");
+  }
+  return {
+    run_id: run.run_id,
+    report,
+    used_model_calls: run.budget.used_model_calls,
+    used_input_tokens: run.budget.used_input_tokens,
+    used_output_tokens: run.budget.used_output_tokens,
+    used_cost_usd: run.budget.estimated_cost
+  };
+}
+
+function governedMemoryConflictSummary(claim: CanonClaim, claims: readonly CanonClaim[]): string {
+  const conflicts = claims.filter((candidate) =>
+    candidate.id !== claim.id
+    && candidate.status !== "superseded"
+    && candidate.subject === claim.subject
+    && candidate.predicate === claim.predicate
+    && candidate.object !== claim.object
+  );
+  if (!conflicts.length) return "";
+  return `与 ${conflicts.map((item) => `${item.id}（${item.object}）`).join("、")} 存在同主体同属性的不同值，需逐条处理`;
 }
 
 function isDurableSkillAgentRequest(request: AgentRunRequest): boolean {

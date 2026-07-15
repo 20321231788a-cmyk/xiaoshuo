@@ -2,6 +2,12 @@ import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type IpcMainEvent, ty
 import contextMenu from "electron-context-menu";
 import { download } from "electron-dl";
 import path from "node:path";
+import fs from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import AdmZip from "adm-zip";
+import { DocumentService } from "@xiaoshuo/document-service";
+import { ProjectManifestService, readExistingProjectId } from "@xiaoshuo/project-manifest";
+import type { NovelTypedActionRequest, NovelTypedActionResult, NovelUserGestureAction } from "@xiaoshuo/shared";
 import { resolveProjectRoot } from "./backend.js";
 import { getShellCapabilities } from "./capabilities.js";
 import {
@@ -23,21 +29,42 @@ import {
   TerminalUserGestureAuthorizationStore,
   type TerminalRendererAuthorizationIdentity
 } from "./terminal-user-gesture-authorization.js";
+import { NovelAgentControlService } from "./novel-agent-control-service.js";
+import {
+  NovelUserGestureAuthorizationStore,
+  type NovelRendererAuthorizationIdentity
+} from "./novel-user-gesture-authorization.js";
 import {
   cloudProjectDeleteRequestSchema,
   cloudProjectDownloadRequestSchema,
   cloudProjectUploadRequestSchema,
   desktopProjectExportRequestSchema,
   ipcChannels,
+  novelBackgroundTaskControlSchema,
+  novelBackgroundTaskCreateSchema,
+  novelMemoryBatchDesktopRequestSchema,
+  novelProjectTransferCommitRequestSchema,
+  novelProjectTransferPlanRequestSchema,
+  novelProjectTransferSourceConfirmRequestSchema,
+  novelProjectRootRequestSchema,
+  novelRoomDesktopRequestSchema,
+  novelToolInstallProposalRequestSchema,
+  novelToolInstallRequestSchema,
+  novelTypedActionRequestSchema,
+  novelUserGestureActionSchema,
+  novelWorkspaceProjectSchema,
   runtimeRequestSchema
 } from "../shared/channels.js";
 
 const runtimeState: RuntimeServerState = {};
 const terminalUserGestureAuthorizations = new TerminalUserGestureAuthorizationStore();
+const novelUserGestureAuthorizations = new NovelUserGestureAuthorizationStore();
+let novelAgentControlService: NovelAgentControlService | null = null;
 const appIconPath = path.join(app.getAppPath(), "assets", "quill.ico");
 const appDisplayTitle = `ArcWriter ${app.getVersion()}`;
 const updateService = new UpdateService({
   beforeInstall: async () => {
+    await novelAgentControlService?.pauseAll();
     killAllTerminals();
     closeLocalState();
     await stopRuntimeServer(runtimeState);
@@ -145,10 +172,12 @@ async function createWindow(): Promise<BrowserWindow> {
   const windowWebContentsId = window.webContents.id;
   window.on("closed", () => {
     terminalUserGestureAuthorizations.revoke(windowWebContentsId);
+    novelUserGestureAuthorizations.revoke(windowWebContentsId);
     killTerminalsForOwner(windowWebContentsId);
   });
   window.webContents.on("did-start-navigation", () => {
     terminalUserGestureAuthorizations.revoke(windowWebContentsId);
+    novelUserGestureAuthorizations.revoke(windowWebContentsId);
   });
   window.webContents.on("before-input-event", (event, input) => {
     if (input.type !== "keyDown" || !(input.control || input.meta)) {
@@ -204,6 +233,13 @@ function registerIpc(): void {
   const cloudProjectService = new CloudProjectService({
     appRoot: resolveProjectRoot(app.getAppPath()),
     tempRoot: app.getPath("temp")
+  });
+  novelAgentControlService = new NovelAgentControlService({
+    appRoot: resolveProjectRoot(app.getAppPath()),
+    statePath: path.join(app.getPath("userData"), "state", "novel-agent-control.json"),
+    getFeatureFlags: () => runtimeState.featureFlags,
+    getRuntimeRegistry: () => runtimeState.agentRuntimes ?? (runtimeState.agentRuntimes = new Map()),
+    getProjectIdentityRegistry: () => runtimeState.projectIdentityRegistry
   });
 
   ipcMain.handle(ipcChannels.appVersions, () => ({
@@ -298,6 +334,93 @@ function registerIpc(): void {
   ipcMain.handle(ipcChannels.localStateSyncProject, (_event, request) => syncProjectLocalState(request));
   ipcMain.handle(ipcChannels.localStatePatchSettings, (_event, request) => patchWorkbenchSettings(request));
   ipcMain.handle(ipcChannels.localStateTrackGeneratedCache, (_event, request) => trackGeneratedCacheMetadata(request));
+  ipcMain.on(ipcChannels.novelAuthorizeUserGesture, (event, value) => {
+    if (!isTrustedRuntimeRenderer(event)) return;
+    const action = novelUserGestureActionSchema.safeParse(value);
+    if (action.success) novelUserGestureAuthorizations.authorize(novelRendererIdentity(event), action.data);
+  });
+  ipcMain.handle(ipcChannels.novelSnapshot, (event, request) => {
+    assertTrustedNovelRenderer(event);
+    return requireNovelAgentService().snapshot(novelWorkspaceProjectSchema.parse(request));
+  });
+  ipcMain.handle(ipcChannels.novelIdentifyProject, async (event, request) => {
+    assertTrustedNovelRenderer(event);
+    const payload = novelProjectRootRequestSchema.parse(request);
+    const projectId = await readExistingProjectId(payload.project_root);
+    if (!projectId || !runtimeState.projectIdentityRegistry) throw new Error("当前目录不是已确认的 ArcWriter 小说项目");
+    runtimeState.projectIdentityRegistry.assertWritable(payload.project_root, projectId);
+    return { project_id: projectId, project_root: path.resolve(payload.project_root) };
+  });
+  ipcMain.handle(ipcChannels.novelReview, (event, request) => {
+    assertTrustedNovelRenderer(event);
+    return requireNovelAgentService().review(novelRoomDesktopRequestSchema.parse(request));
+  });
+  ipcMain.handle(ipcChannels.novelToolPropose, (event, request) => {
+    assertTrustedNovelRenderer(event);
+    return requireNovelAgentService().proposeTool(novelToolInstallProposalRequestSchema.parse(request));
+  });
+  ipcMain.handle(ipcChannels.novelToolInstall, (event, request) => {
+    consumeNovelGesture(event, "install_tool");
+    return requireNovelAgentService().installTool(novelToolInstallRequestSchema.parse(request));
+  });
+  ipcMain.handle(ipcChannels.novelActionRun, (event, request) => {
+    consumeNovelGesture(event, "typed_action");
+    return requireNovelAgentService().runTypedAction(
+      novelTypedActionRequestSchema.parse(request),
+      executeNovelTypedAction
+    );
+  });
+  ipcMain.handle(ipcChannels.novelBackgroundCreate, (event, request) => {
+    consumeNovelGesture(event, "background_create");
+    return requireNovelAgentService().createBackgroundTask(novelBackgroundTaskCreateSchema.parse(request));
+  });
+  ipcMain.handle(ipcChannels.novelBackgroundControl, (event, request) => {
+    consumeNovelGesture(event, "background_control");
+    return requireNovelAgentService().controlBackgroundTask(novelBackgroundTaskControlSchema.parse(request));
+  });
+  ipcMain.handle(ipcChannels.novelTransferPickProject, async (event) => {
+    assertTrustedNovelRenderer(event);
+    const result = await dialog.showOpenDialog({ title: "选择小说素材迁移项目", properties: ["openDirectory"] });
+    const projectRoot = result.canceled ? "" : result.filePaths[0] || "";
+    if (!projectRoot) return null;
+    const projectId = await readExistingProjectId(projectRoot);
+    if (!projectId || !runtimeState.projectIdentityRegistry) throw new Error("所选目录不是具有稳定 UUID 的 ArcWriter 小说项目");
+    const claim = await runtimeState.projectIdentityRegistry.reconfirm(projectRoot, projectId);
+    return { project_id: claim.projectId, project_root: claim.canonicalPath };
+  });
+  ipcMain.handle(ipcChannels.novelTransferPlan, (event, request) => {
+    consumeNovelGesture(event, "transfer_plan");
+    return requireNovelAgentService().createTransferPlan(novelProjectTransferPlanRequestSchema.parse(request));
+  });
+  ipcMain.handle(ipcChannels.novelTransferConfirmSource, (event, request) => {
+    consumeNovelGesture(event, "transfer_source_confirm");
+    return requireNovelAgentService().confirmTransferSource(
+      novelProjectTransferSourceConfirmRequestSchema.parse(request)
+    );
+  });
+  ipcMain.handle(ipcChannels.novelTransferCommit, (event, request) => {
+    consumeNovelGesture(event, "transfer_target_confirm");
+    const payload = novelProjectTransferCommitRequestSchema.parse(request);
+    return requireNovelAgentService().commitTransfer({
+      ...payload,
+      target_confirmation_id: `transfer_target_${randomUUID().replace(/-/g, "")}`
+    });
+  });
+  ipcMain.handle(ipcChannels.novelMemoryPrepare, (event, request) => {
+    assertTrustedNovelRenderer(event);
+    return requireNovelAgentService().prepareMemoryBatch(novelWorkspaceProjectSchema.parse(request));
+  });
+  ipcMain.handle(ipcChannels.novelMemoryConfirm, (event, request) => {
+    consumeNovelGesture(event, "memory_batch");
+    const payload = novelMemoryBatchDesktopRequestSchema.parse(request);
+    return requireNovelAgentService().confirmMemoryBatch(payload.project_root, {
+      ...payload.request,
+      confirmation_ids: Object.fromEntries(payload.request.items.map((item) => [
+        item.claim_id,
+        `memory_claim_${randomUUID().replace(/-/g, "")}`
+      ]))
+    });
+  });
   ipcMain.on(ipcChannels.terminalAuthorizeUserGesture, (event) => {
     if (!isTrustedRuntimeRenderer(event)) {
       return;
@@ -396,6 +519,104 @@ function terminalRendererIdentity(event: IpcMainEvent | IpcMainInvokeEvent): Ter
   };
 }
 
+function novelRendererIdentity(event: IpcMainEvent | IpcMainInvokeEvent): NovelRendererAuthorizationIdentity {
+  const window = BrowserWindow.fromWebContents(event.sender);
+  if (!window || !event.senderFrame) throw new Error("拒绝无法绑定窗口的渲染进程访问小说 Agent 控制面");
+  return { webContentsId: event.sender.id, browserWindowId: window.id, rendererUrl: event.senderFrame.url };
+}
+
+function assertTrustedNovelRenderer(event: IpcMainInvokeEvent): void {
+  if (!isTrustedRuntimeRenderer(event)) throw new Error("拒绝非受信任渲染进程访问小说 Agent 控制面");
+}
+
+function consumeNovelGesture(event: IpcMainInvokeEvent, action: NovelUserGestureAction): void {
+  assertTrustedNovelRenderer(event);
+  novelUserGestureAuthorizations.consume(novelRendererIdentity(event), action);
+}
+
+function requireNovelAgentService(): NovelAgentControlService {
+  if (!novelAgentControlService) throw new Error("小说 Agent 主进程服务尚未初始化");
+  return novelAgentControlService;
+}
+
+async function executeNovelTypedAction(request: NovelTypedActionRequest): Promise<NovelTypedActionResult> {
+  const documents = new DocumentService({ projectRoot: request.project_root });
+  const baseResult = { action: request.action, operation_id: request.operation_id, ok: true, output_path: "", message: "" };
+  if (request.action === "backup_project") {
+    const backupRoot = path.join(path.dirname(request.project_root), "ArcWriter Backups");
+    await fs.mkdir(backupRoot, { recursive: true });
+    const target = path.join(backupRoot, defaultProjectArchiveName(path.basename(request.project_root), request.project_root));
+    const output = await exportProjectArchive({ projectPath: request.project_root, targetPath: ensureZipExtension(target) });
+    return { ...baseResult, output_path: output, message: "小说项目备份已完成" };
+  }
+  if (request.action === "export_project") {
+    const result = await dialog.showSaveDialog({
+      title: "导出小说项目",
+      defaultPath: path.join(path.dirname(request.project_root), defaultProjectArchiveName(path.basename(request.project_root), request.project_root)),
+      filters: [{ name: "ArcWriter 项目归档", extensions: ["zip"] }]
+    });
+    if (result.canceled || !result.filePath) return { ...baseResult, ok: false, message: "用户取消导出" };
+    const output = await exportProjectArchive({ projectPath: request.project_root, targetPath: ensureZipExtension(result.filePath) });
+    return { ...baseResult, output_path: output, message: "小说项目导出完成" };
+  }
+  if (request.action === "open_project_folder") {
+    await shell.openPath(await documents.canonicalProjectRoot());
+    return { ...baseResult, output_path: request.project_root, message: "已打开小说项目目录" };
+  }
+  if (request.action === "rebuild_index") {
+    const output = "00_设定集/.agent/story-index.md";
+    const manifest = new ProjectManifestService(request.project_root);
+    const projectDocuments = (await manifest.listDocuments({ force: true }))
+      .map((item) => item.path.replace(/\\/g, "/"))
+      .filter((item) => /^(00_设定集|01_大纲|02_正文)\//.test(item) && /\.(md|txt)$/i.test(item) && !item.includes("/.agent/"));
+    const indexLines = ["# 本地故事索引", "", `重建时间：${new Date().toISOString()}`, "", "## 小说文档"];
+    for (const relativePath of projectDocuments) {
+      const content = await documents.readRawText(relativePath, 100_000).catch(() => "");
+      const headings = content.split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => /^(#{1,6}\s+|第.{1,20}章|人物[:：]|伏笔[:：]|时间线[:：])/.test(line))
+        .slice(0, 8);
+      indexLines.push("", `### ${relativePath}`, "", `- 字符数：${content.length}`);
+      if (headings.length) indexLines.push(`- 标题线索：${headings.join(" / ")}`);
+    }
+    if (!projectDocuments.length) indexLines.push("", "当前项目没有可索引的设定、大纲或正文文本。");
+    await documents.saveDocument(output, `${indexLines.join("\n")}\n`, {
+      source: "novel_typed_action",
+      summary: "重建本地故事索引"
+    });
+    return { ...baseResult, output_path: output, message: "本地故事索引已重建" };
+  }
+  const selected = await dialog.showOpenDialog({
+    title: request.action === "import_material" ? "选择小说参考素材" : "选择要转换的小说文档",
+    properties: ["openFile"],
+    filters: [{ name: "小说文档", extensions: request.action === "import_material" ? ["txt", "md", "epub"] : ["txt", "md"] }]
+  });
+  const sourcePath = selected.canceled ? "" : selected.filePaths[0] || "";
+  if (!sourcePath) return { ...baseResult, ok: false, message: "用户取消选择文件" };
+  const sourceContent = await readNovelMaterial(sourcePath);
+  const sourceName = path.basename(sourcePath, path.extname(sourcePath)).replace(/[^\p{L}\p{N}_-]+/gu, "_").slice(0, 80) || "material";
+  const extension = request.action === "convert_document"
+    ? (request.format === "md" ? ".md" : ".txt")
+    : ".txt";
+  const relative = `00_设定集/参考素材/${sourceName}${extension}`;
+  await documents.saveDocument(relative, sourceContent, { source: "novel_typed_action", summary: "导入小说参考素材" });
+  return { ...baseResult, output_path: relative, message: request.action === "convert_document" ? "小说文档已转换并导入" : "小说参考素材已导入" };
+}
+
+async function readNovelMaterial(sourcePath: string): Promise<string> {
+  const stats = await fs.stat(sourcePath);
+  if (!stats.isFile() || stats.size > 20 * 1024 * 1024) throw new Error("小说素材必须是 20MB 以内的普通文件");
+  if (path.extname(sourcePath).toLowerCase() !== ".epub") return fs.readFile(sourcePath, "utf8");
+  const zip = new AdmZip(sourcePath);
+  const text = zip.getEntries()
+    .filter((entry) => !entry.isDirectory && /\.(xhtml|html|htm)$/i.test(entry.entryName))
+    .map((entry) => entry.getData().toString("utf8").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .join("\n\n");
+  if (!text) throw new Error("EPUB 中没有可导入的正文内容");
+  return text;
+}
+
 function isTrustedRendererUrl(value: string): boolean {
   return hasTrustedRendererUrl(value, {
     runtimeUrl,
@@ -436,10 +657,16 @@ app.whenReady().then(async () => {
   updateService.scheduleStartupCheck();
 });
 
-app.on("before-quit", () => {
+let quitCleanupComplete = false;
+app.on("before-quit", (event) => {
+  if (quitCleanupComplete) return;
+  event.preventDefault();
   killAllTerminals();
   closeLocalState();
-  void stopRuntimeServer(runtimeState);
+  void Promise.all([novelAgentControlService?.pauseAll(), stopRuntimeServer(runtimeState)]).finally(() => {
+    quitCleanupComplete = true;
+    app.quit();
+  });
 });
 
 app.on("window-all-closed", () => {

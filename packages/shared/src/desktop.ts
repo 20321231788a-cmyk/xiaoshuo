@@ -1,4 +1,29 @@
 import { z } from "zod";
+import type {
+  NovelAgentWorkspaceSnapshot,
+  NovelBackgroundTask,
+  NovelBackgroundTaskControl,
+  NovelBackgroundTaskCreate,
+  NovelMemoryBatchDesktopRequest,
+  NovelMemoryBatchPrepareResult,
+  NovelMemoryBatchReviewResult,
+  NovelProjectTransferCommitRequest,
+  NovelProjectTransferPlan,
+  NovelProjectTransferPlanRequest,
+  NovelProjectTransferResult,
+  NovelProjectTransferSourceConfirmRequest,
+  NovelProjectTransferSourceConfirmResult,
+  NovelProjectRootRequest,
+  NovelRoomDesktopRequest,
+  NovelRoomResponse,
+  NovelToolInstallProposal,
+  NovelToolInstallProposalRequest,
+  NovelToolInstallRequest,
+  NovelToolInstallResult,
+  NovelTypedActionRequest,
+  NovelTypedActionResult,
+  NovelWorkspaceProject
+} from "./schemas/novel-agent.js";
 
 export const desktopIpcChannels = {
   appVersions: "app:versions",
@@ -25,6 +50,21 @@ export const desktopIpcChannels = {
   localStateSyncProject: "local-state:sync-project",
   localStatePatchSettings: "local-state:patch-settings",
   localStateTrackGeneratedCache: "local-state:track-generated-cache",
+  novelAuthorizeUserGesture: "novel:authorize-user-gesture",
+  novelIdentifyProject: "novel:identify-project",
+  novelSnapshot: "novel:snapshot",
+  novelReview: "novel:review",
+  novelToolPropose: "novel:tool-propose",
+  novelToolInstall: "novel:tool-install",
+  novelActionRun: "novel:action-run",
+  novelBackgroundCreate: "novel:background-create",
+  novelBackgroundControl: "novel:background-control",
+  novelTransferPickProject: "novel:transfer-pick-project",
+  novelTransferPlan: "novel:transfer-plan",
+  novelTransferConfirmSource: "novel:transfer-confirm-source",
+  novelTransferCommit: "novel:transfer-commit",
+  novelMemoryPrepare: "novel:memory-prepare",
+  novelMemoryConfirm: "novel:memory-confirm",
   terminalCreate: "terminal:create",
   terminalWrite: "terminal:write",
   terminalResize: "terminal:resize",
@@ -384,6 +424,22 @@ export type XiaoShuoDesktopApi = {
     syncProject: (request: LocalStateSyncProjectRequest) => Promise<LocalStateSnapshot>;
     patchSettings: (request: LocalStatePatchSettingsRequest) => Promise<LocalStateSnapshot>;
     trackGeneratedCache: (request: LocalStateTrackGeneratedCacheRequest) => Promise<LocalStateSnapshot>;
+  };
+  novelAgent: {
+    identifyProject: (request: NovelProjectRootRequest) => Promise<NovelWorkspaceProject>;
+    snapshot: (request: NovelWorkspaceProject) => Promise<NovelAgentWorkspaceSnapshot>;
+    review: (request: NovelRoomDesktopRequest) => Promise<NovelRoomResponse>;
+    proposeTool: (request: NovelToolInstallProposalRequest) => Promise<NovelToolInstallProposal>;
+    installTool: (request: NovelToolInstallRequest) => Promise<NovelToolInstallResult>;
+    runAction: (request: NovelTypedActionRequest) => Promise<NovelTypedActionResult>;
+    createBackgroundTask: (request: NovelBackgroundTaskCreate) => Promise<NovelBackgroundTask>;
+    controlBackgroundTask: (request: NovelBackgroundTaskControl) => Promise<NovelBackgroundTask>;
+    pickTransferProject: () => Promise<NovelWorkspaceProject | null>;
+    createTransferPlan: (request: NovelProjectTransferPlanRequest) => Promise<NovelProjectTransferPlan>;
+    confirmTransferSource: (request: NovelProjectTransferSourceConfirmRequest) => Promise<NovelProjectTransferSourceConfirmResult>;
+    commitTransfer: (request: NovelProjectTransferCommitRequest) => Promise<NovelProjectTransferResult>;
+    prepareMemoryBatch: (request: NovelWorkspaceProject) => Promise<NovelMemoryBatchPrepareResult>;
+    confirmMemoryBatch: (request: NovelMemoryBatchDesktopRequest) => Promise<NovelMemoryBatchReviewResult>;
   };
   terminal: {
     create: (request?: TerminalCreateRequest) => Promise<TerminalSession>;

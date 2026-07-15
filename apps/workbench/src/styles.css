@@ -18,6 +18,222 @@
   color: var(--ink);
 }
 
+.xw-novel-agent-page {
+  gap: 14px;
+  overflow: auto;
+}
+
+.xw-novel-agent-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 36px;
+  border-bottom: 1px solid var(--border-color, #d9dde3);
+}
+
+.xw-novel-agent-tabs > button:not(.xw-icon-button) {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: inherit;
+}
+
+.xw-novel-agent-tabs > button.active {
+  border-bottom-color: #28765b;
+  color: #175e46;
+  font-weight: 600;
+}
+
+.xw-novel-agent-tabs .xw-icon-button {
+  margin-left: auto;
+}
+
+.xw-novel-agent-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(340px, 1.1fr);
+  gap: 14px;
+  min-height: 0;
+}
+
+.xw-novel-agent-section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.xw-novel-agent-section h3 {
+  margin: 0;
+  font-size: 15px;
+  letter-spacing: 0;
+}
+
+.xw-novel-agent-section textarea,
+.xw-novel-agent-section input,
+.xw-novel-agent-section select {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.xw-novel-role-picker,
+.xw-novel-action-row,
+.xw-section-head,
+.xw-novel-transfer-projects {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.xw-section-head {
+  justify-content: space-between;
+}
+
+.xw-novel-action-row select {
+  width: auto;
+  min-width: 210px;
+  max-width: 100%;
+}
+
+.xw-novel-role-picker label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.xw-novel-role-picker input,
+.xw-novel-memory-list input {
+  width: auto;
+}
+
+.xw-novel-review-results article,
+.xw-novel-tool-list article,
+.xw-novel-task-list article {
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-color, #d9dde3);
+}
+
+.xw-novel-review-results article p {
+  margin: 6px 0;
+  white-space: pre-wrap;
+}
+
+.xw-novel-issue,
+.xw-novel-conflict {
+  margin-top: 6px;
+  padding-left: 9px;
+  border-left: 3px solid #6a7785;
+}
+
+.xw-novel-issue.blocking,
+.xw-novel-conflict {
+  border-left-color: #b4473c;
+}
+
+.xw-novel-tool-list,
+.xw-novel-task-list,
+.xw-novel-memory-list {
+  display: grid;
+  gap: 8px;
+}
+
+.xw-novel-tool-list article,
+.xw-novel-task-list article {
+  display: grid;
+  gap: 7px;
+}
+
+.xw-novel-tool-list article > div,
+.xw-novel-task-list article > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.xw-novel-tool-list em {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: #28765b;
+  font-style: normal;
+}
+
+.xw-novel-action-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.xw-novel-action-grid button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+}
+
+.xw-novel-task-list progress {
+  width: 100%;
+}
+
+.xw-novel-transfer-projects span,
+.xw-novel-transfer-projects strong {
+  overflow-wrap: anywhere;
+}
+
+.xw-novel-transfer-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.xw-novel-transfer-fields label {
+  display: grid;
+  gap: 5px;
+}
+
+.xw-novel-diff {
+  max-height: 340px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  padding: 10px;
+  border: 1px solid var(--border-color, #d9dde3);
+  background: #f7f8f9;
+}
+
+.xw-novel-memory-list label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 9px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--border-color, #d9dde3);
+}
+
+.xw-novel-memory-list label span {
+  display: grid;
+  gap: 4px;
+}
+
+.xw-novel-memory-list label.disabled {
+  opacity: 0.65;
+}
+
+.xw-muted {
+  color: #68717c;
+}
+
+@media (max-width: 1050px) {
+  .xw-novel-agent-grid,
+  .xw-novel-transfer-fields {
+    grid-template-columns: 1fr;
+  }
+}
+
 * {
   box-sizing: border-box;
 }

@@ -1,427 +1,197 @@
-# ArcWriter 项目维护交接手册
+# ArcWriter 项目维护交接
 
-> 最近整理：2026-07-13
+> 更新：2026-07-15
 >
-> 当前版本：0.4.0
+> 当前版本：`0.9.0`（Preview 渠道）
 >
-> 当前结论：Batch A、Batch B 和最终集中验收已完成，本轮修改通过代码验收；M2～P5 仍处于集成阶段，P7 仅完成证据机制。不是 RC，也不能声明生产就绪。
+> 定位：免费、小范围使用的 AI 小说写作 Preview，不按商业软件验收
 
-本文只保留接手工作需要的当前事实、操作入口、约束和可复用证据。2026-06-13 至 2026-07-13 的逐文件开发流水已从正文移除，需要时通过 Git 历史查询，不再把过期测试结果和已被推翻的状态长期堆叠在交接手册中。
+## 1. 当前结论
 
-## 1. 先看这里
+0.5.0～0.9.0 已合并为一次交付，不再维护五套开发和验收周期。P0～P7 及小说 Agent 七项受控替代能力已经完成并通过集中验收；普通 Desktop 启动默认启用集成 Preview 配置，`--safe-agent` 可一键回退。
 
-### 1.1 文档职责
+Agent 当前执行口径只认两份文档：
 
-| 文档 | 用途 |
+| 文档 | 职责 |
 | --- | --- |
-| `docs/PROJECT_MAINTENANCE_HANDOFF.md` | 当前运维、接手入口、剩余工作和关键证据 |
-| `docs/AGENT_OPTIMIZATION_MODIFICATION_MANUAL.md` | Agent 优化的上位设计、阶段契约和第 19 节安全边界 |
-| `docs/AGENT_OPTIMIZATION_NEXT_IMPLEMENTATION_MANUAL.md` | 当前 Batch A、Batch B、最终验收和退出条件 |
-| `README.md` | 仓库启动与基础开发说明 |
-| Git 历史 | 已完成版本和逐刀实现的完整审计记录 |
+| `docs/PROJECT_MAINTENANCE_HANDOFF.md` | 唯一维护事实源，记录当前代码、命令、验收和交接状态 |
+| `docs/AGENT_NOVEL_CREATION_MODIFICATION_PLAN.md` | 小说创作 Agent 七项受控能力的实现契约和集中验收方案 |
 
-若三份 Agent 文档出现冲突，当前执行节奏以优化手册第 17、20 节和后续实施手册第 0.3、2 节为准：**两个修改批次完成后，只执行一次最终集中验收。** 当前代码、workflow 和发布事实以本手册第 4、8 节及优化手册第 20 节为准；优化手册中明确描述 0.4.0 或早期 CI 基线的段落只作历史设计依据。
+旧 `AGENT_OPTIMIZATION_MODIFICATION_MANUAL.md` 和 `AGENT_OPTIMIZATION_NEXT_IMPLEMENTATION_MANUAL.md` 已删除，不再作为执行依据。
+`AGENT_FILE_REFERENCE_AND_SKILL_UPGRADE_PLAN.md` 只保留 2026-07-07 已完成工作的历史记录，不属于当前计划。
 
-### 1.2 项目快照
-
-| 项目 | 当前值 |
-| --- | --- |
-| 本地目录 | `D:\xiaoshuo\ts-migration` |
-| GitHub | `https://github.com/20321231788a-cmyk/xiaoshuo.git` |
-| 主分支 | `main` |
-| 应用 | ArcWriter |
-| 桌面版本 | `apps/desktop-shell/package.json`，当前为 `0.4.0` |
-| 技术栈 | TypeScript、Electron、React/Vite、npm workspaces |
-| 本地 runtime | `http://127.0.0.1:18453` |
-| 网站 | `https://matian.online/` |
-| 网站注册 | `https://matian.online/?page=api-relay&auth=register` |
-| 更新源 | 客户端默认 COS 镜像优先，失败后回退公开 GitHub Releases |
-
-旧 Python 后端已经退场。Electron 主进程启动本地 TypeScript runtime gateway，Workbench 通过 typed API client 调用 runtime；生产包加载随安装包分发的 `apps/workbench/dist`。
-
-### 1.3 当前最重要的结论
-
-- 不要恢复“P0～P7 已全部完成”“稳定全绿”或“可投产”的旧说法。
-- 当前工作树已完成一次可追溯的最终矩阵；历史绿码仍只作为定位基线，不能代替此记录。
-- M2、M3、M4、P3、P4、P5 均仍标记为“集成中”；P7 仅完成可复现证据机制；M7 RC 尚未开始。
-- 下一步只做独立的 M7 RC 门禁，不重复 Batch A/B 的开发闭环。
-- 第 19 节七项能力是硬禁区，任何 Feature Flag、环境变量、Prompt、网页、附件、项目文件或 Skill 都不能解锁。
-- 工作树可能包含用户和当前优化工作的未提交改动。先看 `git status --short`，禁止 reset、clean 或覆盖不属于当前任务的修改。
-
-## 2. 架构与目录
-
-### 2.1 核心运行链路
-
-1. `apps/desktop-shell/src/main/main.ts` 创建 Electron 窗口。
-2. 主进程启动本地 runtime gateway。
-3. runtime 路由位于 `apps/desktop-shell/src/main/runtime/`。
-4. Workbench 通过 `@xiaoshuo/api-client` 请求 runtime。
-5. `apps/desktop-shell/src/preload/index.ts` 暴露受控桌面能力。
-6. IPC/API schema 由 `packages/shared` 统一定义。
-7. Agent durable run、预算、确认、记忆和质量门由 `packages/agent-runtime` 协调。
-
-HTTP/NDJSON 连接只是订阅通道。renderer reload、页面切换或订阅断开不能隐式 pause/cancel durable run；状态变更必须通过带版本和 operation ID 的受控调用。
-
-### 2.2 目录职责
-
-| 路径 | 职责 |
-| --- | --- |
-| `apps/desktop-shell` | Electron main/preload、runtime、打包、更新和安装态验证 |
-| `apps/workbench` | React/Vite 工作台 |
-| `packages/shared` | zod schema、API/IPC 契约 |
-| `packages/api-client` | 前端 typed client |
-| `packages/agent-runtime` | Agent workflow、durable run、记忆、上下文和质量门 |
-| `packages/document-service` | 项目文档、归档、时间线和安全写入 |
-| `packages/generated-cache` | 生成缓存、预览、提交和恢复 |
-| `packages/config-service` | `studio_config.json` 与 AI profile |
-| `packages/model-client` | OpenAI-compatible 模型调用 |
-| `packages/conversation-service` | 会话、附件和摘要 |
-| `packages/vector-service` | SQLite 向量索引与图谱 |
-| `tests/e2e` | Browser Playwright E2E |
-| `.github/workflows` | Windows PR、RC/nightly 和 release gate |
-
-### 2.3 关键持久数据
-
-| 数据 | 位置/权威来源 |
-| --- | --- |
-| Durable run | 项目内 `00_设定集/.agent/agent_runs.sqlite3` |
-| Governed memory | 项目内 `00_设定集/.agent/governed_memory.sqlite3` |
-| Generated cache | `00_设定集/.agent/generated_cache/` |
-| 项目身份 | project manifest 的稳定 UUID，加 canonical path/file identity guard |
-| AI 配置 | 本地 `studio_config.json` |
-
-不要把进程内 Map、UI state 或 Trace 当成持久事实源。
-
-## 3. 本地环境与启动
-
-推荐 Windows + Node 22。在仓库根目录执行：
+本批全部修改完成后已运行唯一集中验收：
 
 ```powershell
+npm run acceptance:preview
+```
+
+该结果只用于 Preview 代码验收。签名、950 条商业数据集、sealed holdout、1000 次故障注入、2 小时 soak、固定设备性能、盲评和正式 release evidence 均为未来商业化事项。
+
+## 2. 快速开始
+
+```powershell
+cd D:\xiaoshuo\ts-migration
 npm install
 npm run dev:desktop
 ```
 
-只启动 Workbench：
+常用命令：
+
+| 目的 | 命令 |
+| --- | --- |
+| 启动 Workbench | `npm run dev:workbench` |
+| 启动 Desktop | `npm run dev:desktop` |
+| 安全模式 | `npm run dev:desktop -- --safe-agent` |
+| Preview 总验收 | `npm run acceptance:preview` |
+| 无签名安装包 | `npm run dist -w @xiaoshuo/desktop-shell` |
+
+本地 runtime 默认是 `http://127.0.0.1:18453`。受保护调用必须经 preload/IPC 获取会话能力，renderer 不得直接拼接认证信息。
+
+## 3. 架构入口
+
+| 范围 | 路径 |
+| --- | --- |
+| Electron main/preload/runtime | `apps/desktop-shell/src/` |
+| React 工作台 | `apps/workbench/src/` |
+| API 与 IPC schema | `packages/shared/src/` |
+| Typed API client | `packages/api-client/src/` |
+| Agent、run、记忆、上下文、质量门 | `packages/agent-runtime/src/` |
+| 文档与安全写入 | `packages/document-service/src/` |
+| 生成缓存 | `packages/generated-cache/src/` |
+| Browser E2E | `tests/e2e/` |
+| Windows workflow | `.github/workflows/` |
+
+持久事实源：
+
+- durable run：项目内 `00_设定集/.agent/agent_runs.sqlite3`；
+- governed memory：项目内 `00_设定集/.agent/governed_memory.sqlite3`；
+- generated cache：项目内 `00_设定集/.agent/generated_cache/`；
+- 项目身份：manifest 稳定 UUID + canonical path/file identity；
+- AI 配置：本机 `studio_config.json`。
+
+UI state、进程内 Map 和 Trace 不是持久事实源。
+
+## 4. Preview 配置
+
+Desktop 普通启动默认开启：durable execution、Model Gateway、replanning、context budget、governed memory、memory selector、quality gate、event stream 和 inline plan UI。
+
+配置入口：`apps/desktop-shell/src/main/agent-feature-flags.ts`。
+
+规则：
+
+- 合法持久覆盖可关闭产品能力；
+- 非法配置文件 fail closed，全部关闭且不自动恢复；
+- `--safe-agent` 最高优先级，全部关闭但不改写 userData；
+- runtime 通用库默认仍为关闭；
+- 安全控制和七项原始高风险能力不能通过普通 Feature Flag 直接解锁。
+
+## 5. 小说 Agent 七项受控能力
+
+当前 `0.9.0` 仍硬禁用以下原始能力：
+
+1. 多 Agent 并行协作；
+2. Agent 自行安装工具/库；
+3. Agent 或模型执行任意 shell/代码；用户手动 terminal 必须有真实用户手势并走 Electron/IPC；
+4. Agent 修改并发布自身内核；
+5. 无预算后台自治；
+6. 未确认跨项目写入；
+7. draft 未经二次确认进入 Confirmed Memory。
+
+关键实现位于 `packages/agent-runtime/src/negative-capability-policy.ts`、`action-executor.ts`、main-process terminal 授权、持久预算、项目身份和 governed-memory confirmation receipt。
+
+同一批次已经实现以下受控替代路径：
+
+| 能力 | 目标形态 |
+| --- | --- |
+| 多 Agent | 固定剧情、人物、连续性、文风角色最多三个只读并行审校，主笔合并 |
+| 工具安装 | 内置小说工具白名单、hash/版本校验、真实手势确认；“安装”只激活随应用发布的工具 |
+| Shell/代码 | 小说专用类型化 Electron/IPC 动作；schema 不接受 executable、shell、argv、环境或源/目标执行路径 |
+| 自我修改 | 只生成 Skill/Prompt/rubric 草稿，不能修改或发布运行内核 |
+| 后台自治 | 持久化 token/费用/时间/步骤预算，退出暂停，恢复沿用原预算和输入 revision |
+| 跨项目写入 | 用户选择双项目、预览 diff、双确认、持久 journal 提交和崩溃恢复 |
+| Confirmed Memory | 保持二次确认，提供逐条 receipt 的批量审核 UI |
+
+Workbench 入口为“状态 -> 小说 Agent”。主进程事实源为 userData `state/novel-agent-control.json`，迁移恢复备份位于目标项目 `00_设定集/.agent/transfer-journals/`。详细契约见 `docs/AGENT_NOVEL_CREATION_MODIFICATION_PLAN.md`。
+
+## 6. 验收与失败处理
+
+开发中不重复跑根级验收。小说 Agent 计划的所有修改结束后已执行：
 
 ```powershell
-npm run dev:workbench
+npm run acceptance:preview
 ```
 
-更换桌面 preview 端口：
+执行过程中仅定向重跑失败项；所有失败修复后完成了一次最终总验收。新增小说多 Agent、工具、IPC、后台任务、跨项目迁移和记忆审核测试均已接入该命令。
+
+最终结果：全 workspace typecheck 通过；Vitest 112 个测试文件、878 个测试通过；3 个 Node 测试通过；8 个 eval manifest 通过，其中 `novel-agent` 19/19；Workbench/Desktop build 通过；Browser E2E 6/6；Desktop smoke 通过；`git diff --check` 通过。`excluded-capabilities` 为 116/116，原始七项高风险入口仍不可达。
+
+`desktop-rc.yml` 的 nightly 路径可生成无签名 Preview artifact；严格 `channel=rc` 和 `release.yml` 留给未来商业化，不阻塞本次小范围使用。
+
+## 7. 打包与回退
 
 ```powershell
-npm run dev:desktop -- --port 4191
+npm run dist -w @xiaoshuo/desktop-shell
 ```
 
-已有 renderer 时可使用 `XIAOSHUO_RENDERER_URL`。`XIAOSHUO_RUNTIME_URL` 只影响启动脚本传给 renderer 的 URL，不能让 Electron 复用外部 runtime；主进程仍会启动绑定本进程 session token 的本地 runtime。不要把该变量描述成 runtime 复用开关，也不要让测试探针误连正在使用的正式实例。
+产物目录：`apps/desktop-shell/release/`。无签名包可能触发 Windows SmartScreen，符合当前小范围 Preview 定位。
 
-### 3.1 AI 与网站配置
+回退优先使用 `--safe-agent`。版本回退前备份整个小说项目；不要用旧版本写入已经升级的 SQLite schema。卸载默认不删除用户数据。
 
-配置分为：
+## 8. 常见问题
 
-- `manual_profile`：本地 API Key、Base URL、模型、`temperature`、`top_p`。
-- `website_profile`：网站 token、模型、`temperature`、`top_p`。
+| 现象 | 检查 |
+| --- | --- |
+| runtime 401 | 是否绕过 preload/IPC session token |
+| Agent 功能全部关闭 | 是否使用 `--safe-agent`，或 userData Flag 文件是否合法 |
+| 项目写入被拒绝 | manifest UUID、canonical root、symlink/junction、file identity |
+| run 无法恢复 | version、budget、memory revision、lease/attempt |
+| Browser E2E 绿但安装后失败 | Browser token 不是安装态 IPC 证据 |
+| `rg` 入口失效 | 执行 `Get-Command rg`、`rg --version`；本仓库已恢复使用系统 ripgrep，不再依赖失效别名 |
 
-`ai_config_mode` 只选择当前 profile，切换模式不能覆盖另一套配置。网站 token、API Key 和隐藏 Base URL 不应暴露到 UI、日志、Trace 或 CI artifact。网站账号、模型、兑换和充值请求必须经本地 runtime 代理。
+## 9. 提交纪律
 
-### 3.2 不得提交
-
-- `studio_config.json`
-- `.env`、`.env.*`
-- `dist/`、`release/`、`output/`
-- `coverage/`、`test-results/`、`playwright-report/`
-- `sandbox-projects/`
-- 日志、截图、临时项目和手工测试产物
-
-提交前始终执行：
+先检查：
 
 ```powershell
-git status --short
-git diff --stat
-```
-
-不要使用 `git add .` 收集不明确的文件。
-
-## 4. 当前实现状态
-
-| 范围 | 状态 | 当前事实 | 剩余出口 |
-| --- | --- | --- | --- |
-| M0/M1 | 本轮代码验收通过 | 文档口径已校准；Desktop smoke 认证经 preload/IPC，最终 smoke 通过 | M7 installed-build 和发布证据 |
-| M2 | 集成中，本轮代码验收通过 | 主执行门和八个子 Flag 均有生产消费者及关闭路径 | M7 独立的 Flag 放量与回滚演练 |
-| M3/P6 | 集成中，本轮代码验收通过 | 会话计划卡/Trace 使用真实 run/version/step；E2E 6/6 覆盖控制、冲突、reload 与确认 | packaged installed-build 证据留给 M7 |
-| M4 | 集成中，本轮代码验收通过 | Negative Capability Gate、用户终端手势、预算、Action receipt、项目身份均已接入；excluded-capabilities manifest 110/110 | M7 安装/发布级安全证据 |
-| P3 | 集成中，本轮代码验收通过 | governed store、二次确认、来源失效、结构化摘要、治理 UI、投影/重建和 100 轮隔离回放已接入 | M7 的完整 RC 证据 |
-| P4 | 集成中，本轮代码验收通过 | ContextScheduler 覆盖 chat/skill 上下文，并保留 Flag 回退 | M7 版本化上下文质量数据 |
-| P5 | 集成中，本轮代码验收通过 | 统一 pre-save quality gate、报告和经确认 feedback 已接线 | M7 人工质量校准 |
-| P7 | 证据机制完成，本阶段未完成 | 每个 eval 写 manifest/hash/case/artifact；Windows workflow 使用 `always()` 上传 | sealed holdout、最低数据规模、统计协议和人工校准 |
-| M7 | 预演中 | 本地构建了 0.4.0 安装器；安装/卸载和 0.3.2 → 0.4.0 → 0.3.2 通过；dirty evidence 被拒绝；RC/release 强制 13 类数据集/holdout declaration | 干净候选、签名、真实数据规模、installed-build、soak、人工校准和 release evidence |
-
-### 4.1 可复用的历史证据
-
-| 范围 | 历史证据 | 限制 |
-| --- | --- | --- |
-| M3 | Browser E2E 6/6 | 使用 test-only runtime token，不是安装态 IPC 证据 |
-| M4 | `eval:excluded-capabilities` 11 files / 104 tests，E2E 6/6，Desktop smoke | 属于较早代码树，不替代最终矩阵 |
-| P3/B3 | 9 files / 178 tests，相关 workspace typecheck | L2/L3 未执行；只证明定向实现基线 |
-| M2 子 Flag | runtime + desktop route 2 files / 117 tests，两个 workspace typecheck 和 diff check | 后增的高负载 fixture 已移除，不算绿色证据 |
-
-不得把表中结果相加后宣称“当前全绿”。
-
-## 5. 下一步执行
-
-### 5.1 本轮开发闭环已结束
-
-Batch A 已完成 durable UI 状态校准、P4 token 上下文调度/回退和 P5 统一质量门/确认反馈；Batch B 已完成 Eval Manifest、固定 seed、fixture/case hash、诊断 artifact 与 Windows workflow 上传。固定六命令矩阵最终复跑已通过，详细记录见 12.3。
-
-不要为同一工作树重新执行 Batch A/B，也不要把浏览器 harness 的 token 或 source smoke 称为安装态发布证据。
-
-### 5.2 后续仅限 M7 RC 门禁
-
-1. 建立符合手册最低规模的版本化数据集和至少 20% sealed holdout，完成统计协议和人工质量校准。
-2. 在干净候选 commit 上执行 clean install/build、installed-build smoke、Authenticode 签名/时间戳和同 commit release evidence；本地 `NotSigned` 包不能复用。
-3. 复跑已接线的 previous-release download、安装、升级、回滚 smoke，并演练 SQLite migration/backup、commit journal 故障恢复和至少两小时长任务 soak。
-4. 验证发布包与 COS/GitHub 更新回退链路；在所有 M7 证据齐备前不得 bump release 或创建 tag。
-
-## 6. 第 19 节安全边界
-
-以下七项在 0.5.0～0.9.0 内保持硬禁用：
-
-1. 多 Agent 并行协作。
-2. Agent 自行安装任意工具或库。
-3. Agent 或模型驱动的任意 shell/代码执行；唯一例外是与 Agent 隔离、经真实用户手势和 Electron/IPC 主进程受控通道创建的用户手动 terminal。
-4. Agent 自动修改和发布自身运行内核。
-5. 无预算后台自治任务。
-6. 未经确认的跨项目越权写入。
-7. 未经用户二次确认，把模型 draft 直接写入 Confirmed Memory。
-
-执行不变量：
-
-- Agent Action Registry、runtime API、模型 tool schema 和 Skill manifest 不暴露 `terminal.*`。
-- 用户手动 terminal 是独立 capability，只能经 Electron preload/IPC/main process 和真实用户手势创建。
-- 当前跨项目写入直接拒绝；未来若讨论放开，必须另立 ADR、精确 scope receipt 和专属安全评估。
-- Confirmed Memory 固定遵循 `draft -> proposed -> confirmed`；模型最多创建 draft/proposed。
-- 每个 run 必须有步骤、重规划、模型调用、token、费用和 deadline 预算。
-- 未知 actor、capability、scope 或缺失确认一律 fail closed。
-- 任何 Feature Flag 都不能开启本节能力。
-
-负向门禁统一由 `npm run eval:excluded-capabilities` 覆盖，并进入最终矩阵和未来 RC/release。
-
-## 7. Git 与普通推送
-
-普通代码或文档修改：
-
-```powershell
-git branch --show-current
 git status --short
 git diff --stat
 git diff --check
 ```
 
-只暂存明确文件：
+禁止 `reset --hard`、`clean`、覆盖用户修改和 `git add .`。不要提交 `studio_config.json`、`.env*`、`dist/`、`release/`、测试报告、日志、截图或临时项目。
 
-```powershell
-git add <明确文件列表>
-git commit -m "concise English message"
-git push origin main
-```
+## 10. 状态记录
 
-当前 Batch A/B 期间，提交不是测试触发器。可以按可回滚能力拆提交，但不要在提交边界重复跑全量测试，也不要把无关 UI、格式化、构建产物或用户文件混入提交。
+历史的 Batch A/Batch B、M7 商业 RC 预演和逐文件测试流水保留在 Git 历史，不再堆入交接正文。
 
-## 8. CI、打包与发布
+2026-07-14 集成交付变更：
 
-### 8.1 当前工作流
+- 0.5.0～0.9.0 合并为 `0.9.0` Preview；
+- Desktop 默认启用完整 Preview Feature Flag 配置；
+- `--safe-agent` 和非法配置保持全关闭；
+- 新增 `npm run acceptance:preview`；
+- 商业 RC 要求移出当前完成门槛；
+- 七项原始高风险能力的硬门禁保持不变；
+- 最终集中验收：`npm run acceptance:preview` 已通过；112 files / 878 tests、3/3 Node tests、8 类 eval（novel-agent 19/19）、两个 build、Browser E2E 6/6、Desktop smoke 和 diff check 全部成功；excluded-capabilities 为 116/116。
 
-| Workflow | 作用 | 当前限制 |
-| --- | --- | --- |
-| `windows-pr-ci.yml` | main/PR 的 typecheck、test、build、Browser E2E、Desktop source smoke 和全部 eval | `always()` 上传 eval manifest、失败摘要、脱敏 trace、性能/安全计数；不替代 RC |
-| `desktop-rc.yml` | nightly/手动 RC 打包、安装态 smoke、完整 eval 和 evidence | P7 artifact 已接线；数据规模、签名与人工校准仍由 M7 关闭 |
-| `release.yml` | `v*` tag 的 Windows release gate、签名、安装态 smoke 和发布 | 也暴露 `workflow_dispatch`，但非 tag ref 当前会被 tag/version 校验拒绝；M7 前不得用于宣称生产就绪 |
+首次矩阵曾因 `0.9.0-preview.1` 不符合 Windows 三段式 ProductVersion 停在发布证据测试。保持严格校验并改用包版本 `0.9.0` 后，定向测试和完整矩阵均通过。当前结论是“0.9 Preview 代码验收完成”，不是商业生产就绪。
 
-M7 仍必须确保 tag release 消费同一 commit 的不可变 RC 证据，不能只在打 tag 后临时补门禁。当前 release workflow 只发布 GitHub 资产，不负责同步或验证 COS 镜像；正式发布流程必须另行提供镜像同步/校验证据，或明确验证客户端能安全回退 GitHub。
+本轮最终复跑首次在一个 SQLite/文件恢复用例上触发默认 5 秒超时；该用例单独复现为 195ms。仅将该用例超时上限调整为 15 秒，定向复验通过，随后完整矩阵通过。
 
-### 8.2 本地打包
+2026-07-14 文档收口：
 
-```powershell
-npm run build:workbench
-npm run build:desktop
-npm run dist -w @xiaoshuo/desktop-shell
-```
+- 删除两份旧 Agent 优化/后续实施计划；
+- 新增 `AGENT_NOVEL_CREATION_MODIFICATION_PLAN.md`；
+- 七项能力采用“统一修改、全部完成后集中验收”，本批已经完成；
+- 产品方向固定为小说创作，不扩展为通用编程、运维或无人自治 Agent；
+- 七项受控小说能力的 shared schema、runtime、main/preload IPC、Workbench 页面、持久状态和负向测试已接入；
+- Desktop Preview 默认开启六个小说 Agent Feature Flag，`--safe-agent` 全部关闭；
+- 新增 `novel-agent` eval，并把小说手势门禁加入 excluded-capabilities；
+- 原始七项高风险入口未放宽，最终集中验收已通过并完成回填。
 
-产物位于 `apps/desktop-shell/release/`：
+2026-07-15 Git 收口：
 
-- `ArcWriter-Setup-x.y.z.exe`
-- `ArcWriter-Setup-x.y.z.exe.blockmap`
-- `latest.yml`
-- `win-unpacked/`
-
-`latest.yml.path` 必须与真实 exe 文件名一致。
-
-### 8.3 正式发布
-
-只有 M7 前置条件满足后才执行：
-
-1. 修改 `apps/desktop-shell/package.json` 的 version，并同步 lockfile：
-
-```powershell
-npm install --package-lock-only -w @xiaoshuo/desktop-shell
-```
-
-2. 提交并推送干净的版本化候选 commit，但不要创建 tag。
-3. 配置受保护的 `release-candidate` environment 及其中的 `WIN_CSC_LINK`、`WIN_CSC_KEY_PASSWORD`，手工触发 `desktop-rc.yml` 的 `channel=rc`。
-4. 确认签名/时间戳、installed smoke、升级/回滚、完整 eval、外部 soak/故障演练/人工校准均绑定同一候选 SHA，且两个 RC artifact 唯一、未过期。
-5. 只有上述证据齐备后，才创建并推送与 version 完全一致的 annotated tag：
-
-```powershell
-git tag -a vx.y.z -m "ArcWriter x.y.z"
-git push origin vx.y.z
-```
-
-6. `release.yml` 只需要 production approval 和发布权限；它复验并晋级已有 RC artifact，不接收签名 secrets、不重新构建。
-7. Release 必须包含 exe、blockmap、`latest.yml` 和最终 `release-evidence.json`；该 evidence 内嵌安装/升级证据并记录 RC run、attempt 与两个 artifact ID。
-
-发布后验证：
-
-```powershell
-$version = "x.y.z"
-$base = "https://github.com/20321231788a-cmyk/xiaoshuo/releases/download/v$version"
-Invoke-WebRequest -UseBasicParsing -Method Head "$base/latest.yml" -MaximumRedirection 5
-Invoke-WebRequest -UseBasicParsing -Method Head "$base/ArcWriter-Setup-$version.exe" -MaximumRedirection 5
-Invoke-WebRequest -UseBasicParsing -Method Head "$base/ArcWriter-Setup-$version.exe.blockmap" -MaximumRedirection 5
-Invoke-WebRequest -UseBasicParsing -Method Head "$base/release-evidence.json" -MaximumRedirection 5
-```
-
-tag 已推送但 workflow 失败时，不在旧 tag 上堆修复或强推。修复后升补丁版本、提交 main，再创建新 tag。
-
-## 9. 常见故障
-
-| 现象 | 首要检查 |
-| --- | --- |
-| runtime 401 | 受保护调用是否绕过 preload/IPC session token |
-| Browser E2E 通过但安装态失败 | Browser harness 使用 test-only token，不能替代 installed Electron |
-| `latest.yml` 存在但 exe 404 | `artifactName`、version、tag 和 `latest.yml.path` 是否一致 |
-| Release 只有源码包 | workflow 的 files glob 和前序打包步骤 |
-| 签名失败 | production secrets、证书有效期和时间戳 |
-| `electron-updater` 在 ESM 下崩溃 | 是否通过兼容加载方式引入 |
-| 原生依赖在 CI 重建失败 | dist/release 的 `-c.npmRebuild=false` 是否被误删 |
-| 项目写入被 scope guard 拒绝 | manifest UUID、canonical root、symlink/junction 和 file identity |
-| run 无法恢复 | expected version、budget、memory revision、lease/attempt 状态 |
-| `rg` 无法执行 | 先运行 `rg --version` 和 `Get-Command rg`；当前已验证 ripgrep 15.1.0 |
-
-不要通过关闭认证、放宽路径校验、跳过确认或扩大预算来“修复”测试。
-
-## 10. 按任务找入口
-
-| 任务 | 首要文件 |
-| --- | --- |
-| Electron 生命周期/runtime | `apps/desktop-shell/src/main/main.ts`、`runtime-server.ts`、`main/runtime/` |
-| preload/IPC/terminal | `apps/desktop-shell/src/preload/index.ts`、`src/shared/channels.ts` |
-| Workbench UI | `apps/workbench/src/App.tsx`、`features/`、`hooks/controllers/`、`styles.css` |
-| API 契约 | `packages/shared/src/schemas/`、`packages/api-client/src/client.ts` |
-| Agent 执行 | `packages/agent-runtime/src/runtime.ts`、`planner.ts`、`chat-runner.ts` |
-| Durable run | `packages/agent-runtime/src/kernel/` |
-| Governed memory | `packages/agent-runtime/src/governed-memory-store.ts` 及 memory/projection 模块 |
-| 项目文档/Journal | `packages/document-service`、agent runtime commit journal |
-| AI 配置/模型 | `packages/config-service/src/service.ts`、`packages/model-client` |
-| 发布/更新 | `apps/desktop-shell/package.json`、`update-service.ts`、`.github/workflows/` |
-
-## 11. 历史索引
-
-### 11.1 版本索引
-
-| 日期 | 版本 |
-| --- | --- |
-| 早期标签 | v0.1.0～v0.1.7（仓库没有 v0.1.8） |
-| 2026-06-13 | v0.1.9、v0.2.0 |
-| 2026-06-14 | v0.2.1、v0.2.2 |
-| 2026-06-15 | v0.2.3、v0.2.4、v0.2.5 |
-| 2026-06-16 | v0.2.6、v0.2.7 |
-| 2026-06-20 | v0.2.8 |
-| 2026-06-26 | v0.2.9、v0.3.0 |
-| 2026-06-28 | v0.3.1、v0.3.2 |
-| 2026-07-08 | 0.4.0 版本同步 |
-
-具体变更、commit、构建结果和发布资产以 Git tag、GitHub Release 和 Git 历史为准。
-
-### 11.2 工程里程碑
-
-| 日期 | 里程碑 | 当前解释 |
-| --- | --- | --- |
-| 2026-06-20 | GraphRAG-lite、拆书树和分屏工作台 | 早期功能基线 |
-| 2026-07-07 | Workflow Registry、ContextAssembler、GraphMemory、Eval、Controller 和 Skill 平台化 | 原型/基础设施，不等同当前 P3～P7 完成 |
-| 2026-07-10 | P0 durable run、Execution Store、CommitJournal、恢复、认证和发布门禁 | 主体实现已有历史证据 |
-| 2026-07-11 | M1 smoke 认证、M2 gate、M3 计划卡、M4 Negative Capability Gate | 后续多次校准，现状见第 4 节 |
-| 2026-07-13 | Batch A/B 收口、Eval artifact 机制和最终矩阵 | 本轮代码验收通过；M7 RC 证据仍未形成 |
-
-2026-07-11 曾出现“P3～P7 100% 绿过/完成”的记录，随后代码审阅确认生产消费者、Manifest、安装态和 RC 证据不完整，该结论已经撤销，不得恢复。
-
-## 12. 接手与后续记录
-
-### 12.1 接手检查
-
-1. 阅读本文件和两份优化手册。
-2. 执行 `git status --short`，区分用户改动、当前批次和生成产物。
-3. 确认 Node 22、`npm --version` 和 `rg --version`。
-4. 不重新执行旧 B1/B2/B3 或逐 Flag 验收。
-5. 不重复 Batch A/B；从 M7 数据集、安装态和发布证据开始。
-6. 先核对 12.3 记录和候选 commit，再生成新的 RC 证据。
-7. 候选版本可在严格 RC commit 中设置；未取得 M7 证据前不得创建 tag 或 GitHub Release。
-
-### 12.2 交接记录规则
-
-不要恢复 `15.1～15.92` 式逐小改动流水。Batch A、Batch B 和最终集中验收全部结束后，只追加一条合并记录：
-
-```markdown
-### YYYY-MM-DD Batch A + Batch B 集中验收
-
-- 候选 commit：
-- Batch A 范围：
-- Batch B 范围：
-- Flag 开/关与回滚：
-- 数据迁移：
-- 中途例外检查：
-- 首次六命令矩阵：
-- 失败项与定向重跑：
-- 修复后的完整矩阵最终复跑：
-- 复用的历史证据：
-- RC 未完成项：
-```
-
-记录必须写实际命令、结果和未完成项。禁止只写“全绿”“完成”或测试数量，不得把开发闭环验收描述为 RC/生产发布证据。
-
-### 12.3 2026-07-13 Batch A + Batch B 集中验收
-
-- 状态：本轮修改通过代码验收；M2～P5 继续为集成中，P7 仅完成可复现证据机制，非 RC 候选。
-- 候选快照：本节记录提交前的本地开发验收，不声明可复用的 RC commit；任何后续候选都必须在自身 commit 上重跑门禁。
-- Batch A 范围：durable UI 控制后的 run/event 校准，`ContextScheduler` 的 chat/skill 调度与 Flag 回退，以及 generated cache、文件操作、项目文档的统一 quality gate 和用户确认 feedback。
-- Batch B 范围：`scripts/run-eval.mjs`、Eval Manifest/fixture inventory、case/failure/trace/performance/security artifact、三个 Windows workflow 的 `always()` 上传。
-- Flag 开/关与回滚：`context_budget_v2=off` 回到 legacy assembler；`memory_context_selector_v2=off` 保留 P4a 预算；`quality_gate_v2=off` 回到旧保存检查；其他已有 v2 Flag 保持各自 fail-closed/legacy 分支。
-- 数据迁移：Execution Store migration 2（P5 feedback store）和 migration 3（M4 model budget ledger）保留 pre-migration backup/只读高 schema 隔离；回滚使用已校验 backup，不 down-migrate 用户数据。
-- 中途例外检查：定向 Playwright `project-entry.spec.ts` 6/6，用于修复协作式暂停后的事件/状态同步。
-- 首次六命令矩阵：typecheck、test、E2E、Desktop smoke 通过；`eval:excluded-capabilities` 在 Windows 以 `shell: false` 启动 `npx.cmd` 时发生 `spawn EINVAL`，测试未执行。
-- 失败项与定向重跑：运行器改为由当前 Node 直接启动锁定的 Vitest 入口；`npm run eval:excluded-capabilities` 通过并生成 manifest。
-- 修复后的完整矩阵最终复跑：`npm run typecheck` 通过；`npm test` 103 files / 836 tests；`npm run test:e2e` 6/6；`npm run smoke:desktop` 通过；`npm run eval:excluded-capabilities` 110/110、pass rate 1；`git diff --check` 通过（仅 CRLF 预警）。
-- 复用的同 commit 证据：无；本节结果仅作为历史开发验收记录，不得替代后续候选自己的 same-commit CI/RC evidence。
-- RC 未完成项：最低数据规模、sealed holdout、clean install/build、installed-build smoke、签名/时间戳、安装/升级/回滚、soak、人工质量校准和 same-commit release evidence。
-
-### 12.4 2026-07-13 M7 本地预演
-
-- 本地 `npm run dist -w @xiaoshuo/desktop-shell` 产生 `ArcWriter-Setup-0.4.0.exe` 与 blockmap；因前台工具时限，构建改为后台监控，最终产物与 electron-builder 成功日志均存在。
-- `smoke-installed-desktop.ps1` 对该安装器的静默安装、启动观测和卸载通过。
-- 新增 `smoke-upgrade-rollback-desktop.ps1`，使用本地 0.3.2 基线与 0.4.0 候选完成安装、升级、回滚、启动观测和卸载。
-- 新增 previous-release 下载脚本；RC/release workflow 现在要求此基线并将升级/回滚 evidence 绑定候选安装器 hash、source commit 和发布 evidence。
-- 本地构建来自 dirty workspace，evidence 写入 `workspace_dirty=true`，验证器按预期拒绝；Authenticode 检查为 `NotSigned`，没有证书时不得绕过。
-- 新增 `verify-rc-eval-evidence.mjs`；RC/release 需要 13 类数据集、每类最低 case 数、至少 20% sealed holdout 和 project-group 声明。缺少 `evals/rc-dataset-manifest.json` 的负向验证已确认 fail closed。
-- M7 仍未完成：干净同 commit 安装包、有效签名/时间戳、真实数据集/holdout、soak、人工校准、迁移故障演练和真实 CI/release evidence。
-
-### 12.5 2026-07-13 M7 RC Gate Strengthening
-
-- 版本纪律：已发布 tag 及其 commit 不得重用、强推或补写证据。新的严格 RC 必须使用版本一致的干净候选 commit；在同 commit 的 RC evidence 全部通过前，不得创建对应 annotated tag 或 GitHub Release。
-- 改动：`desktop-rc.yml` 的 preview timeout 为 90 分钟、严格 RC 为 180 分钟，但该数值不等同已执行两小时 soak。RC 中间产物改放 Git 忽略的 `output/`，避免 smoke 自身制造 untracked dirty；上传 bundle 只含当前版本 installer/blockmap/`latest.yml`、声明引用的 dataset metadata 和证据，不再递归上传整个 `release/**` 或 `evals/**`。
-- Preview 决策：公开仓库的小范围免费试用走 unsigned nightly；仅在 `main` push 或手工 `channel=nightly` 时执行，不配置 cron 或无预算后台自治任务。nightly 不绑定 GitHub Environment、不读取签名 secrets、不要求 13 类 RC 数据或人工 approval，但仍执行 typecheck、unit、现有 eval（含负向能力）、build、E2E、source smoke、installed smoke 和 upgrade/rollback。只有完整成功才上传保留 7 天的 Actions `arcwriter-nightly-<sha>`；失败 run 只允许上传不含 installer/release 目录、保留 7 天的诊断 artifact。新的 nightly/main push 会取消同 ref 的旧 nightly，严格 RC 不自动取消且 artifact 保留 30 天。preview 不是 GitHub Release/更新通道，不降低 RC/production 门禁。
-- 改动：安装和升级 smoke 从实际 `git rev-parse HEAD`、`git status --porcelain` 取证。dirty 默认拒绝；`-AllowDirtyWorkspace` 仅允许本地预演继续，证据仍记录 `workspace_dirty=true`，release verifier 必须看到显式 `false`。
-- 改动：升级 fixture 从 execution-store schema v2 开始。候选安装态通过受控 CLI probe 调用真实 Electron runtime 打开项目并读取未完成 run，再迁移到 v3、产生一份健康 v2 backup；baseline/candidate/rollback 三阶段均从已安装 `ArcWriter.exe` 的 Windows `ProductVersion` 绑定实际应用版本，并要求 `typescript-electron` health，校验项目 hash、SQLite `quick_check`、pending run、commit-journal backup 和 phase-aware migration，rollback 必须保留同一 backup。
-- 改动：`run-rc-evals.mjs` 要求独立 `rc-runner-manifest.json`，逐 dataset 以 repository-local Vitest 文件调用 `run-eval.mjs --case-manifest`。普通 7 组 workspace eval 不能冒充 13 类 RC 数据。`verify-rc-eval-evidence.mjs` 继续从 case metadata 和 case-level 结果计算最低数量、holdout、project-group 隔离、hash、pass rate、P50/P95 和 source commit。
-- 改动：`Release Desktop` 只接受 annotated version tag，按 exact SHA 筛选一个成功的手工 RC run，并要求该 run 内唯一、未过期的 `arcwriter-rc-<sha>` 与 `eval-evidence-rc-<sha>`。下载后使用固定目录和精确文件名复验签名、schema v2 release evidence、状态契约和评测证据；promotion evidence 记录 RC run/attempt 与两个 artifact ID，并以最终 `release-evidence.json` 发布，RC 原始 evidence 保持只读。发布前再次查询 run、artifact 和远端 tag target，不重新构建安装器。
-- 本地验证：根 `npm test` 已串接 `test:node-scripts`；两个 Node 门禁测试覆盖 RC evidence、Release promotion provenance、额外文件/runtime probe 拒绝及 manifest-bound RC dispatcher，定向执行 2/2 通过。相关 `.mjs` 均通过 `node --check`，两个 workflow 通过 YAML 解析；缺少真实 dataset/runner manifest 时 RC dispatcher 按预期 fail closed。临时假安装器仅验证证据绑定逻辑，不是签名、安装态或 RC 证据。
-- 候选验收：历史 CI、失败 run、过期 artifact 或 dirty workspace 产物均不能作为候选证据。每个候选 commit 都必须重新取得同 SHA 的成功 Windows/RC run、不可歧义的 artifact ID 和完整 evidence；交接文档不固化某个临时 HEAD。
-- 严格 RC 前置：最少 950 个经授权真实 case、`evals/rc-dataset-manifest.json`、`evals/rc-runner-manifest.json`、受保护的 `release-candidate`/`production` environment，以及仅存于 `release-candidate` 的代码签名 secrets。2 小时 soak、累计 1000 次 crash boundary、10 次固定设备性能记录及双盲人工评审可跳过 preview，但 production gate 仍保留；候选 commit 上必须完整重跑自动矩阵。
+- 本批小说 Agent 代码、测试、Feature Flag、Workbench、评测和文档作为一个完整变更提交；
+- 提交前最终证据沿用第 6 节的 `npm run acceptance:preview` 完整通过结果；
+- 本次只创建本地 Git commit，不创建 tag、不推送 Release，也不宣称商业 RC 或生产就绪。

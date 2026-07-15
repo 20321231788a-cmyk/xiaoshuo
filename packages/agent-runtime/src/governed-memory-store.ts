@@ -310,7 +310,7 @@ export class GovernedMemoryStore {
       project_id: projectId,
       claim_id: claim.id,
       source_revision: claim.revision,
-      content_hash: claimContentHash(claim),
+      content_hash: governedMemoryClaimContentHash(claim),
       version: 1,
       status: "requested",
       requested_at: now,
@@ -379,7 +379,7 @@ export class GovernedMemoryStore {
         throw new GovernedMemoryError(GOVERNED_MEMORY_ERROR_CODES.confirmationExpired, "memory confirmation 已过期");
       }
       const claim = this.requireClaim(projectId, input.claimId);
-      if (!canConfirm(claim.status) || claim.revision !== receipt.source_revision || claimContentHash(claim) !== receipt.content_hash) {
+      if (!canConfirm(claim.status) || claim.revision !== receipt.source_revision || governedMemoryClaimContentHash(claim) !== receipt.content_hash) {
         throw new GovernedMemoryError(GOVERNED_MEMORY_ERROR_CODES.confirmationScopeMismatch, "memory claim 已变更，旧确认回执不能复用");
       }
       promoted = { ...claim, status: "confirmed", revision: claim.revision + 1 };
@@ -859,7 +859,7 @@ function canConfirm(status: CanonClaim["status"]): boolean {
   return status === "draft" || status === "proposed" || status === "planned";
 }
 
-function claimContentHash(claim: CanonClaim): string {
+export function governedMemoryClaimContentHash(claim: CanonClaim): string {
   return sha256StableJson({
     id: claim.id,
     projectUuid: claim.projectUuid,

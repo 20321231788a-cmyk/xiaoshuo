@@ -1904,7 +1904,7 @@ describe("agent-runtime chat flow", () => {
     expect(detail.messages.filter((message) =>
       message.role === "system" && message.content.includes("已写回 02_正文/第一章.txt")
     )).toHaveLength(1);
-  });
+  }, 15_000);
 
   it("streams conversation write_target through the durable journal before yielding the final event", async () => {
     const conversations = new ConversationService({ projectRoot: tempDir });

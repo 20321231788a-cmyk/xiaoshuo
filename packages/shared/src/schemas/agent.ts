@@ -465,7 +465,13 @@ export const DEFAULT_AGENT_FEATURE_FLAG_SNAPSHOT = {
   memory_context_selector_v2: false,
   quality_gate_v2: false,
   agent_event_stream_v2: false,
-  agent_inline_plan_ui: false
+  agent_inline_plan_ui: false,
+  novel_agent_room_v1: false,
+  novel_tool_catalog_v1: false,
+  novel_typed_actions_v1: false,
+  novel_background_tasks_v1: false,
+  novel_project_transfer_v1: false,
+  novel_memory_batch_review_v1: false
 } as const;
 
 const agentFeatureFlagSnapshotV1Schema = z
@@ -479,12 +485,26 @@ const agentFeatureFlagSnapshotV1Schema = z
     memory_context_selector_v2: z.boolean(),
     quality_gate_v2: z.boolean(),
     agent_event_stream_v2: z.boolean(),
-    agent_inline_plan_ui: z.boolean()
+    agent_inline_plan_ui: z.boolean(),
+    novel_agent_room_v1: z.boolean(),
+    novel_tool_catalog_v1: z.boolean(),
+    novel_typed_actions_v1: z.boolean(),
+    novel_background_tasks_v1: z.boolean(),
+    novel_project_transfer_v1: z.boolean(),
+    novel_memory_batch_review_v1: z.boolean()
   })
   .strict();
 
 export const agentFeatureFlagSnapshotSchema = z.preprocess(
-  (value) => (isEmptyObject(value) ? undefined : value),
+  (value) => {
+    if (isEmptyObject(value)) {
+      return undefined;
+    }
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      return { ...DEFAULT_AGENT_FEATURE_FLAG_SNAPSHOT, ...(value as Record<string, unknown>) };
+    }
+    return value;
+  },
   agentFeatureFlagSnapshotV1Schema.default(DEFAULT_AGENT_FEATURE_FLAG_SNAPSHOT)
 );
 

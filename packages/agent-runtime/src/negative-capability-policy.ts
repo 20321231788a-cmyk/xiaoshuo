@@ -37,6 +37,7 @@ const AGENT_ACTION_ALLOWLIST = new Set([
   "search_web_material",
   "check_graph_consistency",
   "evaluate_artifact",
+  "run_novel_review",
   "propose_save"
 ]);
 
@@ -54,7 +55,8 @@ const FORBIDDEN_AGENT_CAPABILITIES: ReadonlyArray<readonly [string, NegativeCapa
 ];
 
 /**
- * Code-level deny-by-default boundary for the seven exclusions in Manual §19.
+ * Deny-by-default boundary for the seven raw capabilities tracked by the
+ * novel-focused Agent modification plan.
  * Product flags never participate in this decision, so a prompt, Skill or
  * environment value cannot turn one of these capabilities back on.
  */

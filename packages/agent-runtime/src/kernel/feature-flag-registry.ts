@@ -27,7 +27,13 @@ export const AGENT_FEATURE_FLAG_DEFINITIONS: readonly AgentFeatureFlagDefinition
   flag("memory_context_selector_v2", false, ["context_budget_v2", "memory_v2"]),
   flag("quality_gate_v2", false, ["agent_execution_v2_mode"]),
   flag("agent_event_stream_v2", false, ["agent_execution_v2_mode"]),
-  flag("agent_inline_plan_ui", false, ["agent_execution_v2_mode"])
+  flag("agent_inline_plan_ui", false, ["agent_execution_v2_mode"]),
+  flag("novel_agent_room_v1", false, ["agent_execution_v2_mode", "model_gateway_v2"]),
+  flag("novel_tool_catalog_v1", false, ["agent_execution_v2_mode"]),
+  flag("novel_typed_actions_v1", false, ["agent_execution_v2_mode"]),
+  flag("novel_background_tasks_v1", false, ["agent_execution_v2_mode"]),
+  flag("novel_project_transfer_v1", false, ["agent_execution_v2_mode"]),
+  flag("novel_memory_batch_review_v1", false, ["agent_execution_v2_mode", "memory_v2"])
 ];
 
 /**
@@ -44,7 +50,13 @@ export const AGENT_PERSISTABLE_FEATURE_FLAG_KEYS: readonly AgentFeatureFlagKey[]
   "memory_context_selector_v2",
   "quality_gate_v2",
   "agent_event_stream_v2",
-  "agent_inline_plan_ui"
+  "agent_inline_plan_ui",
+  "novel_agent_room_v1",
+  "novel_tool_catalog_v1",
+  "novel_typed_actions_v1",
+  "novel_background_tasks_v1",
+  "novel_project_transfer_v1",
+  "novel_memory_batch_review_v1"
 ];
 
 export const agentFeatureFlagOverridesSchema = z
@@ -57,7 +69,13 @@ export const agentFeatureFlagOverridesSchema = z
     memory_context_selector_v2: z.boolean().optional(),
     quality_gate_v2: z.boolean().optional(),
     agent_event_stream_v2: z.boolean().optional(),
-    agent_inline_plan_ui: z.boolean().optional()
+    agent_inline_plan_ui: z.boolean().optional(),
+    novel_agent_room_v1: z.boolean().optional(),
+    novel_tool_catalog_v1: z.boolean().optional(),
+    novel_typed_actions_v1: z.boolean().optional(),
+    novel_background_tasks_v1: z.boolean().optional(),
+    novel_project_transfer_v1: z.boolean().optional(),
+    novel_memory_batch_review_v1: z.boolean().optional()
   })
   .strict();
 
@@ -136,7 +154,13 @@ function normalize(snapshot: AgentFeatureFlagSnapshot): AgentFeatureFlagSnapshot
       memory_context_selector_v2: false,
       quality_gate_v2: false,
       agent_event_stream_v2: false,
-      agent_inline_plan_ui: false
+      agent_inline_plan_ui: false,
+      novel_agent_room_v1: false,
+      novel_tool_catalog_v1: false,
+      novel_typed_actions_v1: false,
+      novel_background_tasks_v1: false,
+      novel_project_transfer_v1: false,
+      novel_memory_batch_review_v1: false
     };
   }
 
@@ -145,6 +169,12 @@ function normalize(snapshot: AgentFeatureFlagSnapshot): AgentFeatureFlagSnapshot
   }
   if (!snapshot.context_budget_v2 || !snapshot.memory_v2) {
     snapshot = { ...snapshot, memory_context_selector_v2: false };
+  }
+  if (!snapshot.model_gateway_v2) {
+    snapshot = { ...snapshot, novel_agent_room_v1: false };
+  }
+  if (!snapshot.memory_v2) {
+    snapshot = { ...snapshot, novel_memory_batch_review_v1: false };
   }
   return snapshot;
 }

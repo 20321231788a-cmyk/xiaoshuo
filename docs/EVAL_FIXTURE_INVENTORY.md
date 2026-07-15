@@ -14,6 +14,10 @@ The manifest records the seed policy, command, commit, host OS, duration and
 case-level outcomes. The same directory contains a redacted failure trace,
 failure-case summary, performance baseline and security/recovery counters.
 
-The inventory mechanism is complete for the current fixture set. Dataset scale,
-sealed holdout and human calibration remain RC gates described in
-`AGENT_OPTIMIZATION_NEXT_IMPLEMENTATION_MANUAL.md`.
+The inventory now includes the `novel-agent` eval for fixed-role review,
+per-claim memory confirmation, the built-in tool catalog, budgeted background
+tasks, revision-bound project transfer, shared-schema injection rejection and
+the two-step transfer confirmation contract. The excluded-capabilities eval
+also includes both renderer and main-process novel user-gesture gates. The
+single acceptance policy remains defined in
+`AGENT_NOVEL_CREATION_MODIFICATION_PLAN.md`.

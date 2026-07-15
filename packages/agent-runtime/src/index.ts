@@ -31,3 +31,4 @@ export * from "./governed-memory-projection-service.js";
 export * from "./evaluator-registry.js";
 export * from "./feedback-learner.js";
 export * from "./negative-capability-policy.js";
+export * from "./novel-room-coordinator.js";
