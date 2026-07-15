@@ -46,6 +46,36 @@ async function openAssistantWorkspace(page: Page) {
   await expect(page.getByRole("button", { name: "新开对话", exact: true })).toBeVisible();
 }
 
+function documentApiPath(relativePath: string) {
+  return `/api/documents/${relativePath.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+async function createWritingProject(prefix: string) {
+  const projectName = `${prefix}-${Date.now()}`;
+  const response = await runtimeFetch("/api/projects/create", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ path: sandboxProjectsPath, project_name: projectName, create_in_parent: true })
+  });
+  expect(response.ok).toBe(true);
+  return projectName;
+}
+
+async function saveRuntimeDocument(relativePath: string, content: string) {
+  const response = await runtimeFetch(documentApiPath(relativePath), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content, force: true })
+  });
+  expect(response.ok).toBe(true);
+}
+
+async function readRuntimeDocument(relativePath: string) {
+  const response = await runtimeFetch(documentApiPath(relativePath));
+  expect(response.ok).toBe(true);
+  return await response.json() as { content: string };
+}
+
 test.beforeAll(async () => {
   mockModelServer = http.createServer((request, response) => {
     if (!request.url?.includes("/chat/completions")) {
@@ -166,6 +196,54 @@ test("writing-first shell has no page-level horizontal overflow at supported des
     }));
     expect(dimensions.scrollWidth, `${viewport.width}x${viewport.height} page overflow`).toBeLessThanOrEqual(dimensions.clientWidth);
   }
+});
+
+test("editor saves every dirty tab and protects unsaved work from unload", async ({ page }) => {
+  await createWritingProject("e2e-save-all");
+  await saveRuntimeDocument("02_正文/E2E甲.txt", "甲初稿");
+  await saveRuntimeDocument("02_正文/E2E乙.txt", "乙初稿");
+  await page.goto(workbenchUrl());
+
+  const tree = page.locator(".xw-tree-card");
+  await tree.getByRole("button", { name: /^02_正文/ }).click();
+  await tree.getByRole("button", { name: "E2E甲.txt", exact: true }).click();
+  await page.getByRole("textbox", { name: "E2E甲.txt 正文编辑器" }).fill("甲修改稿");
+  await tree.getByRole("button", { name: "E2E乙.txt", exact: true }).click();
+  await page.getByRole("textbox", { name: "E2E乙.txt 正文编辑器" }).fill("乙修改稿");
+
+  await expect(page.getByRole("button", { name: "保存全部 (2)", exact: true })).toBeEnabled();
+  expect(await page.evaluate(() => window.dispatchEvent(new Event("beforeunload", { cancelable: true })))).toBe(false);
+  await page.getByRole("button", { name: "保存全部 (2)", exact: true }).click();
+  await expect(page.getByRole("status")).toHaveText("已保存全部 2 个文档。");
+  expect((await readRuntimeDocument("02_正文/E2E甲.txt")).content).toBe("甲修改稿");
+  expect((await readRuntimeDocument("02_正文/E2E乙.txt")).content).toBe("乙修改稿");
+  expect(await page.evaluate(() => window.dispatchEvent(new Event("beforeunload", { cancelable: true })))).toBe(true);
+});
+
+test("split editor shows and resolves a save conflict while the primary page is not the editor", async ({ page }) => {
+  await createWritingProject("e2e-split-conflict");
+  await saveRuntimeDocument("02_正文/E2E冲突.txt", "磁盘初稿");
+  await page.goto(workbenchUrl());
+
+  const tree = page.locator(".xw-tree-card");
+  await tree.getByRole("button", { name: /^02_正文/ }).click();
+  await tree.getByRole("button", { name: "E2E冲突.txt", exact: true }).click();
+  await page.getByRole("textbox", { name: "E2E冲突.txt 正文编辑器" }).fill("本地修改稿");
+
+  const navigation = page.getByRole("complementary", { name: "主导航" });
+  await navigation.getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByRole("button", { name: "分屏", exact: true }).click();
+  await page.locator(".xw-split-pane").nth(1).click();
+  await page.getByRole("button", { name: "E2E冲突.txt", exact: true }).click();
+  await expect(page.getByRole("textbox", { name: "E2E冲突.txt 正文编辑器" })).toBeVisible();
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await saveRuntimeDocument("02_正文/E2E冲突.txt", "后台磁盘新版");
+  await page.getByRole("button", { name: "保存当前", exact: true }).click();
+  await expect(page.getByText("E2E冲突.txt 磁盘已有新版", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "确认覆盖", exact: true }).click();
+  await expect(page.getByText("E2E冲突.txt 磁盘已有新版", { exact: true })).toHaveCount(0);
+  expect((await readRuntimeDocument("02_正文/E2E冲突.txt")).content).toBe("本地修改稿");
 });
 
 async function configureMockModel() {

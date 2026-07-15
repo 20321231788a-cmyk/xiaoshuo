@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DocumentSaveConflictError, DocumentService } from "./service.js";
 
 let tempDir = "";
@@ -19,6 +19,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   if (tempDir) {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
@@ -232,6 +233,21 @@ describe("document-service", () => {
       after_exists: true,
       after_excerpt: "新的大纲"
     });
+  });
+
+  it("uses a managed same-directory atomic replacement by default", async () => {
+    const service = new DocumentService({ projectRoot: tempDir });
+    const target = path.join(tempDir, "01_大纲", "大纲.txt");
+    const rename = vi.spyOn(fs, "rename");
+
+    await service.saveDocument("01_大纲/大纲.txt", "原子保存后的大纲");
+
+    expect(rename).toHaveBeenCalledWith(
+      expect.stringMatching(/\.大纲\.txt\.arcwriter-[a-f0-9]+\.tmp$/),
+      target
+    );
+    expect(await fs.readFile(target, "utf8")).toBe("原子保存后的大纲");
+    expect((await fs.readdir(path.dirname(target))).filter((name) => name.includes(".arcwriter-"))).toEqual([]);
   });
 
   it("creates missing files inside the project when saving", async () => {

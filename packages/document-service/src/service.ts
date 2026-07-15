@@ -199,7 +199,7 @@ export class DocumentService {
     if (options.atomicWrite) {
       await this.writeTextAtomically(target, nextContent, options.atomicWrite);
     } else {
-      await fs.writeFile(target, nextContent, "utf8");
+      await this.writeTextWithManagedAtomicReplace(target, nextContent);
     }
 
     const afterChange = await this.completeChange(beforeChange);
@@ -629,6 +629,20 @@ export class DocumentService {
     await this.revalidateAbsoluteProjectPath(backupPath);
     await fs.rename(tempPath, target);
     await options.onStage?.("file_replaced");
+  }
+
+  private async writeTextWithManagedAtomicReplace(target: string, content: string): Promise<void> {
+    const suffix = randomUUID().replace(/-/g, "");
+    const tempPath = path.join(path.dirname(target), `.${path.basename(target)}.arcwriter-${suffix}.tmp`);
+    const backupPath = path.join(path.dirname(target), `.${path.basename(target)}.arcwriter-${suffix}.bak`);
+    try {
+      await this.writeTextAtomically(target, content, { tempPath, backupPath });
+    } finally {
+      await Promise.all([
+        fs.rm(tempPath, { force: true }).catch(() => undefined),
+        fs.rm(backupPath, { force: true }).catch(() => undefined)
+      ]);
+    }
   }
 
   private async assertSaveBaseIsCurrent(target: string, options: SaveDocumentOptions): Promise<void> {

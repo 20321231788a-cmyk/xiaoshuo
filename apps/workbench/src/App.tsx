@@ -45,6 +45,7 @@ import {
   Pin,
   RefreshCw,
   Save,
+  SaveAll,
   ScanSearch,
   Send,
   Settings,
@@ -158,6 +159,18 @@ export function App() {
   useEffect(() => {
     document.title = APP_WINDOW_TITLE;
   }, []);
+
+  useEffect(() => {
+    function protectUnsavedDocuments(event: BeforeUnloadEvent) {
+      if (!controller.openDocuments.some((document) => document.dirty)) {
+        return;
+      }
+      event.preventDefault();
+      event.returnValue = "";
+    }
+    window.addEventListener("beforeunload", protectUnsavedDocuments);
+    return () => window.removeEventListener("beforeunload", protectUnsavedDocuments);
+  }, [controller.openDocuments]);
 
   useEffect(() => {
     const unsubscribeTutorial = window.xiaoshuoDesktop?.onOpenTutorial?.(() => setTutorialOpen(true));
@@ -604,6 +617,8 @@ function FeatureWorkbenchPanel({
   const currentPaneDoc = isSplit
     ? (activePane === "left" ? activeDocument : rightActiveDocument)
     : activeDocument;
+  const dirtyDocumentCount = controller.openDocuments.filter((document) => document.dirty).length;
+  const editorVisible = feature === "editor" || (isSplit && rightFeature === "editor");
 
   // 根据当前聚焦侧动态计算并展示头部标题
   const title = isSplit
@@ -803,6 +818,11 @@ function FeatureWorkbenchPanel({
         <div className="xw-editor-title">
           <FilePenLine size={19} />
           <strong>{title}</strong>
+          {controller.documentMessage && (
+            <span className="xw-document-status" role="status" aria-live="polite">
+              {controller.documentMessage}
+            </span>
+          )}
         </div>
         <div className="xw-top-actions">
           {/* 分屏控制按钮 */}
@@ -855,7 +875,11 @@ function FeatureWorkbenchPanel({
               </button>
             </div>
           </details>
-          <button className="xw-primary-button compact" onClick={() => void controller.saveActiveDocument()} disabled={!currentPaneDoc || controller.documentBusy}>
+          <button className="xw-secondary-button compact" onClick={() => void controller.saveAllDocuments()} disabled={!dirtyDocumentCount || controller.documentBusy}>
+            <SaveAll size={15} />
+            <span>保存全部{dirtyDocumentCount > 0 ? ` (${dirtyDocumentCount})` : ""}</span>
+          </button>
+          <button className="xw-primary-button compact" onClick={() => void controller.saveActiveDocument({ path: currentPaneDoc?.path })} disabled={!currentPaneDoc || controller.documentBusy}>
             <Save size={15} />
             <span>保存当前</span>
           </button>
@@ -998,7 +1022,7 @@ function FeatureWorkbenchPanel({
           </div>
         )}
 
-        {feature === "editor" && controller.pendingCloseRequest && (
+        {editorVisible && controller.pendingCloseRequest && (
           <GuardBanner
             title={`${controller.pendingCloseRequest.title} 还有未保存修改`}
             detail="继续关闭会直接丢掉本地草稿。"
@@ -1008,7 +1032,7 @@ function FeatureWorkbenchPanel({
             onSecondary={controller.cancelCloseDocument}
           />
         )}
-        {feature === "editor" && controller.pendingReloadRequest && (
+        {editorVisible && controller.pendingReloadRequest && (
           <GuardBanner
             title={`${controller.pendingReloadRequest.title} 还有未保存修改`}
             detail="读取最新版会用磁盘内容覆盖当前本地草稿。"
@@ -1018,7 +1042,7 @@ function FeatureWorkbenchPanel({
             onSecondary={controller.cancelReloadDocument}
           />
         )}
-        {feature === "editor" && controller.pendingSaveConflictRequest && (
+        {editorVisible && controller.pendingSaveConflictRequest && (
           <GuardBanner
             title={`${controller.pendingSaveConflictRequest.title} 磁盘已有新版`}
             detail="普通保存已暂停，避免覆盖后台或其他窗口写入的内容。"

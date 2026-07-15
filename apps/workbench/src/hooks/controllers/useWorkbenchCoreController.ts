@@ -2742,11 +2742,11 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setDocumentMessage(`已从磁盘重新载入 ${request.path}，本地未保存草稿已丢弃。`);
   }
 
-  async function saveActiveDocument(options: { force?: boolean; path?: string } = {}) {
+  async function saveActiveDocument(options: { force?: boolean; path?: string } = {}): Promise<"saved" | "conflict" | "failed" | "missing"> {
     const targetPath = options.path || activeDocumentPathRef.current;
     const activeDocument = openDocumentsRef.current.find((item) => item.path === targetPath);
     if (!activeDocument) {
-      return;
+      return "missing";
     }
 
     if (activeDocument.stale && !options.force) {
@@ -2757,7 +2757,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       });
       setDocumentMessage(`${activeDocument.path} 磁盘已有后台更新，普通保存已暂停。请读取最新版或确认覆盖。`);
       setActiveTab("editor");
-      return;
+      return "conflict";
     }
 
     setDocumentBusy(true);
@@ -2780,6 +2780,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       setPendingSaveConflictRequest((current) => (current?.path === saved.path ? null : current));
       await refreshProjectChrome();
       setDocumentMessage(options.force ? `已确认覆盖并保存 ${saved.path}` : `已保存 ${saved.path}`);
+      return "saved";
     } catch (nextError) {
       if (isSaveConflictError(nextError)) {
         setPendingSaveConflictRequest({
@@ -2790,13 +2791,35 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         setOpenDocuments((current) => current.map((item) => (item.path === activeDocument.path ? { ...item, saving: false, stale: true } : item)));
         setDocumentMessage(`${activeDocument.path} 磁盘已有新版，已暂停保存以避免覆盖。`);
         setActiveTab("editor");
-        return;
+        return "conflict";
       }
       setDocumentMessage(describeActionableError(nextError, "保存文档失败", "请确认目标文档仍存在，然后重试保存。"));
       setOpenDocuments((current) => current.map((item) => (item.path === activeDocument.path ? { ...item, saving: false } : item)));
+      return "failed";
     } finally {
       setDocumentBusy(false);
     }
+  }
+
+  async function saveAllDocuments() {
+    const dirtyPaths = openDocumentsRef.current.filter((item) => item.dirty).map((item) => item.path);
+    if (!dirtyPaths.length) {
+      setDocumentMessage("没有需要保存的文档。");
+      return;
+    }
+
+    let savedCount = 0;
+    for (const path of dirtyPaths) {
+      const result = await saveActiveDocument({ path });
+      if (result !== "saved") {
+        if (savedCount > 0) {
+          setDocumentMessage(`已保存 ${savedCount} 个文档；${path} 尚未保存，请先处理当前错误或冲突。`);
+        }
+        return;
+      }
+      savedCount += 1;
+    }
+    setDocumentMessage(`已保存全部 ${savedCount} 个文档。`);
   }
 
   function cancelSaveConflict() {
@@ -4406,6 +4429,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     confirmProjectSwitch,
     updateActiveDocument,
     saveActiveDocument,
+    saveAllDocuments,
     selectedSkillId,
     selectedSkillDetail,
     selectedJobId,

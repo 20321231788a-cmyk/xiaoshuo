@@ -60,6 +60,8 @@ const runtimeState: RuntimeServerState = {};
 const terminalUserGestureAuthorizations = new TerminalUserGestureAuthorizationStore();
 const novelUserGestureAuthorizations = new NovelUserGestureAuthorizationStore();
 let novelAgentControlService: NovelAgentControlService | null = null;
+let quitCleanupComplete = false;
+let quitCleanupStarted = false;
 const appIconPath = path.join(app.getAppPath(), "assets", "quill.ico");
 const appDisplayTitle = `ArcWriter ${app.getVersion()}`;
 const updateService = new UpdateService({
@@ -83,7 +85,7 @@ function registerApplicationMenu(): void {
     {
       label: "退出",
       accelerator: "CommandOrControl+Q",
-      click: () => app.quit()
+      click: () => activeWindow()?.close()
     },
     {
       label: "状态",
@@ -168,6 +170,25 @@ async function createWindow(): Promise<BrowserWindow> {
   });
   window.webContents.on("did-finish-load", () => {
     window.setTitle(appDisplayTitle);
+  });
+  window.webContents.on("will-prevent-unload", (event) => {
+    if (quitCleanupComplete) {
+      event.preventDefault();
+      return;
+    }
+    const decision = dialog.showMessageBoxSync(window, {
+      type: "warning",
+      title: "还有未保存的小说内容",
+      message: "当前仍有未保存的文档，确定要退出 ArcWriter 吗？",
+      detail: "退出会丢失尚未保存到磁盘的修改。",
+      buttons: ["继续编辑", "退出且丢弃"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true
+    });
+    if (decision === 1) {
+      event.preventDefault();
+    }
   });
   const windowWebContentsId = window.webContents.id;
   window.on("closed", () => {
@@ -657,10 +678,16 @@ app.whenReady().then(async () => {
   updateService.scheduleStartupCheck();
 });
 
-let quitCleanupComplete = false;
 app.on("before-quit", (event) => {
   if (quitCleanupComplete) return;
   event.preventDefault();
+  const windows = BrowserWindow.getAllWindows();
+  if (windows.length > 0) {
+    for (const window of windows) window.close();
+    return;
+  }
+  if (quitCleanupStarted) return;
+  quitCleanupStarted = true;
   killAllTerminals();
   closeLocalState();
   void Promise.all([novelAgentControlService?.pauseAll(), stopRuntimeServer(runtimeState)]).finally(() => {

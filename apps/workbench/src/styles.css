@@ -7375,6 +7375,15 @@ body {
 }
 
 .xw-editor-title strong { font-size: 15px; }
+.xw-document-status {
+  min-width: 0;
+  max-width: 34ch;
+  overflow: hidden;
+  color: var(--xw-muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .xw-editor-body { gap: 8px; padding: 10px 14px 14px; }
 .xw-editor-tabs { min-height: 34px; align-items: center; }
 .xw-editor-tab { min-height: 32px; border-radius: 5px; background: var(--xw-stone); }
@@ -7593,6 +7602,7 @@ select:focus-visible,
 @media (max-width: 720px) {
   .xw-editor-title svg { display: none; }
   .xw-editor-title strong { max-width: 34vw; }
+  .xw-document-status { display: none; }
   .xw-home-continue { grid-template-columns: 1fr; }
   .xw-home-project-mark { display: none; }
   .xw-home-facts { grid-column: auto; }

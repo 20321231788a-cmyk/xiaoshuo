@@ -124,7 +124,7 @@ npm run acceptance:preview
 
 执行过程中仅定向重跑失败项；所有失败修复后完成了一次最终总验收。新增小说多 Agent、工具、IPC、后台任务、跨项目迁移和记忆审核测试均已接入该命令。
 
-当前结果：全 workspace typecheck 通过；Vitest 112 个测试文件、880 个测试通过；3 个 Node 测试通过；8 个 eval manifest 通过，其中 `novel-agent` 19/19；Workbench/Desktop build 通过；Browser E2E 8/8；Desktop smoke 通过；`git diff --check` 通过。原始七项高风险入口仍不可达。
+当前结果：全 workspace typecheck 通过；Vitest 112 个测试文件、881 个测试通过；3 个 Node 测试通过；8 个 eval manifest 通过，其中 `novel-agent` 19/19；Workbench/Desktop build 通过；Browser E2E 10/10；Desktop smoke 通过；`git diff --check` 通过。原始七项高风险入口仍不可达。
 
 `desktop-rc.yml` 的 nightly 路径可生成无签名 Preview artifact；严格 `channel=rc` 和 `release.yml` 留给未来商业化，不阻塞本次小范围使用。
 
@@ -208,3 +208,13 @@ git diff --check
 - 1024 宽隐藏项目树和 AI 栏并将主导航图标化；1280/1440 使用完整导航，三档均无页面级横向溢出；
 - 本批验收为 112 files / 880 tests、3/3 Node tests、8 类 eval、两个 build、Browser E2E 8/8、Desktop smoke 和 diff check 全部通过；详细过程见 `docs/UI_MODIFICATION_IMPLEMENTATION_PLAN.md` 第 13.4 节；
 - UI 方案是本批已完成实施记录，不新增长期并行计划；后续维护仍以本交接和小说 Agent 契约为事实源。
+
+2026-07-15 文档保存可靠性收口：
+
+- 普通编辑保存改为目标文件同目录临时文件写入和原子替换；成功或失败后清理 ArcWriter 临时文件和备份；
+- Workbench 对所有未保存文档注册 `beforeunload` 保护，Electron 捕获 `will-prevent-unload` 并提供“继续编辑 / 退出且丢弃”原生确认；用户取消退出时不提前关闭 Agent、SQLite 或 runtime；
+- 分屏任一侧显示编辑器时，关闭、重载和保存冲突横幅均保持可见；主页面处于设置等非编辑页面时也可完成冲突处理；
+- 顶部新增“保存全部 (N)”，顺序保存所有脏文档；首个失败或冲突即停止，保留现有冲突门禁，不静默覆盖磁盘新版；
+- 保存当前显式绑定当前分屏文档路径，文档保存结果通过可访问状态区反馈；
+- 集中验证通过：全 workspace typecheck；112 files / 881 tests；3/3 Node tests；Document Service 32/32；Browser E2E 10/10；Desktop smoke；`git diff --check`；
+- 当前只保留既有的 Workbench 构建 chunk 超过 500 kB 警告，不影响本批保存行为，也不作为免费小范围 Preview 的阻断项。
