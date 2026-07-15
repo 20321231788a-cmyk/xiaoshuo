@@ -8,7 +8,7 @@ vi.mock("@xiaoshuo/config-service", () => ({
   savePublicConfig: vi.fn()
 }));
 
-import { loadPublicConfig } from "@xiaoshuo/config-service";
+import { loadPublicConfig, savePublicConfig } from "@xiaoshuo/config-service";
 
 function createContext(): RuntimeContext {
   return {
@@ -153,6 +153,53 @@ describe("handleWebsiteAiRoutes", () => {
         status: "redeemed",
         message: "兑换成功"
       })
+    );
+  });
+
+  it("clears stale website embedding configuration when no vector model is selected", async () => {
+    const writeJson = vi.fn();
+    const readJsonBody = vi.fn().mockResolvedValue({ model: "deepseek-chat", embedding_model: "", temp: 0.7, top_p: 1 });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(okJson(dashboardPayload()))
+      .mockResolvedValueOnce(okJson({ purchaseUrl: "" }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.mocked(loadPublicConfig).mockResolvedValue({
+      ai_config_mode: "website",
+      website_profile: {
+        api_key: "license-token",
+        license_account_key: "license-token",
+        model: "deepseek-chat",
+        embedding_enabled: true,
+        embedding_api_key: "stale-key",
+        embedding_base_url: "https://stale.example.test/v1",
+        embedding_model: "stale-embedding"
+      }
+    } as unknown as Awaited<ReturnType<typeof loadPublicConfig>>);
+    vi.mocked(savePublicConfig).mockResolvedValue({
+      ai_config_mode: "website",
+      website_profile: { api_key: "license-token", model: "deepseek-chat", embedding_enabled: false, embedding_model: "" }
+    } as unknown as Awaited<ReturnType<typeof savePublicConfig>>);
+
+    const handled = await handleWebsiteAiRoutes(
+      createRequest("POST"),
+      createResponse(),
+      "/api/website-ai/apply",
+      createContext(),
+      { readJsonBody, writeJson }
+    );
+
+    expect(handled).toBe(true);
+    expect(savePublicConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        website_profile: expect.objectContaining({
+          embedding_enabled: false,
+          embedding_api_key: "",
+          embedding_base_url: "",
+          embedding_model: ""
+        })
+      }),
+      { rootDir: "D:\\xiaoshuo\\ts-migration" }
     );
   });
 });

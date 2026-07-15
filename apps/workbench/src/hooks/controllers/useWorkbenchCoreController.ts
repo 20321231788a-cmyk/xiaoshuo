@@ -1870,6 +1870,12 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
+  function resetEmbeddingTestResult() {
+    if (!embeddingTestBusy) {
+      setEmbeddingTestMessage("");
+    }
+  }
+
   function patchConfig(patch: Partial<AppConfig>) {
     configDraftDirtyRef.current = true;
     setConfigDraft((current) => (current ? normalizeConfigDraft({ ...current, ...patch }) : current));
@@ -4312,6 +4318,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     patchAndSaveConfig,
     saveConfig,
     testEmbeddingConnection,
+    resetEmbeddingTestResult,
     refreshLicense,
     configMessage,
     configBusy,

@@ -7,6 +7,7 @@ export function useConfigController(core: CoreWorkbenchController) {
     patchAndSaveConfig: core.patchAndSaveConfig,
     saveConfig: core.saveConfig,
     testEmbeddingConnection: core.testEmbeddingConnection,
+    resetEmbeddingTestResult: core.resetEmbeddingTestResult,
     refreshLicense: core.refreshLicense,
     configMessage: core.configMessage,
     configBusy: core.configBusy,

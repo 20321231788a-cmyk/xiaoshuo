@@ -67,7 +67,10 @@ import { useWorkbenchController } from "./hooks/useWorkbenchController.js";
 import { AppShell } from "./layout/AppShell.js";
 import { GuardBanner, AssistantRail, railModes, type RailMode } from "./layout/RightRail.js";
 import { LeftSidebar } from "./layout/LeftSidebar.js";
+import { WorkbenchNavigation } from "./layout/WorkbenchNavigation.js";
+import type { CenterFeature } from "./navigation.js";
 import { CardDrawFeaturePage } from "./features/card-draw/CardDrawFeaturePage.js";
+import { HomeFeaturePage } from "./features/home/HomeFeaturePage.js";
 import { DisassembleFeaturePage } from "./features/disassembly/DisassemblyFeaturePage.js";
 import { SettingsFeaturePage } from "./features/settings/SettingsFeaturePage.js";
 import { SkillFeaturePage } from "./features/skills/SkillFeaturePage.js";
@@ -103,36 +106,6 @@ const WEBSITE_REGISTER_URL = "https://matian.online/?page=api-relay&auth=registe
 
 const punctuationMarks = ["“”", "‘’", "——", "……", "（）", "《》", "，", "。", "？", "！"];
 
-type CenterFeature =
-  | "editor"
-  | "conversations"
-  | "timeline"
-  | "settings-set"
-  | "style-library"
-  | "theme-library"
-  | "batch"
-  | "crawl"
-  | "card_draw"
-  | "ledger"
-  | "revision"
-  | "skills"
-  | "traces"
-  | "memory"
-  | "novel_agent"
-  | "vector_test"
-  | "consistency"
-  | "settings"
-  | "terminal";
-
-const pageTabs: Array<{ key: CenterFeature; label: string }> = [
-  { key: "editor", label: "文档" },
-  { key: "conversations", label: "AI 对话" },
-  { key: "timeline", label: "时间线" },
-  { key: "settings-set", label: "设定集" },
-  { key: "style-library", label: "风格库" },
-  { key: "theme-library", label: "题材库" }
-];
-
 type DisassemblyUiState = {
   selectedBookId: string;
   fusionBookIds: string[];
@@ -166,6 +139,7 @@ export function App() {
   const [rightMode, setRightMode] = useState<RailMode>("ai");
   const [centerFeature, setCenterFeature] = useState<CenterFeature>("editor");
   const [rightWidth, setRightWidth] = useState(DEFAULT_RIGHT_WIDTH);
+  const [rightRailOpen, setRightRailOpen] = useState(() => typeof window === "undefined" || window.innerWidth >= 1320);
   const [selectedDisassemblyBookId, setSelectedDisassemblyBookId] = useState("");
   const [fusionBookIds, setFusionBookIds] = useState<string[]>([]);
   const [tutorialOpen, setTutorialOpen] = useState(false);
@@ -300,7 +274,17 @@ export function App() {
   function selectCenterFeature(feature: CenterFeature) {
     setLegacyWorkbenchTab(null);
     setCenterFeature(feature);
-    if (feature === "editor" || feature === "conversations" || feature === "terminal") {
+    if (feature === "home") {
+      controller.setActiveTab("project");
+      return;
+    }
+    if (feature === "conversations") {
+      setRightMode("ai");
+      setRightRailOpen(true);
+      controller.setActiveTab(feature);
+      return;
+    }
+    if (feature === "editor" || feature === "terminal") {
       controller.setActiveTab(feature);
       return;
     }
@@ -308,7 +292,7 @@ export function App() {
       controller.setActiveTab("config");
       return;
     }
-    if (feature === "timeline" || feature === "ledger" || feature === "revision" || feature === "traces" || feature === "memory" || feature === "novel_agent" || feature === "vector_test") {
+    if (feature === "timeline" || feature === "clues" || feature === "ledger" || feature === "revision" || feature === "traces" || feature === "memory" || feature === "novel_agent" || feature === "studio" || feature === "vector_test") {
       controller.setActiveTab("overview");
       return;
     }
@@ -325,6 +309,7 @@ export function App() {
 
   function selectRightMode(mode: RailMode) {
     setRightMode(mode);
+    setRightRailOpen(true);
     const nextMode = railModes.find((item) => item.key === mode);
     if (nextMode) {
       selectCenterFeature(nextMode.feature);
@@ -341,6 +326,18 @@ export function App() {
   return (
     <AppShell
       rightWidth={rightWidth}
+      rightOpen={rightRailOpen}
+      navigation={
+        <WorkbenchNavigation
+          feature={centerFeature}
+          projectName={controller.snapshot?.currentProject.name || ""}
+          projectPath={controller.snapshot?.currentProject.path || ""}
+          assistantOpen={rightRailOpen}
+          onSelect={selectCenterFeature}
+          onOpenProject={() => controller.pickAndOpenProject("open")}
+          onToggleAssistant={() => setRightRailOpen((value) => !value)}
+        />
+      }
       left={
         <LeftSidebar
           controller={controller}
@@ -901,7 +898,7 @@ function FeatureWorkbenchPanel({
           </div>
         )}
 
-        <div className="xw-quickbar">
+        {feature === "editor" && <div className="xw-quickbar">
           <span>快速工具</span>
           <button onClick={() => onSelectRightMode("ai")}>润色选段</button>
           <button onClick={() => onSelectRightMode("ai")}>续写此处</button>
@@ -920,37 +917,14 @@ function FeatureWorkbenchPanel({
           >
             自动提取设定
           </button>
-        </div>
-        <div className="xw-page-tabs">
-          <span>页面</span>
-          {pageTabs.map((tab) => {
-            const isActive = isSplit
-              ? (activePane === "left" ? feature === tab.key : rightFeature === tab.key)
-              : feature === tab.key;
-            return (
-              <button
-                key={tab.key}
-                className={isActive ? "active" : ""}
-                onClick={() => {
-                  if (isSplit && activePane === "right") {
-                    handleSelectRightFeature(tab.key);
-                  } else {
-                    onSelectFeature(tab.key);
-                  }
-                }}
-              >
-                {tab.label}
-              </button>
-            );
-          })}
-        </div>
-        <div className="xw-punctuation-bar">
+        </div>}
+        {feature === "editor" && currentPaneDoc && <div className="xw-punctuation-bar" aria-label="中文标点快捷输入">
           {punctuationMarks.map((mark) => (
             <button key={mark} onClick={() => insertMark(mark)} disabled={!currentPaneDoc}>
               {mark}
             </button>
           ))}
-        </div>
+        </div>}
 
         {findOpen && (
           <div className="xw-find-bar">
@@ -1127,8 +1101,17 @@ function FeatureWorkbenchPanel({
 
 function featureTitle(feature: CenterFeature, activeDocument: OpenDocumentTab | null): string {
   const titles: Record<CenterFeature, string> = {
+    home: "项目首页",
     editor: activeDocument?.title || "未打开文档",
     conversations: "AI 对话",
+    outline: "故事大纲",
+    clues: "伏笔与时间线",
+    sources: "设定资料",
+    style: "风格与题材",
+    studio: "小说编辑室",
+    review: "全文审阅",
+    transfer: "素材迁移",
+    tasks: "后台任务",
     timeline: "时间线",
     "settings-set": "设定集",
     "style-library": "风格库",
@@ -1165,6 +1148,9 @@ function FeatureContentSurface({
   editorRef: React.RefObject<HTMLTextAreaElement | null>;
   onSelectFeature: (feature: CenterFeature) => void;
 }) {
+  if (feature === "home") {
+    return <HomeFeaturePage controller={controller} onSelectFeature={onSelectFeature} />;
+  }
   if (feature === "editor") {
     return <EditorFeaturePage controller={controller} activeDocument={activeDocument} editorRef={editorRef} />;
   }
@@ -1173,6 +1159,49 @@ function FeatureContentSurface({
   }
   if (feature === "timeline") {
     return <TimelineFeaturePage controller={controller} />;
+  }
+  if (feature === "outline") {
+    return (
+      <DocumentLibraryFeaturePage
+        hint="大纲文件使用真实项目文档，打开后进入正文编辑器"
+        cards={[
+          ["故事大纲", "全书主线、阶段目标与核心冲突", "01_大纲/大纲.txt"],
+          ["情节细纲", "分卷推进、场景安排与人物线", "01_大纲/细纲.txt"],
+          ["章节章纲", "逐章目标、钩子与写作要求", "01_大纲/章纲.txt"]
+        ]}
+        onOpenDocument={async (path) => {
+          const opened = await controller.openDocument(path);
+          if (opened) onSelectFeature("editor");
+        }}
+      />
+    );
+  }
+  if (feature === "clues") {
+    return <CluesFeaturePage controller={controller} onSelectFeature={onSelectFeature} />;
+  }
+  if (feature === "sources") {
+    feature = "settings-set";
+  }
+  if (feature === "style") {
+    return <StyleAndGenreFeaturePage controller={controller} onSelectFeature={onSelectFeature} />;
+  }
+  if (feature === "studio") {
+    feature = "novel_agent";
+  }
+  if (feature === "review") {
+    feature = "consistency";
+  }
+  if (feature === "transfer" || feature === "tasks") {
+    return (
+      <NovelAgentWorkspace
+        projectRoot={controller.snapshot?.currentProject.path || ""}
+        activePath={activeDocument?.path || ""}
+        activeContent={activeDocument?.content || ""}
+        sourceRevision={activeDocument?.updatedAt || ""}
+        initialTab={feature === "transfer" ? "transfer" : "tasks"}
+        onOpenSkills={() => onSelectFeature("skills")}
+      />
+    );
   }
   if (feature === "settings-set") {
     return (
@@ -1260,12 +1289,65 @@ function FeatureContentSurface({
     return <VectorTestFeaturePage controller={controller} />;
   }
   if (feature === "settings") {
-    return <SettingsFeaturePage controller={controller} />;
+    return <SettingsFeaturePage controller={controller} onOpenVectorTest={() => onSelectFeature("vector_test")} />;
   }
   if (feature === "terminal") {
     return <TerminalFeaturePage controller={controller} />;
   }
   return <WorkflowFeaturePage controller={controller} feature={feature} disassemblyUi={disassemblyUi} />;
+}
+
+function CluesFeaturePage({ controller, onSelectFeature }: { controller: WorkbenchController; onSelectFeature: (feature: CenterFeature) => void }) {
+  const [view, setView] = useState<"ledger" | "timeline">("ledger");
+  return (
+    <section className="xw-feature-page xw-combined-feature">
+      <div className="xw-combined-feature-head">
+        <div><span>全书规划</span><h2>伏笔与时间线</h2></div>
+        <div className="xw-segmented-control" role="tablist" aria-label="伏笔与时间线视图">
+          <button type="button" role="tab" aria-selected={view === "ledger"} className={view === "ledger" ? "active" : ""} onClick={() => setView("ledger")}>伏笔台账</button>
+          <button type="button" role="tab" aria-selected={view === "timeline"} className={view === "timeline" ? "active" : ""} onClick={() => setView("timeline")}>故事时间线</button>
+        </div>
+      </div>
+      <div role="tabpanel" className="xw-combined-feature-body">
+        {view === "ledger" ? <LedgerFeaturePage controller={controller} onSelectFeature={onSelectFeature} /> : <TimelineFeaturePage controller={controller} />}
+      </div>
+    </section>
+  );
+}
+
+function StyleAndGenreFeaturePage({ controller, onSelectFeature }: { controller: WorkbenchController; onSelectFeature: (feature: CenterFeature) => void }) {
+  const [view, setView] = useState<"style" | "genre">("style");
+  const cards: Array<[string, string, string]> = view === "style"
+    ? [
+        ["写作风格", "项目默认语气、视角与叙事规则", "00_设定集/风格库/写作风格.txt"],
+        ["风格示例", "可复用的段落和对白样本", "00_设定集/风格库/风格示例.txt"],
+        ["参考素材", "意象、语感与资料摘录", "00_设定集/风格库/参考素材.txt"]
+      ]
+    : [
+        ["题材规则", "世界类型、爽点与创作边界", "00_设定集/题材库/题材规则.txt"],
+        ["题材素材", "桥段、场景与关键词", "00_设定集/题材库/题材素材.txt"],
+        ["战斗模板", "冲突推进与场面调度", "00_设定集/题材库/战斗模板.txt"],
+        ["禁用表达", "敏感词和替代表达", "00_设定集/题材库/违禁词.txt"]
+      ];
+  return (
+    <section className="xw-feature-page xw-combined-feature">
+      <div className="xw-combined-feature-head">
+        <div><span>项目写作规则</span><h2>风格与题材</h2></div>
+        <div className="xw-segmented-control" role="tablist" aria-label="风格与题材视图">
+          <button type="button" role="tab" aria-selected={view === "style"} className={view === "style" ? "active" : ""} onClick={() => setView("style")}>写作风格</button>
+          <button type="button" role="tab" aria-selected={view === "genre"} className={view === "genre" ? "active" : ""} onClick={() => setView("genre")}>题材规则</button>
+        </div>
+      </div>
+      <DocumentLibraryFeaturePage
+        hint="打开真实项目文件编辑，所有规则都会随项目保存"
+        cards={cards}
+        onOpenDocument={async (path) => {
+          const opened = await controller.openDocument(path);
+          if (opened) onSelectFeature("editor");
+        }}
+      />
+    </section>
+  );
 }
 
 function EditorFeaturePage({

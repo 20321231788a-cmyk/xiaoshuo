@@ -112,7 +112,7 @@ Desktop 普通启动默认开启：durable execution、Model Gateway、replannin
 | 跨项目写入 | 用户选择双项目、预览 diff、双确认、持久 journal 提交和崩溃恢复 |
 | Confirmed Memory | 保持二次确认，提供逐条 receipt 的批量审核 UI |
 
-Workbench 入口为“状态 -> 小说 Agent”。主进程事实源为 userData `state/novel-agent-control.json`，迁移恢复备份位于目标项目 `00_设定集/.agent/transfer-journals/`。详细契约见 `docs/AGENT_NOVEL_CREATION_MODIFICATION_PLAN.md`。
+Workbench 入口为主导航“小说编辑室”；后台任务、素材迁移和项目记忆也有独立正式入口。主进程事实源为 userData `state/novel-agent-control.json`，迁移恢复备份位于目标项目 `00_设定集/.agent/transfer-journals/`。详细契约见 `docs/AGENT_NOVEL_CREATION_MODIFICATION_PLAN.md`。
 
 ## 6. 验收与失败处理
 
@@ -124,7 +124,7 @@ npm run acceptance:preview
 
 执行过程中仅定向重跑失败项；所有失败修复后完成了一次最终总验收。新增小说多 Agent、工具、IPC、后台任务、跨项目迁移和记忆审核测试均已接入该命令。
 
-最终结果：全 workspace typecheck 通过；Vitest 112 个测试文件、878 个测试通过；3 个 Node 测试通过；8 个 eval manifest 通过，其中 `novel-agent` 19/19；Workbench/Desktop build 通过；Browser E2E 6/6；Desktop smoke 通过；`git diff --check` 通过。`excluded-capabilities` 为 116/116，原始七项高风险入口仍不可达。
+当前结果：全 workspace typecheck 通过；Vitest 112 个测试文件、880 个测试通过；3 个 Node 测试通过；8 个 eval manifest 通过，其中 `novel-agent` 19/19；Workbench/Desktop build 通过；Browser E2E 8/8；Desktop smoke 通过；`git diff --check` 通过。原始七项高风险入口仍不可达。
 
 `desktop-rc.yml` 的 nightly 路径可生成无签名 Preview artifact；严格 `channel=rc` 和 `release.yml` 留给未来商业化，不阻塞本次小范围使用。
 
@@ -195,3 +195,16 @@ git diff --check
 - 本批小说 Agent 代码、测试、Feature Flag、Workbench、评测和文档作为一个完整变更提交；
 - 提交前最终证据沿用第 6 节的 `npm run acceptance:preview` 完整通过结果；
 - 本次只创建本地 Git commit，不创建 tag、不推送 Release，也不宣称商业 RC 或生产就绪。
+
+2026-07-15 写作优先 UI 交付：
+
+- `output/ui-final/` 仅作为视觉和信息架构参考；生产 Workbench 继续使用现有 Controller、typed API、Electron/IPC 和真实项目状态；
+- 主导航调整为写作、规划、资料、审阅、工具、全局六组，共 16 个正式入口；`states` 不进入导航；
+- 新增真实项目首页；大纲映射 `01_大纲`；伏笔/时间线、风格/题材使用组合视图；AI 助手入口会主动展开右侧会话栏；
+- 小说编辑室展示合并摘要、证据、建议、冲突、run 和 degraded 状态；任务展示预算、Token、费用、步骤、截止时间和错误；迁移保留策略选择、diff 和双确认；
+- 设置保留 manual/website 双 profile、主副模型、Embedding、联网搜索、写作/上下文、一致性、授权和更新；DuckDuckGo 为真实选项；
+- “连接与检索测试”保留 Embedding 草稿连接测试、向量状态、重建、待处理和召回诊断；未新增没有后端契约的主/副模型假测试按钮；
+- 网站模式清空向量模型会同步关闭 Embedding 并清空 key/base/model；Embedding 禁用后重建只建立关键词索引，不发送向量请求；
+- 1024 宽隐藏项目树和 AI 栏并将主导航图标化；1280/1440 使用完整导航，三档均无页面级横向溢出；
+- 本批验收为 112 files / 880 tests、3/3 Node tests、8 类 eval、两个 build、Browser E2E 8/8、Desktop smoke 和 diff check 全部通过；详细过程见 `docs/UI_MODIFICATION_IMPLEMENTATION_PLAN.md` 第 13.4 节；
+- UI 方案是本批已完成实施记录，不新增长期并行计划；后续维护仍以本交接和小说 Agent 契约为事实源。

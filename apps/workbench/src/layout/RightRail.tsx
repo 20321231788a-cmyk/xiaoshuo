@@ -23,24 +23,7 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { WorkbenchController } from "../hooks/useWorkbenchController.js";
 import { attachmentDisplayName } from "../lib/attachments.js";
 import { buildRailStatusSummary } from "../lib/railStatus.js";
-
-export type CenterFeature =
-  | "editor"
-  | "conversations"
-  | "timeline"
-  | "settings-set"
-  | "style-library"
-  | "theme-library"
-  | "batch"
-  | "crawl"
-  | "card_draw"
-  | "ledger"
-  | "revision"
-  | "skills"
-  | "traces"
-  | "consistency"
-  | "settings"
-  | "terminal";
+import type { CenterFeature } from "../navigation.js";
 
 export const railModes = [
   { key: "ai", label: "AI", icon: Bot, tab: "editor", feature: "editor" },

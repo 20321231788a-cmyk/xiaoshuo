@@ -27,7 +27,7 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
-type WorkspaceTab = "room" | "tools" | "tasks" | "transfer" | "memory";
+export type NovelWorkspaceTab = "room" | "tools" | "tasks" | "transfer" | "memory";
 
 const roleOptions: Array<{ id: NovelReviewRole; label: string }> = [
   { id: "plot_reviewer", label: "剧情" },
@@ -49,18 +49,20 @@ export function NovelAgentWorkspace({
   activePath,
   activeContent,
   sourceRevision,
+  initialTab = "room",
   onOpenSkills
 }: {
   projectRoot: string;
   activePath: string;
   activeContent: string;
   sourceRevision: string;
+  initialTab?: NovelWorkspaceTab;
   onOpenSkills: () => void;
 }) {
   const api = window.xiaoshuoDesktop?.novelAgent;
   const [project, setProject] = useState<NovelWorkspaceProject | null>(null);
   const [snapshot, setSnapshot] = useState<NovelAgentWorkspaceSnapshot | null>(null);
-  const [tab, setTab] = useState<WorkspaceTab>("room");
+  const [tab, setTab] = useState<NovelWorkspaceTab>(initialTab);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -85,6 +87,10 @@ export function NovelAgentWorkspace({
       .catch((error) => !cancelled && setMessage(errorMessage(error)));
     return () => { cancelled = true; };
   }, [api, projectRoot]);
+
+  useEffect(() => {
+    setTab(initialTab);
+  }, [initialTab]);
 
   async function run(action: () => Promise<void>) {
     setBusy(true);
@@ -114,8 +120,8 @@ export function NovelAgentWorkspace({
           ["tasks", "后台任务"],
           ["transfer", "素材迁移"],
           ["memory", "记忆审核"]
-        ] as Array<[WorkspaceTab, string]>).map(([key, label]) => (
-          <button key={key} type="button" className={tab === key ? "active" : ""} onClick={() => setTab(key)}>{label}</button>
+        ] as Array<[NovelWorkspaceTab, string]>).map(([key, label]) => (
+          <button key={key} id={`novel-tab-${key}`} role="tab" aria-selected={tab === key} aria-controls={`novel-panel-${key}`} type="button" className={tab === key ? "active" : ""} onClick={() => setTab(key)}>{label}</button>
         ))}
         <button type="button" className="xw-icon-button" title="刷新" aria-label="刷新小说 Agent 状态" onClick={() => void run(() => refresh())} disabled={!project || busy}>
           <RefreshCw size={15} />
@@ -123,7 +129,7 @@ export function NovelAgentWorkspace({
       </div>
 
       {tab === "room" && project && (
-        <RoomPanel
+        <div id="novel-panel-room" role="tabpanel" aria-labelledby="novel-tab-room"><RoomPanel
           project={project}
           activePath={activePath}
           activeContent={activeContent}
@@ -131,18 +137,18 @@ export function NovelAgentWorkspace({
           busy={busy}
           run={run}
           onOpenSkills={onOpenSkills}
-        />
+        /></div>
       )}
       {tab === "tools" && project && snapshot && (
-        <ToolsPanel project={project} snapshot={snapshot} busy={busy} run={run} refresh={() => refresh(project)} />
+        <div id="novel-panel-tools" role="tabpanel" aria-labelledby="novel-tab-tools"><ToolsPanel project={project} snapshot={snapshot} busy={busy} run={run} refresh={() => refresh(project)} /></div>
       )}
       {tab === "tasks" && project && snapshot && (
-        <TasksPanel project={project} tasks={snapshot.background_tasks} activePath={activePath} sourceRevision={sourceRevision} busy={busy} run={run} refresh={() => refresh(project)} />
+        <div id="novel-panel-tasks" role="tabpanel" aria-labelledby="novel-tab-tasks"><TasksPanel project={project} tasks={snapshot.background_tasks} activePath={activePath} sourceRevision={sourceRevision} busy={busy} run={run} refresh={() => refresh(project)} /></div>
       )}
       {tab === "transfer" && project && (
-        <TransferPanel project={project} busy={busy} run={run} refresh={() => refresh(project)} />
+        <div id="novel-panel-transfer" role="tabpanel" aria-labelledby="novel-tab-transfer"><TransferPanel project={project} busy={busy} run={run} refresh={() => refresh(project)} /></div>
       )}
-      {tab === "memory" && project && <MemoryPanel project={project} busy={busy} run={run} />}
+      {tab === "memory" && project && <div id="novel-panel-memory" role="tabpanel" aria-labelledby="novel-tab-memory"><MemoryPanel project={project} busy={busy} run={run} /></div>}
       {message && <p className="xw-status-line" role="status">{message}</p>}
     </section>
   );
@@ -202,11 +208,26 @@ function RoomPanel({ project, activePath, activeContent, sourceRevision, busy, r
       <section className="xw-novel-agent-section xw-novel-review-results">
         <h3>合并结果</h3>
         {!result && <span className="xw-muted">尚无审校结果</span>}
+        {result && (
+          <div className="xw-novel-merged-summary">
+            <div><strong>主笔合并摘要</strong><span>{result.degraded ? "部分审校角色降级" : "全部审校完成"}</span></div>
+            <p>{result.merged_summary || "审校已完成，查看各角色建议。"}</p>
+            <small>运行 {result.run_id} · 来源版本 {result.source_revision}</small>
+          </div>
+        )}
         {result?.reviews.map((review) => (
           <article key={review.role}>
-            <strong>{roleOptions.find((item) => item.id === review.role)?.label} · {review.status}</strong>
+            <strong>{roleOptions.find((item) => item.id === review.role)?.label} · {reviewStatusLabel(review.status)}</strong>
             <p>{review.summary}</p>
-            {review.issues.map((issue) => <div key={issue.issue_id} className={`xw-novel-issue ${issue.severity}`}>{issue.summary}</div>)}
+            {review.issues.map((issue) => (
+              <div key={issue.issue_id} className={`xw-novel-issue ${issue.severity}`}>
+                <div><strong>{severityLabel(issue.severity)} · {issue.summary}</strong>{issue.requires_user_decision && <em>需要作者决定</em>}</div>
+                {issue.suggestion && <p>建议：{issue.suggestion}</p>}
+                {issue.evidence.map((evidence, index) => (
+                  <small key={`${evidence.source_path}-${index}`}>证据：{evidence.source_path} · {evidence.excerpt || "已引用项目内容"}</small>
+                ))}
+              </div>
+            ))}
           </article>
         ))}
         {result?.conflicts.map((conflict) => <div key={conflict.conflict_id} className="xw-novel-conflict">需用户决定：{conflict.summary}</div>)}
@@ -326,9 +347,11 @@ function TasksPanel({ project, tasks, activePath, sourceRevision, busy, run, ref
     })}><Play size={14} />创建{selectedTask.label}</button></div></div>
     <div className="xw-novel-task-list">
       {tasks.map((task) => <article key={task.task_id}>
-        <div><strong>{backgroundTaskOptions.find((item) => item.id === task.kind)?.label || task.kind}</strong><span className={`xw-job-pill ${task.status}`}>{task.status}</span></div>
+        <div><strong>{backgroundTaskOptions.find((item) => item.id === task.kind)?.label || task.kind}</strong><span className={`xw-job-pill ${task.status}`}>{taskStatusLabel(task.status)}</span></div>
         <progress value={task.completed_units} max={Math.max(1, task.total_units)} />
-        <small>{task.completed_units}/{task.total_units} · steps {task.used_steps}/{task.budget.max_steps}</small>
+        <small>{task.completed_units}/{task.total_units} · 步骤 {task.used_steps}/{task.budget.max_steps} · 模型调用 {task.used_model_calls}/{task.budget.max_model_calls}</small>
+        <small>Token {task.used_input_tokens + task.used_output_tokens}/{task.budget.max_input_tokens + task.budget.max_output_tokens} · 费用 ${task.used_cost_usd.toFixed(4)}/${task.budget.max_cost_usd.toFixed(2)} · 截止 {formatTaskDeadline(task.budget.deadline_at)}</small>
+        {task.error_code && <p className="xw-novel-task-error">失败原因：{task.error_code}</p>}
         {(task.status === "running" || task.status === "queued" || task.status === "paused") && <div className="xw-novel-action-row">
           {task.status === "paused" ? <button data-novel-user-gesture="background_control" type="button" onClick={() => void controlTask("resume", task)}><Play size={13} />恢复</button> : <button data-novel-user-gesture="background_control" type="button" onClick={() => void controlTask("pause", task)}><Pause size={13} />暂停</button>}
           <button data-novel-user-gesture="background_control" type="button" onClick={() => void controlTask("cancel", task)}><Square size={13} />取消</button>
@@ -355,6 +378,8 @@ function TransferPanel({ project, busy, run, refresh }: {
   const [source, setSource] = useState<NovelWorkspaceProject | null>(null);
   const [sourcePath, setSourcePath] = useState("00_设定集/设定集/人物设定.txt");
   const [targetPath, setTargetPath] = useState("00_设定集/设定集/人物设定.txt");
+  const [kind, setKind] = useState<NovelProjectTransferPlan["items"][number]["kind"]>("character_setting");
+  const [strategy, setStrategy] = useState<NovelProjectTransferPlan["items"][number]["strategy"]>("create");
   const [plan, setPlan] = useState<NovelProjectTransferPlan | null>(null);
   const [sourceConfirmation, setSourceConfirmation] = useState<NovelProjectTransferSourceConfirmResult | null>(null);
   return <section className="xw-novel-agent-section">
@@ -365,6 +390,8 @@ function TransferPanel({ project, busy, run, refresh }: {
       <strong>目标：{project.project_root}</strong>
     </div>
     <div className="xw-novel-transfer-fields">
+      <label>内容类型<select value={kind} onChange={(event) => setKind(event.target.value as typeof kind)}><option value="character_setting">人物设定</option><option value="world_setting">世界观规则</option><option value="style_rule">文风规则</option><option value="reference_material">参考素材</option></select></label>
+      <label>冲突策略<select value={strategy} onChange={(event) => setStrategy(event.target.value as typeof strategy)}><option value="create">仅新建</option><option value="append">追加</option><option value="replace">替换</option><option value="skip">跳过冲突</option></select></label>
       <label>来源相对路径<input value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} /></label>
       <label>目标相对路径<input value={targetPath} onChange={(event) => setTargetPath(event.target.value)} /></label>
     </div>
@@ -375,7 +402,7 @@ function TransferPanel({ project, busy, run, refresh }: {
           source_project_root: source!.project_root,
           target_project_id: project.project_id,
           target_project_root: project.project_root,
-          items: [{ kind: "character_setting", source_path: sourcePath, target_path: targetPath, strategy: "replace" }]
+          items: [{ kind, source_path: sourcePath, target_path: targetPath, strategy }]
         });
         setPlan(nextPlan);
         setSourceConfirmation(null);
@@ -411,6 +438,7 @@ function MemoryPanel({ project, busy, run }: {
 }) {
   const [batch, setBatch] = useState<NovelMemoryBatchPrepareResult | null>(null);
   const [selected, setSelected] = useState<string[]>([]);
+  const eligibleItems = useMemo(() => batch?.items.filter((item) => !item.subjective && !item.conflict_summary) || [], [batch]);
   const selectedItems = useMemo(() => batch?.items.filter((item) => selected.includes(item.claim_id) && !item.subjective && !item.conflict_summary) || [], [batch, selected]);
   return <section className="xw-novel-agent-section">
     <div className="xw-section-head"><h3>Confirmed Memory 批量审核</h3><button className="xw-secondary-button compact" type="button" disabled={busy} onClick={() => void run(async () => {
@@ -427,6 +455,10 @@ function MemoryPanel({ project, busy, run }: {
         {requiresIndividualReview && <em>{item.conflict_summary || "需逐条确认"}</em>}
       </label>})}
       {batch && !batch.items.length && <span className="xw-muted">没有待审核的 draft/proposed memory</span>}
+    </div>
+    <div className="xw-novel-action-row">
+      <button className="xw-secondary-button" type="button" disabled={busy || !eligibleItems.length} onClick={() => setSelected(eligibleItems.map((item) => item.claim_id))}>选择全部可确认项</button>
+      <button className="xw-secondary-button" type="button" disabled={busy || !selected.length} onClick={() => setSelected([])}>取消选择</button>
     </div>
     <button className="xw-primary-button" data-novel-user-gesture="memory_batch" type="button" disabled={busy || !selectedItems.length} onClick={() => void run(async () => {
       const confirmationIds = Object.fromEntries(selectedItems.map((item) => [item.claim_id, crypto.randomUUID()]));
@@ -447,4 +479,30 @@ function EmptyState({ text }: { text: string }) {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function reviewStatusLabel(status: "completed" | "failed" | "skipped"): string {
+  return status === "completed" ? "已完成" : status === "failed" ? "失败" : "已跳过";
+}
+
+function severityLabel(severity: "info" | "warning" | "blocking"): string {
+  return severity === "blocking" ? "阻断" : severity === "warning" ? "注意" : "建议";
+}
+
+function taskStatusLabel(status: NovelBackgroundTask["status"]): string {
+  const labels: Record<NovelBackgroundTask["status"], string> = {
+    queued: "等待中",
+    running: "运行中",
+    paused: "已暂停",
+    paused_budget_exhausted: "预算已用尽",
+    completed: "已完成",
+    failed: "失败",
+    cancelled: "已取消"
+  };
+  return labels[status];
+}
+
+function formatTaskDeadline(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false });
 }

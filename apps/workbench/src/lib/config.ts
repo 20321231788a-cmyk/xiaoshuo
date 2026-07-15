@@ -86,8 +86,11 @@ function normalizeAiProfile(
 
 export function describeConfigReadiness(config: AppConfig): ConfigReadinessItem[] {
   const hasMainModel = Boolean(config.api_key.trim() && config.base_url.trim() && config.model.trim());
-  const hasSecondaryModel = Boolean(config.secondary_api_key.trim() && config.secondary_base_url.trim() && config.secondary_model.trim());
-  const hasEmbedding = Boolean(config.embedding_api_key.trim() && config.embedding_base_url.trim() && config.embedding_model.trim());
+  const hasSecondaryModel = Boolean(config.secondary_api_key.trim() && (config.secondary_base_url.trim() || config.base_url.trim()) && config.secondary_model.trim());
+  const embeddingFallbackKey = (config.embedding_base_url.toLowerCase().includes("volces.com") || config.embedding_model.toLowerCase().includes("doubao"))
+    ? config.secondary_api_key.trim() || config.api_key.trim()
+    : config.api_key.trim();
+  const hasEmbedding = Boolean((config.embedding_api_key.trim() || embeddingFallbackKey) && config.embedding_base_url.trim() && config.embedding_model.trim());
   const webSearchReady = config.web_search_provider === "custom" ? Boolean(config.web_search_base_url?.trim()) : true;
 
   return [

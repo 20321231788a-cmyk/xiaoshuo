@@ -1,4 +1,5 @@
 import { test, expect } from "@playwright/test";
+import type { Page } from "@playwright/test";
 import http from "node:http";
 
 const baseUrl = process.env.WORKBENCH_BASE_URL || "http://127.0.0.1:4180";
@@ -37,6 +38,12 @@ async function runtimeFetch(pathname: string, init: RequestInit = {}): Promise<R
 
 function workbenchUrl() {
   return `${baseUrl}?e2e=${Date.now()}&api=${encodeURIComponent(runtimeApi)}`;
+}
+
+async function openAssistantWorkspace(page: Page) {
+  const navigation = page.getByRole("complementary", { name: "主导航" });
+  await navigation.getByRole("button", { name: "AI 助手", exact: true }).click();
+  await expect(page.getByRole("button", { name: "新开对话", exact: true })).toBeVisible();
 }
 
 test.beforeAll(async () => {
@@ -105,6 +112,60 @@ test.beforeEach(async ({ page }) => {
   await page.route(`${runtimeApi}/**`, async (route) => {
     await route.continue({ headers: Object.fromEntries(runtimeHeaders(route.request().headers())) });
   });
+});
+
+test("writing-first navigation exposes all production pages and keeps AI diagnostics reachable", async ({ page }) => {
+  await page.goto(workbenchUrl());
+
+  const navigation = page.getByRole("complementary", { name: "主导航" });
+  const entries = [
+    "项目首页",
+    "正文编辑",
+    "AI 助手",
+    "故事大纲",
+    "伏笔与时间线",
+    "设定资料",
+    "风格与题材",
+    "小说编辑室",
+    "全文审阅",
+    "项目记忆",
+    "拆书工作台",
+    "批量章节生成",
+    "素材迁移",
+    "创作工具",
+    "后台任务",
+    "设置"
+  ];
+
+  for (const entry of entries) {
+    const button = navigation.getByRole("button", { name: entry, exact: true });
+    await expect(button).toBeVisible();
+    await button.click();
+    await expect(button).toHaveAttribute("aria-current", "page");
+  }
+
+  await expect(navigation.getByText("关键状态", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("tablist", { name: "AI 配置模式" })).toBeVisible();
+  await page.getByRole("button", { name: "手动配置", exact: true }).click();
+  await expect(page.getByRole("option", { name: "DuckDuckGo", exact: true })).toBeAttached();
+  await expect(page.locator(".xw-settings-section").getByRole("button", { name: "连接与检索测试", exact: true })).toBeVisible();
+});
+
+test("writing-first shell has no page-level horizontal overflow at supported desktop widths", async ({ page }) => {
+  for (const viewport of [
+    { width: 1024, height: 720 },
+    { width: 1280, height: 720 },
+    { width: 1440, height: 900 }
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto(workbenchUrl());
+    await expect(page.getByRole("complementary", { name: "主导航" })).toBeVisible();
+    const dimensions = await page.evaluate(() => ({
+      clientWidth: document.documentElement.clientWidth,
+      scrollWidth: document.documentElement.scrollWidth
+    }));
+    expect(dimensions.scrollWidth, `${viewport.width}x${viewport.height} page overflow`).toBeLessThanOrEqual(dimensions.clientWidth);
+  }
 });
 
 async function configureMockModel() {
@@ -222,6 +283,7 @@ test("conversation inline plan controls the real durable run through the API cli
   expect(projectResponse.ok).toBe(true);
   await configureMockModel();
   await page.goto(workbenchUrl());
+  await openAssistantWorkspace(page);
 
   await page.getByRole("button", { name: "新开对话", exact: true }).click();
   await page.getByRole("button", { name: "AI 对话框", exact: true }).click();
@@ -240,7 +302,7 @@ test("conversation inline plan controls the real durable run through the API cli
   // recover the persisted pending assistant metadata and re-subscribe to the
   // same durable run instead of cancelling or losing the plan card.
   await page.reload();
-  await page.getByRole("button", { name: "AI 对话", exact: true }).click();
+  await openAssistantWorkspace(page);
   card = page.getByLabel("Agent 执行计划");
   await expect(card).toBeVisible({ timeout: 15_000 });
   await card.getByRole("button", { name: /智能执行计划/ }).click();
@@ -293,6 +355,7 @@ test("conversation inline plan refreshes after a version conflict without replay
   expect(projectResponse.ok).toBe(true);
   await configureMockModel();
   await page.goto(workbenchUrl());
+  await openAssistantWorkspace(page);
 
   await page.getByRole("button", { name: "新开对话", exact: true }).click();
   await page.getByRole("button", { name: "AI 对话框", exact: true }).click();
@@ -340,6 +403,7 @@ test("conversation inline plan retries the failed durable step by its real step 
   expect(projectResponse.ok).toBe(true);
   await configureMockModel();
   await page.goto(workbenchUrl());
+  await openAssistantWorkspace(page);
 
   await page.getByRole("button", { name: "新开对话", exact: true }).click();
   await page.getByRole("button", { name: "AI 对话框", exact: true }).click();

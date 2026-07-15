@@ -13,7 +13,7 @@ import type { WorkbenchController } from "../../hooks/useWorkbenchController.js"
 const WEBSITE_HOME_URL = "https://matian.online/";
 const WEBSITE_REGISTER_URL = "https://matian.online/?page=api-relay&auth=register";
 
-export function SettingsFeaturePage({ controller }: { controller: WorkbenchController }) {
+export function SettingsFeaturePage({ controller, onOpenVectorTest }: { controller: WorkbenchController; onOpenVectorTest?: () => void }) {
   const config = controller.configDraft;
   const [showSecrets, setShowSecrets] = useState(false);
   const [websiteEmail, setWebsiteEmail] = useState("");
@@ -47,7 +47,9 @@ export function SettingsFeaturePage({ controller }: { controller: WorkbenchContr
   const websiteModels = websiteDashboard?.models || [];
   const websiteEmbeddingModels = websiteDashboard?.embedding_models || [];
   const websiteModel = websiteProfile.model || websiteDashboard?.selected_model || websiteModels[0]?.id || "";
-  const websiteEmbeddingModel = websiteProfile.embedding_model || websiteDashboard?.selected_embedding_model || websiteEmbeddingModels[0]?.id || "";
+  const websiteEmbeddingModel = websiteProfile.embedding_enabled
+    ? websiteProfile.embedding_model || websiteDashboard?.selected_embedding_model || websiteEmbeddingModels[0]?.id || ""
+    : "";
   const websiteTemp = websiteProfile.temp ?? websiteDashboard?.temp ?? 0.7;
   const websiteTopP = websiteProfile.top_p ?? websiteDashboard?.top_p ?? 1;
   const selectedRechargeOption = rechargeOptions.find((item) => item.option_index === selectedRechargeIndex) || rechargeOptions[0] || null;
@@ -77,6 +79,9 @@ export function SettingsFeaturePage({ controller }: { controller: WorkbenchContr
   }
 
   function patchManualProfile(patch: Partial<AiConfigProfile>) {
+    if (["embedding_enabled", "embedding_api_key", "embedding_base_url", "embedding_model"].some((key) => key in patch)) {
+      controller.resetEmbeddingTestResult();
+    }
     controller.patchConfig({ manual_profile: { ...manualProfile, ...patch } });
   }
 
@@ -146,7 +151,7 @@ export function SettingsFeaturePage({ controller }: { controller: WorkbenchContr
         </div>
       </div>
       {mode === "manual" ? (
-        <ManualAiSettings config={activeConfig} profile={manualProfile} controller={controller} showSecrets={showSecrets} onProfileChange={patchManualProfile} />
+        <ManualAiSettings config={activeConfig} profile={manualProfile} controller={controller} showSecrets={showSecrets} onProfileChange={patchManualProfile} onOpenVectorTest={onOpenVectorTest} />
       ) : (
         <div className="xw-settings-list ai">
           <section className="xw-settings-section">
@@ -227,7 +232,7 @@ export function SettingsFeaturePage({ controller }: { controller: WorkbenchContr
                   value={websiteEmbeddingModel}
                   placeholder="可选"
                   options={websiteEmbeddingModels.map((item) => ({ value: item.id, label: item.provider ? `${item.name} · ${item.provider}` : item.name }))}
-                  onChange={(value) => patchWebsiteProfile({ embedding_model: value, embedding_enabled: true })}
+                  onChange={(value) => patchWebsiteProfile({ embedding_model: value, embedding_enabled: Boolean(value) })}
                 />
               )}
               <SliderSettingRow label="temperature" value={websiteTemp} min={0} max={2} step={0.01} onChange={(value) => patchWebsiteProfile({ temp: value })} />
@@ -511,7 +516,7 @@ function WebsiteWebSearchSettings({ config, controller }: { config: AppConfig; c
     <section className="xw-settings-section">
       <div className="xw-settings-section-head">
         <strong>联网素材搜索</strong>
-        <span>网站配置也会使用这组搜索设置；Bing 无需额外密钥，自定义搜索密钥仍在手动配置页维护。</span>
+        <span>网站配置也会使用这组搜索设置；可选 Bing、DuckDuckGo 或自定义接口。</span>
       </div>
       <div className="xw-settings-grid">
         <ToggleSettingRow
@@ -522,10 +527,11 @@ function WebsiteWebSearchSettings({ config, controller }: { config: AppConfig; c
         <label className="xw-setting-field">
           <span>搜索来源</span>
           <select
-            value={config.web_search_provider === "custom" ? "custom" : "bing"}
-            onChange={(event) => savePatch({ web_search_provider: event.target.value === "custom" ? "custom" : "bing" })}
+            value={config.web_search_provider || "bing"}
+            onChange={(event) => savePatch({ web_search_provider: event.target.value as AppConfig["web_search_provider"] })}
           >
             <option value="bing">Bing</option>
+            <option value="duckduckgo">DuckDuckGo</option>
             <option value="custom">自定义 API</option>
           </select>
         </label>
@@ -712,13 +718,15 @@ function ManualAiSettings({
   profile,
   controller,
   showSecrets,
-  onProfileChange
+  onProfileChange,
+  onOpenVectorTest
 }: {
   config: AppConfig;
   profile: Partial<AiConfigProfile>;
   controller: WorkbenchController;
   showSecrets: boolean;
   onProfileChange: (patch: Partial<AiConfigProfile>) => void;
+  onOpenVectorTest?: () => void;
 }) {
   return (
     <div className="xw-settings-list ai">
@@ -774,14 +782,19 @@ function ManualAiSettings({
             <Cable size={14} />
             {controller.embeddingTestBusy ? "检测中" : "检测链接"}
           </button>
+          {onOpenVectorTest && (
+            <button className="xw-secondary-button compact" type="button" onClick={onOpenVectorTest}>
+              <ArchiveRestore size={14} />连接与检索测试
+            </button>
+          )}
         </div>
         <div className="xw-settings-grid">
           <ToggleSettingRow label="启用向量召回" checked={Boolean(profile.embedding_enabled)} onChange={() => onProfileChange({ embedding_enabled: !profile.embedding_enabled })} />
           <SecretSettingRow label="Embedding API Key" value={profile.embedding_api_key || ""} visible={showSecrets} onChange={(value) => onProfileChange({ embedding_api_key: value })} />
           <TextSettingRow label="Embedding Base URL" value={profile.embedding_base_url || ""} onChange={(value) => onProfileChange({ embedding_base_url: value })} />
           <TextSettingRow label="Embedding 模型" value={profile.embedding_model || ""} onChange={(value) => onProfileChange({ embedding_model: value })} />
-          <NumberSettingRow label="超时秒数" value={config.embedding_timeout || 60} min={5} max={300} onChange={(value) => controller.patchConfig({ embedding_timeout: value })} />
-          <NumberSettingRow label="批大小" value={config.embedding_batch_size || 16} min={1} max={128} onChange={(value) => controller.patchConfig({ embedding_batch_size: value })} />
+          <NumberSettingRow label="超时秒数" value={config.embedding_timeout || 60} min={5} max={300} onChange={(value) => { controller.resetEmbeddingTestResult(); controller.patchConfig({ embedding_timeout: value }); }} />
+          <NumberSettingRow label="批大小" value={config.embedding_batch_size || 16} min={1} max={128} onChange={(value) => { controller.resetEmbeddingTestResult(); controller.patchConfig({ embedding_batch_size: value }); }} />
           <NumberSettingRow label="召回条数" value={config.vector_top_k || 10} min={1} max={40} onChange={(value) => controller.patchConfig({ vector_top_k: value })} />
           <NumberSettingRow label="召回上下文字符" value={config.vector_context_chars || 9000} min={1000} max={80000} onChange={(value) => controller.patchConfig({ vector_context_chars: value })} />
         </div>
@@ -797,8 +810,9 @@ function ManualAiSettings({
           <ToggleSettingRow label="联网素材搜索" checked={Boolean(config.web_search_enabled)} onChange={() => controller.patchConfig({ web_search_enabled: !config.web_search_enabled })} />
           <label className="xw-setting-field">
             <span>搜索来源</span>
-            <select value={config.web_search_provider === "custom" ? "custom" : "bing"} onChange={(event) => controller.patchConfig({ web_search_provider: event.target.value === "custom" ? "custom" : "bing" })}>
+            <select value={config.web_search_provider || "bing"} onChange={(event) => controller.patchConfig({ web_search_provider: event.target.value as AppConfig["web_search_provider"] })}>
               <option value="bing">Bing</option>
+              <option value="duckduckgo">DuckDuckGo</option>
               <option value="custom">自定义 API</option>
             </select>
           </label>
@@ -807,6 +821,20 @@ function ManualAiSettings({
           <NumberSettingRow label="结果数量" value={config.web_search_max_results || 3} min={1} max={5} onChange={(value) => controller.patchConfig({ web_search_max_results: value })} />
           <NumberSettingRow label="搜索超时秒数" value={config.web_search_timeout || 10} min={3} max={60} onChange={(value) => controller.patchConfig({ web_search_timeout: value })} />
           <NumberSettingRow label="素材上下文字符" value={config.web_search_context_chars || 3000} min={800} max={8000} onChange={(value) => controller.patchConfig({ web_search_context_chars: value })} />
+        </div>
+      </section>
+
+      <section className="xw-settings-section">
+        <div className="xw-settings-section-head">
+          <strong>写作上下文与修订</strong>
+          <span>控制生成上下文、设定提取、文本自然度和一致性复查</span>
+        </div>
+        <div className="xw-settings-grid">
+          <ToggleSettingRow label="自动提取明确设定" checked={Boolean(config.auto_lore_extract_enabled)} onChange={() => controller.patchConfig({ auto_lore_extract_enabled: !config.auto_lore_extract_enabled })} />
+          <ToggleSettingRow label="降低模板化表达" checked={Boolean(config.humanizer_enabled)} onChange={() => controller.patchConfig({ humanizer_enabled: !config.humanizer_enabled })} />
+          <ToggleSettingRow label="生成后运行一致性复查" checked={Boolean(config.enable_consistency_revision)} onChange={() => controller.patchConfig({ enable_consistency_revision: !config.enable_consistency_revision })} />
+          <NumberSettingRow label="最大上下文字符" value={config.context_limit_chars || 262144} min={8192} max={1048576} onChange={(value) => controller.patchConfig({ context_limit_chars: value })} />
+          <NumberSettingRow label="触发修订分数" value={config.consistency_revision_score || 80} min={1} max={100} onChange={(value) => controller.patchConfig({ consistency_revision_score: value })} />
         </div>
       </section>
 

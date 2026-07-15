@@ -149,10 +149,10 @@ export async function handleWebsiteAiRoutes(
             model: payload.model,
             temp: payload.temp,
             top_p: payload.top_p,
-            embedding_enabled: payload.embedding_model ? true : Boolean(currentWebsiteProfile.embedding_enabled),
-            embedding_api_key: payload.embedding_model ? tokenKey : stringValue(currentWebsiteProfile.embedding_api_key),
-            embedding_base_url: payload.embedding_model ? makeRelayBaseUrl(websiteBaseUrl) : stringValue(currentWebsiteProfile.embedding_base_url),
-            embedding_model: payload.embedding_model || stringValue(currentWebsiteProfile.embedding_model)
+            embedding_enabled: Boolean(payload.embedding_model),
+            embedding_api_key: payload.embedding_model ? tokenKey : "",
+            embedding_base_url: payload.embedding_model ? makeRelayBaseUrl(websiteBaseUrl) : "",
+            embedding_model: payload.embedding_model
           }
         },
         { rootDir: context.projectRoot }

@@ -231,9 +231,10 @@ export class VectorIndex {
     this.db.init();
     const files = this.collectFiles();
     const config = await loadEmbeddingConfig({ rootDir: this.projectPath });
+    const embeddingConfigured = config.enabled && config.configured;
     let embedder: EmbeddingClient | null = null;
     let embeddingKey = "";
-    if (config.configured) {
+    if (embeddingConfigured) {
       embedder = new EmbeddingClient(config);
       embeddingKey = embedder.storageModel();
     }
@@ -251,7 +252,7 @@ export class VectorIndex {
         const rel = path.relative(this.projectPath, file).replace(/\\/g, "/");
         const mtime = fs.statSync(file).mtimeMs / 1000;
 
-        if (this.isFileCurrent(rel, mtime, embeddingKey, config.configured)) {
+        if (this.isFileCurrent(rel, mtime, embeddingKey, embeddingConfigured)) {
           progress?.((i + 1) / total * 0.45, `Index unchanged ${i + 1}/${files.length}`);
           continue;
         }
