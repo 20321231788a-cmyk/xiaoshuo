@@ -28,6 +28,52 @@ function parseChapterNumber(text: string): number | undefined {
   return undefined;
 }
 
+function loreCategoryType(name: string, fallback: string): string {
+  const normalized = name.replace(/\s+/g, "");
+  if (normalized === "人物") return "character";
+  if (normalized === "地点") return "location";
+  if (normalized === "势力") return "organization";
+  if (normalized === "物品") return "item";
+  if (normalized === "世界规则") return "world_rule";
+  return fallback;
+}
+
+function isRuleCategoryHeading(name: string): boolean {
+  return ["叙事规则", "语言偏好", "风格示例", "参考素材", "题材规则", "题材素材", "冲突模板", "战斗模板", "禁用表达", "违禁词"].includes(name.replace(/\s+/g, ""));
+}
+
+function ruleCategoryType(sourceType: string, name: string, fallback: string): string {
+  const normalized = name.replace(/\s+/g, "");
+  if (sourceType === "style") {
+    if (normalized === "风格示例") return "style_example";
+    if (normalized === "参考素材") return "style_material";
+    return "style_rule";
+  }
+  if (sourceType === "genre") {
+    if (normalized === "题材素材") return "genre_material";
+    if (normalized === "冲突模板" || normalized === "战斗模板") return "conflict_template";
+    if (normalized === "禁用表达" || normalized === "违禁词") return "banned_expression";
+    return "genre_rule";
+  }
+  return fallback;
+}
+
+function parseProjectionRelation(line: string, source: GraphEntity, sourcePath: string): GraphRelation | null {
+  const match = /^\s*[-*]\s*关系[：:]\s*([^|｜]+?)\s*[|｜]\s*([^|｜]+?)(?:\s*[|｜]\s*(.+))?\s*$/.exec(line);
+  if (!match) return null;
+  const targetName = String(match[1] || "").trim();
+  const predicate = String(match[2] || "关联").trim();
+  if (!targetName || !predicate) return null;
+  return {
+    source_entity_id: source.entity_id,
+    predicate,
+    target_entity_id: `character:${targetName}`,
+    description: String(match[3] || "").trim(),
+    source_path: sourcePath,
+    status: "confirmed"
+  };
+}
+
 
 export interface GraphEntity {
   id?: number;
@@ -136,8 +182,19 @@ export class GraphContext {
       for (const line of lines) {
         const match = line.match(/^(#{1,4})\s+(.+)$/);
         if (match) {
-          flushEntity();
           const name = match[2]!.trim().replace(/[\[\]【】]/g, "");
+          const level = match[1]!.length;
+          if (sourceType === "lore" && level <= 2) {
+            flushEntity();
+            type = loreCategoryType(name, type);
+            continue;
+          }
+          if (sourceType !== "lore" && (level === 1 || isRuleCategoryHeading(name))) {
+            flushEntity();
+            type = ruleCategoryType(sourceType, name, type);
+            continue;
+          }
+          flushEntity();
           const entityId = `${type}:${name}`;
           currentEntity = {
             entity_id: entityId,
@@ -147,6 +204,13 @@ export class GraphContext {
             source_path: sourcePath,
             status: "confirmed"
           };
+        } else if (currentEntity) {
+          const relation = parseProjectionRelation(line, currentEntity, sourcePath);
+          if (relation) {
+            relations.push(relation);
+          } else if (line.trim()) {
+            descLines.push(line);
+          }
         } else if (line.trim()) {
           descLines.push(line);
         }
@@ -270,11 +334,16 @@ export class GraphContext {
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `);
 
+      const stmtStructuredRelation = conn.prepare(`
+        INSERT INTO graph_relations(source_entity_id, predicate, target_entity_id, description, source_path, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+
       const now = Math.floor(Date.now() / 1000);
       const allExtractedEntities: GraphEntity[] = [];
 
       for (const chunk of chunks) {
-        const { entities, claims } = this.extractGraphData(
+        const { entities, relations, claims } = this.extractGraphData(
           chunk.id,
           chunk.text,
           chunk.source_type,
@@ -299,6 +368,19 @@ export class GraphContext {
             clm.status,
             clm.confidence || 1.0,
             clm.evidence_chunk_id || null,
+            now,
+            now
+          );
+        }
+
+        for (const relation of relations) {
+          stmtStructuredRelation.run(
+            relation.source_entity_id,
+            relation.predicate,
+            relation.target_entity_id,
+            relation.description || null,
+            relation.source_path,
+            relation.status,
             now,
             now
           );
@@ -409,8 +491,13 @@ export class GraphContext {
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `);
 
+        const stmtStructuredRelation = conn.prepare(`
+          INSERT INTO graph_relations(source_entity_id, predicate, target_entity_id, description, source_path, status, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `);
+
         for (const chunk of chunks) {
-          const { entities, claims } = this.extractGraphData(
+          const { entities, relations, claims } = this.extractGraphData(
             chunk.id,
             chunk.text,
             chunk.source_type,
@@ -434,6 +521,19 @@ export class GraphContext {
               clm.status,
               clm.confidence || 1.0,
               clm.evidence_chunk_id || null,
+              now,
+              now
+            );
+          }
+
+          for (const relation of relations) {
+            stmtStructuredRelation.run(
+              relation.source_entity_id,
+              relation.predicate,
+              relation.target_entity_id,
+              relation.description || null,
+              relation.source_path,
+              relation.status,
               now,
               now
             );

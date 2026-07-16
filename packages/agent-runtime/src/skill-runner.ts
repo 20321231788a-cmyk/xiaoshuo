@@ -13,11 +13,8 @@ import { assembleContext } from "./kernel/context-assembler.js";
 import type { ContextBlock } from "./kernel/context-block.js";
 import { scheduleModelContextBlocks } from "./context-scheduling.js";
 import { ProjectFileResolver } from "./kernel/project-file-resolver.js";
-import {
-  mergeLoreSectionText,
-  prepareSectionedGeneratedSave,
-  sectionedGeneratedTargetPaths
-} from "./sectioned-generated-save.js";
+import { createGeneratedLibraryDraft } from "./library-draft.js";
+import { isSectionedGeneratedSkillId, sectionedGeneratedTargetPaths } from "./sectioned-generated-save.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import { streamModelText, StreamingGenerationSession, type StreamingModelClient } from "./stream.js";
 import { isCancellationError, throwIfAborted, type AgentRunOptions } from "./cancellation.js";
@@ -576,25 +573,30 @@ export class PromptSkillRunner {
       }
 
       const shouldAutoCommit = await this.savePlanner.shouldAutoCommit(savePlan);
-      if (shouldAutoCommit && !options.deferAutoCommit) {
+      if (isSectionedGeneratedSkillId(skill.id)) {
+        const draft = await createGeneratedLibraryDraft({
+          projectRoot: this.projectRoot,
+          cacheId: entry.cache_id,
+          skillId: skill.id,
+          result: finalResult,
+          mode: savePlan.mode,
+          source: `prompt_skill:${skill.id}`
+        });
+        const draftPath = draft ? `00_设定集/.agent/library-drafts/${draft.draft_id}.jsonl` : "";
+        await this.cache.markCommitted(entry.cache_id, draftPath ? [draftPath] : [], { cleanupContent: false });
+        data.library_draft = draft ? {
+          draft_id: draft.draft_id,
+          domain: draft.domain,
+          records: draft.records.length,
+          requires_confirmation: true
+        } : undefined;
+        data.pending_save = false;
+        data.requires_confirmation = Boolean(draft);
+      } else if (shouldAutoCommit && !options.deferAutoCommit) {
         throwIfAborted(options.signal);
-        savedPaths =
-          skill.id === "style_extract"
-            ? await this.saveStyleSections(finalResult, savePlan.mode, {
-                summaryPrefix: "风格库确认保存"
-              })
-            : skill.id === "genre_generate"
-            ? await this.saveGenreSections(finalResult, savePlan.mode, {
-                summaryPrefix: "题材库确认保存"
-              })
-            : skill.id === "lore_extract"
-              ? await this.saveLoreSections(finalResult, savePlan.mode, {
-                  summaryPrefix: "设定提取确认保存",
-                  mergeExisting: !shouldOverwriteLore(payload.instruction)
-                })
-              : await this.cache.commitSavePlan(entry.cache_id, savePlan, {
-                cleanupContent: true
-              });
+        savedPaths = await this.cache.commitSavePlan(entry.cache_id, savePlan, {
+          cleanupContent: true
+        });
         savedPath = savedPaths[0] || "";
         data.saved_paths = savedPaths;
         await this.cache.markCommitted(entry.cache_id, savedPaths, { cleanupContent: true });
@@ -730,108 +732,6 @@ export class PromptSkillRunner {
       return `${STORY_DESLOP_SYSTEM_PROMPT}\n\n用户手动调用时，仍然只返回去AI味后的文本。若用户明确要求检测报告，再单独输出简短报告。`;
     }
     return (skill.prompt || "").trim() || `你是小说创作技能：${skill.name}。${skill.description}`;
-  }
-
-  public async saveStyleSections(
-    result: string,
-    mode: "replace" | "append",
-    options: { summaryPrefix: string }
-  ): Promise<string[]> {
-    const prepared = prepareSectionedGeneratedSave({
-      skillId: "style_extract",
-      result,
-      mode,
-      summaryPrefix: options.summaryPrefix
-    });
-    const savedPaths: string[] = [];
-    for (const item of prepared) {
-      await this.saveGeneratedText(item.target_path, item.content, item.mode, item.summary);
-      savedPaths.push(item.target_path);
-    }
-    return savedPaths;
-  }
-
-  public async saveGenreSections(
-    result: string,
-    mode: "replace" | "append",
-    options: { summaryPrefix: string }
-  ): Promise<string[]> {
-    const prepared = prepareSectionedGeneratedSave({
-      skillId: "genre_generate",
-      result,
-      mode,
-      summaryPrefix: options.summaryPrefix
-    });
-    const savedPaths: string[] = [];
-    for (const item of prepared) {
-      await this.saveGeneratedText(item.target_path, item.content, item.mode, item.summary);
-      savedPaths.push(item.target_path);
-    }
-    return savedPaths;
-  }
-
-  public async saveLoreSections(
-    result: string,
-    mode: "replace" | "append",
-    options: { summaryPrefix: string; mergeExisting: boolean }
-  ): Promise<string[]> {
-    const prepared = prepareSectionedGeneratedSave({
-      skillId: "lore_extract",
-      result,
-      mode,
-      summaryPrefix: options.summaryPrefix
-    });
-    const savedPaths: string[] = [];
-    for (const item of prepared) {
-      if (mode === "append") {
-        await this.saveGeneratedText(item.target_path, item.content, "append", item.summary);
-        savedPaths.push(item.target_path);
-        continue;
-      }
-
-      let nextText = item.content;
-      if (options.mergeExisting) {
-        let existing = "";
-        try {
-          existing = await this.documents.readRawText(item.target_path);
-        } catch {
-          existing = "";
-        }
-        nextText = mergeLoreSectionText(item.title, existing, item.content);
-      }
-      if (!String(nextText || "").trim()) {
-        continue;
-      }
-      await this.documents.saveDocument(item.target_path, String(nextText).trim(), {
-        source: "skill",
-        summary: item.summary
-      });
-      savedPaths.push(item.target_path);
-    }
-    return savedPaths;
-  }
-
-  private async saveGeneratedText(relPath: string, content: string, mode: "replace" | "append", summary: string): Promise<void> {
-    const targetPath = normalizeOptionalPath(this.documents, relPath);
-    if (!targetPath) {
-      throw new Error("保存目标不能为空");
-    }
-    const text = String(content || "").trim();
-    if (!text) {
-      throw new Error("生成内容为空，已阻止写入文件");
-    }
-    if (mode === "append") {
-      let existing = "";
-      try {
-        existing = await this.documents.readRawText(targetPath);
-      } catch {
-        existing = "";
-      }
-      const nextText = existing.trim() ? `${existing.trimEnd()}\n\n---\n${text}\n` : `${text}\n`;
-      await this.documents.saveDocument(targetPath, nextText, { source: "agent_generated_save", summary });
-      return;
-    }
-    await this.documents.saveDocument(targetPath, text, { source: "agent_generated_save", summary });
   }
 
   async draftSkillFromUrl(payload: SkillDraftFromUrlRequest, options: AgentRunOptions = {}): Promise<SkillDraftResponse> {

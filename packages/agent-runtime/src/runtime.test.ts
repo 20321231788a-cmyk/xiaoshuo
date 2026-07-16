@@ -756,7 +756,7 @@ describe("agent-runtime generated cache commits", () => {
     expect((await cache.get(entry.cache_id)).status).toBe("committed");
   });
 
-  it("commits sectioned style cache content through stable per-section journals", async () => {
+  it("turns sectioned style cache content into a confirmable library draft", async () => {
     const cache = new GeneratedCacheService({ projectRoot: tempDir });
     const entry = await cache.create({
       source: "skill_stream",
@@ -798,56 +798,23 @@ describe("agent-runtime generated cache commits", () => {
       }
     });
 
-    expect(result.saved_paths).toEqual([
-      "00_设定集/风格库/写作风格.txt",
-      "00_设定集/风格库/风格示例.txt",
-      "00_设定集/风格库/参考素材.txt"
-    ]);
+    expect(result.saved_paths).toEqual([]);
+    expect(result.run_id).toBe("");
     expect(result.cache).toMatchObject({
       status: "committed",
-      save_plan: expect.objectContaining({
-        action: "split_and_save",
-        skill_id: "style_extract"
-      })
+      saved_paths: [expect.stringMatching(/^00_设定集\/\.agent\/library-drafts\/generated-/)]
     });
-    expect(runtime.listDurableCommitJournal(result.run_id)).toEqual([
-      expect.objectContaining({
-        action: "generated_cache.commit.section:style_extract:00_设定集/风格库/写作风格.txt",
-        stage: "finalized"
-      }),
-      expect.objectContaining({
-        action: "generated_cache.commit.section:style_extract:00_设定集/风格库/风格示例.txt",
-        stage: "finalized"
-      }),
-      expect.objectContaining({
-        action: "generated_cache.commit.section:style_extract:00_设定集/风格库/参考素材.txt",
-        stage: "finalized"
-      })
-    ]);
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toBe("短句、留白。");
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "风格示例.txt"), "utf8")).toBe("雨打旧檐。");
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "参考素材.txt"), "utf8")).toBe("明清话本。");
+    expect(runtime.listDurableCommitJournal(result.run_id)).toEqual([]);
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toBe("克制冷静");
+    expect(existsSync(path.join(tempDir, "00_设定集", ".agent", "libraries", "style.v1.jsonl"))).toBe(false);
+    const draftPath = result.cache.saved_paths[0]!;
+    const draft = JSON.parse(await fs.readFile(path.join(tempDir, ...draftPath.split("/")), "utf8"));
+    expect(draft).toMatchObject({ domain: "style", source: "generated_cache:generated_save_route" });
+    expect(draft.records.map((record: { kind: string }) => record.kind)).toEqual(expect.arrayContaining([
+      "style_profile", "style_example", "style_material"
+    ]));
     expect(existsSync(path.join(tempDir, "02_正文", "不应写入.txt"))).toBe(false);
     expect(existsSync(path.join(tempDir, "02_正文", "也不应写入.txt"))).toBe(false);
-    const timeline = await new DocumentService({ projectRoot: tempDir }).listTimeline();
-    const sectionTimeline = Object.fromEntries(timeline.map((entry) => [
-      entry.files[0]?.path,
-      { source: entry.source, summary: entry.summary }
-    ]));
-    expect(sectionTimeline).toMatchObject({
-      "00_设定集/风格库/写作风格.txt": {
-        source: "agent_generated_save",
-        summary: "风格库保存：写作风格"
-      },
-      "00_设定集/风格库/风格示例.txt": {
-        source: "agent_generated_save",
-        summary: "风格库保存：风格示例"
-      },
-      "00_设定集/风格库/参考素材.txt": {
-        source: "agent_generated_save",
-        summary: "风格库保存：参考素材"
-      }
-    });
   });
 
   it("rejects a request skill that conflicts with pending cache metadata before any journal write", async () => {
@@ -875,11 +842,7 @@ describe("agent-runtime generated cache commits", () => {
     expect(existsSync(path.join(tempDir, "02_正文", "第一章.txt"))).toBe(false);
   });
 
-  it("retries a failed sectioned append on the same run without duplicating finalized sections", async () => {
-    const styleDir = path.join(tempDir, "00_设定集", "风格库");
-    const blockedTarget = path.join(styleDir, "风格示例.txt");
-    await fs.writeFile(path.join(styleDir, "写作风格.txt"), "原有风格", "utf8");
-    await fs.mkdir(blockedTarget);
+  it("replays a sectioned cache as the same library draft without projection writes", async () => {
     const cache = new GeneratedCacheService({ projectRoot: tempDir });
     const entry = await cache.create({
       source: "skill_stream",
@@ -897,53 +860,25 @@ describe("agent-runtime generated cache commits", () => {
     ].join("\n"));
     const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
 
-    await expect(runtime.commitGeneratedCache({
+    const first = await runtime.commitGeneratedCache({
       cache_id: entry.cache_id,
       source: "generated_save_route",
       skill_id: "style_extract",
       mode: "append"
-    })).rejects.toThrow();
-    const failedRun = runtime.listDurableRuns(["failed"], 10)[0];
-    expect(failedRun?.status).toBe("failed");
-    expect(await fs.readFile(path.join(styleDir, "写作风格.txt"), "utf8"))
-      .toBe("原有风格\n\n---\n新增风格\n");
-    expect((await cache.get(entry.cache_id)).status).toBe("pending");
-
-    await fs.rm(blockedTarget, { recursive: true });
-    const recovered = await runtime.commitGeneratedCache({
+    });
+    const replay = await runtime.commitGeneratedCache({
       cache_id: entry.cache_id,
       source: "generated_cache_commit_route",
       mode: "append"
     });
 
-    expect(recovered.run_id).toBe(failedRun?.run_id);
-    expect(runtime.exportDurableRun(recovered.run_id).attempts).toHaveLength(2);
-    expect(await fs.readFile(path.join(styleDir, "写作风格.txt"), "utf8"))
-      .toBe("原有风格\n\n---\n新增风格\n");
-    expect(await fs.readFile(path.join(styleDir, "风格示例.txt"), "utf8")).toBe("新增示例\n");
-    expect(await fs.readFile(path.join(styleDir, "参考素材.txt"), "utf8")).toBe("新增素材\n");
+    expect(first.cache.saved_paths).toEqual(replay.cache.saved_paths);
+    expect(replay.replayed).toBe(true);
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toBe("克制冷静");
     expect((await cache.get(entry.cache_id)).status).toBe("committed");
-    expect(runtime.listDurableCommitJournal(recovered.run_id)).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        action: "generated_cache.commit.section:style_extract:00_设定集/风格库/写作风格.txt",
-        stage: "finalized"
-      }),
-      expect.objectContaining({
-        action: "generated_cache.commit.section:style_extract:00_设定集/风格库/风格示例.txt",
-        error_code: "COMMIT_WRITE_FAILED"
-      }),
-      expect.objectContaining({
-        action: "generated_cache.commit.section:style_extract:00_设定集/风格库/风格示例.txt",
-        stage: "finalized"
-      }),
-      expect.objectContaining({
-        action: "generated_cache.commit.section:style_extract:00_设定集/风格库/参考素材.txt",
-        stage: "finalized"
-      })
-    ]));
   });
 
-  it("uses pending sectioned cache mode when the commit request omits mode", async () => {
+  it("uses the cached sectioned mode when creating a library draft", async () => {
     const cache = new GeneratedCacheService({ projectRoot: tempDir });
     const entry = await cache.create({
       source: "skill_stream",
@@ -954,13 +889,14 @@ describe("agent-runtime generated cache commits", () => {
     await cache.replace(entry.cache_id, "新增风格");
     const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
 
-    await runtime.commitGeneratedCache({
+    const result = await runtime.commitGeneratedCache({
       cache_id: entry.cache_id,
       skill_id: "style_extract"
     });
 
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8"))
-      .toBe("克制冷静\n\n---\n新增风格\n");
+    const draft = JSON.parse(await fs.readFile(path.join(tempDir, ...result.cache.saved_paths[0]!.split("/")), "utf8"));
+    expect(draft).toMatchObject({ domain: "style" });
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toBe("克制冷静");
   });
 
   it("discards deterministic raw sectioned caches when parsing produces no target", async () => {
@@ -3270,7 +3206,7 @@ describe("agent-runtime chat flow", () => {
     expect(continued.conversation.current_skill).toBe("style_dialogue");
   });
 
-  it("routes genre_generate skill intent locally with multi-target pending-save metadata", async () => {
+  it("routes genre_generate skill intent to a confirmable library draft", async () => {
     const runtime = new AgentRuntimeService({
       projectRoot: tempDir,
       config: { configPath },
@@ -3294,17 +3230,13 @@ describe("agent-runtime chat flow", () => {
 
     expect(result.intent).toBe("skill");
     expect(result.skill_result?.data).toMatchObject({
-      pending_save: true,
-      target_paths: [
-        "00_设定集/题材库/题材规则.txt",
-        "00_设定集/题材库/题材素材.txt",
-        "00_设定集/题材库/战斗模板.txt",
-        "00_设定集/题材库/违禁词.txt"
-      ]
+      pending_save: false,
+      requires_confirmation: true,
+      library_draft: { domain: "genre", records: 4 }
     });
   });
 
-  it("routes style_extract skill intent locally with multi-target pending-save metadata", async () => {
+  it("routes style_extract skill intent to a confirmable library draft", async () => {
     const runtime = new AgentRuntimeService({
       projectRoot: tempDir,
       config: { configPath },
@@ -3328,16 +3260,13 @@ describe("agent-runtime chat flow", () => {
 
     expect(result.intent).toBe("skill");
     expect(result.skill_result?.data).toMatchObject({
-      pending_save: true,
-      target_paths: [
-        "00_设定集/风格库/写作风格.txt",
-        "00_设定集/风格库/风格示例.txt",
-        "00_设定集/风格库/参考素材.txt"
-      ]
+      pending_save: false,
+      requires_confirmation: true,
+      library_draft: { domain: "style", records: 3 }
     });
   });
 
-  it("routes lore_extract skill intent locally with multi-target pending-save metadata", async () => {
+  it("routes lore_extract skill intent to a confirmable library draft", async () => {
     const runtime = new AgentRuntimeService({
       projectRoot: tempDir,
       config: { configPath },
@@ -3361,10 +3290,9 @@ describe("agent-runtime chat flow", () => {
 
     expect(result.intent).toBe("skill");
     expect(result.skill_result?.data).toMatchObject({
-      saved_paths: [
-        "00_设定集/设定集/人物设定.txt",
-        "00_设定集/设定集/体系设定.txt"
-      ]
+      saved_paths: [],
+      requires_confirmation: true,
+      library_draft: { domain: "lore", records: 2 }
     });
   });
 
@@ -4444,7 +4372,7 @@ describe("agent-runtime chat flow", () => {
     await expect(runtimeCache.readContent(cacheId)).rejects.toThrow("正文不存在");
   });
 
-  it("preserves lore merge semantics while committing the prompt skill through the journal", async () => {
+  it("keeps durable lore extraction as a draft until the user confirms it", async () => {
     const loreDir = path.join(tempDir, "00_设定集", "设定集");
     await fs.mkdir(loreDir, { recursive: true });
     await fs.writeFile(path.join(loreDir, "人物设定.txt"), "林默：主角，出身寒门。", "utf8");
@@ -4471,19 +4399,16 @@ describe("agent-runtime chat flow", () => {
     });
 
     const runId = String(result.data.run_id || "");
-    expect(result.data.saved_paths).toEqual(["00_设定集/设定集/人物设定.txt"]);
+    expect(result.data).toMatchObject({
+      saved_paths: [],
+      library_draft: { domain: "lore", records: 1, requires_confirmation: true }
+    });
     expect(await fs.readFile(path.join(loreDir, "人物设定.txt"), "utf8"))
-      .toContain("林默：主角，出身寒门；擅长隐忍");
-    expect(runtime.listDurableCommitJournal(runId)).toEqual([
-      expect.objectContaining({
-        run_id: runId,
-        action: "generated_cache.commit.section:lore_extract:00_设定集/设定集/人物设定.txt",
-        stage: "finalized"
-      })
-    ]);
+      .toBe("林默：主角，出身寒门。");
+    expect(runtime.listDurableCommitJournal(runId)).toEqual([]);
   });
 
-  it("honors an explicit lore overwrite while committing through the durable journal", async () => {
+  it("does not let an explicit lore overwrite bypass draft confirmation", async () => {
     const loreDir = path.join(tempDir, "00_设定集", "设定集");
     await fs.mkdir(loreDir, { recursive: true });
     await fs.writeFile(path.join(loreDir, "人物设定.txt"), "林默：旧设定，不应保留。", "utf8");
@@ -4510,13 +4435,8 @@ describe("agent-runtime chat flow", () => {
     });
 
     const content = await fs.readFile(path.join(loreDir, "人物设定.txt"), "utf8");
-    expect(content).toContain("林默：新设定，已加入宗门");
-    expect(content).not.toContain("旧设定");
-    expect(runtime.listDurableCommitJournal(String(result.data.run_id || ""))).toEqual([
-      expect.objectContaining({
-        action: "generated_cache.commit.section:lore_extract:00_设定集/设定集/人物设定.txt",
-        stage: "finalized"
-      })
-    ]);
+    expect(content).toBe("林默：旧设定，不应保留。");
+    expect(result.data).toMatchObject({ library_draft: { domain: "lore", records: 1, requires_confirmation: true } });
+    expect(runtime.listDurableCommitJournal(String(result.data.run_id || ""))).toEqual([]);
   });
 });

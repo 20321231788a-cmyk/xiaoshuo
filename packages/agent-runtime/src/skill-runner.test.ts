@@ -254,7 +254,7 @@ describe("prompt-skill-runner", () => {
     expect(capturedPrompt).not.toContain("SOURCE_TAIL_SHOULD_BE_TRIMMED");
   });
 
-  it("returns multi-target pending-save metadata for style_extract", async () => {
+  it("creates a confirmable style library draft instead of writing TXT projections", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
       config: { configPath },
@@ -277,16 +277,13 @@ describe("prompt-skill-runner", () => {
     });
 
     expect(result.data).toMatchObject({
-      pending_save: true,
-      target_paths: [
-        "00_设定集/风格库/写作风格.txt",
-        "00_设定集/风格库/风格示例.txt",
-        "00_设定集/风格库/参考素材.txt"
-      ]
+      pending_save: false,
+      requires_confirmation: true,
+      library_draft: { domain: "style", records: 3, requires_confirmation: true }
     });
   });
 
-  it("writes style sections into multiple target files when write_result=true", async () => {
+  it("does not bypass confirmation when style_extract requests a write", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
       config: { configPath },
@@ -308,17 +305,13 @@ describe("prompt-skill-runner", () => {
       attachment_ids: []
     });
 
-    expect(result.data.saved_paths).toEqual([
-      "00_设定集/风格库/写作风格.txt",
-      "00_设定集/风格库/风格示例.txt",
-      "00_设定集/风格库/参考素材.txt"
-    ]);
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toBe("风格规则");
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "风格示例.txt"), "utf8")).toBe("示例特征");
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "参考素材.txt"), "utf8")).toBe("素材摘要");
+    expect(result.data).toMatchObject({ saved_paths: [], library_draft: { domain: "style", records: 3 } });
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toBe("克制冷静");
+    await expect(fs.access(path.join(tempDir, "00_设定集", "风格库", "风格示例.txt"))).rejects.toThrow();
+    await expect(fs.access(path.join(tempDir, "00_设定集", "风格库", "参考素材.txt"))).rejects.toThrow();
   });
 
-  it("defers sectioned skill writes while preserving their generated save plan", async () => {
+  it("keeps a sectioned skill result as a draft for durable callers too", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
       config: { configPath },
@@ -341,16 +334,9 @@ describe("prompt-skill-runner", () => {
     }, { deferAutoCommit: true });
 
     expect(result.data).toMatchObject({
-      pending_save: true,
+      pending_save: false,
       saved_paths: [],
-      deferred_commit: {
-        skill_id: "style_extract",
-        target_paths: [
-          "00_设定集/风格库/写作风格.txt",
-          "00_设定集/风格库/风格示例.txt",
-          "00_设定集/风格库/参考素材.txt"
-        ]
-      }
+      library_draft: { domain: "style", records: 3, requires_confirmation: true }
     });
     expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toBe("克制冷静");
     await expect(fs.access(path.join(tempDir, "00_设定集", "风格库", "风格示例.txt"))).rejects.toThrow();
@@ -554,7 +540,7 @@ describe("prompt-skill-runner", () => {
     expect(capturedSystemPrompt).toContain("只改“怎么说”，不改“说什么”");
   });
 
-  it("returns multi-target pending-save metadata for genre_generate", async () => {
+  it("creates a confirmable genre library draft", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
       config: { configPath },
@@ -577,17 +563,13 @@ describe("prompt-skill-runner", () => {
     });
 
     expect(result.data).toMatchObject({
-      pending_save: true,
-      target_paths: [
-        "00_设定集/题材库/题材规则.txt",
-        "00_设定集/题材库/题材素材.txt",
-        "00_设定集/题材库/战斗模板.txt",
-        "00_设定集/题材库/违禁词.txt"
-      ]
+      pending_save: false,
+      requires_confirmation: true,
+      library_draft: { domain: "genre", records: 4, requires_confirmation: true }
     });
   });
 
-  it("writes genre sections into multiple target files when write_result=true", async () => {
+  it("does not bypass confirmation when genre_generate requests a write", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
       config: { configPath },
@@ -609,17 +591,12 @@ describe("prompt-skill-runner", () => {
       attachment_ids: []
     });
 
-    expect(result.data.saved_paths).toEqual([
-      "00_设定集/题材库/题材规则.txt",
-      "00_设定集/题材库/题材素材.txt",
-      "00_设定集/题材库/战斗模板.txt",
-      "00_设定集/题材库/违禁词.txt"
-    ]);
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "题材库", "题材规则.txt"), "utf8")).toBe("规则内容");
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "题材库", "题材素材.txt"), "utf8")).toBe("素材内容");
+    expect(result.data).toMatchObject({ saved_paths: [], library_draft: { domain: "genre", records: 4 } });
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "题材库", "题材规则.txt"), "utf8")).toBe("升级流");
+    await expect(fs.access(path.join(tempDir, "00_设定集", "题材库", "题材素材.txt"))).rejects.toThrow();
   });
 
-  it("returns multi-target pending-save metadata for lore_extract", async () => {
+  it("creates a confirmable lore library draft", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
       config: { configPath },
@@ -642,17 +619,13 @@ describe("prompt-skill-runner", () => {
     });
 
     expect(result.data).toMatchObject({
-      pending_save: true,
-      target_paths: [
-        "00_设定集/设定集/人物设定.txt",
-        "00_设定集/设定集/体系设定.txt",
-        "00_设定集/设定集/地图设定.txt",
-        "00_设定集/设定集/道具设定.txt"
-      ]
+      pending_save: false,
+      requires_confirmation: true,
+      library_draft: { domain: "lore", records: 2, requires_confirmation: true }
     });
   });
 
-  it("merges lore sections into existing files when write_result=true", async () => {
+  it("keeps existing lore TXT untouched until the generated draft is confirmed", async () => {
     await fs.mkdir(path.join(tempDir, "00_设定集", "设定集"), { recursive: true });
     await fs.writeFile(path.join(tempDir, "00_设定集", "设定集", "人物设定.txt"), "林默：主角，出身寒门。", "utf8");
 
@@ -677,10 +650,9 @@ describe("prompt-skill-runner", () => {
       attachment_ids: []
     });
 
-    expect(result.data.saved_paths).toContain("00_设定集/设定集/人物设定.txt");
-    expect(result.data.saved_paths).toContain("00_设定集/设定集/体系设定.txt");
+    expect(result.data).toMatchObject({ saved_paths: [], library_draft: { domain: "lore", records: 2 } });
     const mergedLore = await fs.readFile(path.join(tempDir, "00_设定集", "设定集", "人物设定.txt"), "utf8");
-    expect(mergedLore).toContain("林默：主角，出身寒门；擅长隐忍");
+    expect(mergedLore).toBe("林默：主角，出身寒门。");
   });
 
   it("drafts a skill from a URL using AI when configured", async () => {

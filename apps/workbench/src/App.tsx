@@ -66,7 +66,7 @@ import type { CSSProperties, FormEvent as ReactFormEvent, KeyboardEvent as React
 import type { DisassemblyBookSummary, OpenDocumentTab, WorkbenchController } from "./hooks/useWorkbenchController.js";
 import { useWorkbenchController } from "./hooks/useWorkbenchController.js";
 import { AppShell } from "./layout/AppShell.js";
-import { GuardBanner, AssistantRail, railModes, type RailMode } from "./layout/RightRail.js";
+import { GuardBanner } from "./layout/RightRail.js";
 import { LeftSidebar } from "./layout/LeftSidebar.js";
 import { WorkbenchNavigation } from "./layout/WorkbenchNavigation.js";
 import type { CenterFeature } from "./navigation.js";
@@ -80,6 +80,7 @@ import { LedgerFeaturePage } from "./features/ledger/LedgerFeaturePage.js";
 import { LegacyWorkbenchView, type LegacyWorkbenchTab } from "./features/legacy/LegacyWorkbenchView.js";
 import { LogsFeaturePage } from "./features/revision/LogsFeaturePage.js";
 import { NovelAgentWorkspace } from "./features/novel-agent/NovelAgentWorkspace.js";
+import { SourcesFeaturePage, StyleGenreFeaturePage } from "./features/library/ProjectLibraryPages.js";
 import { AutoReviewGeneratedToggle, ProjectFileSelect } from "./features/workflow/WorkflowControls.js";
 import { AgentTraceView } from "./views/AgentTraceView.js";
 import { MemoryGovernanceView } from "./views/MemoryGovernanceView.js";
@@ -100,7 +101,6 @@ import {
 const TerminalView = lazy(() => import("./views/TerminalView.js").then((module) => ({ default: module.TerminalView })));
 
 const runtime = readWorkbenchRuntime();
-const DEFAULT_RIGHT_WIDTH = 440;
 const APP_WINDOW_TITLE = "ArcWriter 0.9 Preview";
 const WEBSITE_HOME_URL = "https://matian.online/";
 const WEBSITE_REGISTER_URL = "https://matian.online/?page=api-relay&auth=register";
@@ -137,10 +137,7 @@ function disassemblyBookIsRawSource(book: DisassemblyBookSummary | null): boolea
 
 export function App() {
   const controller = useWorkbenchController(runtime);
-  const [rightMode, setRightMode] = useState<RailMode>("ai");
   const [centerFeature, setCenterFeature] = useState<CenterFeature>("editor");
-  const [rightWidth, setRightWidth] = useState(DEFAULT_RIGHT_WIDTH);
-  const [rightRailOpen, setRightRailOpen] = useState(() => typeof window === "undefined" || window.innerWidth >= 1320);
   const [selectedDisassemblyBookId, setSelectedDisassemblyBookId] = useState("");
   const [fusionBookIds, setFusionBookIds] = useState<string[]>([]);
   const [tutorialOpen, setTutorialOpen] = useState(false);
@@ -151,10 +148,10 @@ export function App() {
   const onboardingRef = useRef(false);
 
   useEffect(() => {
-    if (rightMode === "crawl" || centerFeature === "crawl") {
+    if (centerFeature === "crawl") {
       setLeftSidebarTab("disassembly");
     }
-  }, [rightMode, centerFeature]);
+  }, [centerFeature]);
 
   useEffect(() => {
     document.title = APP_WINDOW_TITLE;
@@ -259,7 +256,6 @@ export function App() {
     if (hasRecentProjects || controller.snapshot.currentProject.path) {
       return;
     }
-    setRightMode("settings");
     setCenterFeature("settings");
     controller.setActiveTab("config");
     if (controller.configDraft.ai_config_mode !== "website") {
@@ -292,8 +288,6 @@ export function App() {
       return;
     }
     if (feature === "conversations") {
-      setRightMode("ai");
-      setRightRailOpen(true);
       controller.setActiveTab(feature);
       return;
     }
@@ -320,15 +314,6 @@ export function App() {
     }
   }
 
-  function selectRightMode(mode: RailMode) {
-    setRightMode(mode);
-    setRightRailOpen(true);
-    const nextMode = railModes.find((item) => item.key === mode);
-    if (nextMode) {
-      selectCenterFeature(nextMode.feature);
-    }
-  }
-
   const disassemblyUi: DisassemblyUiState = {
     selectedBookId: selectedDisassemblyBookId,
     fusionBookIds,
@@ -338,20 +323,16 @@ export function App() {
 
   return (
     <AppShell
-      rightWidth={rightWidth}
-      rightOpen={rightRailOpen}
       navigation={
         <WorkbenchNavigation
           feature={centerFeature}
           projectName={controller.snapshot?.currentProject.name || ""}
           projectPath={controller.snapshot?.currentProject.path || ""}
-          assistantOpen={rightRailOpen}
           onSelect={selectCenterFeature}
           onOpenProject={() => controller.pickAndOpenProject("open")}
-          onToggleAssistant={() => setRightRailOpen((value) => !value)}
         />
       }
-      left={
+      left={centerFeature === "editor" ? (
         <LeftSidebar
           controller={controller}
           disassemblyUi={disassemblyUi}
@@ -365,7 +346,7 @@ export function App() {
           }}
           onOpenTimeline={() => selectCenterFeature("timeline")}
         />
-      }
+      ) : undefined}
       center={
         <LegacyWorkbenchView
           controller={controller}
@@ -382,22 +363,10 @@ export function App() {
               findRequestTick={findRequestTick}
               replaceRequestTick={replaceRequestTick}
               onSelectFeature={selectCenterFeature}
-              onSelectRightMode={selectRightMode}
             />
           )}
         </LegacyWorkbenchView>
       }
-      splitter={
-        <RightRailSplitter
-          onReset={() => setRightWidth(DEFAULT_RIGHT_WIDTH)}
-          onDrag={(clientX) => {
-            const maxWidth = Math.min(620, Math.max(360, window.innerWidth - 820));
-            const next = Math.min(maxWidth, Math.max(340, window.innerWidth - clientX - 14));
-            setRightWidth(next);
-          }}
-        />
-      }
-      right={<AssistantRail controller={controller} mode={rightMode} onModeChange={selectRightMode} onSelectFeature={selectCenterFeature} />}
       dialog={tutorialOpen ? <WebsiteTutorialDialog onClose={() => setTutorialOpen(false)} /> : undefined}
     />
   );
@@ -526,33 +495,13 @@ function WebsiteTutorialDialog({ onClose }: { onClose: () => void }) {
   );
 }
 
-function RightRailSplitter({ onDrag, onReset }: { onDrag: (clientX: number) => void; onReset: () => void }) {
-  function handleMouseDown(event: ReactMouseEvent<HTMLButtonElement>) {
-    event.preventDefault();
-    const handleMove = (moveEvent: MouseEvent) => onDrag(moveEvent.clientX);
-    const handleUp = () => {
-      window.removeEventListener("mousemove", handleMove);
-      window.removeEventListener("mouseup", handleUp);
-    };
-    window.addEventListener("mousemove", handleMove);
-    window.addEventListener("mouseup", handleUp);
-  }
-
-  return (
-    <button className="xw-rail-splitter" aria-label="调整右侧助手宽度" onMouseDown={handleMouseDown} onDoubleClick={onReset}>
-      <span />
-    </button>
-  );
-}
-
 function CenterWorkspace({
   controller,
   feature,
   findRequestTick,
   replaceRequestTick,
   disassemblyUi,
-  onSelectFeature,
-  onSelectRightMode
+  onSelectFeature
 }: {
   controller: WorkbenchController;
   feature: CenterFeature;
@@ -560,13 +509,12 @@ function CenterWorkspace({
   replaceRequestTick: number;
   disassemblyUi: DisassemblyUiState;
   onSelectFeature: (feature: CenterFeature) => void;
-  onSelectRightMode: (mode: RailMode) => void;
 }) {
   if (!controller.snapshot || !controller.configDraft) {
     return null;
   }
 
-  return <FeatureWorkbenchPanel controller={controller} feature={feature} findRequestTick={findRequestTick} replaceRequestTick={replaceRequestTick} disassemblyUi={disassemblyUi} onSelectFeature={onSelectFeature} onSelectRightMode={onSelectRightMode} />;
+  return <FeatureWorkbenchPanel controller={controller} feature={feature} findRequestTick={findRequestTick} replaceRequestTick={replaceRequestTick} disassemblyUi={disassemblyUi} onSelectFeature={onSelectFeature} />;
 }
 
 function FeatureWorkbenchPanel({
@@ -575,8 +523,7 @@ function FeatureWorkbenchPanel({
   findRequestTick,
   replaceRequestTick,
   disassemblyUi,
-  onSelectFeature,
-  onSelectRightMode
+  onSelectFeature
 }: {
   controller: WorkbenchController;
   feature: CenterFeature;
@@ -584,7 +531,6 @@ function FeatureWorkbenchPanel({
   replaceRequestTick: number;
   disassemblyUi: DisassemblyUiState;
   onSelectFeature: (feature: CenterFeature) => void;
-  onSelectRightMode: (mode: RailMode) => void;
 }) {
   const activeDocument = controller.openDocuments.find((document) => document.path === controller.activeDocumentPath) || null;
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
@@ -924,8 +870,8 @@ function FeatureWorkbenchPanel({
 
         {feature === "editor" && <div className="xw-quickbar">
           <span>快速工具</span>
-          <button onClick={() => onSelectRightMode("ai")}>润色选段</button>
-          <button onClick={() => onSelectRightMode("ai")}>续写此处</button>
+          <button onClick={() => onSelectFeature("conversations")}>润色选段</button>
+          <button onClick={() => onSelectFeature("conversations")}>续写此处</button>
           <button
             onClick={() => void controller.runWorkflowSkill("lore_extract", {
               instruction: "提取当前页面设定：只提取当前打开文档中明确出现的人物、体系、地图、道具设定，并与现有设定合并，避免臆造。",
@@ -1204,10 +1150,10 @@ function FeatureContentSurface({
     return <CluesFeaturePage controller={controller} onSelectFeature={onSelectFeature} />;
   }
   if (feature === "sources") {
-    feature = "settings-set";
+    return <SourcesFeaturePage controller={controller} />;
   }
   if (feature === "style") {
-    return <StyleAndGenreFeaturePage controller={controller} onSelectFeature={onSelectFeature} />;
+    return <StyleGenreFeaturePage controller={controller} />;
   }
   if (feature === "studio") {
     feature = "novel_agent";
@@ -1339,7 +1285,7 @@ function CluesFeaturePage({ controller, onSelectFeature }: { controller: Workben
   );
 }
 
-function StyleAndGenreFeaturePage({ controller, onSelectFeature }: { controller: WorkbenchController; onSelectFeature: (feature: CenterFeature) => void }) {
+function LegacyStyleAndGenreFeaturePage({ controller, onSelectFeature }: { controller: WorkbenchController; onSelectFeature: (feature: CenterFeature) => void }) {
   const [view, setView] = useState<"style" | "genre">("style");
   const cards: Array<[string, string, string]> = view === "style"
     ? [

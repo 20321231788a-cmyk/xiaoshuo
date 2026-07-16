@@ -8,7 +8,7 @@
 >
 > 实施方式：所有 UI 修改在一个批次内完成，开发中只做低成本阻断检查，最后执行一次集中验收
 >
-> 当前状态：已实施并完成 Preview 集中验收
+> 当前状态：历史 UI 批次已验收；2026-07-16 正在以本文件补充的结构化资料库契约进行增量验收。旧验收统计不得用于替代本次结果。
 
 ## 1. 结论
 
@@ -91,8 +91,8 @@
 | AI 助手 `assistant` | `ConversationFeaturePage`、`AssistantRail` | 共用现有会话与上下文；展示本次读取内容和写入目标 | 第二套会话状态、自动直接覆盖正文 |
 | 故事大纲 `outline` | `01_大纲` 文档及现有规划流程 | 首版提供大纲文档视图和快捷进入编辑 | 尚无契约的拖拽结构化节点 |
 | 伏笔与时间线 `clues` | `LedgerFeaturePage`、`TimelineFeaturePage` | 同一页面用标签切换两个真实视图 | 虚构关联数和扫描结果 |
-| 设定资料 `sources` | `settings-set` 文档库 | 按人物、体系、地图、道具分组，继续打开真实文件 | 不存在的结构化数据库字段 |
-| 风格与题材 `style` | `style-library`、`theme-library` | 合并成分段视图，保持真实文件编辑 | 虚构自动评分和规则命中 |
+| 设定资料 `sources` | `lore.v1.jsonl` 主数据、人物/地点/势力/物品/世界规则投影 | 分类列表、详情、关系和人物弧光读写 JSONL；TXT 仅作兼容投影 | 未确认的 AI 内容直接写入设定或记忆 |
+| 风格与题材 `style` | `style.v1.jsonl`、`genre.v1.jsonl` 主数据及各自投影 | 风格、规则、偏好、范文、题材和禁用表达读写 JSONL；右栏显示真实范文对照 | 虚构自动评分和未经确认的规则生效 |
 | 小说编辑室 `studio` | `NovelAgentWorkspace` 的 `room` | 独立一级入口；补齐范围、进度、摘要、issue 证据/建议、冲突与差异 | 角色直接写文件、隐藏降级状态 |
 | 全文审阅 `review` | `ConsistencyFeaturePage`、`full_consistency_scan`、`batch_chapter_quality` | 聚合一致性检查和真实后台报告 | 没有事实源的总分、历史趋势和问题数 |
 | 项目记忆 `memory` | `MemoryGovernanceView`、Novel MemoryPanel | 合并治理和批量确认；增加“全选可确认项”和冲突跳转 | 主观/冲突项批量确认、draft 自动 confirmed |
@@ -312,7 +312,7 @@ SettingsFeaturePage
 
 - [x] 大纲页映射真实 `01_大纲` 文档。
 - [x] 伏笔与时间线整合为分段视图，保留各自 controller 行为。
-- [x] 设定资料、风格与题材保留现有目录和真实文件路径。
+- [x] 设定资料、风格与题材升级为 JSONL 主数据与 TXT 兼容投影；首次旧文件导入和投影冲突均要求用户确认。
 - [x] 未实现的结构化拖拽和自动统计不进入可点击 UI。
 
 ### UI-04 审阅和记忆
@@ -406,7 +406,7 @@ npm run acceptance:preview
 5. 确认 Embedding 连接测试和向量检索测试入口可达；真实外部连接按用户当前配置选做；
 6. 调整到 1024x720 和 1440x900，确认无重叠、裁切和不可达按钮。
 
-### 13.4 实际验收结果（2026-07-15）
+### 13.4 历史验收结果（2026-07-15）
 
 - 全 workspace typecheck 通过；Vitest 112 个文件、880 项测试通过；3 项 Node 测试通过。
 - routing、planning、memory、quality、recovery、security、novel-agent、excluded-capabilities 共 8 类 eval manifest 通过；`novel-agent` 19/19。
@@ -415,6 +415,17 @@ npm run acceptance:preview
 - Playwright 真实截图检查覆盖 1440x900 编辑器/设置和 1024x720 设置页，无重叠、裁切或页面级横向溢出；截图为临时验收产物，未提交。
 - Desktop smoke 通过（Electron 42.3.0、node-pty、node:sqlite）；最终 `git diff --check` 通过。
 - 为效率未重复执行已通过的 880 项测试和 8 类 eval；上述证据共同覆盖 `acceptance:preview` 的全部阶段。
+
+### 13.5 结构化资料库增量验收（2026-07-16）
+
+本节只覆盖本次新 UI 与资料保存适配，不复跑商业化或发布验收。
+
+1. 运行 `npm run acceptance:ui-library`：shared/document/vector/agent/desktop/workbench 类型检查，资料库、图谱、生成草稿和既有 agent-runtime 定向测试，Workbench build 与 diff check。
+2. 在 Desktop 中打开一个项目：分别进入“设定资料”“风格与题材”，确认没有旧全局 AI 工具栏，且两页不显示静态 mock 数据。
+3. 在 1440x900 与 1280x720 检查列表、详情、草稿确认条和右侧效果预览，无横向溢出、重叠或不可达按钮。
+4. 用一个旧 TXT 项目验证迁移预览；确认导入后检查 JSONL 和投影；手工改写投影后验证冲突提示；生成一次 AI 内容并在页面确认草稿后验证投影更新。
+
+实际结果：`npm run acceptance:ui-library` 于 2026-07-16 通过，包含 6 个 workspace 定向 typecheck、4 个测试文件共 127 项测试、Workbench production build 和 `git diff --check`。浏览器可加载新工作台外壳并确认旧全局 AI 栏已移除；直接浏览器访问 runtime 被 Electron IPC 的认证/CORS 边界拒绝，未绕过该安全设计。完整资料编辑交互仍应通过 Desktop renderer 的 IPC 通道进行人工复验。
 
 ## 14. 完成定义
 

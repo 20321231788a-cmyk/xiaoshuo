@@ -33,6 +33,7 @@ import {
   handleGeneratedCacheRoutes,
   handleJobRoutes,
   handleProjectDocumentRoutes,
+  handleProjectLibraryRoutes,
   handleProjectReferenceRoutes,
   handleSkillRoutes,
   handleVectorRoutes,
@@ -219,6 +220,15 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
     writeJson,
     matchDocumentRoute,
     matchTimelineRoute
+  })) {
+    return;
+  }
+
+  if (await handleProjectLibraryRoutes(request, response, pathname, context, {
+    ensureProjectSessionCurrent,
+    ensureDocumentSession,
+    readJsonBody,
+    writeJson
   })) {
     return;
   }

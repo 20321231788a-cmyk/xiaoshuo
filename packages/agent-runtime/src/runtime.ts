@@ -124,6 +124,7 @@ import type { CanonClaim } from "./memory-governor.js";
 import { GovernedMemoryProjectionService } from "./governed-memory-projection-service.js";
 import { EvaluatorRegistry } from "./evaluator-registry.js";
 import { FeedbackLearner, type ArtifactFeedback } from "./feedback-learner.js";
+import { createGeneratedLibraryDraft } from "./library-draft.js";
 import {
   buildSectionedGeneratedSavePlan,
   isSectionedGeneratedSkillId,
@@ -212,6 +213,7 @@ type DeferredPromptSkillCommit = {
 const DIRECT_SKILL_REQUEST_ORIGIN = "skill_api";
 
 export class AgentRuntimeService {
+  private readonly projectRoot: string;
   private readonly planner: AgentPlanner;
   private readonly skillRunner: PromptSkillRunner;
   private readonly skillDrafts: SkillDraftService;
@@ -235,6 +237,7 @@ export class AgentRuntimeService {
   private governedMemoryStore: GovernedMemoryStore | null = null;
 
   constructor(options: AgentRuntimeOptions) {
+    this.projectRoot = options.projectRoot;
     this.config = options.config ?? {};
     // Product callers inject the main-process registry (default `off`). The
     // explicit compatibility registry preserves the public library's
@@ -1421,6 +1424,30 @@ export class AgentRuntimeService {
 
     const cachedContent = await this.cache.readContent(cacheId);
     const sectionedMode = requestedMode || meta.save_plan?.mode || meta.mode || "replace";
+    if (isSectionedGeneratedSkillId(effectiveSkillId)) {
+      const draft = await createGeneratedLibraryDraft({
+        projectRoot: this.projectRoot,
+        cacheId,
+        skillId: effectiveSkillId,
+        result: cachedContent,
+        mode: sectionedMode,
+        source: `generated_cache:${source}`
+      });
+      const draftPath = draft ? `00_设定集/.agent/library-drafts/${draft.draft_id}.jsonl` : "";
+      const committed = await this.cache.markCommitted(cacheId, draftPath ? [draftPath] : [], {
+        cleanupContent: input.cleanup_content ?? false,
+        commitRunId: options.execution?.run_id,
+        commitRequestId: options.execution?.request_id
+      });
+      return {
+        run_id: options.execution?.run_id || "",
+        cache_id: cacheId,
+        saved_paths: [],
+        journal_ids: [],
+        replayed: false,
+        cache: committed
+      };
+    }
     const sectionedSavePlan = isSectionedGeneratedSkillId(effectiveSkillId)
       ? canonicalGeneratedSavePlan(buildSectionedGeneratedSavePlan({
           skillId: effectiveSkillId,

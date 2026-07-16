@@ -59,6 +59,11 @@ export type SaveDocumentOptions = {
   atomicWrite?: DocumentAtomicWriteOptions;
 };
 
+export type AtomicDocumentSaveInput = {
+  path: string;
+  content: string;
+};
+
 export type DocumentAtomicWriteStage = "temp_written" | "before_replace" | "file_replaced";
 
 export type DocumentAtomicWriteOptions = {
@@ -233,6 +238,112 @@ export class DocumentService {
       ...options,
       summary: options.summary || `追加 ${normalized}`
     });
+  }
+
+  /**
+   * Commits a related set of text documents as one filesystem transaction and
+   * records one timeline event. This is used by structured project libraries
+   * whose JSONL source and searchable text projections must never diverge.
+   */
+  async saveDocumentsAtomically(entries: AtomicDocumentSaveInput[], options: SaveDocumentOptions = {}): Promise<DocumentContent[]> {
+    const normalizedEntries = entries.map((entry) => ({
+      path: this.normalizeRelativePath(entry.path),
+      content: entry.content || ""
+    }));
+    const seen = new Set<string>();
+    for (const entry of normalizedEntries) {
+      if (seen.has(entry.path)) {
+        throw new Error(`重复原子保存路径: ${entry.path}`);
+      }
+      seen.add(entry.path);
+    }
+    if (!normalizedEntries.length) {
+      return [];
+    }
+
+    const changed = [] as Array<{ path: string; content: string; target: string; before: TimelineFileChange }>;
+    for (const entry of normalizedEntries) {
+      const target = await this.resolveSafePath(entry.path, { allowMissing: true });
+      const current = await fs.readFile(target, "utf8").catch(() => null);
+      if (current === entry.content) {
+        continue;
+      }
+      changed.push({
+        path: entry.path,
+        content: entry.content,
+        target,
+        before: await this.snapshotChange(entry.path, "save_document")
+      });
+    }
+    if (!changed.length) {
+      return Promise.all(normalizedEntries.map((entry) => this.readDocument(entry.path)));
+    }
+
+    const token = this.idFactory();
+    const staged: Array<{ path: string; content: string; target: string; before: TimelineFileChange; temp: string; backup: string; hadOriginal: boolean; committed: boolean }> = [];
+    try {
+      for (const item of changed) {
+        await fs.mkdir(path.dirname(item.target), { recursive: true });
+        await this.revalidateAbsoluteProjectPath(item.target);
+        const basename = path.basename(item.target);
+        const stagedItem = {
+          ...item,
+          temp: path.join(path.dirname(item.target), `.${basename}.arcwriter-${token}.tmp`),
+          backup: path.join(path.dirname(item.target), `.${basename}.arcwriter-${token}.bak`),
+          hadOriginal: Boolean(await fs.stat(item.target).catch(() => null)),
+          committed: false
+        };
+        await fs.writeFile(stagedItem.temp, item.content, "utf8");
+        staged.push(stagedItem);
+      }
+
+      for (const item of staged) {
+        if (item.hadOriginal) {
+          await fs.rename(item.target, item.backup);
+        }
+        await fs.rename(item.temp, item.target);
+        item.committed = true;
+      }
+    } catch (error) {
+      for (const item of [...staged].reverse()) {
+        if (item.committed) {
+          await fs.rm(item.target, { force: true }).catch(() => undefined);
+        }
+        if (item.hadOriginal) {
+          const hasBackup = await fs.stat(item.backup).catch(() => null);
+          if (hasBackup) {
+            await fs.rename(item.backup, item.target).catch(() => undefined);
+          }
+        }
+      }
+      throw error;
+    } finally {
+      await Promise.all(staged.flatMap((item) => [
+        fs.rm(item.temp, { force: true }).catch(() => undefined),
+        fs.rm(item.backup, { force: true }).catch(() => undefined)
+      ]));
+    }
+
+    const completed = await Promise.all(changed.map((item) => this.completeChange(item.before)));
+    await this.appendTimelineEvent({
+      source: options.source || "editor",
+      summary: options.summary || `原子保存 ${changed.length} 个文件`,
+      files: completed,
+      operations: [],
+      session: options.session
+    });
+
+    return Promise.all(normalizedEntries.map(async (entry) => {
+      const target = await this.resolveSafePath(entry.path);
+      const stats = await fs.stat(target);
+      return documentContentSchema.parse({
+        path: entry.path,
+        content: entry.content,
+        updated_at: formatTimestamp(stats.mtime),
+        updated_at_ms: stats.mtimeMs,
+        changed: changed.some((item) => item.path === entry.path)
+      });
+    }));
   }
 
   async archiveDocument(relativePath: string, options: SaveDocumentOptions = {}): Promise<{ path: string; archived_path: string }> {

@@ -62,6 +62,32 @@ describe("GraphContext", () => {
       expect(data.claims[0]!.status).toBe("confirmed");
     });
 
+    it("understands canonical library categories and preserves authored character relations", () => {
+      const text = [
+        "# 人物设定",
+        "",
+        "## 人物",
+        "",
+        "### 顾淮",
+        "- 身份：调查员",
+        "- 关系：苏晚 | 搭档 | 共同追查旧案",
+        "",
+        "### 苏晚",
+        "- 身份：记者"
+      ].join("\n");
+      const data = graph!.extractGraphData(4, text, "lore", "00_设定集/设定集/人物设定.txt", "人物设定");
+
+      expect(data.entities.map((entity) => entity.name)).toEqual(["顾淮", "苏晚"]);
+      expect(data.entities.every((entity) => entity.type === "character")).toBe(true);
+      expect(data.entities.map((entity) => entity.name)).not.toContain("人物");
+      expect(data.relations).toEqual([expect.objectContaining({
+        source_entity_id: "character:顾淮",
+        target_entity_id: "character:苏晚",
+        predicate: "搭档",
+        description: "共同追查旧案"
+      })]);
+    });
+
     it("extracts planned outlines correctly", () => {
       const text = "陆尘将在青云山脚偶遇林风，并引发一系列冲突。";
       const data = graph!.extractGraphData(2, text, "outline", "01_大纲/第一章大纲.md", "第一章");

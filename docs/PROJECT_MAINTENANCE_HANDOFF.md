@@ -8,7 +8,7 @@
 
 ## 1. 当前结论
 
-0.5.0～0.9.0 已合并为一次交付，不再维护五套开发和验收周期。P0～P7 及小说 Agent 七项受控替代能力已经完成并通过集中验收；普通 Desktop 启动默认启用集成 Preview 配置，`--safe-agent` 可一键回退。
+0.5.0～0.9.0 已合并为一次交付，不再维护五套开发和验收周期。P0～P7 及小说 Agent 七项受控替代能力保持既有集中验收结论；本次“新 UI 资料库适配”作为独立增量，使用本章定义的 `acceptance:ui-library` 集中验收，不回填或复用旧 UI 验收统计。普通 Desktop 启动默认启用集成 Preview 配置，`--safe-agent` 可一键回退。
 
 Agent 当前执行口径只认两份文档：
 
@@ -43,7 +43,8 @@ npm run dev:desktop
 | 启动 Workbench | `npm run dev:workbench` |
 | 启动 Desktop | `npm run dev:desktop` |
 | 安全模式 | `npm run dev:desktop -- --safe-agent` |
-| Preview 总验收 | `npm run acceptance:preview` |
+| 本批 UI 资料库集中验收 | `npm run acceptance:ui-library` |
+| Preview 全量验收（发布前才需要） | `npm run acceptance:preview` |
 | 无签名安装包 | `npm run dist -w @xiaoshuo/desktop-shell` |
 
 本地 runtime 默认是 `http://127.0.0.1:18453`。受保护调用必须经 preload/IPC 获取会话能力，renderer 不得直接拼接认证信息。
@@ -125,6 +126,18 @@ npm run acceptance:preview
 执行过程中仅定向重跑失败项；所有失败修复后完成了一次最终总验收。新增小说多 Agent、工具、IPC、后台任务、跨项目迁移和记忆审核测试均已接入该命令。
 
 当前结果：全 workspace typecheck 通过；Vitest 112 个测试文件、881 个测试通过；3 个 Node 测试通过；8 个 eval manifest 通过，其中 `novel-agent` 19/19；Workbench/Desktop build 通过；Browser E2E 10/10；Desktop smoke 通过；`git diff --check` 通过。原始七项高风险入口仍不可达。
+
+以上统计是 2026-07-15 上一批 Preview 的历史证据。它不代表本次结构化资料库、草稿确认与新页面的验收结果。
+
+### 6.1 新 UI 资料库契约（2026-07-16）
+
+- `00_设定集/.agent/libraries/{lore,style,genre}.v1.jsonl` 是设定、风格和题材的唯一结构化主数据；UI 只读写这三个 JSONL。
+- 既有 `00_设定集/设定集/*.txt`、`风格库/*.txt`、`题材库/*.txt` 是由主数据一次性生成的 AI、Skill 和向量检索兼容投影，不能再作为 UI 的主编辑源。
+- 首次遇到旧 TXT 时只显示迁移预览。只有用户点击导入后，才会创建 JSONL 和新投影；外部改写投影会暂停编辑，用户必须选择重建投影或重新导入。
+- `lore_extract`、`style_extract`、`genre_generate` 的模型输出仅写入 `00_设定集/.agent/library-drafts/`。工作台显示待确认草稿，只有“确认写入”才会更新主数据和投影。
+- 保存 JSONL 与全部 TXT 投影使用一个文件事务和一条时间线记录。提交后重建 manifest、标记向量索引，并使相关治理记忆失效。
+- 本批集中验收命令为 `npm run acceptance:ui-library`，另须人工检查 1440x900 与 1280x720 的“设定资料”“风格与题材”页面。它替代本次开发期间的根级全量验收。
+- 2026-07-16 已通过该自动化集中验收：6 个定向 typecheck、4 个测试文件共 127 项测试、Workbench build 和 `git diff --check`。直接浏览器调用 runtime 会被 Electron IPC/CORS 身份边界拦截，这是预期安全行为；最终人工页面检查必须在 Desktop renderer 内完成。
 
 `desktop-rc.yml` 的 nightly 路径可生成无签名 Preview artifact；严格 `channel=rc` 和 `release.yml` 留给未来商业化，不阻塞本次小范围使用。
 

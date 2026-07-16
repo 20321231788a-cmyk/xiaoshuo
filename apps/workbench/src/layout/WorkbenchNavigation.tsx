@@ -1,4 +1,4 @@
-import { Bot, ChevronRight, Database, FolderOpen, PanelRightClose, PanelRightOpen, Sparkles, TerminalSquare, Workflow } from "lucide-react";
+import { ChevronRight, Sparkles } from "lucide-react";
 import type { CenterFeature } from "../navigation.js";
 import { workbenchNavigation } from "../navigation.js";
 
@@ -6,18 +6,14 @@ export function WorkbenchNavigation({
   feature,
   projectName,
   projectPath,
-  assistantOpen,
   onSelect,
-  onOpenProject,
-  onToggleAssistant
+  onOpenProject
 }: {
   feature: CenterFeature;
   projectName: string;
   projectPath: string;
-  assistantOpen: boolean;
   onSelect: (feature: CenterFeature) => void;
   onOpenProject: () => void;
-  onToggleAssistant: () => void;
 }) {
   return (
     <aside className="xw-primary-nav" aria-label="主导航">
@@ -65,25 +61,6 @@ export function WorkbenchNavigation({
         ))}
       </nav>
 
-      <div className="xw-nav-footer">
-        <button type="button" onClick={() => onSelect("vector_test")} className={feature === "vector_test" ? "active" : ""} title="连接与检索测试">
-          <Database size={16} /><span>连接与检索测试</span>
-        </button>
-        <button type="button" onClick={() => onSelect("traces")} className={feature === "traces" ? "active" : ""} title="Agent 运行">
-          <Workflow size={16} /><span>Agent 运行</span>
-        </button>
-        <button type="button" onClick={() => onSelect("terminal")} className={feature === "terminal" ? "active" : ""} title="受控终端">
-          <TerminalSquare size={16} /><span>受控终端</span>
-        </button>
-        <button type="button" onClick={onToggleAssistant} title={assistantOpen ? "收起 AI 侧栏" : "展开 AI 侧栏"} aria-pressed={assistantOpen}>
-          {assistantOpen ? <PanelRightClose size={16} /> : <PanelRightOpen size={16} />}
-          <span>{assistantOpen ? "收起 AI 侧栏" : "展开 AI 侧栏"}</span>
-          <Bot size={14} className="xw-nav-footer-tail" />
-        </button>
-        <button type="button" onClick={onOpenProject} title="打开项目目录">
-          <FolderOpen size={16} /><span>切换项目</span>
-        </button>
-      </div>
     </aside>
   );
 }
