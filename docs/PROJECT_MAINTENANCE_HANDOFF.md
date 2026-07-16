@@ -138,6 +138,7 @@ npm run acceptance:preview
 - 保存 JSONL 与全部 TXT 投影使用一个文件事务和一条时间线记录。提交后重建 manifest、标记向量索引，并使相关治理记忆失效。
 - 本批集中验收命令为 `npm run acceptance:ui-library`，另须人工检查 1440x900 与 1280x720 的“设定资料”“风格与题材”页面。它替代本次开发期间的根级全量验收。
 - 2026-07-16 最终 `acceptance:ui-library` 已通过：6 个 workspace 定向 typecheck、5 个测试文件共 132 项测试、Workbench production build 和 `git diff --check`。它同时覆盖资料库 Desktop runtime route：保存或确认草稿后必须重建 manifest、标记投影向量变更、失效对应治理记忆。直接浏览器调用 runtime 会被 Electron IPC/CORS 身份边界拦截，这是预期安全行为；最终人工页面检查必须在 Desktop renderer 内完成。
+- Desktop renderer 已在隔离 smoke 项目完成实际保存复验：旧风格/题材 TXT 经用户确认迁移后，新增题材素材同时写入 `genre.v1.jsonl` 和 `题材素材.txt`；新增人物设定同时写入 `lore.v1.jsonl` 和 `人物设定.txt`。新建设定的默认标题会在首次输入时自动全选替换，避免出现标题拼接。1440x900 与 1280x720 下资料列表、详情和题材预览均无旧版全局 AI 工具栏、遮挡或不可达操作。
 
 `desktop-rc.yml` 的 nightly 路径可生成无签名 Preview artifact；严格 `channel=rc` 和 `release.yml` 留给未来商业化，不阻塞本次小范围使用。
 

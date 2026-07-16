@@ -178,6 +178,7 @@ export function SourcesFeaturePage({ controller }: { controller: WorkbenchContro
   const [tab, setTab] = useState<(typeof entityTabs)[number][0]>("character");
   const [selectedId, setSelectedId] = useState("");
   const [editing, setEditing] = useState(false);
+  const [newEntityId, setNewEntityId] = useState("");
 
   const load = useCallback(async () => {
     if (!controller.snapshot?.currentProject.path) {
@@ -225,6 +226,7 @@ export function SourcesFeaturePage({ controller }: { controller: WorkbenchContro
       }));
       setBundle(next);
       setEditing(false);
+      setNewEntityId("");
       setMessage("设定资料已保存，并同步更新 AI 可检索文本。");
       void controller.refreshProjectWorkspace();
     } catch (error) {
@@ -265,6 +267,7 @@ export function SourcesFeaturePage({ controller }: { controller: WorkbenchContro
     } as ProjectLibraryRecord;
     setBundle({ ...bundle, records: [...bundle.records, entity] });
     setSelectedId(entity.id);
+    setNewEntityId(entity.id);
     setEditing(true);
   }
 
@@ -319,7 +322,7 @@ export function SourcesFeaturePage({ controller }: { controller: WorkbenchContro
         </aside>
         <main className="xw-library-detail">
           {selected ? <>
-            <div className="xw-library-detail-head"><span className="xw-library-avatar large">{selected.name.slice(0, 1)}</span><div><small>{entityTabs.find(([kind]) => kind === selected.kind)?.[1] || "设定"}</small>{editing ? <input value={selected.name} onChange={(event) => updateSelected({ name: event.target.value })} aria-label="设定名称" /> : <h2>{selected.name}</h2>}<p>{selected.identity || selected.role || "尚未填写身份"}</p></div><div>{editing && <button type="button" className="xw-primary-button" onClick={save}><Save size={15} />保存</button>}<button type="button" className="xw-secondary-button" onClick={() => { updateSelected({ status: "archived" }); setSelectedId(""); setEditing(true); }}><Archive size={14} />归档</button></div></div>
+            <div className="xw-library-detail-head"><span className="xw-library-avatar large">{selected.name.slice(0, 1)}</span><div><small>{entityTabs.find(([kind]) => kind === selected.kind)?.[1] || "设定"}</small>{editing ? <input value={selected.name} onFocus={(event) => { if (newEntityId === selected.id) event.currentTarget.select(); }} onChange={(event) => updateSelected({ name: event.target.value })} aria-label="设定名称" /> : <h2>{selected.name}</h2>}<p>{selected.identity || selected.role || "尚未填写身份"}</p></div><div>{editing && <button type="button" className="xw-primary-button" onClick={save}><Save size={15} />保存</button>}<button type="button" className="xw-secondary-button" onClick={() => { updateSelected({ status: "archived" }); setSelectedId(""); setEditing(true); }}><Archive size={14} />归档</button></div></div>
             <div className="xw-library-detail-grid">
               <section><h3>{selected.kind === "character" ? "人物核心" : "资料内容"}</h3>{editing ? <EntityEditor record={selected} onChange={updateSelected} /> : <EntityReadOnly record={selected} />}</section>
               {selected.kind === "character" && <section><div className="xw-library-section-head"><h3>关系</h3>{editing && <button type="button" onClick={addRelation}><Plus size={14} />添加</button>}</div><div className="xw-library-relations">{selectedRelations.map((relation) => relation.kind === "relation" && <RelationEditor key={relation.id} relation={relation} people={characters} editing={editing} onChange={replaceRecord} />)}{!selectedRelations.length && <p>尚未建立人物关系</p>}</div></section>}

@@ -425,7 +425,7 @@ npm run acceptance:preview
 3. 在 1440x900 与 1280x720 检查列表、详情、草稿确认条和右侧效果预览，无横向溢出、重叠或不可达按钮。
 4. 用一个旧 TXT 项目验证迁移预览；确认导入后检查 JSONL 和投影；手工改写投影后验证冲突提示；生成一次 AI 内容并在页面确认草稿后验证投影更新。
 
-实际结果：2026-07-16 最终 `npm run acceptance:ui-library` 通过，包含 6 个 workspace 定向 typecheck、5 个测试文件共 132 项测试、Workbench production build 和 `git diff --check`。测试覆盖资料库服务/图谱/Agent/Desktop route；浏览器可加载新工作台外壳并确认旧全局 AI 栏已移除。直接浏览器访问 runtime 被 Electron IPC 的认证/CORS 边界拒绝，未绕过该安全设计。完整资料编辑交互仍应通过 Desktop renderer 的 IPC 通道进行人工复验。
+实际结果：2026-07-16 最终 `npm run acceptance:ui-library` 通过，包含 6 个 workspace 定向 typecheck、5 个测试文件共 132 项测试、Workbench production build 和 `git diff --check`。测试覆盖资料库服务/图谱/Agent/Desktop route；浏览器可加载新工作台外壳并确认旧全局 AI 栏已移除。直接浏览器访问 runtime 被 Electron IPC 的认证/CORS 边界拒绝，未绕过该安全设计。随后在 Desktop renderer 的隔离 smoke 项目中完成手工复验：旧风格/题材 TXT 先显示迁移确认，确认后新增题材素材同步写入 `genre.v1.jsonl` 和 `题材素材.txt`；新建人物设定同步写入 `lore.v1.jsonl` 和 `人物设定.txt`，默认标题首次输入会被替换而非拼接。1440x900 与 1280x720 下资料列表、详情、草稿确认条和题材预览均可达，未见旧全局 AI 工具栏、重叠或横向溢出。
 
 ## 14. 完成定义
 
