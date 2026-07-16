@@ -1,6 +1,6 @@
 # ArcWriter 项目维护交接
 
-> 更新：2026-07-15
+> 更新：2026-07-16
 >
 > 当前版本：`0.9.0`（Preview 渠道）
 >
@@ -131,13 +131,13 @@ npm run acceptance:preview
 
 ### 6.1 新 UI 资料库契约（2026-07-16）
 
-- `00_设定集/.agent/libraries/{lore,style,genre}.v1.jsonl` 是设定、风格和题材的唯一结构化主数据；UI 只读写这三个 JSONL。
+- `00_设定集/.agent/libraries/{lore,style,genre}.v1.jsonl` 是设定、风格和题材的唯一结构化主数据；UI 只读写这三个 JSONL。人物关系、人物弧光、风格档案、规则、偏好、范文、参考素材、题材素材、冲突模板和禁用表达都有对应记录，不能再退回到按 TXT 编辑。
 - 既有 `00_设定集/设定集/*.txt`、`风格库/*.txt`、`题材库/*.txt` 是由主数据一次性生成的 AI、Skill 和向量检索兼容投影，不能再作为 UI 的主编辑源。
 - 首次遇到旧 TXT 时只显示迁移预览。只有用户点击导入后，才会创建 JSONL 和新投影；外部改写投影会暂停编辑，用户必须选择重建投影或重新导入。
 - `lore_extract`、`style_extract`、`genre_generate` 的模型输出仅写入 `00_设定集/.agent/library-drafts/`。工作台显示待确认草稿，只有“确认写入”才会更新主数据和投影。
 - 保存 JSONL 与全部 TXT 投影使用一个文件事务和一条时间线记录。提交后重建 manifest、标记向量索引，并使相关治理记忆失效。
 - 本批集中验收命令为 `npm run acceptance:ui-library`，另须人工检查 1440x900 与 1280x720 的“设定资料”“风格与题材”页面。它替代本次开发期间的根级全量验收。
-- 2026-07-16 已通过该自动化集中验收：6 个定向 typecheck、4 个测试文件共 127 项测试、Workbench build 和 `git diff --check`。直接浏览器调用 runtime 会被 Electron IPC/CORS 身份边界拦截，这是预期安全行为；最终人工页面检查必须在 Desktop renderer 内完成。
+- 2026-07-16 最终 `acceptance:ui-library` 已通过：6 个 workspace 定向 typecheck、5 个测试文件共 132 项测试、Workbench production build 和 `git diff --check`。它同时覆盖资料库 Desktop runtime route：保存或确认草稿后必须重建 manifest、标记投影向量变更、失效对应治理记忆。直接浏览器调用 runtime 会被 Electron IPC/CORS 身份边界拦截，这是预期安全行为；最终人工页面检查必须在 Desktop renderer 内完成。
 
 `desktop-rc.yml` 的 nightly 路径可生成无签名 Preview artifact；严格 `channel=rc` 和 `release.yml` 留给未来商业化，不阻塞本次小范围使用。
 

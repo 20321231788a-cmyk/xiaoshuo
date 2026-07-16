@@ -373,6 +373,9 @@ export function StyleGenreFeaturePage({ controller }: { controller: WorkbenchCon
   const styleRecords = activeRecords(style);
   const genreRecords = activeRecords(genre);
   const examples = styleRecords.filter((record) => record.kind === "style_example");
+  const styleMaterials = styleRecords.filter((record) => record.kind === "style_material");
+  const genreMaterials = genreRecords.filter((record) => record.kind === "genre_material");
+  const conflictTemplates = genreRecords.filter((record) => record.kind === "conflict_template");
   const selectedExample = examples.find((record) => record.id === selectedExampleId && record.kind === "style_example") || null;
   const rules = view === "genre" ? genreRecords.filter((record) => record.kind === "genre_rule") : styleRecords.filter((record) => record.kind === "style_rule");
   const profile = view === "genre"
@@ -391,18 +394,39 @@ export function StyleGenreFeaturePage({ controller }: { controller: WorkbenchCon
     } catch (error) { setMessage(error instanceof Error ? error.message : String(error)); }
   }
 
-  function addRule() {
+  function addItem() {
     const domain = view === "genre" || view === "banned" ? "genre" : "style";
     const source = domain === "style" ? style : genre;
     if (!source) return;
-    const record = domain === "style" ? { ...manualBase("新叙事规则", source.records.length), kind: "style_rule" as const, category: "custom" as const, instruction: "", severity: "preference" as const, enabled: true } : { ...manualBase(view === "banned" ? "禁用表达" : "新题材规则", source.records.length), kind: view === "banned" ? "banned_expression" as const : "genre_rule" as const, ...(view === "banned" ? { replacement: "", reason: "" } : { category: "custom" as const, instruction: "", severity: "hard" as const, enabled: true }) };
+    const record = view === "examples"
+      ? { ...manualBase("新范文片段", source.records.length), kind: "style_example" as const, before: "", after: "", explanation: "", source_ref: "" }
+      : domain === "style"
+        ? { ...manualBase("新叙事规则", source.records.length), kind: "style_rule" as const, category: "custom" as const, instruction: "", severity: "preference" as const, enabled: true }
+        : { ...manualBase(view === "banned" ? "禁用表达" : "新题材规则", source.records.length), kind: view === "banned" ? "banned_expression" as const : "genre_rule" as const, ...(view === "banned" ? { replacement: "", reason: "" } : { category: "custom" as const, instruction: "", severity: "hard" as const, enabled: true }) };
     const next = { ...source, records: [...source.records, record as ProjectLibraryRecord] };
     if (domain === "style") setStyle(next); else setGenre(next);
+    if (record.kind === "style_example") setSelectedExampleId(record.id);
   }
 
   function updateDomainRecord(domain: ProjectLibraryDomain, id: string, values: Record<string, unknown>) {
     const setter = domain === "style" ? setStyle : setGenre;
     setter((current) => current ? { ...current, records: current.records.map((record) => record.id === id ? { ...record, ...values } as ProjectLibraryRecord : record) } : current);
+  }
+
+  function updateProfile(domain: "style" | "genre", values: Record<string, unknown>) {
+    const source = domain === "style" ? style : genre;
+    const setter = domain === "style" ? setStyle : setGenre;
+    if (!source) return;
+    const kind = domain === "style" ? "style_profile" : "genre_profile";
+    const existing = source.records.find((record) => record.kind === kind);
+    if (existing) {
+      setter({ ...source, records: source.records.map((record) => record.id === existing.id ? { ...record, ...values } as ProjectLibraryRecord : record) });
+      return;
+    }
+    const profile = domain === "style"
+      ? { ...manualBase("未命名写作风格", source.records.length), kind: "style_profile" as const, narrative_pov: "", description: "", active: true, ...values }
+      : { ...manualBase("未命名题材", source.records.length), kind: "genre_profile" as const, description: "", active: true, ...values };
+    setter({ ...source, records: [...source.records, profile as ProjectLibraryRecord] });
   }
 
   async function migrate() {
@@ -416,15 +440,20 @@ export function StyleGenreFeaturePage({ controller }: { controller: WorkbenchCon
   if (state === "error") return <section className="xw-library-page"><EmptyLibraryState message={message || "风格与题材资料无法读取。"} /></section>;
   if (style?.status === "migration_required" || genre?.status === "migration_required") return <section className="xw-library-page"><EmptyLibraryState message="检测到旧版风格或题材 TXT。导入后将生成可编辑的规则、标签与范文。" onMigrate={migrate} /></section>;
 
+  const addLabel = view === "examples" ? "添加范文" : view === "banned" ? "添加禁用表达" : "添加规则";
+
   return <section className="xw-library-page">
-    <header className="xw-library-head"><div><p>项目写作规则</p><h1>风格与题材</h1><span>确认后的规则会在生成和审阅时自动生效。</span></div><div className="xw-library-actions"><button type="button" className="xw-secondary-button" onClick={() => void load()}><RefreshCw size={15} />刷新</button><button type="button" className="xw-primary-button" onClick={addRule}><Plus size={15} />添加规则</button></div></header>
+    <header className="xw-library-head"><div><p>项目写作规则</p><h1>风格与题材</h1><span>确认后的规则会在生成和审阅时自动生效。</span></div><div className="xw-library-actions"><button type="button" className="xw-secondary-button" onClick={() => void load()}><RefreshCw size={15} />刷新</button><button type="button" className="xw-primary-button" onClick={addItem}><Plus size={15} />{addLabel}</button></div></header>
     <LibraryStatus bundle={style?.status === "projection_drift" ? style : genre} message={message} onReconcile={(action) => void libraryRequest(controller, `/api/project-libraries/${style?.status === "projection_drift" ? "style" : "genre"}/reconcile`, { method: "POST", body: JSON.stringify({ action, confirm: true }) }).then(load)} />
     <LibraryDraftReview controller={controller} domains={["style", "genre"]} onChanged={() => void load()} />
     <div className="xw-library-layout style">
       <aside className="xw-style-nav" role="tablist" aria-label="风格与题材分类"><button role="tab" aria-selected={view === "style"} className={view === "style" ? "active" : ""} onClick={() => setView("style")}><Pencil size={15} />写作风格</button><button role="tab" aria-selected={view === "genre"} className={view === "genre" ? "active" : ""} onClick={() => setView("genre")}><Tags size={15} />题材规则</button><button role="tab" aria-selected={view === "examples"} className={view === "examples" ? "active" : ""} onClick={() => setView("examples")}><FileText size={15} />范文片段</button><button role="tab" aria-selected={view === "banned"} className={view === "banned" ? "active" : ""} onClick={() => setView("banned")}><ShieldCheck size={15} />禁用表达</button></aside>
       <main className="xw-style-main">
-        {(view === "style" || view === "genre") && <RuleEditor title={view === "style" ? "写作风格" : "题材规则"} profile={profile} records={rules} onChange={(id, values) => updateDomainRecord(view === "style" ? "style" : "genre", id, values)} onSave={() => void saveDomain(view === "style" ? "style" : "genre", view === "style" ? style : genre)} />}
+        {(view === "style" || view === "genre") && <RuleEditor title={view === "style" ? "写作风格" : "题材规则"} profile={profile} records={rules} onChange={(id, values) => updateDomainRecord(view === "style" ? "style" : "genre", id, values)} onProfileChange={(values) => updateProfile(view === "style" ? "style" : "genre", values)} onSave={() => void saveDomain(view === "style" ? "style" : "genre", view === "style" ? style : genre)} />}
         {view === "style" && <PreferenceEditor records={preferences} onChange={(id, values) => updateDomainRecord("style", id, values)} onAdd={() => { if (!style) return; setStyle({ ...style, records: [...style.records, { ...manualBase("具体动词", style.records.length), kind: "language_preference", preference: "prefer", replacement: "" } as ProjectLibraryRecord] }); }} onSave={() => void saveDomain("style", style)} />}
+        {view === "style" && <MaterialEditor title="参考素材" records={styleMaterials} onAdd={() => { if (!style) return; setStyle({ ...style, records: [...style.records, { ...manualBase("新参考素材", style.records.length), kind: "style_material", content: "" } as ProjectLibraryRecord] }); }} onChange={(id, values) => updateDomainRecord("style", id, values)} onSave={() => void saveDomain("style", style)} />}
+        {view === "genre" && <MaterialEditor title="题材素材" records={genreMaterials} onAdd={() => { if (!genre) return; setGenre({ ...genre, records: [...genre.records, { ...manualBase("新题材素材", genre.records.length), kind: "genre_material", content: "" } as ProjectLibraryRecord] }); }} onChange={(id, values) => updateDomainRecord("genre", id, values)} onSave={() => void saveDomain("genre", genre)} />}
+        {view === "genre" && <ConflictTemplateEditor records={conflictTemplates} onAdd={() => { if (!genre) return; setGenre({ ...genre, records: [...genre.records, { ...manualBase("新冲突模板", genre.records.length), kind: "conflict_template", setup: "", pressure: "", reversal: "", resolution: "" } as ProjectLibraryRecord] }); }} onChange={(id, values) => updateDomainRecord("genre", id, values)} onSave={() => void saveDomain("genre", genre)} />}
         {view === "examples" && <ExamplesEditor records={examples} selectedId={selectedExampleId} onSelect={setSelectedExampleId} onChange={(id, values) => updateDomainRecord("style", id, values)} onAdd={() => { if (!style) return; const next = { ...manualBase("新范文片段", style.records.length), kind: "style_example" as const, before: "", after: "", explanation: "", source_ref: "" } as ProjectLibraryRecord; setStyle({ ...style, records: [...style.records, next] }); setSelectedExampleId(next.id); }} onSave={() => void saveDomain("style", style)} />}
         {view === "banned" && <BannedEditor records={banned} onChange={(id, values) => updateDomainRecord("genre", id, values)} onSave={() => void saveDomain("genre", genre)} />}
       </main>
@@ -433,9 +462,18 @@ export function StyleGenreFeaturePage({ controller }: { controller: WorkbenchCon
   </section>;
 }
 
-function RuleEditor({ title, profile, records, onChange, onSave }: { title: string; profile: ProjectLibraryRecord | null; records: ProjectLibraryRecord[]; onChange: (id: string, values: Record<string, unknown>) => void; onSave: () => void }) {
+function RuleEditor({ title, profile, records, onChange, onProfileChange, onSave }: { title: string; profile: ProjectLibraryRecord | null; records: ProjectLibraryRecord[]; onChange: (id: string, values: Record<string, unknown>) => void; onProfileChange: (values: Record<string, unknown>) => void; onSave: () => void }) {
   const profileDescription = profile?.kind === "style_profile" || profile?.kind === "genre_profile" ? profile.description || profile.summary : "";
-  return <><div className="xw-library-profile"><div><small>当前{title}</small><h2>{profile?.name || `尚未设置${title}`}</h2><p>{profileDescription || "每条规则都会作为独立项目资产保存，可调整顺序、启用状态和强度。"}</p></div><button type="button" className="xw-primary-button" onClick={onSave}><Save size={15} />保存</button></div><section className="xw-rule-section"><div className="xw-library-section-head"><h3>规则</h3></div>{records.map((record) => (record.kind === "style_rule" || record.kind === "genre_rule") && <article key={record.id} className="xw-rule-row"><input value={record.name} onChange={(event) => onChange(record.id, { name: event.target.value })} /><textarea value={record.instruction} onChange={(event) => onChange(record.id, { instruction: event.target.value })} placeholder="填写可执行的写作约束" /><label><input type="checkbox" checked={record.enabled} onChange={(event) => onChange(record.id, { enabled: event.target.checked })} />启用</label></article>)}{!records.length && <p>点击“添加规则”建立第一条项目约束。</p>}</section></>;
+  const editableProfile = profile?.kind === "style_profile" || profile?.kind === "genre_profile" ? profile : null;
+  return <><div className="xw-library-profile"><div>{editableProfile ? <div className="xw-library-profile-fields"><label>当前{title}<input value={editableProfile.name} onChange={(event) => onProfileChange({ name: event.target.value })} /></label><label>说明<textarea value={profileDescription} onChange={(event) => onProfileChange({ description: event.target.value, summary: event.target.value })} /></label></div> : <><small>当前{title}</small><h2>尚未设置{title}</h2><p>先创建项目级{title}档案，再将规则、素材和范文作为同一套写作上下文保存。</p><button type="button" className="xw-secondary-button" onClick={() => onProfileChange({})}><Plus size={14} />设置{title}</button></>}</div><button type="button" className="xw-primary-button" onClick={onSave}><Save size={15} />保存</button></div><section className="xw-rule-section"><div className="xw-library-section-head"><h3>规则</h3></div>{records.map((record) => (record.kind === "style_rule" || record.kind === "genre_rule") && <article key={record.id} className="xw-rule-row"><input value={record.name} onChange={(event) => onChange(record.id, { name: event.target.value })} /><textarea value={record.instruction} onChange={(event) => onChange(record.id, { instruction: event.target.value })} placeholder="填写可执行的写作约束" /><label><input type="checkbox" checked={record.enabled} onChange={(event) => onChange(record.id, { enabled: event.target.checked })} />启用</label></article>)}{!records.length && <p>点击“添加规则”建立第一条项目约束。</p>}</section></>;
+}
+
+function MaterialEditor({ title, records, onAdd, onChange, onSave }: { title: string; records: ProjectLibraryRecord[]; onAdd: () => void; onChange: (id: string, values: Record<string, unknown>) => void; onSave: () => void }) {
+  return <section className="xw-rule-section"><div className="xw-library-section-head"><h3>{title}</h3><button type="button" onClick={onAdd}><Plus size={14} />添加</button></div>{records.map((record) => (record.kind === "style_material" || record.kind === "genre_material") && <article key={record.id} className="xw-rule-row"><input value={record.name} onChange={(event) => onChange(record.id, { name: event.target.value })} /><textarea value={record.content} onChange={(event) => onChange(record.id, { content: event.target.value })} placeholder="记录可复用的题材、世界观或表达素材" /><button type="button" aria-label={`归档 ${record.name}`} onClick={() => onChange(record.id, { status: "archived" })}><Archive size={14} /></button></article>)}{!records.length && <p>尚未添加{title}。</p>}<button type="button" className="xw-secondary-button" onClick={onSave}><Save size={14} />保存{title}</button></section>;
+}
+
+function ConflictTemplateEditor({ records, onAdd, onChange, onSave }: { records: ProjectLibraryRecord[]; onAdd: () => void; onChange: (id: string, values: Record<string, unknown>) => void; onSave: () => void }) {
+  return <section className="xw-rule-section"><div className="xw-library-section-head"><h3>冲突模板</h3><button type="button" onClick={onAdd}><Plus size={14} />添加</button></div>{records.map((record) => record.kind === "conflict_template" && <article key={record.id} className="xw-conflict-template"><div><input value={record.name} onChange={(event) => onChange(record.id, { name: event.target.value })} aria-label="模板名称" /><button type="button" aria-label={`归档 ${record.name}`} onClick={() => onChange(record.id, { status: "archived" })}><Archive size={14} /></button></div><div className="xw-library-form"><label>铺垫<textarea value={record.setup} onChange={(event) => onChange(record.id, { setup: event.target.value })} /></label><label>压迫<textarea value={record.pressure} onChange={(event) => onChange(record.id, { pressure: event.target.value })} /></label><label>反转<textarea value={record.reversal} onChange={(event) => onChange(record.id, { reversal: event.target.value })} /></label><label>收束<textarea value={record.resolution} onChange={(event) => onChange(record.id, { resolution: event.target.value })} /></label></div></article>)}{!records.length && <p>尚未添加冲突模板。</p>}<button type="button" className="xw-secondary-button" onClick={onSave}><Save size={14} />保存冲突模板</button></section>;
 }
 
 function PreferenceEditor({ records, onChange, onAdd, onSave }: { records: ProjectLibraryRecord[]; onChange: (id: string, values: Record<string, unknown>) => void; onAdd: () => void; onSave: () => void }) {

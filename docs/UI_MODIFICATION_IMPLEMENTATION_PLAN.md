@@ -88,7 +88,7 @@
 | --- | --- | --- | --- |
 | 项目首页 `home` | project session、project chrome、最近项目与项目动作 | 新增轻量项目概览；只显示真实项目和真实动作 | 连续写作天数、虚构统计、未接通云同步 |
 | 正文编辑 `editor` | `EditorFeaturePage`、文档树、标签、查找替换、保存与右栏 | 套用正文优先布局；章节树和 AI 右栏可折叠 | 未实现的富文本格式和虚假保存状态 |
-| AI 助手 `assistant` | `ConversationFeaturePage`、`AssistantRail` | 共用现有会话与上下文；展示本次读取内容和写入目标 | 第二套会话状态、自动直接覆盖正文 |
+| AI 助手 `assistant` | `ConversationFeaturePage` | 使用独立助手页复用现有会话与上下文；全局 `AssistantRail` 不再进入应用壳 | 第二套会话状态、自动直接覆盖正文 |
 | 故事大纲 `outline` | `01_大纲` 文档及现有规划流程 | 首版提供大纲文档视图和快捷进入编辑 | 尚无契约的拖拽结构化节点 |
 | 伏笔与时间线 `clues` | `LedgerFeaturePage`、`TimelineFeaturePage` | 同一页面用标签切换两个真实视图 | 虚构关联数和扫描结果 |
 | 设定资料 `sources` | `lore.v1.jsonl` 主数据、人物/地点/势力/物品/世界规则投影 | 分类列表、详情、关系和人物弧光读写 JSONL；TXT 仅作兼容投影 | 未确认的 AI 内容直接写入设定或记忆 |
@@ -420,24 +420,22 @@ npm run acceptance:preview
 
 本节只覆盖本次新 UI 与资料保存适配，不复跑商业化或发布验收。
 
-1. 运行 `npm run acceptance:ui-library`：shared/document/vector/agent/desktop/workbench 类型检查，资料库、图谱、生成草稿和既有 agent-runtime 定向测试，Workbench build 与 diff check。
+1. 运行 `npm run acceptance:ui-library`：shared/document/vector/agent/desktop/workbench 类型检查，资料库、图谱、生成草稿、Desktop runtime route 和既有 agent-runtime 定向测试，Workbench build 与 diff check。
 2. 在 Desktop 中打开一个项目：分别进入“设定资料”“风格与题材”，确认没有旧全局 AI 工具栏，且两页不显示静态 mock 数据。
 3. 在 1440x900 与 1280x720 检查列表、详情、草稿确认条和右侧效果预览，无横向溢出、重叠或不可达按钮。
 4. 用一个旧 TXT 项目验证迁移预览；确认导入后检查 JSONL 和投影；手工改写投影后验证冲突提示；生成一次 AI 内容并在页面确认草稿后验证投影更新。
 
-实际结果：`npm run acceptance:ui-library` 于 2026-07-16 通过，包含 6 个 workspace 定向 typecheck、4 个测试文件共 127 项测试、Workbench production build 和 `git diff --check`。浏览器可加载新工作台外壳并确认旧全局 AI 栏已移除；直接浏览器访问 runtime 被 Electron IPC 的认证/CORS 边界拒绝，未绕过该安全设计。完整资料编辑交互仍应通过 Desktop renderer 的 IPC 通道进行人工复验。
+实际结果：2026-07-16 最终 `npm run acceptance:ui-library` 通过，包含 6 个 workspace 定向 typecheck、5 个测试文件共 132 项测试、Workbench production build 和 `git diff --check`。测试覆盖资料库服务/图谱/Agent/Desktop route；浏览器可加载新工作台外壳并确认旧全局 AI 栏已移除。直接浏览器访问 runtime 被 Electron IPC 的认证/CORS 边界拒绝，未绕过该安全设计。完整资料编辑交互仍应通过 Desktop renderer 的 IPC 通道进行人工复验。
 
 ## 14. 完成定义
 
-只有同时满足以下条件，才能把本方案状态改为“已完成”：
+本计划的原始 17 页 UI 交付已完成，后续增量按第 13.5 节独立验收，不回退到商业化发布矩阵。结构化资料库增量只有同时满足以下条件，才能标记为“已完成”：
 
-- 第 11 节所有任务完成；
-- 原型的静态数据和无 handler 按钮未进入生产代码；
-- 现有功能、AI 配置字段和测试功能零删减；
-- 16 个正式页面使用真实数据可达，`states` 不作为正式路由；
-- 可访问性和三档桌面窗口要求通过；
-- `acceptance:preview` 的全部阶段通过；后段失败允许按第 13.2 节形成定向复验和尾部门禁证据；
-- 自动化与 Playwright 真实截图短检查通过；外部模型连接按 Preview 配置选做；
+- JSONL 是 UI 的唯一主编辑源，所有对应 TXT 投影可由它完整重建；
+- 旧 TXT 导入、投影冲突恢复与 AI 草稿确认门禁保持可用；
+- 设定资料可展示人物、地点、势力、物品、世界规则、关系和人物弧光；风格与题材可展示档案、规则、偏好、范文、参考素材、题材素材、冲突模板和禁用表达；
+- `acceptance:ui-library` 通过，包含服务、Desktop route、Workbench build 和 diff check；
+- 仅在 Desktop renderer 内完成一次 1440x900 与 1280x720 人工检查，不要求重跑 `acceptance:preview`、商业化 E2E、发布或外部模型实测；
 - 维护交接已回填实际命令、结果和剩余限制。
 
 ## 15. 本批非目标
