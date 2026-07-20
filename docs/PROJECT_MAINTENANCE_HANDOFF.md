@@ -1,6 +1,6 @@
 # ArcWriter 项目维护交接
 
-> 更新：2026-07-16
+> 更新：2026-07-20
 >
 > 当前版本：`0.9.0`（Preview 渠道）
 >
@@ -140,6 +140,19 @@ npm run acceptance:preview
 - 2026-07-16 最终 `acceptance:ui-library` 已通过：6 个 workspace 定向 typecheck、5 个测试文件共 132 项测试、Workbench production build 和 `git diff --check`。它同时覆盖资料库 Desktop runtime route：保存或确认草稿后必须重建 manifest、标记投影向量变更、失效对应治理记忆。直接浏览器调用 runtime 会被 Electron IPC/CORS 身份边界拦截，这是预期安全行为；最终人工页面检查必须在 Desktop renderer 内完成。
 - Desktop renderer 已在隔离 smoke 项目完成实际保存复验：旧风格/题材 TXT 经用户确认迁移后，新增题材素材同时写入 `genre.v1.jsonl` 和 `题材素材.txt`；新增人物设定同时写入 `lore.v1.jsonl` 和 `人物设定.txt`。新建设定的默认标题会在首次输入时自动全选替换，避免出现标题拼接。1440x900 与 1280x720 下资料列表、详情和题材预览均无旧版全局 AI 工具栏、遮挡或不可达操作。
 
+### 6.2 ArcWriter 全量生产工作台收口（2026-07-20）
+
+- 生产 Workbench 固定为 16 个正式页面；类型化 hash 路由支持设置二级页、技能三级页、浏览器前进后退和正确的导航选中状态。生产环境不注册 Trace、终端、向量测试和旧页面别名，非法诊断地址返回项目首页。
+- AppShell、设计令牌、共享状态组件和功能样式已拆分。主导航按写作、规划、资料、审阅、工具分组，后台任务和设置固定在底部；`1024x720` 起支持完整工作区，不使用 `zoom` 或 `scale()` 缩小页面。
+- 项目首页、正文编辑、AI 助手、大纲、伏笔与时间线、设定资料、风格与题材、小说编辑室、全文审阅、项目记忆、拆书、批量生成、素材迁移、创作工具、后台任务和设置均接入现有 Controller、typed API 或明确的不可用状态，不再使用仅供展示的无事件控件。
+- 编辑器提供完整中文标点栏、成对标点包裹和光标恢复；TXT 隐藏无意义的富文本按钮。打字速度按最近 60 秒真实键盘/IME 输入计算，排除粘贴、AI 写入、撤销和程序化替换，并在切换文档时重置。
+- 创作工具的“写作与审阅”集中管理自动提取明确设定、降低模板化表达和生成后一致性复查；三个开关与设置使用同一 `AppConfig` 数据源，保存失败会回滚，关联技能不可用时不会形成无效开启状态。
+- AI 配置保留网站/手动双模式，并拆成模型、本地检索、网站服务、联网搜索四个分区。设置页使用固定页头、分区标签、独立内容滚动区和固定操作区；AppShell 的网格最小高度链已修复，长页面不会再被 `body` 裁切。
+- AI 生成写入统一经过预览和用户确认；技能生成不会直接覆盖正文。AI 助手补齐会话创建、重命名和删除；“抽卡”只保留为 AI 助手与批量生成的生成方式，可见文案不再使用“多版本候选”。
+- 新增版本化故事规划与审阅报告 schema、Document Service 和 Desktop runtime 路由；故事时间线与文件修订历史分离。生产页面不显示日志、Agent Trace、终端、哈希、IPC 或内部执行步骤。
+- 完整收口验收曾通过：全 workspace typecheck；123 个 Vitest 文件、920 项测试；3/3 Node tests；全部 eval；Workbench/Desktop production build；7/7 Browser E2E；Desktop smoke；`git diff --check`。设置分区和短窗口高度修复后再次通过 Workbench typecheck、production build、8/8 Browser E2E 与 `git diff --check`。
+- 本批代码提交为 `9a4e579`（`feat(ui): complete ArcWriter production workbench`）。Workbench 主包约 453 kB，不再触发 Vite 500 kB chunk 警告。
+
 `desktop-rc.yml` 的 nightly 路径可生成无签名 Preview artifact；严格 `channel=rc` 和 `release.yml` 留给未来商业化，不阻塞本次小范围使用。
 
 ## 7. 打包与回退
@@ -232,3 +245,12 @@ git diff --check
 - 保存当前显式绑定当前分屏文档路径，文档保存结果通过可访问状态区反馈；
 - 集中验证通过：全 workspace typecheck；112 files / 881 tests；3/3 Node tests；Document Service 32/32；Browser E2E 10/10；Desktop smoke；`git diff --check`；
 - 当前只保留既有的 Workbench 构建 chunk 超过 500 kB 警告，不影响本批保存行为，也不作为免费小范围 Preview 的阻断项。
+
+2026-07-20 ArcWriter 全量交互与 UI 收口：
+
+- 以 `output/ui-final/` 为视觉和信息架构基准完成 16 个生产页面的统一实现，真实交互和可读性优先于像素级照搬；
+- AI 配置继续作为设置二级页，技能查看、编辑、版本历史和导入预览继续作为创作工具三级页；抽卡不增加独立导航；
+- 自动写作开关、中文标点栏、实时打字速度、故事规划、审阅报告、AI 写入确认和会话删除均已接入并覆盖测试；
+- 修复 AppShell 高度链和设置页滚动归属，`1280x720` 下 1000px 高的模型表单在 365px 内容区内独立滚动，分区标签和底部操作保持可见，无页面级横向溢出；
+- 最终代码提交为 `9a4e579`；只创建本地 Git commit，未创建 tag、未推送 Release；
+- 网站配置若显示 `fetch failed`，当前已确认原因是外部 `matian.online` 证书过期，不属于 Workbench 布局或本地 runtime 故障。
