@@ -1,7 +1,11 @@
 import { ConversationService } from "@xiaoshuo/conversation-service";
 import { loadModelConfig, readRawConfig } from "@xiaoshuo/config-service";
 import { OpenAICompatibleClient } from "@xiaoshuo/model-client";
-import { conversationMessageRequestSchema, type CurrentProject } from "@xiaoshuo/shared";
+import {
+  conversationMessageRequestSchema,
+  conversationModelPreferencesSchema,
+  type CurrentProject
+} from "@xiaoshuo/shared";
 import { AgentRuntimeService, encodeNdjsonEvent } from "@xiaoshuo/agent-runtime";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createRequestAbortSignal } from "./http-utils.js";
@@ -92,6 +96,11 @@ export async function handleConversationRoutes(
     } catch (error) {
       deps.writeJson(response, 404, { detail: error instanceof Error ? error.message : String(error) });
     }
+    return true;
+  }
+  if (conversationRoute.id && conversationRoute.action === "model-preferences" && request.method === "PUT") {
+    const payload = conversationModelPreferencesSchema.parse(await deps.readJsonBody(request));
+    deps.writeJson(response, 200, await service.updateModelPreferences(conversationRoute.id, payload));
     return true;
   }
   if (conversationRoute.id && conversationRoute.action === "messages" && request.method === "POST") {

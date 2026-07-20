@@ -6,6 +6,7 @@ const baseUrl = process.env.WORKBENCH_BASE_URL || "http://127.0.0.1:4180";
 const runtimeApi = process.env.WORKBENCH_API_BASE || "http://127.0.0.1:18453";
 const runtimeSessionToken = process.env.WORKBENCH_E2E_SESSION_TOKEN || "arcwriter-e2e-runtime-token";
 const sandboxProjectsPath = "D:/xiaoshuo/ts-migration/sandbox-projects";
+const coverPng = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
 let mockModelServer: http.Server | null = null;
 let mockModelBaseUrl = "";
 
@@ -58,9 +59,17 @@ async function configureMockModel() {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
+      ai_config_mode: "manual",
       api_key: "e2e-key",
       model: "e2e-model",
       base_url: mockModelBaseUrl,
+      manual_profile: {
+        api_key: "e2e-key",
+        model: "e2e-model",
+        base_url: mockModelBaseUrl,
+        temp: 0.7,
+        top_p: 1
+      },
       humanizer_enabled: false,
       auto_lore_extract_enabled: false,
       enable_consistency_revision: false
@@ -81,16 +90,34 @@ async function openEditorDocument(page: Page, chapterName: string) {
 
 test.beforeAll(async () => {
   mockModelServer = http.createServer((request, response) => {
+    if (request.url?.includes("/models")) {
+      response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+      response.end(JSON.stringify({
+        data: [
+          { id: "gpt-5-mini", display_name: "GPT 5 Mini", owned_by: "openai" },
+          { id: "deepseek-reasoner", display_name: "DeepSeek Reasoner", owned_by: "deepseek" },
+          { id: "text-embedding-3-small", owned_by: "openai" }
+        ]
+      }));
+      return;
+    }
     if (!request.url?.includes("/chat/completions")) {
       response.writeHead(404);
       response.end();
       return;
     }
-    request.resume();
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
     request.on("end", () => {
       response.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
-      response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "E2E 模型回复" } }] })}\n\n`);
-      response.end("data: [DONE]\n\n");
+      const delayed = Buffer.concat(chunks).toString("utf8").includes("E2E 延迟回复");
+      const reply = () => {
+        if (response.destroyed) return;
+        response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "E2E 模型回复" } }] })}\n\n`);
+        response.end("data: [DONE]\n\n");
+      };
+      if (delayed) setTimeout(reply, 2_000).unref();
+      else reply();
     });
   });
   await new Promise<void>((resolve, reject) => {
@@ -129,7 +156,7 @@ test("production navigation, settings history, and diagnostic isolation", async 
   const navigation = page.getByRole("complementary", { name: "主导航" });
   const entries = [
     "项目首页", "正文编辑", "AI 助手", "故事大纲", "伏笔与时间线", "设定资料", "风格与题材",
-    "小说编辑室", "全文审阅", "项目记忆", "拆书工作台", "批量章节生成", "素材迁移", "创作工具",
+    "小说编辑室", "全文审阅", "项目记忆", "拆书工作台", "批量章节生成", "素材迁移", "封面生成", "创作工具",
     "后台任务", "设置"
   ];
 
@@ -166,6 +193,116 @@ test("production navigation, settings history, and diagnostic isolation", async 
     await expect(navigation.getByRole("button", { name: "项目首页", exact: true })).toHaveAttribute("aria-current", "page");
     await expect(page.locator(".xw-trace-page, .terminal-shell")).toHaveCount(0);
   }
+});
+
+test("cover workspace keeps four inputs, website-only model selection and version preview", async ({ page }) => {
+  const projectName = await createWritingProject("cover-e2e");
+  let generated = false;
+  const record = {
+    id: "cover-e2e-record",
+    book_title: projectName,
+    author_name: "南山",
+    font_style: "行草",
+    genre_style: "悬疑",
+    mode: "text_to_image",
+    model: "gpt-image-2",
+    provider: "website",
+    original_path: "封面/e2e-原图.png",
+    final_path: "封面/e2e-600x800.png",
+    original_media_type: "image/png",
+    width: 600,
+    height: 800,
+    created_at: "2026-07-20T06:00:00.000Z"
+  };
+  await page.route(`${runtimeApi}/api/website-ai/dashboard`, (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      logged_in: true,
+      account: { name: "E2E", email: "e2e@example.test", enabled: true },
+      models: [],
+      embedding_models: [],
+      image_models: [{
+        id: "gpt-image-2",
+        name: "GPT Image 2",
+        provider: "website",
+        category: "image",
+        selectable: true,
+        capabilities: { text_generation: false, streaming: false, reasoning: false, image_generation: true, image_edit: true },
+        reasoning_efforts: [],
+        supported_sizes: ["768x1024"]
+      }],
+      selected_model: "",
+      selected_embedding_model: "",
+      selected_image_model: "gpt-image-2",
+      config: { ai_config_mode: "manual", website_profile: { api_key: "masked", license_account_key: "masked", image_model: "gpt-image-2" } }
+    })
+  }));
+  await page.route(`${runtimeApi}/api/project-libraries/genre`, (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      schema_version: 1,
+      domain: "genre",
+      revision: 1,
+      updated_at: "2026-07-20T06:00:00.000Z",
+      status: "ready",
+      projection_paths: [],
+      records: [{
+        id: "genre-suspense",
+        kind: "genre_profile",
+        name: "悬疑",
+        summary: "雨夜追凶",
+        description: "冷峻悬疑氛围",
+        tags: [],
+        order: 0,
+        status: "active",
+        origin: "manual",
+        created_at: "2026-07-20T06:00:00.000Z",
+        updated_at: "2026-07-20T06:00:00.000Z",
+        needs_review: false,
+        notes: "",
+        active: true
+      }]
+    })
+  }));
+  await page.route(`${runtimeApi}/api/covers**`, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/image")) {
+      await route.fulfill({ status: 200, contentType: "image/png", body: coverPng });
+      return;
+    }
+    if (url.pathname === "/api/covers/generate") {
+      const payload = route.request().postDataJSON();
+      expect(payload).toMatchObject({ book_title: projectName, author_name: "南山", font_style: "行草", genre_style: "悬疑" });
+      generated = true;
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(record) });
+      return;
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ records: generated ? [record] : [] }) });
+  });
+
+  await page.setViewportSize({ width: 1024, height: 720 });
+  await page.goto(workbenchUrl("/cover"));
+  await expect(page.getByRole("heading", { name: "封面生成" })).toBeVisible();
+  await expect(page.getByLabel("书名")).toHaveValue(projectName);
+  await page.getByLabel("作者名").fill("南山");
+  await expect(page.getByLabel("字体风格")).toHaveValue("行草");
+  await expect(page.getByLabel("题材风格")).toHaveValue("悬疑");
+  await expect(page.getByText("网站模型：GPT Image 2")).toBeVisible();
+  await page.getByRole("button", { name: "生成封面", exact: true }).click();
+  await expect(page.getByAltText(`《${projectName}》封面`).first()).toBeVisible();
+  await expect(page.getByText("封面已保存，请核对书名和作者署名。")).toBeVisible();
+  const dimensions = await page.evaluate(() => ({ clientWidth: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }));
+  expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
+
+  await page.goto(workbenchUrl("/settings/ai"));
+  await page.getByRole("tablist", { name: "AI 配置模式" }).getByRole("button", { name: "手动配置", exact: true }).click();
+  const settingsTabs = page.getByRole("tablist", { name: "AI 配置分区" });
+  await settingsTabs.getByRole("tab", { name: "网站服务", exact: true }).click();
+  await expect(page.getByLabel("封面生图模型")).toHaveValue("gpt-image-2");
+  await settingsTabs.getByRole("tab", { name: "模型", exact: true }).click();
+  await expect(page.getByLabel("封面生图模型")).toHaveCount(0);
 });
 
 test("shell has no page-level horizontal overflow at supported desktop widths", async ({ page }) => {
@@ -238,6 +375,114 @@ test("assistant conversation create, rename, read, and delete", async ({ page })
   await page.getByRole("button", { name: "再次点击确认删除", exact: true }).click();
   await expect(page.locator(".chat-title strong")).toHaveText("自由会话");
   await expect.poll(async () => (await runtimeFetch("/api/conversations")).json()).toEqual([]);
+});
+
+test("assistant model discovery and reasoning preferences persist per conversation", async ({ page }) => {
+  await createWritingProject("e2e-conversation-model");
+  await configureMockModel();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(workbenchUrl("/assistant"));
+  await page.getByRole("button", { name: "新建对话", exact: true }).click();
+
+  const trigger = page.locator(".assistant-model-trigger");
+  await expect(trigger).toContainText("e2e-model");
+  await trigger.click();
+  await page.getByPlaceholder("搜索模型").fill("GPT 5");
+  await page.locator(".assistant-model-list").getByRole("option", { name: /GPT 5 Mini/ }).click();
+  await expect(trigger).toContainText("GPT 5 Mini · 中");
+
+  const reasoningPanel = page.locator(".assistant-reasoning-panel");
+  await expect(reasoningPanel).toBeVisible();
+  await reasoningPanel.getByRole("button", { name: "高", exact: true }).click();
+  await expect(reasoningPanel.getByRole("button", { name: "高", exact: true })).toHaveAttribute("aria-pressed", "true");
+  await expect(trigger).toContainText("GPT 5 Mini · 高");
+
+  await page.getByPlaceholder("搜索模型").fill("DeepSeek");
+  await page.locator(".assistant-model-list").getByRole("option", { name: /DeepSeek Reasoner/ }).click();
+  await expect(trigger).toContainText("DeepSeek Reasoner · 高");
+  await expect(reasoningPanel.getByRole("button", { name: "低", exact: true })).toBeDisabled();
+  await expect(reasoningPanel.getByRole("button", { name: "中", exact: true })).toBeDisabled();
+  await expect(reasoningPanel.getByRole("button", { name: "高", exact: true })).toHaveAttribute("aria-pressed", "true");
+
+  await page.reload();
+  await expect(trigger).toContainText("DeepSeek Reasoner · 高");
+  const conversations = await (await runtimeFetch("/api/conversations")).json() as Array<{ model_override: string; reasoning_effort: string }>;
+  expect(conversations[0]).toMatchObject({ model_override: "deepseek-reasoner", reasoning_effort: "high" });
+
+  await page.setViewportSize({ width: 1024, height: 720 });
+  await trigger.click();
+  await expect(page.locator(".assistant-reasoning-panel")).toBeVisible();
+  await expect(page.locator(".assistant-model-list")).not.toContainText("text-embedding-3-small");
+});
+
+test("assistant uses split message alignment and a compact keyboard-first composer", async ({ page }) => {
+  await createWritingProject("e2e-assistant-layout");
+  await configureMockModel();
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(workbenchUrl("/assistant"));
+  await page.getByRole("button", { name: "新建对话", exact: true }).click();
+
+  const composer = page.getByLabel("消息内容");
+  await composer.fill("第一行");
+  await composer.press("Shift+Enter");
+  await composer.type("第二行");
+  await expect(composer).toHaveValue("第一行\n第二行");
+
+  const initialHeight = await composer.evaluate((element) => element.getBoundingClientRect().height);
+  await composer.fill(Array.from({ length: 12 }, (_, index) => `第${index + 1}行`).join("\n"));
+  const expandedHeight = await composer.evaluate((element) => element.getBoundingClientRect().height);
+  expect(expandedHeight).toBeGreaterThan(initialHeight);
+  expect(expandedHeight).toBeLessThanOrEqual(160);
+
+  await composer.fill("请回复这条消息");
+  await composer.press("Enter");
+  const userMessage = page.locator('.assistant-message.user[data-message-role="user"]').last();
+  const assistantMessage = page.locator('.assistant-message.ai[data-message-role="assistant"]').last();
+  await expect(userMessage).toContainText("请回复这条消息");
+  await expect(assistantMessage).toContainText("E2E 模型回复", { timeout: 20_000 });
+
+  const [userBox, assistantBox] = await Promise.all([
+    userMessage.locator(".assistant-message-body").boundingBox(),
+    assistantMessage.locator(".assistant-message-body").boundingBox()
+  ]);
+  expect(userBox).not.toBeNull();
+  expect(assistantBox).not.toBeNull();
+  expect(userBox!.x).toBeGreaterThan(assistantBox!.x);
+
+  await composer.fill("E2E 延迟回复");
+  await composer.press("Enter");
+  const stopButton = page.getByRole("button", { name: "停止生成", exact: true });
+  await expect(stopButton).toBeVisible();
+  await stopButton.click();
+  await expect(page.getByRole("button", { name: "发送", exact: true })).toBeVisible();
+});
+
+test("assistant context popover stays synchronized with the full context panel", async ({ page }) => {
+  await createWritingProject("e2e-assistant-context");
+  await saveRuntimeDocument("02_正文/E2E上下文.txt", "用于上下文测试的正文");
+  await page.goto(workbenchUrl("/editor"));
+  await openEditorDocument(page, "E2E上下文");
+  await page.getByRole("complementary", { name: "主导航" }).getByRole("button", { name: "AI 助手", exact: true }).click();
+  await page.getByRole("button", { name: "新建对话", exact: true }).click();
+
+  const contextTrigger = page.locator(".assistant-context-trigger");
+  await expect(contextTrigger).toContainText("上下文 0 项");
+  await contextTrigger.click();
+  const contextPopover = page.locator(".assistant-context-popover");
+  await contextPopover.getByRole("button", { name: "固定当前文档", exact: true }).click();
+  await expect(contextTrigger).toContainText("上下文 1 项");
+  await expect(page.locator(".context-panel")).toContainText("E2E上下文");
+
+  const attachmentInput = page.locator('.assistant-composer input[type="file"]');
+  await attachmentInput.setInputFiles({ name: "人物关系.txt", mimeType: "text/plain", buffer: Buffer.from("甲与乙是盟友", "utf8") });
+  await expect(contextTrigger).toContainText("上下文 2 项");
+  await expect(contextPopover).toContainText("人物关系.txt");
+  await expect(page.locator(".context-panel")).toContainText("人物关系.txt");
+
+  await page.getByRole("button", { name: "删除附件人物关系.txt", exact: true }).first().click();
+  await expect(contextTrigger).toContainText("上下文 1 项");
+  await contextPopover.locator(".assistant-context-row").filter({ hasText: "E2E上下文" }).getByRole("button").click();
+  await expect(contextTrigger).toContainText("上下文 0 项");
 });
 
 test("automatic writing switches stay synchronized with settings", async ({ page }) => {

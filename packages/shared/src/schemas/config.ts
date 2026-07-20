@@ -1,5 +1,46 @@
 import { z } from "zod";
 
+export const reasoningEffortSchema = z.enum(["low", "medium", "high"]);
+
+export const aiModelCapabilitiesSchema = z
+  .object({
+    text_generation: z.boolean().optional().default(true),
+    streaming: z.boolean().optional().default(true),
+    reasoning: z.boolean().optional().default(false),
+    image_generation: z.boolean().optional().default(false),
+    image_edit: z.boolean().optional().default(false)
+  })
+  .passthrough();
+
+export const aiModelOptionSchema = z
+  .object({
+    id: z.string().trim().min(1),
+    name: z.string().trim().min(1),
+    provider: z.string().optional().default(""),
+    category: z.string().optional().default("text"),
+    selectable: z.boolean().optional().default(true),
+    capabilities: aiModelCapabilitiesSchema.optional().default({
+      text_generation: true,
+      streaming: true,
+      reasoning: false
+    }),
+    reasoning_efforts: z.array(reasoningEffortSchema).optional().default([]),
+    supported_sizes: z.array(z.string().regex(/^\d+x\d+$/)).optional().default([])
+  })
+  .passthrough();
+
+export const manualModelDiscoveryRequestSchema = z.object({
+  base_url: z.string().trim().min(1),
+  api_key: z.string().default(""),
+  force: z.boolean().optional().default(false)
+});
+
+export const manualModelDiscoveryResponseSchema = z.object({
+  models: z.array(aiModelOptionSchema),
+  cached: z.boolean().optional().default(false),
+  discovered_at: z.string()
+});
+
 export const aiConfigProfileSchema = z
   .object({
     api_key: z.string().optional().default(""),
@@ -20,11 +61,15 @@ export const aiConfigProfileSchema = z
   })
   .passthrough();
 
+export const websiteAiConfigProfileSchema = aiConfigProfileSchema.extend({
+  image_model: z.string().optional().default("")
+});
+
 export const appConfigSchema = z
   .object({
     ai_config_mode: z.enum(["manual", "website"]).optional().default("manual"),
     manual_profile: aiConfigProfileSchema.optional(),
-    website_profile: aiConfigProfileSchema.optional(),
+    website_profile: websiteAiConfigProfileSchema.optional(),
     api_key: z.string().optional().default(""),
     base_url: z.string().optional().default(""),
     model: z.string().optional().default(""),
@@ -60,14 +105,7 @@ export const appConfigSchema = z
   })
   .passthrough();
 
-export const websiteAiModelOptionSchema = z
-  .object({
-    id: z.string(),
-    name: z.string(),
-    provider: z.string().optional().default(""),
-    category: z.string().optional().default("text")
-  })
-  .passthrough();
+export const websiteAiModelOptionSchema = aiModelOptionSchema;
 
 export const websiteAiAccountSchema = z
   .object({
@@ -115,8 +153,10 @@ export const websiteAiDashboardSchema = z
     account: websiteAiAccountSchema.nullable().optional().default(null),
     models: z.array(websiteAiModelOptionSchema).optional().default([]),
     embedding_models: z.array(websiteAiModelOptionSchema).optional().default([]),
+    image_models: z.array(websiteAiModelOptionSchema).optional().default([]),
     selected_model: z.string().optional().default(""),
     selected_embedding_model: z.string().optional().default(""),
+    selected_image_model: z.string().optional().default(""),
     temp: z.number().optional().default(0.7),
     top_p: z.number().optional().default(1),
     max_concurrency: z.number().optional().default(0),
@@ -140,6 +180,10 @@ export const websiteAiApplyRequestSchema = z.object({
   embedding_model: z.string().trim().optional().default(""),
   temp: z.number().min(0).max(2).optional().default(0.7),
   top_p: z.number().min(0).max(1).optional().default(1)
+});
+
+export const websiteImageConfigRequestSchema = z.object({
+  image_model: z.string().trim().min(1)
 });
 
 export const websiteAiRedeemRequestSchema = z.object({
@@ -194,6 +238,12 @@ export const licenseAccountKeyResponseSchema = z
 
 export type AppConfig = z.infer<typeof appConfigSchema>;
 export type AiConfigProfile = z.infer<typeof aiConfigProfileSchema>;
+export type WebsiteAiConfigProfile = z.infer<typeof websiteAiConfigProfileSchema>;
+export type ReasoningEffort = z.infer<typeof reasoningEffortSchema>;
+export type AiModelCapabilities = z.infer<typeof aiModelCapabilitiesSchema>;
+export type AiModelOption = z.infer<typeof aiModelOptionSchema>;
+export type ManualModelDiscoveryRequest = z.infer<typeof manualModelDiscoveryRequestSchema>;
+export type ManualModelDiscoveryResponse = z.infer<typeof manualModelDiscoveryResponseSchema>;
 export type LicenseStatus = z.infer<typeof licenseStatusSchema>;
 export type LicenseAccountKeyResponse = z.infer<typeof licenseAccountKeyResponseSchema>;
 export type WebsiteAiModelOption = z.infer<typeof websiteAiModelOptionSchema>;
@@ -203,6 +253,7 @@ export type WebsiteAiRechargeOrder = z.infer<typeof websiteAiRechargeOrderSchema
 export type WebsiteAiDashboard = z.infer<typeof websiteAiDashboardSchema>;
 export type WebsiteAiLoginRequest = z.infer<typeof websiteAiLoginRequestSchema>;
 export type WebsiteAiApplyRequest = z.infer<typeof websiteAiApplyRequestSchema>;
+export type WebsiteImageConfigRequest = z.infer<typeof websiteImageConfigRequestSchema>;
 export type WebsiteAiRedeemRequest = z.infer<typeof websiteAiRedeemRequestSchema>;
 export type WebsiteAiRedeemResponse = z.infer<typeof websiteAiRedeemResponseSchema>;
 export type WebsiteAiRechargeCreateRequest = z.infer<typeof websiteAiRechargeCreateRequestSchema>;

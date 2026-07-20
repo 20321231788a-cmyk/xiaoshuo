@@ -17,7 +17,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@xiaoshuo/config-service": "file:../config-service"
+    "@xiaoshuo/config-service": "file:../config-service",
+    "@xiaoshuo/shared": "file:../shared"
   },
   "devDependencies": {
     "typescript": "^5.6.0"

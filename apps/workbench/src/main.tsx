@@ -10,6 +10,8 @@ import "./styles/tools.css";
 import "./styles/settings.css";
 import "./styles/typography.css";
 import "./styles/components.css";
+import "./styles/cover.css";
+import "./styles/assistant.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

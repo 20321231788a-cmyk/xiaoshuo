@@ -1,39 +1,21 @@
 import {
-  ArrowUp,
-  Bot,
-  Brain,
-  Check,
-  Copy,
-  FilePlus2,
   FileText,
-  GitCompareArrows,
   MessageSquare,
   MoreHorizontal,
   Paperclip,
   Plus,
-  RefreshCw,
   Search,
-  Send,
   ShieldCheck,
   Sparkles,
-  Square,
-  Tags,
-  Trash2,
-  UserRound,
   X
 } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
-import type { ConversationDetail, ConversationSummary } from "@xiaoshuo/shared";
+import type { ConversationSummary } from "@xiaoshuo/shared";
 import type { WorkbenchController } from "../../../hooks/useWorkbenchController.js";
-import { attachmentDisplayName } from "../../../lib/attachments.js";
 import { RichText } from "../../../components/RichText.js";
-import {
-  describePendingGeneratedTarget,
-  describeGeneratedWriteIntent,
-  describeGeneratedSaveReason,
-  pendingGeneratedTargetPaths,
-  describeGeneratedSaveAction
-} from "../../../lib/workflow.js";
+import { describePendingGeneratedTarget } from "../../../lib/workflow.js";
+import { AssistantComposer } from "./AssistantComposer.js";
+import { formatAssistantAttachmentSize } from "./assistantComposerUtils.js";
 
 const CardDrawFeaturePage = lazy(() =>
   import("../../card-draw/CardDrawFeaturePage.js").then((module) => ({ default: module.CardDrawFeaturePage }))
@@ -46,7 +28,6 @@ export function AssistantProductPage({ controller }: { controller: WorkbenchCont
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [renameDraft, setRenameDraft] = useState("");
   const threadEndRef = useRef<HTMLDivElement | null>(null);
-  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
 
   const snapshot = controller.snapshot;
   if (!snapshot) return null;
@@ -54,9 +35,8 @@ export function AssistantProductPage({ controller }: { controller: WorkbenchCont
   const conversations = snapshot.conversations || [];
   const activeConversationId = controller.conversationDetail?.id || controller.activeConversationSummary?.id || "";
   const conversationDetail = controller.conversationDetail;
-  const busy = controller.conversationBusy;
+  const busy = controller.conversationBusy || controller.conversationModelPreferenceBusy;
   const sendingMessage = controller.sendingMessage;
-  const messageInput = controller.messageInput;
   const activeDocument = controller.openDocuments.find((item) => item.path === controller.activeDocumentPath) || null;
 
   const messages = conversationDetail?.messages || [];
@@ -102,11 +82,6 @@ export function AssistantProductPage({ controller }: { controller: WorkbenchCont
     return { today, yesterday, earlier };
   }, [conversations, searchQuery]);
 
-  function send() {
-    if (!messageInput.trim() || sendingMessage || busy) return;
-    void controller.sendMessage();
-  }
-
   function openConversationMenu() {
     setRenameDraft(conversationDetail?.title || "");
     setConfirmDelete(false);
@@ -145,7 +120,7 @@ export function AssistantProductPage({ controller }: { controller: WorkbenchCont
       ) : (
         <div className="assistant-page" style={{ flex: 1, minHeight: 0 }}>
           {/* 左栏：会话列表 */}
-          <aside className="session-panel" style={{ display: "flex", flexDirection: "column", minWidth: "215px" }}>
+          <aside className="session-panel">
             <button className="button primary" style={{ width: "100%", minHeight: "30px" }} type="button" onClick={() => void controller.createConversation()}>
               <Plus size={15} />新建对话
             </button>
@@ -219,7 +194,7 @@ export function AssistantProductPage({ controller }: { controller: WorkbenchCont
           </aside>
 
           {/* 中栏：对话区 */}
-          <main className="chat-workspace" style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
+          <main className="chat-workspace">
             <div className="chat-title">
               <div>
                 <strong>{conversationDetail?.title || "自由会话"}</strong>
@@ -253,107 +228,63 @@ export function AssistantProductPage({ controller }: { controller: WorkbenchCont
               )}
             </div>
 
-            <div className="chat-thread" style={{ flex: 1, overflowY: "auto", padding: "20px" }}>
-              {messages.map((entry) => (
-                <article key={entry.id} className={`chat-bubble ${entry.role === "user" ? "user" : "ai"}`}>
-                  <span>{entry.role === "user" ? "我" : <Sparkles size={14} />}</span>
-                  <div>
-                    <RichText text={entry.content} />
-
-                    {/* 内置的差异预览与确认写入 */}
-                    {controller.pendingGeneratedSave && entry.id === [...messages].reverse().find((m) => m.role === "assistant")?.id && (
-                      <div className="suggestion-actions" style={{ marginTop: "12px", padding: "12px", background: "var(--stone)", borderRadius: "6px" }}>
-                        <strong style={{ fontSize: "12px", display: "block", marginBottom: "6px" }}>
-                          {describePendingGeneratedTarget(controller.pendingGeneratedSave)}
-                        </strong>
-                        <p style={{ fontSize: "12px", color: "var(--muted)", margin: "0 0 10px" }}>
-                          已生成约 {controller.pendingGeneratedSave.cacheChars || controller.pendingGeneratedSave.content.length} 字。
-                        </p>
-                        <div style={{ display: "flex", gap: "8px" }}>
-                          <button
-                            className="button primary compact"
-                            type="button"
-                            onClick={() => void controller.savePendingGenerated("replace")}
-                            disabled={busy}
-                          >
-                            覆盖写入
-                          </button>
-                          <button
-                            className="button secondary compact"
-                            type="button"
-                            onClick={() => void controller.savePendingGenerated("append")}
-                            disabled={busy}
-                          >
-                            追加写入
-                          </button>
-                          <button
-                            className="button secondary compact"
-                            type="button"
-                            onClick={() => void controller.savePendingGeneratedAsDraft()}
-                            disabled={busy}
-                          >
-                            另存草稿
-                          </button>
-                          <button
-                            className="button secondary compact"
-                            type="button"
-                            onClick={() => void controller.copyPendingGeneratedContent()}
-                            disabled={busy}
-                          >
-                            复制
-                          </button>
-                          <button
-                            className="button secondary compact"
-                            type="button"
-                            style={{ color: "var(--danger)" }}
-                            onClick={() => controller.discardPendingGenerated()}
-                            disabled={busy}
-                          >
-                            丢弃
-                          </button>
-                        </div>
-                      </div>
-                    )}
+            <div className="chat-thread">
+              <div className="assistant-thread-inner">
+                {!messages.length && !sendingMessage && (
+                  <div className="assistant-thread-empty">
+                    <MessageSquare size={18} />
+                    <span>开始新对话</span>
                   </div>
-                </article>
-              ))}
-              <div ref={threadEndRef} />
+                )}
+
+                {messages.map((entry) => {
+                  if (entry.role === "system") {
+                    return (
+                      <article className="assistant-system-message" data-message-role="system" key={entry.id}>
+                        <RichText text={entry.content} />
+                      </article>
+                    );
+                  }
+                  const userMessage = entry.role === "user";
+                  return (
+                    <article className={`assistant-message ${userMessage ? "user" : "ai"}`} data-message-role={entry.role} key={entry.id}>
+                      {!userMessage && <span className="assistant-message-avatar" aria-hidden="true"><Sparkles size={14} /></span>}
+                      <div className="assistant-message-body">
+                        <RichText text={entry.content} />
+
+                        {controller.pendingGeneratedSave && entry.id === [...messages].reverse().find((message) => message.role === "assistant")?.id && (
+                          <div className="assistant-write-confirm">
+                            <strong>{describePendingGeneratedTarget(controller.pendingGeneratedSave)}</strong>
+                            <p>已生成约 {controller.pendingGeneratedSave.cacheChars || controller.pendingGeneratedSave.content.length} 字。</p>
+                            <div className="assistant-write-actions">
+                              <button className="button primary compact" type="button" onClick={() => void controller.savePendingGenerated("replace")} disabled={busy}>覆盖写入</button>
+                              <button className="button secondary compact" type="button" onClick={() => void controller.savePendingGenerated("append")} disabled={busy}>追加写入</button>
+                              <button className="button secondary compact" type="button" onClick={() => void controller.savePendingGeneratedAsDraft()} disabled={busy}>另存草稿</button>
+                              <button className="button secondary compact" type="button" onClick={() => void controller.copyPendingGeneratedContent()} disabled={busy}>复制</button>
+                              <button className="button secondary compact danger" type="button" onClick={() => controller.discardPendingGenerated()} disabled={busy}>丢弃</button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </article>
+                  );
+                })}
+
+                {sendingMessage && !(lastMessage?.role === "assistant" && lastMessage.content.trim()) && (
+                  <div className="assistant-message ai generating" data-message-role="assistant" role="status">
+                    <span className="assistant-message-avatar" aria-hidden="true"><Sparkles size={14} /></span>
+                    <div className="assistant-generating"><span />正在生成</div>
+                  </div>
+                )}
+                <div ref={threadEndRef} />
+              </div>
             </div>
 
-            <div className="wide-composer">
-              <div className="selected-context">
-                <span>已选上下文</span>
-                {(conversationDetail?.pinned_context || []).map((item) => (
-                  <button key={item.id} type="button" onClick={() => void controller.removePinnedConversationContext(item.id)}>{item.label} <X size={12} /></button>
-                ))}
-                {!conversationDetail?.pinned_context.length && <small>尚未固定资料</small>}
-              </div>
-              <textarea
-                value={messageInput}
-                onChange={(e) => controller.setMessageInput(e.target.value)}
-                placeholder="继续提问，或描述你想要的修改……"
-              />
-              <div>
-                <button className="tool-button" type="button" onClick={() => attachmentInputRef.current?.click()}>
-                  <Paperclip size={15} />添加资料
-                </button>
-                <input ref={attachmentInputRef} type="file" multiple hidden onChange={(event) => { void controller.uploadConversationAttachment(event.target.files); event.currentTarget.value = ""; }} />
-                <span>将使用项目默认模型</span>
-                {sendingMessage ? (
-                  <button className="send-button" type="button" onClick={() => controller.stopMessage()} style={{ background: "var(--danger)" }}>
-                    <Square size={16} />
-                  </button>
-                ) : (
-                  <button className="send-button" type="button" onClick={send} disabled={!messageInput.trim() || busy}>
-                    <Send size={16} />
-                  </button>
-                )}
-              </div>
-            </div>
+            <AssistantComposer controller={controller} />
           </main>
 
           {/* 右栏：本次上下文栏 */}
-          <aside className="context-panel" style={{ width: "250px" }}>
+          <aside className="context-panel">
             <div className="panel-head">
               <strong>本次上下文</strong>
               <button className="icon-button subtle" type="button" title="固定当前文档" aria-label="固定当前文档" onClick={() => void controller.pinCurrentDocumentToConversation()} disabled={!activeDocument || busy}><Plus size={15} /></button>
@@ -367,7 +298,14 @@ export function AssistantProductPage({ controller }: { controller: WorkbenchCont
                   <button type="button" aria-label={`移除${item.label}`} onClick={() => void controller.removePinnedConversationContext(item.id)}><X size={13} /></button>
                 </div>
               ))}
-              {!conversationDetail?.pinned_context.length && <p className="panel-note">固定当前文档或上传资料后会显示在这里。</p>}
+              {(conversationDetail?.attachments || []).map((item) => (
+                <div className="context-item" key={item.id}>
+                  <Paperclip size={15} />
+                  <div><strong>{item.name}</strong><small>{formatAssistantAttachmentSize(item.size)}</small></div>
+                  <button type="button" aria-label={`删除附件${item.name}`} onClick={() => void controller.deleteConversationAttachment(item.id)}><X size={13} /></button>
+                </div>
+              ))}
+              {!conversationDetail?.pinned_context.length && !conversationDetail?.attachments.length && <p className="panel-note">固定当前文档或上传资料后会显示在这里。</p>}
             </div>
 
             <div className="context-scope" style={{ margin: "10px", borderTop: "1px solid var(--line)", paddingTop: "12px" }}>

@@ -1,4 +1,5 @@
 import type { ModelConfig } from "@xiaoshuo/config-service";
+import { resolveModelRequestCapability, type ReasoningEffort } from "@xiaoshuo/shared";
 import type { ModelUsage } from "./usage.js";
 
 export type ChatCompletionMessage = {
@@ -13,6 +14,7 @@ export type OpenAICompatibleClientOptions = {
 
 export type ModelRequestOptions = {
   signal?: AbortSignal;
+  reasoningEffort?: ReasoningEffort;
   /** Trusted hard cap applied to the provider request; never supplied by model text. */
   maxOutputTokens?: number;
   /** Request provider usage in stream terminal events when the provider supports it. */
@@ -81,16 +83,7 @@ export class OpenAICompatibleClient {
       }
     }
 
-    const response = await this.fetchChatCompletions(
-      config,
-      {
-        model: config.model,
-        messages,
-        temperature: temperature ?? config.temperature,
-        top_p: config.top_p
-      },
-      options
-    );
+    const response = await this.fetchChatCompletions(config, buildRequestBody(config, messages, temperature, options), options);
 
     try {
       if (!response.ok) {
@@ -117,18 +110,11 @@ export class OpenAICompatibleClient {
   }
 
   async *streamCompletion(config: ModelConfig, messages: ChatCompletionMessage[], temperature?: number, options: ModelRequestOptions = {}): AsyncGenerator<string> {
-    const response = await this.fetchChatCompletions(
-      config,
-      {
-        model: config.model,
-        messages,
-        temperature: temperature ?? config.temperature,
-        top_p: config.top_p,
-        stream: true,
-        ...(options.captureUsage ? { stream_options: { include_usage: true } } : {})
-      },
-      options
-    );
+    const response = await this.fetchChatCompletions(config, {
+      ...buildRequestBody(config, messages, temperature, options),
+      stream: true,
+      ...(options.captureUsage ? { stream_options: { include_usage: true } } : {})
+    }, options);
 
     let cancelReader: (() => void) | undefined;
     let dispatchError: unknown;
@@ -195,8 +181,10 @@ export class OpenAICompatibleClient {
     body: {
       model: string;
       messages: ChatCompletionMessage[];
-      temperature: number;
-      top_p: number;
+      temperature?: number;
+      top_p?: number;
+      reasoning_effort?: ReasoningEffort;
+      thinking?: { type: "enabled" };
       stream?: boolean;
       stream_options?: { include_usage: boolean };
     },
@@ -287,6 +275,41 @@ export class OpenAICompatibleClient {
       });
     }
   }
+}
+
+function buildRequestBody(
+  config: ModelConfig,
+  messages: ChatCompletionMessage[],
+  temperature: number | undefined,
+  options: ModelRequestOptions
+): {
+  model: string;
+  messages: ChatCompletionMessage[];
+  temperature?: number;
+  top_p?: number;
+  reasoning_effort?: ReasoningEffort;
+  thinking?: { type: "enabled" };
+} {
+  const capability = resolveModelRequestCapability(config.model, config.base_url);
+  const requestedEffort = options.reasoningEffort;
+  const effectiveEffort = requestedEffort && capability.supportsReasoning
+    ? capability.reasoningEfforts.includes(requestedEffort)
+      ? requestedEffort
+      : capability.reasoningEfforts.length === 1
+        ? capability.reasoningEfforts[0]
+        : undefined
+    : undefined;
+  const omitSampling = Boolean(effectiveEffort && capability.omitSamplingParameters);
+  return {
+    model: config.model,
+    messages,
+    ...(!omitSampling ? {
+      temperature: temperature ?? config.temperature,
+      top_p: config.top_p
+    } : {}),
+    ...(effectiveEffort ? { reasoning_effort: effectiveEffort } : {}),
+    ...(effectiveEffort && capability.enableDeepSeekThinking ? { thinking: { type: "enabled" as const } } : {})
+  };
 }
 
 function createAbortError(): Error {

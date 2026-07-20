@@ -8,7 +8,7 @@ import { ConversationService } from "@xiaoshuo/conversation-service";
 import { DocumentService } from "@xiaoshuo/document-service";
 import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
 import { ProjectManifestService } from "@xiaoshuo/project-manifest";
-import type { ChatCompletionMessage } from "@xiaoshuo/model-client";
+import type { ChatCompletionMessage, ModelRequestOptions } from "@xiaoshuo/model-client";
 import type { AgentStreamEvent, ConversationMessageRequest } from "@xiaoshuo/shared";
 import { getAgentTraceFilePath } from "./agent-trace.js";
 import { RunCoordinator } from "./kernel/run-coordinator.js";
@@ -1757,6 +1757,47 @@ describe("agent-runtime chat flow", () => {
       commit_request_id: "conversation-writeback-journal"
     });
     await expect(cache.readContent(cacheId)).rejects.toThrow("正文不存在");
+  });
+
+  it("applies model preferences only to the selected conversation request", async () => {
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const conversation = await conversations.createConversation({ title: "模型覆盖" });
+    await conversations.updateModelPreferences(conversation.id, {
+      model_override: "gpt-5-mini",
+      reasoning_effort: "high"
+    });
+    const captured: {
+      config?: ModelConfig;
+      options?: ModelRequestOptions;
+      messages: ChatCompletionMessage[];
+    } = { messages: [] };
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (config, messages, _temperature, options) => {
+          captured.config = config;
+          captured.messages = messages;
+          captured.options = options || {};
+          return "覆盖模型回复";
+        }
+      }
+    });
+
+    await runtime.sendMessage(conversation.id, {
+      content: "测试会话模型",
+      skill_id: "",
+      agent_name: "",
+      write_target: "",
+      insert_mode: "none",
+      runtime_context: "",
+      attachment_ids: []
+    });
+
+    expect(captured.config?.model).toBe("gpt-5-mini");
+    expect(captured.options?.reasoningEffort).toBe("high");
+    expect(captured.messages.map((item) => item.content).join("\n")).not.toContain("思考模式已开启");
+    expect(JSON.parse(await fs.readFile(configPath, "utf8")).model).toBe("demo-model");
   });
 
   it("resumes conversation write_target from its pending cache without rerunning the model or duplicating write-back messages", async () => {

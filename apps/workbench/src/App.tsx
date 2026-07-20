@@ -152,7 +152,7 @@ export function App() {
     else if (next === "editor") controller.setActiveTab("editor");
     else if (next === "conversations") controller.setActiveTab("conversations");
     else if (next === "settings") controller.setActiveTab("config");
-    else if (next === "crawl" || next === "batch" || next === "transfer" || next === "skills") controller.setActiveTab("operations");
+    else if (next === "crawl" || next === "batch" || next === "transfer" || next === "cover" || next === "skills") controller.setActiveTab("operations");
     else controller.setActiveTab("overview");
   }
 

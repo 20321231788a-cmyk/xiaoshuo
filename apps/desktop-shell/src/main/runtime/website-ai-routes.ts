@@ -4,12 +4,17 @@ import {
   websiteAiLoginRequestSchema,
   websiteAiRechargeCreateRequestSchema,
   websiteAiRedeemRequestSchema,
+  websiteImageConfigRequestSchema,
+  normalizeAiModelOption,
+  aiModelOptionSchema,
   type AppConfig,
   type AiConfigProfile,
+  type WebsiteAiConfigProfile,
   type WebsiteAiDashboard,
   type WebsiteAiModelOption,
   type WebsiteAiRechargeOption,
-  type WebsiteAiRechargeOrder
+  type WebsiteAiRechargeOrder,
+  type ReasoningEffort
 } from "@xiaoshuo/shared";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { RuntimeContext } from "./types.js";
@@ -66,11 +71,13 @@ export async function handleWebsiteAiRoutes(
       const currentWebsiteProfile: Partial<AiConfigProfile> = currentConfig.website_profile || {};
       const textModels = getModelsByCategory(dashboard.providers, "text");
       const embeddingModels = getModelsByCategory(dashboard.providers, "vector");
+      const imageModels = getModelsByCategory(dashboard.providers, "image");
       const selectedModel = pickSelectedModel(stringValue(currentWebsiteProfile.model || currentConfig.model), textModels);
       const selectedEmbeddingModel = pickSelectedModel(stringValue(currentWebsiteProfile.embedding_model || currentConfig.embedding_model), embeddingModels);
+      const selectedImageModel = pickSelectedModel(stringValue((currentWebsiteProfile as Partial<WebsiteAiConfigProfile>).image_model), imageModels);
       const saved = await savePublicConfig(
         {
-          ai_config_mode: "website",
+          ai_config_mode: currentConfig.ai_config_mode,
           website_profile: {
             ...currentWebsiteProfile,
             api_key: tokenKey,
@@ -82,7 +89,8 @@ export async function handleWebsiteAiRoutes(
             embedding_enabled: selectedEmbeddingModel ? true : Boolean(currentWebsiteProfile.embedding_enabled),
             embedding_api_key: selectedEmbeddingModel ? tokenKey : stringValue(currentWebsiteProfile.embedding_api_key),
             embedding_base_url: selectedEmbeddingModel ? makeRelayBaseUrl(websiteBaseUrl) : stringValue(currentWebsiteProfile.embedding_base_url),
-            embedding_model: selectedEmbeddingModel || stringValue(currentWebsiteProfile.embedding_model)
+            embedding_model: selectedEmbeddingModel || stringValue(currentWebsiteProfile.embedding_model),
+            image_model: selectedImageModel
           }
         },
         { rootDir: context.projectRoot }
@@ -104,8 +112,10 @@ export async function handleWebsiteAiRoutes(
           account: null,
           models: [],
           embedding_models: [],
+          image_models: [],
           selected_model: stringValue(websiteProfile.model),
           selected_embedding_model: stringValue(websiteProfile.embedding_model),
+          selected_image_model: stringValue((websiteProfile as Partial<WebsiteAiConfigProfile>).image_model),
           temp: numberValue(websiteProfile.temp, 0.7),
           top_p: numberValue(websiteProfile.top_p, 1),
           max_concurrency: 0,
@@ -160,6 +170,37 @@ export async function handleWebsiteAiRoutes(
       const dashboard = await fetchWebsiteDashboard(websiteBaseUrl, tokenKey);
       const redeemConfig = await fetchRedeemConfig(websiteBaseUrl);
       deps.writeJson(response, 200, buildWebsiteAiDashboard(dashboard, saved, websiteBaseUrl, redeemConfig.purchaseUrl, "网站模型配置已应用。"));
+      return true;
+    }
+
+    if (pathname === "/api/website-ai/image-config" && request.method === "PUT") {
+      const payload = websiteImageConfigRequestSchema.parse(await deps.readJsonBody(request));
+      const currentConfig = await loadPublicConfig({ rootDir: context.projectRoot });
+      const currentWebsiteProfile: Partial<WebsiteAiConfigProfile> = currentConfig.website_profile || {};
+      const tokenKey = getWebsiteTokenKey(currentWebsiteProfile);
+      if (!tokenKey) {
+        deps.writeJson(response, 400, { detail: "请先在网站配置里登录账号。" });
+        return true;
+      }
+      const websiteBaseUrl = resolveWebsiteBaseUrl(process.env);
+      const dashboard = await fetchWebsiteDashboard(websiteBaseUrl, tokenKey);
+      const imageModels = getModelsByCategory(dashboard.providers, "image");
+      if (!imageModels.some((model) => model.id === payload.image_model)) {
+        deps.writeJson(response, 400, { detail: "所选模型不在网站提供的生图模型列表中，请刷新后重试。" });
+        return true;
+      }
+      const saved = await savePublicConfig({
+        ai_config_mode: currentConfig.ai_config_mode,
+        website_profile: {
+          ...currentWebsiteProfile,
+          api_key: tokenKey,
+          base_url: makeRelayBaseUrl(websiteBaseUrl),
+          license_account_key: tokenKey,
+          image_model: payload.image_model
+        }
+      }, { rootDir: context.projectRoot });
+      const redeemConfig = await fetchRedeemConfig(websiteBaseUrl);
+      deps.writeJson(response, 200, buildWebsiteAiDashboard(dashboard, saved, websiteBaseUrl, redeemConfig.purchaseUrl, "网站生图模型已保存。"));
       return true;
     }
 
@@ -258,7 +299,8 @@ function buildWebsiteAiDashboard(payload: WebsiteDashboardPayload, config: AppCo
   const token = readRecord(payload.token);
   const textModels = getModelsByCategory(payload.providers, "text");
   const embeddingModels = getModelsByCategory(payload.providers, "vector");
-  const websiteProfile: Partial<AiConfigProfile> = config.website_profile || {};
+  const imageModels = getModelsByCategory(payload.providers, "image");
+  const websiteProfile: Partial<WebsiteAiConfigProfile> = config.website_profile || {};
   return {
     logged_in: true,
     message,
@@ -274,8 +316,10 @@ function buildWebsiteAiDashboard(payload: WebsiteDashboardPayload, config: AppCo
     },
     models: textModels,
     embedding_models: embeddingModels,
+    image_models: imageModels,
     selected_model: pickSelectedModel(stringValue(websiteProfile.model), textModels),
     selected_embedding_model: pickSelectedModel(stringValue(websiteProfile.embedding_model), embeddingModels),
+    selected_image_model: pickSelectedModel(stringValue(websiteProfile.image_model), imageModels),
     temp: numberValue(websiteProfile.temp, 0.7),
     top_p: numberValue(websiteProfile.top_p, 1),
     max_concurrency: numberValue(payload.maxConcurrency, 0),
@@ -352,7 +396,7 @@ function normalizeRechargeOrder(order: JsonRecord | null, websiteBaseUrl: string
   };
 }
 
-function getModelsByCategory(providers: unknown, category: "text" | "vector"): WebsiteAiModelOption[] {
+export function getModelsByCategory(providers: unknown, category: "text" | "vector" | "image"): WebsiteAiModelOption[] {
   const options: WebsiteAiModelOption[] = [];
   for (const provider of Array.isArray(providers) ? providers : []) {
     const providerRecord = readRecord(provider);
@@ -372,26 +416,85 @@ function getModelsByCategory(providers: unknown, category: "text" | "vector"): W
         continue;
       }
       if (!options.some((item) => item.id === name)) {
-        options.push({ id: name, name, provider: providerName, category });
+        const capabilities = readRecord(modelRecord.capabilities);
+        options.push(category === "text"
+          ? normalizeAiModelOption({
+              id: name,
+              name,
+              provider: providerName,
+              category,
+              reasoningEfforts: readReasoningEfforts(modelRecord.reasoning_efforts || readRecord(modelRecord.capabilities)?.reasoning_efforts),
+              supportsReasoning: modelRecord.supports_reasoning === true || readRecord(modelRecord.capabilities)?.reasoning === true
+            })
+          : aiModelOptionSchema.parse({
+              id: name,
+              name,
+              provider: providerName,
+              category,
+              selectable: true,
+              capabilities: {
+                text_generation: false,
+                streaming: false,
+                reasoning: false,
+                image_generation: category === "image",
+                image_edit: category === "image" && modelRecord.supports_image_edit !== false && capabilities?.image_edit !== false
+              },
+              reasoning_efforts: [],
+              supported_sizes: readSupportedSizes(modelRecord.supported_sizes || modelRecord.sizes || capabilities?.supported_sizes || capabilities?.sizes)
+            }));
       }
     }
   }
   return options;
 }
 
-function detectModelCategory(model: JsonRecord): "text" | "vector" {
-  const category = stringValue(model.category).toLowerCase();
-  if (category === "vector") {
-    return "vector";
+function readReasoningEfforts(value: unknown): ReasoningEffort[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is ReasoningEffort => item === "low" || item === "medium" || item === "high")
+    : [];
+}
+
+export function detectModelCategory(model: JsonRecord): "text" | "vector" | "image" | "other" {
+  const capabilities = readRecord(model.capabilities);
+  const category = stringValue(model.category || model.type).trim().toLowerCase().replace(/[- ]+/g, "_");
+  if (capabilities?.image_generation === true || ["image", "image_generation", "text_to_image", "image_edit"].includes(category)) {
+    return "image";
   }
-  if (category && category !== "text") {
-    return "text";
+  if (["vector", "embedding", "embeddings", "rerank"].includes(category)) {
+    return "vector";
   }
   const name = stringValue(model.name || model.model || model.displayName).toLowerCase();
   if (name.includes("embedding") || name.includes("embed") || name.includes("vector") || name.includes("bge") || name.includes("jina")) {
     return "vector";
   }
+  if (/(?:gpt-image|dall-e|imagen|flux|stable[-_. ]?diffusion|sdxl|seedream|qwen[-_. ]?image|recraft|ideogram|wanx)/i.test(name)) {
+    return "image";
+  }
+  if (category && !["text", "chat", "language", "llm"].includes(category)) return "other";
   return "text";
+}
+
+function readSupportedSizes(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.map((item) => stringValue(item).trim()).filter((item) => /^\d+x\d+$/.test(item)))];
+}
+
+export type WebsiteImageRuntimeConfig = {
+  tokenKey: string;
+  relayBaseUrl: string;
+  model: WebsiteAiModelOption;
+};
+
+export async function resolveWebsiteImageRuntimeConfig(context: RuntimeContext): Promise<WebsiteImageRuntimeConfig> {
+  const { config, tokenKey, websiteBaseUrl } = await readWebsiteToken(context);
+  const websiteProfile: Partial<WebsiteAiConfigProfile> = config.website_profile || {};
+  const selected = stringValue(websiteProfile.image_model).trim();
+  if (!selected) throw new Error("请先在设置的“网站服务”中选择生图模型。");
+  const dashboard = await fetchWebsiteDashboard(websiteBaseUrl, tokenKey);
+  const models = getModelsByCategory(dashboard.providers, "image");
+  const model = models.find((item) => item.id === selected);
+  if (!model) throw new Error("已保存的生图模型当前不可用，请刷新网站配置后重新选择。");
+  return { tokenKey, relayBaseUrl: makeRelayBaseUrl(websiteBaseUrl), model };
 }
 
 function getModelDisplayName(model: JsonRecord): string {

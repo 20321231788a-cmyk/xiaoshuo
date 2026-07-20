@@ -62,6 +62,7 @@ type AiProfile = {
   embedding_api_key: string;
   embedding_base_url: string;
   embedding_model: string;
+  image_model: string;
 };
 
 const publicConfigKeys = [
@@ -155,7 +156,8 @@ const profileConfigKeys = [
   "embedding_enabled",
   "embedding_api_key",
   "embedding_base_url",
-  "embedding_model"
+  "embedding_model",
+  "image_model"
 ] as const;
 
 type ProfileConfigKey = (typeof profileConfigKeys)[number];
@@ -486,7 +488,8 @@ function normalizeProfile(data: RawConfig, options: { defaultBaseUrl: boolean; t
     embedding_enabled: Boolean(data.embedding_enabled ?? false),
     embedding_api_key: stringValue(data.embedding_api_key),
     embedding_base_url: stringValue(data.embedding_base_url || (options.defaultBaseUrl ? DEFAULT_EMBEDDING_BASE_URL : "")),
-    embedding_model: stringValue(data.embedding_model || (options.defaultBaseUrl ? DEFAULT_EMBEDDING_MODEL : ""))
+    embedding_model: stringValue(data.embedding_model || (options.defaultBaseUrl ? DEFAULT_EMBEDDING_MODEL : "")),
+    image_model: stringValue(data.image_model)
   };
 }
 

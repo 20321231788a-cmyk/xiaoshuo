@@ -134,6 +134,7 @@ describe("config-service", () => {
           base_url: "https://matian.example.test/v1",
           license_account_key: "website-token",
           model: "website-model",
+          image_model: "website-image-model",
           temp: 0.33,
           top_p: 0.77
         }
@@ -151,7 +152,8 @@ describe("config-service", () => {
     expect(manualConfig).toMatchObject({ ai_config_mode: "manual", api_key: "manual-key", model: "manual-model", temp: 0.21, top_p: 0.81 });
     expect(manualRuntime).toMatchObject({ api_key: "manual-key", model: "manual-model", temperature: 0.21, top_p: 0.81 });
     expect(raw.manual_profile).toMatchObject({ api_key: "manual-key", model: "manual-model" });
-    expect(raw.website_profile).toMatchObject({ api_key: "website-token", model: "website-model" });
+    expect(raw.website_profile).toMatchObject({ api_key: "website-token", model: "website-model", image_model: "website-image-model" });
+    expect(manualConfig.manual_profile).not.toHaveProperty("image_model", "website-image-model");
   });
 
   it("persists public web search settings through the whitelist", async () => {

@@ -19,14 +19,14 @@ Starts the migration Electron shell.
 
 Options:
   --no-preview     Do not build/start the workbench preview. Uses XIAOSHUO_RENDERER_URL or the backend URL.
-  --port <port>    Preview port when the script starts workbench preview. Default: 4190.
+  --port <port>    Preview port when the script starts workbench preview. Default: 4200.
   --help           Show this help text.
 `);
   process.exit(0);
 }
 
 const noPreview = args.has("--no-preview");
-const port = readOption("--port") || process.env.XIAOSHUO_WORKBENCH_PORT || "4190";
+const port = readOption("--port") || process.env.XIAOSHUO_WORKBENCH_PORT || "4200";
 const runtimeUrl = process.env.XIAOSHUO_RUNTIME_URL || "http://127.0.0.1:18453";
 const previewUrl = `http://127.0.0.1:${port}/?desktop=1&api=${encodeURIComponent(runtimeUrl)}`;
 const rendererUrl = process.env.XIAOSHUO_RENDERER_URL || (noPreview ? "" : previewUrl);

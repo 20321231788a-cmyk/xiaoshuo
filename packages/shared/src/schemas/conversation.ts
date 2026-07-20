@@ -1,4 +1,10 @@
 import { z } from "zod";
+import { reasoningEffortSchema } from "./config.js";
+
+export const conversationModelPreferencesSchema = z.object({
+  model_override: z.string().trim().max(240).optional().default(""),
+  reasoning_effort: reasoningEffortSchema.optional().default("medium")
+});
 
 export const conversationAttachmentSchema = z
   .object({
@@ -43,7 +49,9 @@ export const conversationSummarySchema = z
     current_skill: z.string(),
     current_agent: z.string(),
     message_count: z.number().int(),
-    attachment_count: z.number().int()
+    attachment_count: z.number().int(),
+    model_override: z.string().trim().max(240).optional().default(""),
+    reasoning_effort: reasoningEffortSchema.optional().default("medium")
   })
   .passthrough();
 
@@ -61,6 +69,7 @@ export type PinnedContextItem = z.infer<typeof pinnedContextItemSchema>;
 export type ConversationMessage = z.infer<typeof conversationMessageSchema>;
 export type ConversationSummary = z.infer<typeof conversationSummarySchema>;
 export type ConversationDetail = z.infer<typeof conversationDetailSchema>;
+export type ConversationModelPreferences = z.infer<typeof conversationModelPreferencesSchema>;
 
 export const conversationMessageRequestSchema = z
   .object({

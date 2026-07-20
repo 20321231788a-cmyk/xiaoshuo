@@ -6,6 +6,7 @@ import {
   Boxes,
   Brain,
   Home,
+  ImagePlus,
   Library,
   ListChecks,
   Network,
@@ -35,6 +36,7 @@ export type UserFeature =
   | "crawl"
   | "batch"
   | "transfer"
+  | "cover"
   | "skills"
   | "tasks"
   | "settings";
@@ -116,6 +118,7 @@ export const workbenchNavigation: Array<{ label: string; items: NavigationItem[]
       { feature: "crawl", label: "拆书工作台", icon: BookOpen },
       { feature: "batch", label: "批量章节生成", icon: WandSparkles },
       { feature: "transfer", label: "素材迁移", icon: ArrowLeftRight },
+      { feature: "cover", label: "封面生成", icon: ImagePlus },
       { feature: "skills", label: "创作工具", icon: Boxes }
     ]
   },
@@ -140,6 +143,7 @@ const featurePaths: Record<UserFeature, string> = {
   crawl: "/disassembly",
   batch: "/batch",
   transfer: "/transfer",
+  cover: "/cover",
   skills: "/tools",
   tasks: "/tasks",
   settings: "/settings/ai"

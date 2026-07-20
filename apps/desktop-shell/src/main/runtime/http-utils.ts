@@ -36,12 +36,18 @@ export function parseJsonRecord(rawBody: Buffer): JsonRecord {
   return isRecord(parsed) ? parsed : {};
 }
 
-export async function readRawBody(request: IncomingMessage): Promise<Buffer> {
+export async function readRawBody(request: IncomingMessage, maxBytes = Number.POSITIVE_INFINITY): Promise<Buffer> {
   const chunks: Buffer[] = [];
+  let total = 0;
   for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    total += buffer.length;
+    if (total > maxBytes) {
+      throw new Error("请求内容过大");
+    }
+    chunks.push(buffer);
   }
-  return Buffer.concat(chunks);
+  return Buffer.concat(chunks, total);
 }
 
 export function createRequestAbortSignal(request: IncomingMessage, response: ServerResponse): AbortSignal {

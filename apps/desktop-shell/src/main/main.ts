@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell, type IpcMainEvent, type IpcMainInvokeEvent } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell, type IpcMainEvent, type IpcMainInvokeEvent } from "electron";
 import contextMenu from "electron-context-menu";
 import { download } from "electron-dl";
 import path from "node:path";
@@ -19,7 +19,8 @@ import {
   trackGeneratedCacheMetadata
 } from "./local-state.js";
 import { createTerminalSession, killAllTerminals, killTerminal, killTerminalsForOwner, resizeTerminal, writeTerminal } from "./terminal.js";
-import { registerRuntimeShell, runtimeUrl, startRuntimeServer, stopRuntimeServer, type RuntimeServerState } from "./runtime-server.js";
+import { registerRuntimeCoverImageNormalizer, registerRuntimeShell, runtimeUrl, startRuntimeServer, stopRuntimeServer, type RuntimeServerState } from "./runtime-server.js";
+import { computeCoverCropRect } from "./runtime/cover-routes.js";
 import { UpdateService } from "./update-service.js";
 import { defaultProjectArchiveName, ensureZipExtension, exportProjectArchive, importProjectArchive } from "./project-archive.js";
 import { CloudProjectService } from "./cloud-projects.js";
@@ -75,6 +76,16 @@ const updateService = new UpdateService({
 
 contextMenu();
 registerRuntimeShell(shell);
+registerRuntimeCoverImageNormalizer((content) => {
+  const source = nativeImage.createFromBuffer(content);
+  if (source.isEmpty()) throw new Error("网站返回的图片无法读取。");
+  const size = source.getSize();
+  if (size.width < 1 || size.height < 1 || size.width * size.height > 80_000_000) {
+    throw new Error("网站返回的图片尺寸无效或过大。");
+  }
+  const cropped = source.crop(computeCoverCropRect(size.width, size.height));
+  return cropped.resize({ width: 600, height: 800, quality: "best" }).toPNG();
+});
 
 function activeWindow(): BrowserWindow | null {
   return BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0] || null;

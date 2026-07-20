@@ -1,4 +1,4 @@
-import type { AiConfigProfile, AppConfig } from "@xiaoshuo/shared";
+import type { AiConfigProfile, AppConfig, WebsiteAiConfigProfile } from "@xiaoshuo/shared";
 
 export const defaultEmbeddingBaseUrl = "https://ark.cn-beijing.volces.com/api/v3/embeddings/multimodal";
 export const defaultEmbeddingModel = "doubao-embedding-vision-250615";
@@ -16,10 +16,11 @@ export function normalizeConfigDraft(next: AppConfig): AppConfig {
     defaultBaseUrl: true,
     tempFallback: 0.7
   });
-  const websiteProfile = normalizeAiProfile(next.website_profile ?? (mode === "website" ? next : null), {
-    defaultBaseUrl: false,
-    tempFallback: 0.7
-  });
+  const websiteSource = next.website_profile ?? (mode === "website" ? next : null);
+  const websiteProfile: WebsiteAiConfigProfile = {
+    ...normalizeAiProfile(websiteSource, { defaultBaseUrl: false, tempFallback: 0.7 }),
+    image_model: stringValue(websiteSource?.image_model)
+  };
   const activeProfile = mode === "website" ? websiteProfile : manualProfile;
 
   return {

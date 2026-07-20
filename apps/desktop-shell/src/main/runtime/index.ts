@@ -4,6 +4,8 @@ export * from "./agent-trace-routes.js";
 export * from "./feedback-routes.js";
 export * from "./base-routes.js";
 export * from "./conversation-routes.js";
+export * from "./cover-routes.js";
+export * from "./model-discovery-routes.js";
 export * from "./generated-cache-routes.js";
 export * from "./http-utils.js";
 export * from "./job-routes.js";

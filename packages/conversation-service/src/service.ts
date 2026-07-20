@@ -1,6 +1,8 @@
 import {
   conversationDetailSchema,
+  conversationModelPreferencesSchema,
   type ConversationDetail,
+  type ConversationModelPreferences,
   type ConversationMessage,
   type ConversationSummary,
   type PinnedContextItem,
@@ -91,7 +93,9 @@ export class ConversationService {
       attachments: [],
       messages: [],
       message_count: 0,
-      attachment_count: 0
+      attachment_count: 0,
+      model_override: "",
+      reasoning_effort: "medium"
     };
     await this.saveDetail(detail);
     return detail;
@@ -108,6 +112,18 @@ export class ConversationService {
       throw new Error("对话标题不能为空");
     }
     detail.title = nextTitle.slice(0, 80);
+    detail.updated_at = this.now();
+    return this.saveDetail(detail);
+  }
+
+  async updateModelPreferences(
+    conversationId: string,
+    preferences: ConversationModelPreferences
+  ): Promise<ConversationDetail> {
+    const detail = await this.loadDetail(conversationId);
+    const normalized = conversationModelPreferencesSchema.parse(preferences);
+    detail.model_override = normalized.model_override;
+    detail.reasoning_effort = normalized.reasoning_effort;
     detail.updated_at = this.now();
     return this.saveDetail(detail);
   }
@@ -447,7 +463,9 @@ export class ConversationService {
       current_skill: detail.current_skill,
       current_agent: detail.current_agent,
       message_count: detail.messages.length,
-      attachment_count: detail.attachments.length
+      attachment_count: detail.attachments.length,
+      model_override: detail.model_override,
+      reasoning_effort: detail.reasoning_effort
     };
   }
 

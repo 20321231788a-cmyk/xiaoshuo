@@ -1,7 +1,12 @@
 import { loadModelConfig, loadPublicConfig, loadWebSearchConfig, type ConfigServiceOptions, type ModelConfig } from "@xiaoshuo/config-service";
 import { ConversationService } from "@xiaoshuo/conversation-service";
 import { DocumentService } from "@xiaoshuo/document-service";
-import { canRetryWithoutStream, OpenAICompatibleClient, type ChatCompletionMessage } from "@xiaoshuo/model-client";
+import {
+  canRetryWithoutStream,
+  OpenAICompatibleClient,
+  type ChatCompletionMessage,
+  type ModelRequestOptions
+} from "@xiaoshuo/model-client";
 import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
 import { SkillService } from "@xiaoshuo/skill-service";
 import { VectorIndex } from "@xiaoshuo/vector-service";
@@ -14,6 +19,7 @@ import {
   type ConversationAttachment,
   type ConversationDetail,
   type ConversationMessageRequest,
+  resolveModelRequestCapability,
   type SkillDefinition
 } from "@xiaoshuo/shared";
 import path from "node:path";
@@ -111,13 +117,14 @@ export class AgentChatRunner {
   ): Promise<AgentRunResponse> {
     throwIfAborted(options.signal);
     const state = await this.prepareConversationState(payload);
-    const config = await this.requireModelConfig();
+    const config = await this.requireModelConfig(state.detail);
+    const requestOptions = this.modelRequestOptions(state.detail, options.signal);
     const webSearchSources: WebSearchSource[] = [];
-    const messages = await this.buildMessages(state.detail, payload, config.thinking_enabled, false, webSearchSources, contextObserver);
+    const messages = await this.buildMessages(state.detail, payload, false, webSearchSources, contextObserver);
     throwIfAborted(options.signal);
 
     try {
-      const reply = String(await this.modelClient.requestCompletion(config, messages, config.temperature, { signal: options.signal })).trim();
+      const reply = String(await this.modelClient.requestCompletion(config, messages, config.temperature, requestOptions)).trim();
       throwIfAborted(options.signal);
       const humanized = await this.humanizeConversationText(state.detail, reply, options);
       throwIfAborted(options.signal);
@@ -130,9 +137,9 @@ export class AgentChatRunner {
       if (!looksGatewayTimeout(error)) {
         throw error;
       }
-      const compactMessages = await this.buildMessages(state.detail, payload, config.thinking_enabled, true, undefined, contextObserver);
+      const compactMessages = await this.buildMessages(state.detail, payload, true, undefined, contextObserver);
       throwIfAborted(options.signal);
-      const reply = String(await this.modelClient.requestCompletion(config, compactMessages, config.temperature, { signal: options.signal })).trim();
+      const reply = String(await this.modelClient.requestCompletion(config, compactMessages, config.temperature, requestOptions)).trim();
       throwIfAborted(options.signal);
       const humanized = await this.humanizeConversationText(state.detail, reply, options);
       throwIfAborted(options.signal);
@@ -156,10 +163,11 @@ export class AgentChatRunner {
       skill_id: ""
     };
 
-    const config = await this.requireModelConfig();
+    const config = await this.requireModelConfig(state.detail);
+    const requestOptions = this.modelRequestOptions(state.detail, options.signal);
     const webSearchSources: WebSearchSource[] = [];
-    const baseMessages = await this.buildMessages(state.detail, payload, config.thinking_enabled, false, webSearchSources, contextObserver);
-    const compactMessages = await this.buildMessages(state.detail, payload, config.thinking_enabled, true, undefined, contextObserver);
+    const baseMessages = await this.buildMessages(state.detail, payload, false, webSearchSources, contextObserver);
+    const compactMessages = await this.buildMessages(state.detail, payload, true, undefined, contextObserver);
     const streamCompletion = this.modelClient.streamCompletion?.bind(this.modelClient);
     const replyParts: string[] = [];
     let stoppedPersisted = false;
@@ -177,7 +185,7 @@ export class AgentChatRunner {
 
     if (streamCompletion) {
       try {
-        for await (const chunk of streamCompletion(config, baseMessages, config.temperature, { signal: options.signal })) {
+        for await (const chunk of streamCompletion(config, baseMessages, config.temperature, requestOptions)) {
           throwIfAborted(options.signal);
           if (!chunk) {
             continue;
@@ -205,9 +213,9 @@ export class AgentChatRunner {
         }
         try {
           const fallbackReply = looksGatewayTimeout(error)
-            ? await this.completeOnce(config, compactMessages, options)
+            ? await this.completeOnce(config, compactMessages, options, requestOptions)
             : canRetryWithoutStream(message)
-              ? await this.completeOnce(config, baseMessages, options)
+              ? await this.completeOnce(config, baseMessages, options, requestOptions)
               : "";
           if (!fallbackReply && !looksGatewayTimeout(error) && !canRetryWithoutStream(message)) {
             throw error;
@@ -235,7 +243,7 @@ export class AgentChatRunner {
       }
     } else {
       try {
-        const reply = await this.completeOnce(config, baseMessages, options);
+        const reply = await this.completeOnce(config, baseMessages, options, requestOptions);
         if (reply) {
           replyParts.push(reply);
           for (const visibleChunk of splitVisibleStreamText(reply)) {
@@ -254,7 +262,7 @@ export class AgentChatRunner {
           if (!looksGatewayTimeout(error)) {
             throw error;
           }
-          const reply = await this.completeOnce(config, compactMessages, options);
+          const reply = await this.completeOnce(config, compactMessages, options, requestOptions);
           if (reply) {
             replyParts.push(reply);
             for (const visibleChunk of splitVisibleStreamText(reply)) {
@@ -280,7 +288,7 @@ export class AgentChatRunner {
 
     if (!replyParts.length) {
       try {
-        const reply = await this.completeOnce(config, baseMessages, options);
+        const reply = await this.completeOnce(config, baseMessages, options, requestOptions);
         if (reply) {
           replyParts.push(reply);
           for (const visibleChunk of splitVisibleStreamText(reply)) {
@@ -328,9 +336,17 @@ export class AgentChatRunner {
     }
   }
 
-  private async completeOnce(config: ModelConfig, messages: ChatCompletionMessage[], options: AgentRunOptions = {}): Promise<string> {
+  private async completeOnce(
+    config: ModelConfig,
+    messages: ChatCompletionMessage[],
+    options: AgentRunOptions = {},
+    requestOptions: Pick<ModelRequestOptions, "reasoningEffort"> = {}
+  ): Promise<string> {
     throwIfAborted(options.signal);
-    const reply = String(await this.modelClient.requestCompletion(config, messages, config.temperature, { signal: options.signal })).trim();
+    const reply = String(await this.modelClient.requestCompletion(config, messages, config.temperature, {
+      ...requestOptions,
+      signal: options.signal
+    })).trim();
     throwIfAborted(options.signal);
     return reply;
   }
@@ -462,18 +478,35 @@ export class AgentChatRunner {
     });
   }
 
-  private async requireModelConfig(): Promise<ModelConfig> {
+  private async requireModelConfig(detail?: Pick<ConversationDetail, "model_override">): Promise<ModelConfig> {
     const config = await loadModelConfig(this.config, "primary");
     if (!config.configured) {
       throw new Error("未配置主线路 API Key 或模型名。");
     }
-    return config;
+    const modelOverride = String(detail?.model_override || "").trim();
+    return modelOverride ? { ...config, model: modelOverride } : config;
+  }
+
+  private modelRequestOptions(
+    detail: Pick<ConversationDetail, "model_override" | "reasoning_effort">,
+    signal?: AbortSignal
+  ): ModelRequestOptions {
+    const modelId = String(detail.model_override || "").trim();
+    const capability = modelId ? resolveModelRequestCapability(modelId) : null;
+    const selected = detail.reasoning_effort || "medium";
+    const reasoningEffort = capability?.supportsReasoning
+      ? capability.reasoningEfforts.includes(selected)
+        ? selected
+        : capability.reasoningEfforts.length === 1
+          ? capability.reasoningEfforts[0]
+          : undefined
+      : selected;
+    return { signal, ...(reasoningEffort ? { reasoningEffort } : {}) };
   }
 
   private async buildMessages(
     detail: ConversationDetail,
     payload: AgentRunRequest,
-    thinkingEnabled: boolean,
     compact: boolean,
     webSearchSources?: WebSearchSource[],
     contextObserver?: ChatContextAssemblyObserver
@@ -492,7 +525,7 @@ export class AgentChatRunner {
     const messages: ChatCompletionMessage[] = [
       {
         role: "system",
-        content: buildSystemPrompt(thinkingEnabled)
+        content: buildSystemPrompt()
       },
       {
         role: "system",
@@ -800,11 +833,12 @@ export class AgentChatRunner {
       skill_id: resolvedSkillId
     };
 
-    const config = await this.requireModelConfig();
+    const config = await this.requireModelConfig(detail);
+    const requestOptions = this.modelRequestOptions(detail, options.signal);
     const skill = resolvedSkillId ? await this.skills.getSkill(resolvedSkillId).catch(() => null) : null;
     const webSearchSources: WebSearchSource[] = [];
-    const baseMessages = await this.buildConversationMessages(detail, payload, skill, config.thinking_enabled, false, webSearchSources);
-    const compactMessages = await this.buildConversationMessages(detail, payload, skill, config.thinking_enabled, true);
+    const baseMessages = await this.buildConversationMessages(detail, payload, skill, false, webSearchSources);
+    const compactMessages = await this.buildConversationMessages(detail, payload, skill, true);
     const streamCompletion = this.modelClient.streamCompletion?.bind(this.modelClient);
     const replyParts: string[] = [];
     let stoppedPersisted = false;
@@ -834,7 +868,7 @@ export class AgentChatRunner {
 
     if (streamCompletion) {
       try {
-        for await (const chunk of streamCompletion(config, baseMessages, config.temperature, { signal: options.signal })) {
+        for await (const chunk of streamCompletion(config, baseMessages, config.temperature, requestOptions)) {
           throwIfAborted(options.signal);
           if (!chunk) {
             continue;
@@ -860,9 +894,9 @@ export class AgentChatRunner {
         }
         try {
           const fallbackReply = looksGatewayTimeout(error)
-            ? await this.completeOnce(config, compactMessages, options)
+            ? await this.completeOnce(config, compactMessages, options, requestOptions)
             : canRetryWithoutStream(message)
-              ? await this.completeOnce(config, baseMessages, options)
+              ? await this.completeOnce(config, baseMessages, options, requestOptions)
               : "";
           if (!fallbackReply && !looksGatewayTimeout(error) && !canRetryWithoutStream(message)) {
             throw error;
@@ -888,7 +922,7 @@ export class AgentChatRunner {
       }
     } else {
       try {
-        const reply = await this.completeOnce(config, baseMessages, options);
+        const reply = await this.completeOnce(config, baseMessages, options, requestOptions);
         if (reply) {
           replyParts.push(reply);
           yield {
@@ -905,7 +939,7 @@ export class AgentChatRunner {
           if (!looksGatewayTimeout(error)) {
             throw error;
           }
-          const reply = await this.completeOnce(config, compactMessages, options);
+          const reply = await this.completeOnce(config, compactMessages, options, requestOptions);
           if (reply) {
             replyParts.push(reply);
             yield {
@@ -929,7 +963,7 @@ export class AgentChatRunner {
 
     if (!replyParts.length) {
       try {
-        const reply = await this.completeOnce(config, baseMessages, options);
+        const reply = await this.completeOnce(config, baseMessages, options, requestOptions);
         if (reply) {
           replyParts.push(reply);
           yield {
@@ -1033,11 +1067,12 @@ export class AgentChatRunner {
   ): Promise<{ reply: string; webSearchSources: WebSearchSource[] }> {
     throwIfAborted(options.signal);
     const skill = detail.current_skill ? await this.skills.getSkill(detail.current_skill).catch(() => null) : null;
-    const config = await this.requireModelConfig();
+    const config = await this.requireModelConfig(detail);
+    const requestOptions = this.modelRequestOptions(detail, options.signal);
     const webSearchSources: WebSearchSource[] = [];
-    const messages = await this.buildConversationMessages(detail, payload, skill, config.thinking_enabled, false, webSearchSources);
+    const messages = await this.buildConversationMessages(detail, payload, skill, false, webSearchSources);
     try {
-      const reply = (await this.modelClient.requestCompletion(config, messages, config.temperature, { signal: options.signal })).trim();
+      const reply = (await this.modelClient.requestCompletion(config, messages, config.temperature, requestOptions)).trim();
       throwIfAborted(options.signal);
       return { reply, webSearchSources };
     } catch (error) {
@@ -1047,8 +1082,8 @@ export class AgentChatRunner {
       if (!looksGatewayTimeout(error)) {
         throw error;
       }
-      const retryMessages = await this.buildConversationMessages(detail, payload, skill, config.thinking_enabled, true);
-      const reply = (await this.modelClient.requestCompletion(config, retryMessages, config.temperature, { signal: options.signal })).trim();
+      const retryMessages = await this.buildConversationMessages(detail, payload, skill, true);
+      const reply = (await this.modelClient.requestCompletion(config, retryMessages, config.temperature, requestOptions)).trim();
       throwIfAborted(options.signal);
       return { reply, webSearchSources };
     }
@@ -1058,7 +1093,6 @@ export class AgentChatRunner {
     detail: ConversationDetail,
     payload: ConversationMessageRequest,
     skill: SkillDefinition | null,
-    thinkingEnabled: boolean,
     compact: boolean,
     webSearchSources?: WebSearchSource[]
   ): Promise<ChatCompletionMessage[]> {
@@ -1072,7 +1106,7 @@ export class AgentChatRunner {
         content: clipText(message.content, compact ? 900 : 1800)
       })) as ChatCompletionMessage[];
 
-    const systemPrompt = this.buildConversationSystemPrompt(skill, detail.current_agent, thinkingEnabled);
+    const systemPrompt = this.buildConversationSystemPrompt(skill, detail.current_agent);
     const stableContext = buildStableProjectContext(detail, continuity, attachments, null, compact, this.useContextBudget());
     const taskInstruction = this.buildTaskInstruction(detail, skill);
 
@@ -1098,14 +1132,11 @@ export class AgentChatRunner {
     return messages;
   }
 
-  private buildConversationSystemPrompt(skill: SkillDefinition | null, agentName: string, thinkingEnabled: boolean): string {
+  private buildConversationSystemPrompt(skill: SkillDefinition | null, agentName: string): string {
     let base =
       "你是 ArcWriter 的本地项目助手。优先遵守项目状态、大纲、设定、风格库和题材库。" +
       "回答要直接可用，少解释，不要脱离现有项目乱扩设定。" +
       "你可以自主判断用户真实意图；本地文件、技能、索引和上下文由系统指路提供，不要被固定关键词束缚。";
-    if (thinkingEnabled) {
-      base += "\n思考模式已开启：先在内部判断任务类型、可用上下文、是否需要本地能力，再给出结果；不要输出思考过程，只输出可交付内容。";
-    }
     if (agentName) {
       base += `\n当前代理：${agentName}。`;
     }
@@ -1386,15 +1417,12 @@ function getNowString(): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
-function buildSystemPrompt(thinkingEnabled: boolean): string {
-  const base =
+function buildSystemPrompt(): string {
+  return (
     "你是 ArcWriter 的本地项目助手。优先遵守项目状态、大纲、设定、风格库和题材库。" +
     "回答要直接可用，少解释，不要脱离现有项目乱扩设定。" +
-    "你可以主动综合当前项目上下文、固定上下文、附件摘录和当前文档内容来回答。";
-  if (!thinkingEnabled) {
-    return base;
-  }
-  return `${base}\n思考模式已开启：先在内部判断最相关上下文，再输出结果；不要展示思考过程。`;
+    "你可以主动综合当前项目上下文、固定上下文、附件摘录和当前文档内容来回答。"
+  );
 }
 
 function buildStableProjectContext(

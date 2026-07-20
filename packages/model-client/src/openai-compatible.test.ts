@@ -275,4 +275,57 @@ describe("model-client", () => {
     expect(formatApiError(503, "Service Unavailable")).toContain("模型网关暂时不可用");
     expect(canRetryWithoutStream("streaming unsupported")).toBe(true);
   });
+
+  it("sends OpenAI low, medium and high reasoning effort without sampling parameters", async () => {
+    for (const reasoningEffort of ["low", "medium", "high"] as const) {
+      let requestBody = "";
+      const fetchFn = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        requestBody = String(init?.body || "{}");
+        return new Response('data: {"choices":[{"delta":{"content":"ok"}}]}', { status: 200 });
+      });
+      const client = new OpenAICompatibleClient({ fetchFn: fetchFn as typeof fetch });
+      const config = { ...configuredModel, base_url: "https://api.openai.com/v1", model: "gpt-5-mini" };
+      const chunks: string[] = [];
+      for await (const chunk of client.streamCompletion(config, [{ role: "user", content: "hi" }], undefined, { reasoningEffort })) {
+        chunks.push(chunk);
+      }
+      const body = JSON.parse(requestBody) as Record<string, unknown>;
+      expect(body).toMatchObject({ reasoning_effort: reasoningEffort });
+      expect(body).not.toHaveProperty("temperature");
+      expect(body).not.toHaveProperty("top_p");
+    }
+  });
+
+  it("uses real DeepSeek thinking parameters and normalizes unsupported lower levels to high", async () => {
+    let requestBody = "";
+    const fetchFn = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestBody = String(init?.body || "{}");
+      return new Response('data: {"choices":[{"delta":{"content":"ok"}}]}', { status: 200 });
+    });
+    const client = new OpenAICompatibleClient({ fetchFn: fetchFn as typeof fetch });
+    const config = { ...configuredModel, base_url: "https://api.deepseek.com/v1", model: "deepseek-chat" };
+    for await (const _chunk of client.streamCompletion(config, [{ role: "user", content: "hi" }], undefined, { reasoningEffort: "medium" })) {
+      // consume stream
+    }
+    const body = JSON.parse(requestBody) as Record<string, unknown>;
+    expect(body).toMatchObject({ reasoning_effort: "high", thinking: { type: "enabled" } });
+    expect(body).not.toHaveProperty("temperature");
+    expect(body).not.toHaveProperty("top_p");
+  });
+
+  it("omits reasoning parameters for unsupported models", async () => {
+    let requestBody = "";
+    const fetchFn = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestBody = String(init?.body || "{}");
+      return new Response('data: {"choices":[{"delta":{"content":"ok"}}]}', { status: 200 });
+    });
+    const client = new OpenAICompatibleClient({ fetchFn: fetchFn as typeof fetch });
+    for await (const _chunk of client.streamCompletion(configuredModel, [{ role: "user", content: "hi" }], undefined, { reasoningEffort: "high" })) {
+      // consume stream
+    }
+    const body = JSON.parse(requestBody) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("reasoning_effort");
+    expect(body).not.toHaveProperty("thinking");
+    expect(body).toMatchObject({ temperature: 0.2, top_p: 0.88 });
+  });
 });

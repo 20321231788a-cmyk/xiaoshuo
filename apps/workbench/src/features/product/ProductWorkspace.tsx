@@ -16,6 +16,7 @@ const MemoryProductPage = lazy(() => import("./memory/MemoryProductPage.js").the
 const DisassemblyProductPage = lazy(() => import("./disassembly/DisassemblyProductPage.js").then((module) => ({ default: module.DisassemblyProductPage })));
 const BatchProductPage = lazy(() => import("./batch/BatchProductPage.js").then((module) => ({ default: module.BatchProductPage })));
 const TransferProductPage = lazy(() => import("./transfer/TransferProductPage.js").then((module) => ({ default: module.TransferProductPage })));
+const CoverProductPage = lazy(() => import("./cover/CoverProductPage.js").then((module) => ({ default: module.CoverProductPage })));
 const SkillsProductPage = lazy(() => import("./tools/SkillsProductPage.js").then((module) => ({ default: module.SkillsProductPage })));
 const TasksProductPage = lazy(() => import("./tasks/TasksProductPage.js").then((module) => ({ default: module.TasksProductPage })));
 const SettingsFeaturePage = lazy(() => import("../settings/SettingsFeaturePage.js").then((module) => ({ default: module.SettingsFeaturePage })));
@@ -75,6 +76,8 @@ export function ProductWorkspace({
       return deferredPage(<BatchProductPage controller={controller} />);
     case "transfer":
       return deferredPage(<TransferProductPage controller={controller} onSelectFeature={onSelectFeature} />);
+    case "cover":
+      return deferredPage(<CoverProductPage controller={controller} onSelectFeature={onSelectFeature} />);
     case "skills":
       return deferredPage(<SkillsProductPage controller={controller} route={route} onNavigate={onNavigate} />);
     case "tasks":

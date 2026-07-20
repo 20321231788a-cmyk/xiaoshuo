@@ -47,7 +47,10 @@ function dashboardPayload() {
     providers: [
       {
         name: "provider",
-        models: [{ name: "deepseek-chat", category: "text", enabled: true }]
+        models: [
+          { name: "deepseek-chat", category: "text", enabled: true },
+          { name: "gpt-image-2", category: "image", enabled: true, supports_image_edit: true, supported_sizes: ["768x1024"] }
+        ]
       }
     ],
     maxConcurrency: 300,
@@ -201,5 +204,35 @@ describe("handleWebsiteAiRoutes", () => {
       }),
       { rootDir: "D:\\xiaoshuo\\ts-migration" }
     );
+  });
+
+  it("saves the website image model without switching manual text mode", async () => {
+    const writeJson = vi.fn();
+    const readJsonBody = vi.fn().mockResolvedValue({ image_model: "gpt-image-2" });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(okJson(dashboardPayload()))
+      .mockResolvedValueOnce(okJson({ purchaseUrl: "" }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.mocked(loadPublicConfig).mockResolvedValue({
+      ai_config_mode: "manual",
+      manual_profile: { api_key: "manual-key", model: "manual-model" },
+      website_profile: { api_key: "site-token", license_account_key: "site-token", image_model: "" }
+    } as unknown as Awaited<ReturnType<typeof loadPublicConfig>>);
+    vi.mocked(savePublicConfig).mockResolvedValue({
+      ai_config_mode: "manual",
+      manual_profile: { api_key: "manual-key", model: "manual-model" },
+      website_profile: { api_key: "site-token", license_account_key: "site-token", image_model: "gpt-image-2" }
+    } as unknown as Awaited<ReturnType<typeof savePublicConfig>>);
+
+    await handleWebsiteAiRoutes(createRequest("PUT"), createResponse(), "/api/website-ai/image-config", createContext(), { readJsonBody, writeJson });
+
+    expect(savePublicConfig).toHaveBeenCalledWith(expect.objectContaining({
+      ai_config_mode: "manual",
+      website_profile: expect.objectContaining({ image_model: "gpt-image-2" })
+    }), { rootDir: "D:\\xiaoshuo\\ts-migration" });
+    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 200, expect.objectContaining({
+      image_models: [expect.objectContaining({ id: "gpt-image-2", capabilities: expect.objectContaining({ image_generation: true, image_edit: true }) })],
+      selected_image_model: "gpt-image-2"
+    }));
   });
 });

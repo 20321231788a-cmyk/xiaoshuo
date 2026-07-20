@@ -3,7 +3,8 @@ import type {
   AppConfig,
   DesktopUpdateStatus,
   WebsiteAiRechargeOption,
-  WebsiteAiRechargeOrder
+  WebsiteAiRechargeOrder,
+  WebsiteAiConfigProfile
 } from "@xiaoshuo/shared";
 import { Archive, ArchiveRestore, Bot, Cable, Download, ExternalLink, Eye, EyeOff, Gift, Info, Keyboard, PenLine, RefreshCw, Shield, WalletCards } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -48,14 +49,16 @@ export function SettingsFeaturePage({ controller, section, onNavigate, onOpenVec
   const activeConfig = config;
   const mode: AppConfig["ai_config_mode"] = activeConfig.ai_config_mode === "website" ? "website" : "manual";
   const manualProfile = normalizeUiAiProfile(activeConfig.manual_profile);
-  const websiteProfile = normalizeUiAiProfile(activeConfig.website_profile);
+  const websiteProfile = normalizeUiAiProfile(activeConfig.website_profile) as WebsiteAiConfigProfile;
   const websiteLoggedIn = Boolean(websiteDashboard?.logged_in);
   const websiteModels = websiteDashboard?.models || [];
   const websiteEmbeddingModels = websiteDashboard?.embedding_models || [];
+  const websiteImageModels = websiteDashboard?.image_models || [];
   const websiteModel = websiteProfile.model || websiteDashboard?.selected_model || websiteModels[0]?.id || "";
   const websiteEmbeddingModel = websiteProfile.embedding_enabled
     ? websiteProfile.embedding_model || websiteDashboard?.selected_embedding_model || websiteEmbeddingModels[0]?.id || ""
     : "";
+  const websiteImageModel = websiteProfile.image_model || websiteDashboard?.selected_image_model || websiteImageModels[0]?.id || "";
   const websiteTemp = websiteProfile.temp ?? websiteDashboard?.temp ?? 0.7;
   const websiteTopP = websiteProfile.top_p ?? websiteDashboard?.top_p ?? 1;
   const selectedRechargeOption = rechargeOptions.find((item) => item.option_index === selectedRechargeIndex) || rechargeOptions[0] || null;
@@ -85,6 +88,10 @@ export function SettingsFeaturePage({ controller, section, onNavigate, onOpenVec
     });
   }
 
+  function applyWebsiteImageConfig() {
+    if (websiteImageModel) void controller.applyWebsiteImageConfig({ image_model: websiteImageModel });
+  }
+
   function patchManualProfile(patch: Partial<AiConfigProfile>) {
     if (["embedding_enabled", "embedding_api_key", "embedding_base_url", "embedding_model"].some((key) => key in patch)) {
       controller.resetEmbeddingTestResult();
@@ -92,7 +99,7 @@ export function SettingsFeaturePage({ controller, section, onNavigate, onOpenVec
     controller.patchConfig({ manual_profile: { ...manualProfile, ...patch } });
   }
 
-  function patchWebsiteProfile(patch: Partial<AiConfigProfile>) {
+  function patchWebsiteProfile(patch: Partial<WebsiteAiConfigProfile>) {
     controller.patchConfig({ website_profile: { ...websiteProfile, ...patch } });
   }
 
@@ -171,7 +178,7 @@ export function SettingsFeaturePage({ controller, section, onNavigate, onOpenVec
               手动配置
             </button>
           </div>
-          {mode === "manual" ? (
+          {mode === "manual" && aiPanel !== "service" ? (
             <button className="xw-secondary-button compact" type="button" onClick={() => setShowSecrets((value) => !value)}>
               {showSecrets ? <EyeOff size={15} /> : <Eye size={15} />}
               {showSecrets ? "隐藏密钥" : "显示密钥"}
@@ -191,13 +198,16 @@ export function SettingsFeaturePage({ controller, section, onNavigate, onOpenVec
           ["service", "网站服务"],
           ["search", "联网搜索"]
         ] as Array<[AiSettingsPanel, string]>).map(([id, label]) => (
-          <button key={id} type="button" role="tab" aria-selected={aiPanel === id} className={aiPanel === id ? "active" : ""} onClick={() => setAiPanel(id)}>
+          <button key={id} type="button" role="tab" aria-selected={aiPanel === id} className={aiPanel === id ? "active" : ""} onClick={() => {
+            setAiPanel(id);
+            if (id === "service") void controller.refreshWebsiteAiDashboard();
+          }}>
             {label}
           </button>
         ))}
       </div>
       <div className="ai-config-panel" role="tabpanel" tabIndex={0} aria-label={`${aiPanelLabel(aiPanel)}配置`}>
-        {mode === "manual" ? (
+        {mode === "manual" && aiPanel !== "service" ? (
           <ManualAiSettings panel={aiPanel} config={activeConfig} profile={manualProfile} controller={controller} showSecrets={showSecrets} onProfileChange={patchManualProfile} onOpenVectorTest={onOpenVectorTest} />
         ) : (
           <div className="xw-settings-list ai">
@@ -258,6 +268,21 @@ export function SettingsFeaturePage({ controller, section, onNavigate, onOpenVec
                 </button>
               </form>
             )}
+            {websiteLoggedIn && (
+              <div className="xw-settings-grid xw-image-model-settings">
+                <SelectSettingRow
+                  label="封面生图模型"
+                  value={websiteImageModel}
+                  placeholder="网站账号暂未提供生图模型"
+                  options={websiteImageModels.map((item) => ({
+                    value: item.id,
+                    label: `${item.provider ? `${item.name} · ${item.provider}` : item.name}${item.capabilities.image_edit ? " · 支持图生图" : ""}`
+                  }))}
+                  onChange={(value) => patchWebsiteProfile({ image_model: value })}
+                />
+                {!websiteImageModels.length && <p className="xw-feature-empty">当前网站账号没有可用的生图模型。</p>}
+              </div>
+            )}
           </section>}
 
           {aiPanel === "model" && <section className="xw-settings-section">
@@ -303,7 +328,13 @@ export function SettingsFeaturePage({ controller, section, onNavigate, onOpenVec
         )}
       </div>
       <div className="xw-feature-actions">
-        {mode === "manual" ? (
+        {aiPanel === "service" ? (
+          <>
+            <button className="xw-primary-button compact" onClick={applyWebsiteImageConfig} disabled={controller.websiteAiBusy || !websiteImageModel}>保存生图模型</button>
+            <button className="xw-secondary-button compact" onClick={() => void controller.refreshWebsiteAiDashboard()} disabled={controller.websiteAiBusy}>刷新网站状态</button>
+            <span>{controller.websiteAiMessage || websiteDashboard?.message || "封面生成始终使用这里保存的网站模型。"}</span>
+          </>
+        ) : mode === "manual" ? (
           <>
             <button className="xw-primary-button compact" onClick={controller.saveConfig} disabled={controller.configBusy}>保存设置</button>
             <button className="xw-secondary-button compact" onClick={controller.refreshLicense} disabled={controller.configBusy}>刷新授权</button>
@@ -941,7 +972,14 @@ function ManualAiSettings({
         <div className="xw-settings-grid">
           <SecretSettingRow label="API Key" value={profile.api_key || ""} visible={showSecrets} onChange={(value) => onProfileChange({ api_key: value })} />
           <TextSettingRow label="Base URL" value={profile.base_url || ""} placeholder="https://api.openai.com/v1" onChange={(value) => onProfileChange({ base_url: value })} />
-          <TextSettingRow label="模型" value={profile.model || ""} placeholder="gpt-4.1-mini" onChange={(value) => onProfileChange({ model: value })} />
+          <ManualModelSettingRow
+            value={profile.model || ""}
+            models={controller.manualModelCatalog}
+            busy={controller.manualModelDiscoveryBusy}
+            message={controller.manualModelDiscoveryMessage}
+            onChange={(value) => onProfileChange({ model: value })}
+            onRefresh={() => void controller.refreshManualModelCatalog(profile, { force: true })}
+          />
           <SliderSettingRow label="temperature" value={profile.temp ?? 0.7} min={0} max={2} step={0.01} onChange={(value) => onProfileChange({ temp: value })} />
           <SliderSettingRow label="top_p" value={profile.top_p ?? 1} min={0} max={1} step={0.01} onChange={(value) => onProfileChange({ top_p: value })} />
         </div>
@@ -1075,6 +1113,43 @@ function SelectSettingRow({
           </option>
         ))}
       </select>
+    </label>
+  );
+}
+
+function ManualModelSettingRow({
+  value,
+  models,
+  busy,
+  message,
+  onChange,
+  onRefresh
+}: {
+  value: string;
+  models: Array<{ id: string; name: string; provider: string }>;
+  busy: boolean;
+  message: string;
+  onChange: (value: string) => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <label className="xw-setting-field xw-manual-model-field">
+      <span>模型</span>
+      <span className="xw-setting-input-action">
+        <input
+          value={value}
+          list="arcwriter-manual-models"
+          placeholder="输入或选择模型"
+          onChange={(event) => onChange(event.target.value)}
+        />
+        <button type="button" title="刷新可用模型" aria-label="刷新可用模型" disabled={busy} onClick={onRefresh}>
+          <RefreshCw size={14} className={busy ? "spin" : ""} />
+        </button>
+      </span>
+      <datalist id="arcwriter-manual-models">
+        {models.map((model) => <option key={model.id} value={model.id}>{model.name}{model.provider ? ` · ${model.provider}` : ""}</option>)}
+      </datalist>
+      {message && <small title={message}>{message}</small>}
     </label>
   );
 }

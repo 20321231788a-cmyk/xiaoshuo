@@ -46,7 +46,9 @@ describe("conversation-service", () => {
       current_agent: "agent",
       summary: "",
       message_count: 0,
-      attachment_count: 0
+      attachment_count: 0,
+      model_override: "",
+      reasoning_effort: "medium"
     });
     expect(raw.id).toBe("id_1");
     expect(backup.id).toBe("id_1");
@@ -72,6 +74,25 @@ describe("conversation-service", () => {
 
     expect(renamed.title).toHaveLength(80);
     await expect(conversations.renameConversation(detail.id, "  ")).rejects.toThrow("对话标题不能为空");
+  });
+
+  it("persists model preferences independently and supplies defaults for old files", async () => {
+    const conversations = service();
+    const first = await conversations.createConversation({ title: "first" });
+    const second = await conversations.createConversation({ title: "second" });
+
+    const updated = await conversations.updateModelPreferences(first.id, {
+      model_override: "gpt-5-mini",
+      reasoning_effort: "high"
+    });
+    expect(updated).toMatchObject({ model_override: "gpt-5-mini", reasoning_effort: "high" });
+    expect(await conversations.getConversation(second.id)).toMatchObject({ model_override: "", reasoning_effort: "medium" });
+
+    const old = JSON.parse(await fs.readFile(conversationFile(second.id), "utf8"));
+    delete old.model_override;
+    delete old.reasoning_effort;
+    await fs.writeFile(conversationFile(second.id), JSON.stringify(old), "utf8");
+    expect(await conversations.getConversation(second.id)).toMatchObject({ model_override: "", reasoning_effort: "medium" });
   });
 
   it("deletes a conversation, its backup, and its attachment directory", async () => {

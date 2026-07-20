@@ -1,6 +1,8 @@
 import { ApiError, createApiClient } from "@xiaoshuo/api-client";
 import type {
   AppConfig,
+  AiConfigProfile,
+  AiModelOption,
   AgentRunResponse,
   AgentRunState,
   CardDrawRequest,
@@ -11,6 +13,7 @@ import type {
   ConversationAttachment,
   ConversationMessage,
   ConversationSummary,
+  ConversationModelPreferences,
   CurrentProject,
   JobInfo,
   LedgerItem,
@@ -32,6 +35,7 @@ import type {
   VectorIndexStatus,
   VectorTestRequest,
   WebsiteAiApplyRequest,
+  WebsiteImageConfigRequest,
   WebsiteAiDashboard,
   WebsiteAiRechargeOrder
 } from "@xiaoshuo/shared";
@@ -382,6 +386,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [websiteAiRechargeBusy, setWebsiteAiRechargeBusy] = useState(false);
   const [websiteAiRechargeMessage, setWebsiteAiRechargeMessage] = useState("");
   const [websiteAiRechargeOrder, setWebsiteAiRechargeOrder] = useState<WebsiteAiRechargeOrder | null>(null);
+  const [manualModelCatalog, setManualModelCatalog] = useState<AiModelOption[]>([]);
+  const [manualModelDiscoveryBusy, setManualModelDiscoveryBusy] = useState(false);
+  const [manualModelDiscoveryMessage, setManualModelDiscoveryMessage] = useState("");
   const [cloudProjectSlots, setCloudProjectSlots] = useState<CloudProjectSlot[]>([]);
   const [cloudProjectBusy, setCloudProjectBusy] = useState(false);
   const [cloudProjectMessage, setCloudProjectMessage] = useState("");
@@ -391,6 +398,11 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [messageInput, setMessageInput] = useState("");
   const [sendingMessage, setSendingMessage] = useState(false);
+  const [conversationModelPreferences, setConversationModelPreferences] = useState<ConversationModelPreferences>({
+    model_override: "",
+    reasoning_effort: "medium"
+  });
+  const [conversationModelPreferenceBusy, setConversationModelPreferenceBusy] = useState(false);
   const [pendingReferenceResolution, setPendingReferenceResolution] = useState<PendingReferenceResolution | null>(null);
   const [openDocuments, setOpenDocuments] = useState<OpenDocumentTab[]>([]);
   const [activeDocumentPath, setActiveDocumentPath] = useState("");
@@ -427,6 +439,11 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const lastConfigSignatureRef = useRef("");
   const configDraftDirtyRef = useRef(false);
   const websiteAiRefreshKeyRef = useRef("");
+  const manualModelRefreshKeyRef = useRef("");
+  const conversationModelPreferencesRef = useRef<ConversationModelPreferences>({
+    model_override: "",
+    reasoning_effort: "medium"
+  });
   const client = useMemo(() => createApiClient({ baseUrl: runtime.apiBase, fetchFn: runtime.fetchFn }), [runtime.apiBase, runtime.fetchFn]);
 
   useEffect(() => {
@@ -475,6 +492,10 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   useEffect(() => {
     selectedJobIdRef.current = selectedJobId;
   }, [selectedJobId]);
+
+  useEffect(() => {
+    conversationModelPreferencesRef.current = conversationModelPreferences;
+  }, [conversationModelPreferences]);
 
   useEffect(() => {
     if (pendingReferenceResolution && messageInput.trim() !== pendingReferenceResolution.content) {
@@ -544,6 +565,25 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     configDraft?.website_profile?.embedding_model,
     configDraft?.website_profile?.license_account_key,
     configDraft?.website_profile?.model,
+    status
+  ]);
+
+  useEffect(() => {
+    const manualProfile = configDraft?.manual_profile;
+    const baseUrl = String(manualProfile?.base_url || "").trim();
+    if (status !== "ready" || configDraft?.ai_config_mode !== "manual" || !baseUrl) {
+      return;
+    }
+    const refreshKey = `${baseUrl}:${manualProfile?.api_key || ""}`;
+    if (manualModelRefreshKeyRef.current === refreshKey) {
+      return;
+    }
+    manualModelRefreshKeyRef.current = refreshKey;
+    void refreshManualModelCatalog(manualProfile, { silent: true });
+  }, [
+    configDraft?.ai_config_mode,
+    configDraft?.manual_profile?.api_key,
+    configDraft?.manual_profile?.base_url,
     status
   ]);
 
@@ -652,6 +692,16 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
 
     setConversationDetail(null);
   }, [conversationDetail, snapshot]);
+
+  useEffect(() => {
+    if (!conversationDetail) {
+      return;
+    }
+    setConversationModelPreferences({
+      model_override: conversationDetail.model_override || "",
+      reasoning_effort: conversationDetail.reasoning_effort || "medium"
+    });
+  }, [conversationDetail?.id, conversationDetail?.model_override, conversationDetail?.reasoning_effort]);
 
   useEffect(() => {
     if (!snapshot?.skills.length || selectedSkillId) {
@@ -851,7 +901,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       current_skill: detail.current_skill,
       current_agent: detail.current_agent,
       message_count: detail.message_count,
-      attachment_count: detail.attachment_count
+      attachment_count: detail.attachment_count,
+      model_override: detail.model_override,
+      reasoning_effort: detail.reasoning_effort
     }));
   }
 
@@ -1210,7 +1262,11 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       return conversationDetail.id;
     }
 
-    const detail = await client.createConversation();
+    let detail = await client.createConversation();
+    const preferences = conversationModelPreferencesRef.current;
+    if (preferences.model_override || preferences.reasoning_effort !== "medium") {
+      detail = await client.updateConversationModelPreferences(detail.id, preferences);
+    }
     const conversations = await client.getConversations();
     setConversationDetail(detail);
     setSnapshot((current) => (current ? { ...current, conversations } : current));
@@ -1890,6 +1946,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       lastConfigSignatureRef.current = configSignature(normalizedConfig);
       configDraftDirtyRef.current = false;
       setSnapshot((current) => (current ? { ...current, config: normalizedConfig } : current));
+      if (normalizedConfig.ai_config_mode === "manual") {
+        void refreshManualModelCatalog(normalizedConfig.manual_profile, { silent: true, force: true });
+      }
       setConfigMessage(message);
       return true;
     } catch (nextError) {
@@ -1934,6 +1993,46 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
+  async function refreshManualModelCatalog(
+    profile: Partial<AiConfigProfile> | undefined = configDraft?.manual_profile,
+    options: { silent?: boolean; force?: boolean } = {}
+  ): Promise<AiModelOption[]> {
+    const baseUrl = String(profile?.base_url || "").trim();
+    if (!baseUrl) {
+      setManualModelCatalog([]);
+      setManualModelDiscoveryMessage("请先在设置中填写手动 API 地址。");
+      return [];
+    }
+    if (!options.silent) {
+      setManualModelDiscoveryBusy(true);
+      setManualModelDiscoveryMessage("");
+    }
+    if (options.force) {
+      manualModelRefreshKeyRef.current = "";
+    }
+    try {
+      const result = await client.discoverManualModels({
+        base_url: baseUrl,
+        api_key: String(profile?.api_key || ""),
+        force: options.force === true
+      });
+      setManualModelCatalog(result.models);
+      setManualModelDiscoveryMessage(result.cached ? "已读取最近发现的模型列表。" : `已发现 ${result.models.length} 个文本模型。`);
+      return result.models;
+    } catch (nextError) {
+      setManualModelDiscoveryMessage(describeActionableError(
+        nextError,
+        "模型列表刷新失败",
+        "已保存的默认模型仍可继续使用，请检查接口是否提供 /models。"
+      ));
+      return [];
+    } finally {
+      if (!options.silent) {
+        setManualModelDiscoveryBusy(false);
+      }
+    }
+  }
+
   async function loginWebsiteAi(email: string, password: string) {
     setWebsiteAiBusy(true);
     setWebsiteAiMessage("");
@@ -1965,6 +2064,23 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       setWebsiteAiMessage(dashboard.message || "网站模型配置已应用。");
     } catch (nextError) {
       setWebsiteAiMessage(describeActionableError(nextError, "应用网站配置失败", "请先登录网站账号并选择可用模型。"));
+    } finally {
+      setWebsiteAiBusy(false);
+    }
+  }
+
+  async function applyWebsiteImageConfig(payload: WebsiteImageConfigRequest): Promise<boolean> {
+    setWebsiteAiBusy(true);
+    setWebsiteAiMessage("");
+    try {
+      const dashboard = await client.applyWebsiteImageConfig(payload);
+      setWebsiteAiDashboard(dashboard);
+      if (dashboard.config) applySyncedConfig(dashboard.config);
+      setWebsiteAiMessage(dashboard.message || "网站生图模型已保存。");
+      return true;
+    } catch (nextError) {
+      setWebsiteAiMessage(describeActionableError(nextError, "生图模型保存失败", "请先登录网站账号并选择可用的生图模型。"));
+      return false;
     } finally {
       setWebsiteAiBusy(false);
     }
@@ -2065,6 +2181,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       lastConfigSignatureRef.current = configSignature(normalizedConfig);
       configDraftDirtyRef.current = false;
       setSnapshot((current) => (current ? { ...current, config: saved, license } : current));
+      if (normalizedConfig.ai_config_mode === "manual") {
+        void refreshManualModelCatalog(normalizedConfig.manual_profile, { silent: true, force: true });
+      }
       setConfigMessage(license.licensed ? "配置已保存，授权状态已刷新" : `配置已保存；${license.message || "当前未授权"}`);
     } catch (nextError) {
       setConfigMessage(describeActionableError(nextError, "配置保存失败", "请检查必填配置后重新保存。"));
@@ -2110,6 +2229,10 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     try {
       const detail = await client.getConversation(conversationId);
       setConversationDetail(detail);
+      setConversationModelPreferences({
+        model_override: detail.model_override || "",
+        reasoning_effort: detail.reasoning_effort || "medium"
+      });
       if (options.activateTab ?? true) {
         setActiveTab("conversations");
       }
@@ -2191,6 +2314,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setConversationMessage("");
     try {
       const detail = await client.createConversation();
+      const defaults: ConversationModelPreferences = { model_override: "", reasoning_effort: "medium" };
+      conversationModelPreferencesRef.current = defaults;
+      setConversationModelPreferences(defaults);
       const list = await client.getConversations();
       setConversationDetail(detail);
       setSnapshot((current) => (current ? { ...current, conversations: list } : current));
@@ -2199,6 +2325,53 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       setConversationMessage(describeActionableError(nextError, "新建对话失败"));
     } finally {
       setConversationBusy(false);
+    }
+  }
+
+  async function updateConversationModelPreferences(
+    nextPreferences: ConversationModelPreferences
+  ): Promise<boolean> {
+    if (sendingMessage || conversationBusy || conversationModelPreferenceBusy) {
+      return false;
+    }
+    const normalized: ConversationModelPreferences = {
+      model_override: nextPreferences.model_override.trim(),
+      reasoning_effort: nextPreferences.reasoning_effort
+    };
+    const previous = conversationModelPreferencesRef.current;
+    conversationModelPreferencesRef.current = normalized;
+    setConversationModelPreferences(normalized);
+
+    const conversationId = conversationDetail?.id || "";
+    if (!conversationId) {
+      setConversationMessage("模型偏好将在首次发送时保存到新会话。");
+      return true;
+    }
+
+    setConversationModelPreferenceBusy(true);
+    setConversationDetail((current) => current?.id === conversationId ? { ...current, ...normalized } : current);
+    patchConversationSummary(conversationId, (item) => ({ ...item, ...normalized }));
+    setConversationMessage("");
+    try {
+      const detail = await client.updateConversationModelPreferences(conversationId, normalized);
+      setConversationDetail((current) => current?.id === conversationId ? detail : current);
+      patchConversationSummary(conversationId, (item) => ({
+        ...item,
+        model_override: detail.model_override,
+        reasoning_effort: detail.reasoning_effort,
+        updated_at: detail.updated_at
+      }));
+      setConversationMessage(normalized.model_override ? "本会话模型偏好已保存。" : "本会话已恢复跟随默认模型。");
+      return true;
+    } catch (nextError) {
+      conversationModelPreferencesRef.current = previous;
+      setConversationModelPreferences(previous);
+      setConversationDetail((current) => current?.id === conversationId ? { ...current, ...previous } : current);
+      patchConversationSummary(conversationId, (item) => ({ ...item, ...previous }));
+      setConversationMessage(describeActionableError(nextError, "模型偏好保存失败", "已恢复为保存前的选择，请重试。"));
+      return false;
+    } finally {
+      setConversationModelPreferenceBusy(false);
     }
   }
 
@@ -4416,6 +4589,10 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     websiteAiRechargeBusy,
     websiteAiRechargeMessage,
     websiteAiRechargeOrder,
+    manualModelCatalog,
+    manualModelDiscoveryBusy,
+    manualModelDiscoveryMessage,
+    refreshManualModelCatalog,
     cloudProjectSlots,
     cloudProjectBusy,
     cloudProjectMessage,
@@ -4426,6 +4603,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     loginWebsiteAi,
     refreshWebsiteAiDashboard,
     applyWebsiteAiConfig,
+    applyWebsiteImageConfig,
     redeemWebsiteAiCode,
     createWebsiteAiRechargeOrder,
     refreshWebsiteAiRechargeOrder,
@@ -4440,6 +4618,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     messageInput,
     setMessageInput,
     sendingMessage,
+    conversationModelPreferences,
+    conversationModelPreferenceBusy,
+    updateConversationModelPreferences,
     pendingReferenceResolution,
     loadConversation,
     getConversationPlanRun,

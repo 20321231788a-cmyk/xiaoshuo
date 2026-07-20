@@ -1,3 +1,8 @@
+import {
+  resolveModelRequestCapability,
+  type ReasoningEffort
+} from "@xiaoshuo/shared";
+
 export type ModelCapability = "text" | "stream" | "structured_output" | "reasoning" | "embedding";
 
 export class ProviderCapabilities {
@@ -5,7 +10,7 @@ export class ProviderCapabilities {
     const caps = new Set<ModelCapability>(["text", "stream"]);
     const lower = model.toLowerCase();
     
-    if (lower.includes("o1") || lower.includes("o3") || lower.includes("reasoning") || lower.includes("r1")) {
+    if (resolveModelRequestCapability(model).supportsReasoning) {
       caps.add("reasoning");
     }
 
@@ -27,5 +32,9 @@ export class ProviderCapabilities {
 
   static supportsCapability(model: string, capability: ModelCapability): boolean {
     return this.getModelCapabilities(model).has(capability);
+  }
+
+  static getReasoningEfforts(model: string, providerHint = ""): ReasoningEffort[] {
+    return resolveModelRequestCapability(model, providerHint).reasoningEfforts;
   }
 }

@@ -17,6 +17,12 @@ describe("product routes", () => {
     expect(parseProductRoute(productRoutePath(route))).toEqual(route);
   });
 
+  it("round-trips the cover workspace route", () => {
+    const route = { feature: "cover" } as const;
+    expect(productRoutePath(route)).toBe("/cover");
+    expect(parseProductRoute("/cover")).toEqual(route);
+  });
+
   it("does not expose diagnostic or legacy aliases as product routes", () => {
     expect(parseProductRoute("/terminal")).toBeNull();
     expect(parseProductRoute("/card_draw")).toBeNull();

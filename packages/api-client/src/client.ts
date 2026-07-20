@@ -14,11 +14,18 @@ import {
   conversationMessageRequestSchema,
   conversationAttachmentSchema,
   conversationDetailSchema,
+  conversationModelPreferencesSchema,
+  coverGenerationRequestSchema,
+  coverHistoryResponseSchema,
+  coverOpenFolderResponseSchema,
+  coverRecordSchema,
   documentContentSchema,
   generatedCacheDetailSchema,
   generatedSaveResponseSchema,
   jobInfoSchema,
   licenseAccountKeyResponseSchema,
+  manualModelDiscoveryRequestSchema,
+  manualModelDiscoveryResponseSchema,
   ledgerItemSchema,
   currentProjectSchema,
   cardDrawRequestSchema,
@@ -56,11 +63,13 @@ import {
   websiteAiRechargeOrderResponseSchema,
   websiteAiRedeemRequestSchema,
   websiteAiRedeemResponseSchema,
+  websiteImageConfigRequestSchema,
   type ApiContractName,
   type AgentRunStatus,
   type AgentRunRequest,
   type AgentPlanRequest,
   type ConversationMessageRequest,
+  type ConversationModelPreferences,
   type GeneratedSaveResponse,
   type ApiResponseFor
 } from "@xiaoshuo/shared";
@@ -255,6 +264,11 @@ export function createApiClient(options: ApiClientOptions) {
     getHealth: () => requestContract("health"),
     getLicenseStatus: () => requestContract("licenseStatus"),
     getConfig: () => requestContract("config"),
+    discoverManualModels: (payload: z.input<typeof manualModelDiscoveryRequestSchema>) =>
+      requestWithSchema("/api/config/models/discover", manualModelDiscoveryResponseSchema, {
+        method: "POST",
+        body: JSON.stringify(manualModelDiscoveryRequestSchema.parse(payload))
+      }),
     putConfig: (config: unknown) =>
       requestWithSchema(apiContracts.setConfig.path, appConfigSchema, {
         method: apiContracts.setConfig.method,
@@ -276,6 +290,11 @@ export function createApiClient(options: ApiClientOptions) {
         method: apiContracts.websiteAiApply.method,
         body: JSON.stringify(websiteAiApplyRequestSchema.parse(payload))
       }),
+    applyWebsiteImageConfig: (payload: z.input<typeof websiteImageConfigRequestSchema>) =>
+      requestWithSchema("/api/website-ai/image-config", websiteAiDashboardSchema, {
+        method: "PUT",
+        body: JSON.stringify(websiteImageConfigRequestSchema.parse(payload))
+      }),
     redeemWebsiteAiCode: (payload: z.input<typeof websiteAiRedeemRequestSchema>) =>
       requestWithSchema(apiContracts.websiteAiRedeem.path, websiteAiRedeemResponseSchema, {
         method: apiContracts.websiteAiRedeem.method,
@@ -291,6 +310,26 @@ export function createApiClient(options: ApiClientOptions) {
         pathParams: { order_id: orderId }
       }),
     getCurrentProject: () => requestContract("currentProject"),
+    getCovers: () => requestWithSchema("/api/covers", coverHistoryResponseSchema, { method: "GET" }),
+    generateCover: (payload: z.input<typeof coverGenerationRequestSchema>, signal?: AbortSignal) =>
+      requestWithSchema("/api/covers/generate", coverRecordSchema, {
+        method: "POST",
+        body: JSON.stringify(coverGenerationRequestSchema.parse(payload)),
+        signal
+      }),
+    deleteCover: (coverId: string) => requestWithSchema("/api/covers/{cover_id}", z.object({ ok: z.boolean(), deleted_id: z.string() }), {
+      method: "DELETE",
+      pathParams: { cover_id: coverId }
+    }),
+    openCoverFolder: () => requestWithSchema("/api/covers/open-folder", coverOpenFolderResponseSchema, { method: "POST" }),
+    getCoverImage: async (coverId: string, variant: "original" | "final" = "final") => {
+      const response = await fetchFn(buildApiUrl(options.baseUrl, "/api/covers/{cover_id}/image", { cover_id: coverId }, { variant }));
+      if (!response.ok) {
+        const text = await response.text();
+        throw new ApiError(extractErrorMessage(text) || response.statusText, response.status, parseErrorPayload(text));
+      }
+      return response.blob();
+    },
     openProject: (path: string) =>
       requestWithSchema("/api/projects/open", currentProjectSchema, {
         method: "POST",
@@ -391,6 +430,15 @@ export function createApiClient(options: ApiClientOptions) {
         method: "PUT",
         pathParams: { conversation_id: conversationId },
         body: JSON.stringify({ title })
+      }),
+    updateConversationModelPreferences: (
+      conversationId: string,
+      preferences: ConversationModelPreferences
+    ) =>
+      requestWithSchema("/api/conversations/{conversation_id}/model-preferences", conversationDetailSchema, {
+        method: "PUT",
+        pathParams: { conversation_id: conversationId },
+        body: JSON.stringify(conversationModelPreferencesSchema.parse(preferences))
       }),
     deleteConversation: (conversationId: string) =>
       requestWithSchema("/api/conversations/{conversation_id}", z.object({ id: z.string(), deleted: z.literal(true) }), {

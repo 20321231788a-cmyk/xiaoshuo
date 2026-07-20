@@ -81,3 +81,14 @@
   .ai-config-panel { padding-top: 10px; padding-bottom: 10px; }
   .settings-main .xw-feature-actions { min-height: 52px; padding-block: 8px 9px; }
 }
+.xw-setting-input-action { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) 34px; gap: 6px; }
+.xw-setting-input-action > input { min-width: 0; }
+.xw-setting-input-action > button { width: 34px; min-height: 34px; display: grid; place-items: center; padding: 0; border: 1px solid var(--aw-line); border-radius: var(--aw-radius-control); background: var(--aw-paper); color: var(--aw-muted); }
+.xw-setting-input-action > button:hover:not(:disabled) { color: var(--aw-accent); border-color: var(--aw-line-strong); }
+.xw-setting-input-action > button:disabled { cursor: not-allowed; opacity: .55; }
+.xw-manual-model-field > small { overflow: hidden; color: var(--aw-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.xw-setting-input-action .spin { animation: assistant-model-spin .8s linear infinite; }
+
+@media (prefers-reduced-motion: reduce) {
+  .xw-setting-input-action .spin { animation: none; }
+}

@@ -29,6 +29,7 @@ import {
   handleAgentTraceRoutes,
   handleBaseRuntimeRoutes,
   handleConversationRoutes,
+  handleCoverRoutes,
   handleFeedbackRoutes,
   handleGeneratedCacheRoutes,
   handleJobRoutes,
@@ -41,6 +42,7 @@ import {
   handleVectorRoutes,
   handleGraphRoutes,
   handleMemoryRoutes,
+  handleModelDiscoveryRoutes,
   handleWebsiteAiRoutes,
   runtimeRequestAccessStatus,
   listRuntimeJobs,
@@ -65,6 +67,7 @@ import {
   stringValue,
   stripTrailingSlash,
   type JsonRecord,
+  type CoverImageNormalizer,
   type RuntimeContext,
   type RuntimeServerOptions,
   type RuntimeServerState,
@@ -78,9 +81,14 @@ import { loadDesktopAgentFeatureFlags } from "./agent-feature-flags.js";
 export { runtimeHost, runtimePort, runtimeUrl, type RuntimeServerOptions, type RuntimeServerState } from "./runtime/types.js";
 type ShellLike = { openPath: (target: string) => unknown };
 let shellBridge: ShellLike | null = null;
+let coverImageNormalizer: CoverImageNormalizer | null = null;
 
 export function registerRuntimeShell(shellLike: ShellLike): void {
   shellBridge = shellLike;
+}
+
+export function registerRuntimeCoverImageNormalizer(normalizer: CoverImageNormalizer): void {
+  coverImageNormalizer = normalizer;
 }
 
 export async function startRuntimeServer(options: RuntimeServerOptions): Promise<void> {
@@ -203,7 +211,23 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
     return;
   }
 
+  if (await handleModelDiscoveryRoutes(request, response, pathname, { readJsonBody, writeJson })) {
+    return;
+  }
+
   if (await handleWebsiteAiRoutes(request, response, pathname, context, { readJsonBody, writeJson })) {
+    return;
+  }
+
+  if (await handleCoverRoutes(request, response, pathname, url.searchParams, context, {
+    ensureProjectSessionCurrent,
+    readRawBody,
+    parseJsonRecord,
+    createRequestAbortSignal,
+    writeJson,
+    openPath: (target) => shellBridge?.openPath(target),
+    normalizeImage: coverImageNormalizer
+  })) {
     return;
   }
 
