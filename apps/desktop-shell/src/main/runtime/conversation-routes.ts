@@ -86,6 +86,14 @@ export async function handleConversationRoutes(
     deps.writeJson(response, 200, await service.renameConversation(conversationRoute.id, deps.stringValue(payload.title)));
     return true;
   }
+  if (conversationRoute.id && !conversationRoute.action && request.method === "DELETE") {
+    try {
+      deps.writeJson(response, 200, await service.deleteConversation(conversationRoute.id));
+    } catch (error) {
+      deps.writeJson(response, 404, { detail: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
   if (conversationRoute.id && conversationRoute.action === "messages" && request.method === "POST") {
     if (await writeAiLicenseRequiredIfNeeded(context, response, deps.writeJson)) {
       return true;

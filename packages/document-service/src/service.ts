@@ -551,7 +551,10 @@ export class DocumentService {
       }
       return parsed.flatMap((item) => {
         const result = ledgerItemSchema.safeParse(item);
-        return result.success ? [result.data] : [];
+        return result.success ? [ledgerItemSchema.parse({
+          ...result.data,
+          phase: result.data.phase || (result.data.status === "closed" ? "resolved" : "planted")
+        })] : [];
       });
     } catch {
       return [];
@@ -568,6 +571,7 @@ export class DocumentService {
       id: this.idFactory(),
       desc: text,
       status: "open",
+      phase: "planned",
       created_at: this.now(),
       updated_at: this.now()
     });
@@ -586,6 +590,7 @@ export class DocumentService {
     const updated = ledgerItemSchema.parse({
       ...current,
       status: current.status === "open" ? "closed" : "open",
+      phase: current.status === "open" ? "resolved" : "planned",
       updated_at: this.now()
     });
     items[index] = updated;

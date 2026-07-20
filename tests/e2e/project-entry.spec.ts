@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { expect, test } from "@playwright/test";
 import type { Page } from "@playwright/test";
 import http from "node:http";
 
@@ -6,25 +6,8 @@ const baseUrl = process.env.WORKBENCH_BASE_URL || "http://127.0.0.1:4180";
 const runtimeApi = process.env.WORKBENCH_API_BASE || "http://127.0.0.1:18453";
 const runtimeSessionToken = process.env.WORKBENCH_E2E_SESSION_TOKEN || "arcwriter-e2e-runtime-token";
 const sandboxProjectsPath = "D:/xiaoshuo/ts-migration/sandbox-projects";
-const heldModelResponses = new Set<http.ServerResponse>();
 let mockModelServer: http.Server | null = null;
 let mockModelBaseUrl = "";
-let retryFailureCount = 0;
-
-function releaseHeldModelResponses(content = "E2E 模型回复") {
-  for (const response of heldModelResponses) {
-    try {
-      if (!response.destroyed && !response.writableEnded) {
-        response.write(`data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`);
-        response.end("data: [DONE]\n\n");
-      }
-    } catch {
-      response.destroy();
-    } finally {
-      heldModelResponses.delete(response);
-    }
-  }
-}
 
 function runtimeHeaders(headers: HeadersInit = {}): Headers {
   const next = new Headers(headers);
@@ -36,14 +19,8 @@ async function runtimeFetch(pathname: string, init: RequestInit = {}): Promise<R
   return fetch(`${runtimeApi}${pathname}`, { ...init, headers: runtimeHeaders(init.headers) });
 }
 
-function workbenchUrl() {
-  return `${baseUrl}?e2e=${Date.now()}&api=${encodeURIComponent(runtimeApi)}`;
-}
-
-async function openAssistantWorkspace(page: Page) {
-  const navigation = page.getByRole("complementary", { name: "主导航" });
-  await navigation.getByRole("button", { name: "AI 助手", exact: true }).click();
-  await expect(page.getByRole("button", { name: "新开对话", exact: true })).toBeVisible();
+function workbenchUrl(route = "/home") {
+  return `${baseUrl}?e2e=${Date.now()}&api=${encodeURIComponent(runtimeApi)}#${route}`;
 }
 
 function documentApiPath(relativePath: string) {
@@ -76,6 +53,32 @@ async function readRuntimeDocument(relativePath: string) {
   return await response.json() as { content: string };
 }
 
+async function configureMockModel() {
+  const response = await runtimeFetch("/api/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      api_key: "e2e-key",
+      model: "e2e-model",
+      base_url: mockModelBaseUrl,
+      humanizer_enabled: false,
+      auto_lore_extract_enabled: false,
+      enable_consistency_revision: false
+    })
+  });
+  expect(response.ok).toBe(true);
+}
+
+async function openEditorDocument(page: Page, chapterName: string) {
+  const navigation = page.getByRole("complementary", { name: "主导航" });
+  await navigation.getByRole("button", { name: "正文编辑", exact: true }).click();
+  const chapterPanel = page.locator(".chapter-panel");
+  await chapterPanel.getByRole("button", { name: chapterName, exact: true }).click();
+  const editor = page.locator(".manuscript textarea");
+  await expect(editor).toBeVisible();
+  return editor;
+}
+
 test.beforeAll(async () => {
   mockModelServer = http.createServer((request, response) => {
     if (!request.url?.includes("/chat/completions")) {
@@ -83,29 +86,9 @@ test.beforeAll(async () => {
       response.end();
       return;
     }
-
-    let body = "";
-    request.setEncoding("utf8");
-    request.on("data", (chunk) => {
-      body += chunk;
-    });
+    request.resume();
     request.on("end", () => {
-      const isAssistantChat = body.includes("你是 ArcWriter 的本地项目助手");
-      if (body.includes("E2E 重试失败") && isAssistantChat && retryFailureCount++ === 0) {
-        response.writeHead(500, { "Content-Type": "application/json; charset=utf-8" });
-        response.end(JSON.stringify({ error: { message: "E2E forced first-attempt failure" } }));
-        return;
-      }
       response.writeHead(200, { "Content-Type": "text/event-stream; charset=utf-8" });
-      // Planning and intent classification must resolve before the chat stream
-      // emits its durable start event. Hold only the actual chat completion.
-      if (body.includes("E2E 保持运行") && isAssistantChat) {
-        // Keep the model call open so the UI can exercise a genuine durable-run control.
-        heldModelResponses.add(response);
-        response.flushHeaders();
-        response.once("close", () => heldModelResponses.delete(response));
-        return;
-      }
       response.write(`data: ${JSON.stringify({ choices: [{ delta: { content: "E2E 模型回复" } }] })}\n\n`);
       response.end("data: [DONE]\n\n");
     });
@@ -126,10 +109,7 @@ test.beforeAll(async () => {
 });
 
 test.afterAll(async () => {
-  releaseHeldModelResponses();
-  if (!mockModelServer) {
-    return;
-  }
+  if (!mockModelServer) return;
   mockModelServer.closeAllConnections?.();
   await new Promise<void>((resolve) => mockModelServer?.close(() => resolve()));
   mockModelServer = null;
@@ -144,27 +124,13 @@ test.beforeEach(async ({ page }) => {
   });
 });
 
-test("writing-first navigation exposes all production pages and keeps AI diagnostics reachable", async ({ page }) => {
+test("production navigation, settings history, and diagnostic isolation", async ({ page }) => {
   await page.goto(workbenchUrl());
-
   const navigation = page.getByRole("complementary", { name: "主导航" });
   const entries = [
-    "项目首页",
-    "正文编辑",
-    "AI 助手",
-    "故事大纲",
-    "伏笔与时间线",
-    "设定资料",
-    "风格与题材",
-    "小说编辑室",
-    "全文审阅",
-    "项目记忆",
-    "拆书工作台",
-    "批量章节生成",
-    "素材迁移",
-    "创作工具",
-    "后台任务",
-    "设置"
+    "项目首页", "正文编辑", "AI 助手", "故事大纲", "伏笔与时间线", "设定资料", "风格与题材",
+    "小说编辑室", "全文审阅", "项目记忆", "拆书工作台", "批量章节生成", "素材迁移", "创作工具",
+    "后台任务", "设置"
   ];
 
   for (const entry of entries) {
@@ -174,18 +140,40 @@ test("writing-first navigation exposes all production pages and keeps AI diagnos
     await expect(button).toHaveAttribute("aria-current", "page");
   }
 
-  await expect(navigation.getByText("关键状态", { exact: true })).toHaveCount(0);
-  await expect(page.getByRole("tablist", { name: "AI 配置模式" })).toBeVisible();
-  await page.getByRole("button", { name: "手动配置", exact: true }).click();
-  await expect(page.getByRole("option", { name: "DuckDuckGo", exact: true })).toBeAttached();
-  await expect(page.locator(".xw-settings-section").getByRole("button", { name: "连接与检索测试", exact: true })).toBeVisible();
+  const settingsNav = page.getByRole("complementary", { name: "设置分类" });
+  await settingsNav.getByRole("button", { name: "写作体验", exact: true }).click();
+  await expect(page).toHaveURL(/#\/settings\/writing$/);
+  await expect(page.getByLabel("自动提取明确设定")).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(/#\/settings\/ai$/);
+  await page.getByRole("tablist", { name: "AI 配置模式" }).getByRole("button", { name: "网站配置", exact: true }).click();
+  const aiSections = page.getByRole("tablist", { name: "AI 配置分区" });
+  await expect(aiSections).toBeVisible();
+  await aiSections.getByRole("tab", { name: "网站服务", exact: true }).click();
+  await expect(page.getByText("网站账号", { exact: true })).toBeVisible();
+  await aiSections.getByRole("tab", { name: "模型", exact: true }).click();
+  await expect(page.getByText("网站模型", { exact: true })).toBeVisible();
+  await expect(page.getByText("网站账号", { exact: true })).toHaveCount(0);
+  await aiSections.getByRole("tab", { name: "本地检索", exact: true }).click();
+  await expect(page.getByText("本地检索与向量召回", { exact: true })).toBeVisible();
+  await aiSections.getByRole("tab", { name: "联网搜索", exact: true }).click();
+  await expect(page.getByText("联网素材搜索", { exact: true }).first()).toBeVisible();
+  await page.goForward();
+  await expect(page).toHaveURL(/#\/settings\/writing$/);
+
+  for (const diagnostic of ["traces", "terminal", "vector_test", "card_draw"]) {
+    await page.goto(workbenchUrl(`/${diagnostic}`));
+    await expect(navigation.getByRole("button", { name: "项目首页", exact: true })).toHaveAttribute("aria-current", "page");
+    await expect(page.locator(".xw-trace-page, .terminal-shell")).toHaveCount(0);
+  }
 });
 
-test("writing-first shell has no page-level horizontal overflow at supported desktop widths", async ({ page }) => {
+test("shell has no page-level horizontal overflow at supported desktop widths", async ({ page }) => {
   for (const viewport of [
     { width: 1024, height: 720 },
     { width: 1280, height: 720 },
-    { width: 1440, height: 900 }
+    { width: 1440, height: 900 },
+    { width: 1920, height: 1080 }
   ]) {
     await page.setViewportSize(viewport);
     await page.goto(workbenchUrl());
@@ -198,367 +186,157 @@ test("writing-first shell has no page-level horizontal overflow at supported des
   }
 });
 
-test("editor saves every dirty tab and protects unsaved work from unload", async ({ page }) => {
-  await createWritingProject("e2e-save-all");
-  await saveRuntimeDocument("02_正文/E2E甲.txt", "甲初稿");
-  await saveRuntimeDocument("02_正文/E2E乙.txt", "乙初稿");
-  await page.goto(workbenchUrl());
+test("AI settings remain complete and reachable in a short desktop window", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.goto(workbenchUrl("/settings/ai"));
 
-  const tree = page.locator(".xw-tree-card");
-  await tree.getByRole("button", { name: /^02_正文/ }).click();
-  await tree.getByRole("button", { name: "E2E甲.txt", exact: true }).click();
-  await page.getByRole("textbox", { name: "E2E甲.txt 正文编辑器" }).fill("甲修改稿");
-  await tree.getByRole("button", { name: "E2E乙.txt", exact: true }).click();
-  await page.getByRole("textbox", { name: "E2E乙.txt 正文编辑器" }).fill("乙修改稿");
+  const modeTabs = page.getByRole("tablist", { name: "AI 配置模式" });
+  await modeTabs.getByRole("button", { name: "手动配置", exact: true }).click();
+  const sectionTabs = page.getByRole("tablist", { name: "AI 配置分区" });
+  await sectionTabs.getByRole("tab", { name: "模型", exact: true }).click();
 
-  await expect(page.getByRole("button", { name: "保存全部 (2)", exact: true })).toBeEnabled();
-  expect(await page.evaluate(() => window.dispatchEvent(new Event("beforeunload", { cancelable: true })))).toBe(false);
-  await page.getByRole("button", { name: "保存全部 (2)", exact: true }).click();
-  await expect(page.getByRole("status")).toHaveText("已保存全部 2 个文档。");
-  expect((await readRuntimeDocument("02_正文/E2E甲.txt")).content).toBe("甲修改稿");
-  expect((await readRuntimeDocument("02_正文/E2E乙.txt")).content).toBe("乙修改稿");
-  expect(await page.evaluate(() => window.dispatchEvent(new Event("beforeunload", { cancelable: true })))).toBe(true);
+  const panel = page.getByRole("tabpanel", { name: "模型配置" });
+  const actions = page.locator(".settings-ai-page > .xw-feature-actions");
+  await expect(sectionTabs).toBeVisible();
+  await expect(panel).toBeVisible();
+  await expect(actions).toBeVisible();
+
+  const dimensions = await panel.evaluate((element) => {
+    const styles = getComputedStyle(element);
+    return {
+      clientHeight: element.clientHeight,
+      clientWidth: element.clientWidth,
+      scrollHeight: element.scrollHeight,
+      scrollWidth: element.scrollWidth,
+      overflowY: styles.overflowY
+    };
+  });
+  expect(dimensions.clientHeight).toBeGreaterThan(180);
+  expect(dimensions.scrollHeight).toBeGreaterThan(dimensions.clientHeight);
+  expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth + 1);
+  expect(dimensions.overflowY).toBe("auto");
+
+  await panel.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect(panel.locator(".xw-settings-section-head > strong").filter({ hasText: "副模型" })).toBeVisible();
+  await expect(sectionTabs).toBeVisible();
+  await expect(actions).toBeVisible();
 });
 
-test("split editor shows and resolves a save conflict while the primary page is not the editor", async ({ page }) => {
-  await createWritingProject("e2e-split-conflict");
+test("assistant conversation create, rename, read, and delete", async ({ page }) => {
+  await createWritingProject("e2e-conversation-crud");
+  await page.goto(workbenchUrl("/assistant"));
+  await page.getByRole("button", { name: "新建对话", exact: true }).click();
+  await expect(page.locator(".chat-title strong")).toHaveText("新对话");
+
+  await page.getByRole("button", { name: "会话操作", exact: true }).click();
+  await page.getByLabel("会话标题").fill("E2E 会话标题");
+  await page.getByRole("button", { name: "保存标题", exact: true }).click();
+  await expect(page.locator(".chat-title strong")).toHaveText("E2E 会话标题");
+
+  await page.getByRole("button", { name: "会话操作", exact: true }).click();
+  await page.getByRole("button", { name: "删除会话", exact: true }).click();
+  await page.getByRole("button", { name: "再次点击确认删除", exact: true }).click();
+  await expect(page.locator(".chat-title strong")).toHaveText("自由会话");
+  await expect.poll(async () => (await runtimeFetch("/api/conversations")).json()).toEqual([]);
+});
+
+test("automatic writing switches stay synchronized with settings", async ({ page }) => {
+  await createWritingProject("e2e-automatic-settings");
+  await page.goto(workbenchUrl("/tools"));
+  await page.getByRole("tab", { name: "写作与审阅", exact: true }).click();
+  const featureSwitch = page.getByRole("switch", { name: /自动提取明确设定/ });
+  const original = await featureSwitch.getAttribute("aria-checked") === "true";
+
+  await featureSwitch.click();
+  await expect(featureSwitch).toHaveAttribute("aria-checked", String(!original));
+  await page.getByRole("complementary", { name: "主导航" }).getByRole("button", { name: "设置", exact: true }).click();
+  await page.getByRole("complementary", { name: "设置分类" }).getByRole("button", { name: "写作体验", exact: true }).click();
+  const settingsToggle = page.getByLabel("自动提取明确设定");
+  await expect(settingsToggle).toBeChecked({ checked: !original });
+
+  await settingsToggle.click();
+  await expect(settingsToggle).toBeChecked({ checked: original });
+  await page.getByRole("complementary", { name: "主导航" }).getByRole("button", { name: "创作工具", exact: true }).click();
+  await page.getByRole("tab", { name: "写作与审阅", exact: true }).click();
+  await expect(page.getByRole("switch", { name: /自动提取明确设定/ })).toHaveAttribute("aria-checked", String(original));
+});
+
+test("skill view, edit, versions, and import preview use tertiary routes", async ({ page }) => {
+  await createWritingProject("e2e-skill-routes");
+  await page.goto(workbenchUrl("/tools"));
+  await page.getByRole("button", { name: "导入技能", exact: true }).click();
+  await expect(page).toHaveURL(/#\/tools\/import$/);
+  await expect(page.getByRole("heading", { name: "导入技能", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "← 返回创作工具", exact: true }).click();
+
+  await page.locator(".tool-row").filter({ hasText: "设定提取" }).first().click();
+  await expect(page.getByRole("heading", { name: /技能详情：设定提取/ })).toBeVisible();
+  await page.getByRole("button", { name: "编辑技能", exact: true }).click();
+  await expect(page).toHaveURL(/#\/tools\/skills\/lore_extract\/edit$/);
+  await page.getByRole("button", { name: "取消编辑", exact: true }).click();
+  await page.getByRole("button", { name: "版本历史", exact: true }).click();
+  await expect(page).toHaveURL(/#\/tools\/skills\/lore_extract\/versions$/);
+  await expect(page.getByRole("region", { name: "技能版本历史" })).toBeVisible();
+});
+
+test("editor punctuation, typing speed, save-all, and conflict recovery", async ({ page }) => {
+  await createWritingProject("e2e-editor");
+  await saveRuntimeDocument("02_正文/E2E甲.txt", "天地");
+  await saveRuntimeDocument("02_正文/E2E乙.txt", "");
   await saveRuntimeDocument("02_正文/E2E冲突.txt", "磁盘初稿");
-  await page.goto(workbenchUrl());
+  await page.goto(workbenchUrl("/editor"));
 
-  const tree = page.locator(".xw-tree-card");
-  await tree.getByRole("button", { name: /^02_正文/ }).click();
-  await tree.getByRole("button", { name: "E2E冲突.txt", exact: true }).click();
-  await page.getByRole("textbox", { name: "E2E冲突.txt 正文编辑器" }).fill("本地修改稿");
+  const editor = await openEditorDocument(page, "E2E甲");
+  await editor.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(0, 2));
+  await page.getByRole("toolbar", { name: "常用中文标点" }).getByRole("button", { name: "中文双引号" }).click();
+  await expect(editor).toHaveValue("“天地”");
+  await editor.evaluate((element: HTMLTextAreaElement) => element.setSelectionRange(element.value.length, element.value.length));
+  await page.getByRole("toolbar", { name: "常用中文标点" }).getByRole("button", { name: "句号" }).click();
+  await expect(editor).toHaveValue("“天地”。");
+  await expect(page.locator(".format-tools").getByText("标题", { exact: true })).toHaveCount(0);
 
-  const navigation = page.getByRole("complementary", { name: "主导航" });
-  await navigation.getByRole("button", { name: "设置", exact: true }).click();
-  await page.getByRole("button", { name: "分屏", exact: true }).click();
-  await page.locator(".xw-split-pane").nth(1).click();
-  await page.getByRole("button", { name: "E2E冲突.txt", exact: true }).click();
-  await expect(page.getByRole("textbox", { name: "E2E冲突.txt 正文编辑器" })).toBeVisible();
+  const chapterPanel = page.locator(".chapter-panel");
+  await chapterPanel.getByRole("button", { name: "E2E乙", exact: true }).click();
+  const typingEditor = page.locator(".manuscript textarea");
+  await typingEditor.pressSequentially("春夏秋冬风", { delay: 1100 });
+  await expect(chapterPanel.locator(".typing-speed strong")).not.toHaveText("-- 字/分钟", { timeout: 8_000 });
+  await chapterPanel.getByRole("button", { name: "E2E甲", exact: true }).click();
+  await expect(chapterPanel.locator(".typing-speed strong")).toHaveText("-- 字/分钟");
 
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  expect(await page.evaluate(() => window.dispatchEvent(new Event("beforeunload", { cancelable: true })))).toBe(false);
+  await page.getByRole("button", { name: "保存全部", exact: true }).click();
+  await expect.poll(async () => (await readRuntimeDocument("02_正文/E2E甲.txt")).content).toBe("“天地”。");
+  await expect.poll(async () => (await readRuntimeDocument("02_正文/E2E乙.txt")).content).toBe("春夏秋冬风");
+  expect(await page.evaluate(() => window.dispatchEvent(new Event("beforeunload", { cancelable: true })))).toBe(true);
+
+  await chapterPanel.getByRole("button", { name: "E2E冲突", exact: true }).click();
+  const conflictEditor = page.locator(".manuscript textarea");
+  await conflictEditor.fill("本地修改稿");
   await saveRuntimeDocument("02_正文/E2E冲突.txt", "后台磁盘新版");
-  await page.getByRole("button", { name: "保存当前", exact: true }).click();
-  await expect(page.getByText("E2E冲突.txt 磁盘已有新版", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "确认覆盖", exact: true }).click();
-  await expect(page.getByText("E2E冲突.txt 磁盘已有新版", { exact: true })).toHaveCount(0);
-  expect((await readRuntimeDocument("02_正文/E2E冲突.txt")).content).toBe("本地修改稿");
+  await page.locator(".editor-meta").getByRole("button", { name: "保存", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "正文在另一处被修改", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "查看差异", exact: true }).click();
+  await expect(page.getByRole("region", { name: "保存冲突差异" })).toContainText("后台磁盘新版");
+  await page.getByRole("button", { name: "保留我的版本", exact: true }).click();
+  await expect.poll(async () => (await readRuntimeDocument("02_正文/E2E冲突.txt")).content).toBe("本地修改稿");
 });
 
-async function configureMockModel() {
-  const response = await runtimeFetch("/api/config", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      api_key: "e2e-key",
-      model: "e2e-model",
-      base_url: mockModelBaseUrl,
-      secondary_api_key: "e2e-key",
-      secondary_model: "e2e-model",
-      secondary_base_url: mockModelBaseUrl
-    })
-  });
-  expect(response.ok).toBe(true);
-}
-
-async function prepareTraceRun() {
-  const projectName = `e2e-agent-trace-${Date.now()}`;
-  const projectResponse = await runtimeFetch("/api/projects/create", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path: sandboxProjectsPath, project_name: projectName, create_in_parent: true })
-  });
-  expect(projectResponse.ok).toBe(true);
+test("skill generation requires preview confirmation before writing", async ({ page }) => {
+  await createWritingProject("e2e-generated-confirmation");
+  await saveRuntimeDocument("02_正文/E2E生成.txt", "生成前正文");
   await configureMockModel();
+  await page.goto(workbenchUrl("/editor"));
+  await openEditorDocument(page, "E2E生成");
 
-  const requestId = `e2e-agent-trace-run-${Date.now()}`;
-  const runResponse = await runtimeFetch("/api/agent/runs", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      request_id: requestId,
-      content: "E2E 保持运行，用于验证 Agent Trace 暂停控制。",
-      current_path: "01_大纲/大纲.txt"
-    })
-  });
-  expect(runResponse.status).toBe(201);
-  const run = await runResponse.json() as { run_id: string; request_id: string };
-  expect(run.run_id).not.toBe("");
-  expect(run.request_id).toBe(requestId);
-  return run;
-}
+  await page.getByRole("complementary", { name: "主导航" }).getByRole("button", { name: "创作工具", exact: true }).click();
+  await page.locator(".tool-row").filter({ hasText: "正文润色" }).first().click();
+  await page.getByRole("button", { name: "运行技能", exact: true }).click();
+  const confirmation = page.getByRole("region", { name: "AI 写入确认" });
+  await expect(confirmation).toBeVisible({ timeout: 20_000 });
+  await expect(confirmation).toContainText("E2E 模型回复");
+  expect((await readRuntimeDocument("02_正文/E2E生成.txt")).content).toBe("生成前正文");
 
-async function prepareConfirmationRun() {
-  const projectName = `e2e-agent-confirmation-${Date.now()}`;
-  const projectResponse = await runtimeFetch("/api/projects/create", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path: sandboxProjectsPath, project_name: projectName, create_in_parent: true })
-  });
-  expect(projectResponse.ok).toBe(true);
-
-  const requestId = `e2e-agent-confirmation-run-${Date.now()}`;
-  const runResponse = await runtimeFetch("/api/agent/runs", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      request_id: requestId,
-      // A file operation creates a confirmation checkpoint. The selected text
-      // keeps the test fully local and independent from a model response.
-      content: "请保存到大纲文件",
-      selection: "E2E durable confirmation content.",
-      current_path: "01_大纲/大纲.txt"
-    })
-  });
-  expect(runResponse.status).toBe(201);
-  const run = await runResponse.json() as { run_id: string; request_id: string };
-  expect(run.request_id).toBe(requestId);
-  // Creation returns as soon as the durable attempt is scheduled. Wait for
-  // its independent confirmation checkpoint before loading the UI so the
-  // assertion cannot race Workbench's initial confirmation-list request.
-  await expect.poll(async () => {
-    const response = await runtimeFetch(`/api/agent/runs/${encodeURIComponent(run.run_id)}/confirmations`);
-    if (!response.ok) {
-      return "";
-    }
-    const confirmations = await response.json() as Array<{ status: string }>;
-    return confirmations[0]?.status || "";
-  }, { timeout: 15_000 }).toBe("pending");
-  return run;
-}
-
-test("status menu opens Agent Trace and pauses a durable run", async ({ page }) => {
-  const run = await prepareTraceRun();
-  await page.goto(workbenchUrl());
-
-  await expect(page.locator("summary.xw-status-summary")).toBeVisible({ timeout: 15_000 });
-  await page.locator("summary.xw-status-summary").click();
-  await page.getByRole("menuitem", { name: "运行", exact: true }).click();
-
-  const tracePage = page.locator(".xw-trace-page");
-  await expect(tracePage.getByText("Agent 运行", { exact: true })).toBeVisible();
-  await expect(tracePage.getByLabel("Agent trace runs")).toContainText("E2E 保持运行", { timeout: 15_000 });
-
-  const detail = tracePage.getByLabel("Agent trace detail");
-  await expect(detail).toContainText(run.run_id);
-  const pause = detail.getByRole("button", { name: "暂停运行", exact: true });
-  await expect(pause).toBeEnabled({ timeout: 15_000 });
-  await pause.click();
-
-  // An active run pauses cooperatively at its next durable checkpoint. The
-  // immediate user-visible contract is the persisted pause request event.
-  await expect(detail.getByText("run.pause_requested", { exact: true })).toBeVisible();
-});
-
-test("conversation inline plan controls the real durable run through the API client", async ({ page }) => {
-  const projectName = `e2e-inline-plan-${Date.now()}`;
-  const projectResponse = await runtimeFetch("/api/projects/create", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path: sandboxProjectsPath, project_name: projectName, create_in_parent: true })
-  });
-  expect(projectResponse.ok).toBe(true);
-  await configureMockModel();
-  await page.goto(workbenchUrl());
-  await openAssistantWorkspace(page);
-
-  await page.getByRole("button", { name: "新开对话", exact: true }).click();
-  await page.getByRole("button", { name: "AI 对话框", exact: true }).click();
-  const composer = page.getByPlaceholder("输入写作目标、修稿要求或拆书要求，系统会按内容自动调用合适的技能。");
-  await composer.fill("E2E 保持运行，用于验证会话内计划卡暂停控制。");
-  await page.getByRole("button", { name: "发送", exact: true }).click();
-
-  let card = page.getByLabel("Agent 执行计划");
-  await expect(card).toBeVisible({ timeout: 15_000 });
-  await card.getByRole("button", { name: /智能执行计划/ }).click();
-  await expect(card).toContainText(/运行 run_/, { timeout: 15_000 });
-  const runId = (await card.textContent() || "").match(/运行 (run_[^\s·]+)/)?.[1] || "";
-  expect(runId).toMatch(/^run_/);
-
-  // The NDJSON response is deliberately still open. A renderer reload must
-  // recover the persisted pending assistant metadata and re-subscribe to the
-  // same durable run instead of cancelling or losing the plan card.
-  await page.reload();
-  await openAssistantWorkspace(page);
-  card = page.getByLabel("Agent 执行计划");
-  await expect(card).toBeVisible({ timeout: 15_000 });
-  await card.getByRole("button", { name: /智能执行计划/ }).click();
-  await expect(card).toContainText(`运行 ${runId}`, { timeout: 15_000 });
-
-  const pause = card.getByRole("button", { name: "暂停", exact: true });
-  await expect(pause).toBeEnabled({ timeout: 15_000 });
-  await pause.click();
-  await expect(card.getByText("操作已提交。", { exact: true })).toBeVisible();
-  await expect.poll(async () => {
-    const response = await runtimeFetch(`/api/agent/runs/${encodeURIComponent(runId)}/events`);
-    const payload = await response.json() as { events?: Array<{ event_type?: string }> };
-    return payload.events?.some((event) => event.event_type === "run.pause_requested") || false;
-  }, { timeout: 15_000 }).toBe(true);
-
-  // A pause becomes durable at the next checkpoint. Release the held model
-  // stream, resume from the newly-versioned run, then cancel through the same
-  // card so this verifies all three real control paths.
-  releaseHeldModelResponses();
-  await expect.poll(async () => {
-    const response = await runtimeFetch(`/api/agent/runs/${encodeURIComponent(runId)}`);
-    return (await response.json() as { status: string }).status;
-  }, { timeout: 15_000 }).toBe("paused");
-  const resume = card.getByRole("button", { name: "恢复", exact: true });
-  await expect(resume).toBeEnabled({ timeout: 15_000 });
-  await resume.click();
-  await expect(card.getByText("操作已提交。", { exact: true })).toBeVisible();
-  await expect.poll(async () => {
-    const response = await runtimeFetch(`/api/agent/runs/${encodeURIComponent(runId)}/events`);
-    const payload = await response.json() as { events?: Array<{ event_type?: string }> };
-    return payload.events?.some((event) => event.event_type === "run.resume_started") || false;
-  }, { timeout: 15_000 }).toBe(true);
-
-  const cancel = card.getByRole("button", { name: "取消", exact: true });
-  await expect(cancel).toBeEnabled({ timeout: 15_000 });
-  await cancel.click();
-  await expect.poll(async () => {
-    const response = await runtimeFetch(`/api/agent/runs/${encodeURIComponent(runId)}`);
-    return (await response.json() as { status: string }).status;
-  }, { timeout: 15_000 }).toBe("cancelled");
-});
-
-test("conversation inline plan refreshes after a version conflict without replaying pause", async ({ page }) => {
-  const projectName = `e2e-inline-plan-conflict-${Date.now()}`;
-  const projectResponse = await runtimeFetch("/api/projects/create", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path: sandboxProjectsPath, project_name: projectName, create_in_parent: true })
-  });
-  expect(projectResponse.ok).toBe(true);
-  await configureMockModel();
-  await page.goto(workbenchUrl());
-  await openAssistantWorkspace(page);
-
-  await page.getByRole("button", { name: "新开对话", exact: true }).click();
-  await page.getByRole("button", { name: "AI 对话框", exact: true }).click();
-  const composer = page.getByPlaceholder("输入写作目标、修稿要求或拆书要求，系统会按内容自动调用合适的技能。");
-  await composer.fill("E2E 保持运行，用于验证会话内计划卡冲突刷新。");
-  await page.getByRole("button", { name: "发送", exact: true }).click();
-
-  const card = page.getByLabel("Agent 执行计划");
-  await expect(card).toBeVisible({ timeout: 15_000 });
-  await card.getByRole("button", { name: /智能执行计划/ }).click();
-  const runId = (await card.textContent() || "").match(/运行 (run_[^\s·]+)/)?.[1] || "";
-  expect(runId).toMatch(/^run_/);
-
-  let preempted = false;
-  await page.route(`${runtimeApi}/api/agent/runs/${encodeURIComponent(runId)}/pause`, async (route) => {
-    if (!preempted) {
-      preempted = true;
-      const requestBody = route.request().postDataJSON() as { expected_version?: number };
-      const preempt = await runtimeFetch(`/api/agent/runs/${encodeURIComponent(runId)}/pause`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          operation_id: `e2e-preempt-${Date.now()}`,
-          expected_version: requestBody.expected_version
-        })
-      });
-      expect(preempt.ok).toBe(true);
-    }
-    await route.continue({ headers: Object.fromEntries(runtimeHeaders(route.request().headers())) });
-  });
-
-  await card.getByRole("button", { name: "暂停", exact: true }).click();
-  await expect(card.getByText("运行状态已在其他位置更新；本次操作没有自动重放。", { exact: true })).toBeVisible({ timeout: 15_000 });
-  expect(preempted).toBe(true);
-  releaseHeldModelResponses();
-});
-
-test("conversation inline plan retries the failed durable step by its real step ID", async ({ page }) => {
-  const projectName = `e2e-inline-plan-retry-${Date.now()}`;
-  const projectResponse = await runtimeFetch("/api/projects/create", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ path: sandboxProjectsPath, project_name: projectName, create_in_parent: true })
-  });
-  expect(projectResponse.ok).toBe(true);
-  await configureMockModel();
-  await page.goto(workbenchUrl());
-  await openAssistantWorkspace(page);
-
-  await page.getByRole("button", { name: "新开对话", exact: true }).click();
-  await page.getByRole("button", { name: "AI 对话框", exact: true }).click();
-  const composer = page.getByPlaceholder("输入写作目标、修稿要求或拆书要求，系统会按内容自动调用合适的技能。");
-  await composer.fill("E2E 重试失败，用于验证会话内计划卡真实 step 重试。");
-  await page.getByRole("button", { name: "发送", exact: true }).click();
-
-  const card = page.getByLabel("Agent 执行计划");
-  await expect(card).toBeVisible({ timeout: 15_000 });
-  await card.getByRole("button", { name: /智能执行计划/ }).click();
-  const runId = (await card.textContent() || "").match(/运行 (run_[^\s·]+)/)?.[1] || "";
-  expect(runId).toMatch(/^run_/);
-  const failedRun = await expect.poll(async () => {
-    const response = await runtimeFetch(`/api/agent/runs/${encodeURIComponent(runId)}`);
-    return await response.json() as { status: string; steps: Array<{ step_id: string; status: string }> };
-  }, { timeout: 15_000 }).toMatchObject({ status: "failed" });
-  const response = await runtimeFetch(`/api/agent/runs/${encodeURIComponent(runId)}`);
-  const run = await response.json() as { steps: Array<{ step_id: string; status: string }> };
-  const failedStep = run.steps.find((step) => step.status === "failed");
-  expect(failedStep?.step_id).toMatch(/^step_/);
-  const retryRequest = page.waitForRequest((request) =>
-    request.method() === "POST" && request.url().includes(`/api/agent/runs/${runId}/steps/${failedStep!.step_id}/retry`)
-  );
-  await card.getByRole("button", { name: "重试此步", exact: true }).click();
-  await retryRequest;
-  await expect(card.getByText("操作已提交。", { exact: true })).toBeVisible();
-  await expect.poll(async () => {
-    const eventsResponse = await runtimeFetch(`/api/agent/runs/${encodeURIComponent(runId)}/events`);
-    const payload = await eventsResponse.json() as { events?: Array<{ event_type?: string; step_id?: string }> };
-    return payload.events?.some((event) => event.event_type === "run.retry_started" && event.step_id === failedStep?.step_id) || false;
-  }, { timeout: 15_000 }).toBe(true);
-});
-
-test("Agent Trace approves a durable confirmation and requires an explicit resume", async ({ page }) => {
-  const run = await prepareConfirmationRun();
-  await page.goto(workbenchUrl());
-
-  await expect(page.locator("summary.xw-status-summary")).toBeVisible({ timeout: 15_000 });
-  await page.locator("summary.xw-status-summary").click();
-  await page.getByRole("menuitem", { name: "运行", exact: true }).click();
-
-  const detail = page.locator("[aria-label='Agent trace detail']");
-  await expect(detail).toContainText(run.run_id, { timeout: 15_000 });
-  await expect(detail.getByText(/^待确认\s*·\s*01_大纲\/大纲\.txt$/)).toBeVisible();
-
-  await detail.getByRole("button", { name: "批准", exact: true }).click();
-  await expect(detail.getByText("已批准。请使用“继续”显式恢复任务。", { exact: true })).toBeVisible();
-
-  const resume = detail.getByRole("button", { name: "恢复运行", exact: true });
-  await expect(resume).toBeEnabled();
-  await resume.click();
-
-  await expect.poll(async () => {
-    const response = await runtimeFetch(`/api/agent/runs/${encodeURIComponent(run.run_id)}`);
-    return (await response.json() as { status: string }).status;
-  }, { timeout: 15_000 }).toBe("completed");
-});
-
-test("Agent Trace rejects a durable confirmation and fails its run", async ({ page }) => {
-  const run = await prepareConfirmationRun();
-  await page.goto(workbenchUrl());
-
-  await expect(page.locator("summary.xw-status-summary")).toBeVisible({ timeout: 15_000 });
-  await page.locator("summary.xw-status-summary").click();
-  await page.getByRole("menuitem", { name: "运行", exact: true }).click();
-
-  const detail = page.locator("[aria-label='Agent trace detail']");
-  await expect(detail).toContainText(run.run_id, { timeout: 15_000 });
-  await expect(detail.getByText(/^待确认\s*·\s*01_大纲\/大纲\.txt$/)).toBeVisible();
-  await detail.getByRole("button", { name: "拒绝", exact: true }).click();
-
-  await expect(detail.getByText(/^已拒绝\s*·\s*01_大纲\/大纲\.txt$/)).toBeVisible();
-  await expect(detail.getByText("失败", { exact: true })).toBeVisible();
-  await expect(detail.getByRole("button", { name: "恢复运行", exact: true })).toBeEnabled();
-
-  await expect.poll(async () => {
-    const response = await runtimeFetch(`/api/agent/runs/${encodeURIComponent(run.run_id)}`);
-    return (await response.json() as { status: string; error_code: string }).status;
-  }, { timeout: 15_000 }).toBe("failed");
+  await confirmation.getByRole("button", { name: "覆盖写入", exact: true }).click();
+  await expect(confirmation).toHaveCount(0);
+  await expect.poll(async () => (await readRuntimeDocument("02_正文/润色结果.txt")).content).toContain("E2E 模型回复");
 });

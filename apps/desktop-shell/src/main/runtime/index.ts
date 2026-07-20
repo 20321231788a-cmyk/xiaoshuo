@@ -10,6 +10,8 @@ export * from "./job-routes.js";
 export * from "./license-guard.js";
 export * from "./project-document-routes.js";
 export * from "./project-library-routes.js";
+export * from "./story-planning-routes.js";
+export * from "./review-report-routes.js";
 export * from "./project-reference-routes.js";
 export * from "./route-matchers.js";
 export * from "./runtime-helpers.js";

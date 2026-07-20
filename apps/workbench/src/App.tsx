@@ -1,167 +1,79 @@
-import { inlinePlanMetadataSchema } from "@xiaoshuo/shared";
-import type {
-  AgentRunState,
-  AiConfigProfile,
-  AppConfig,
-  ConversationMessage,
-  ConversationSummary,
-  DesktopUpdateStatus,
-  JobInfo,
-  SkillDefinition,
-  TreeNode,
-  WebsiteAiRechargeOption,
-  WebsiteAiRechargeOrder
-} from "@xiaoshuo/shared";
-import {
-  Activity,
-  ArchiveRestore,
-  Bot,
-  BookOpen,
-  Cable,
-  ChevronDown,
-  ChevronUp,
-  Cloud,
-  Columns,
-  Copy,
-  Database,
-  Download,
-  Eye,
-  EyeOff,
-  ExternalLink,
-  FilePenLine,
-  FilePlus2,
-  FileText,
-  Folder,
-  FolderKanban,
-  FolderOpen,
-  FolderPlus,
-  Gift,
-  History,
-  Library,
-  Link,
-  MessageSquarePlus,
-  MessageSquareText,
-  Brain,
-  Pin,
-  RefreshCw,
-  Save,
-  SaveAll,
-  ScanSearch,
-  Send,
-  Settings,
-  Shield,
-  ShieldCheck,
-  SlidersHorizontal,
-  Sparkles,
-  Square,
-  Trash2,
-  Upload,
-  Wand2,
-  WalletCards,
-  Workflow,
-  X
-} from "lucide-react";
-import { lazy, Suspense, useEffect, useRef, useState } from "react";
-import type { CSSProperties, FormEvent as ReactFormEvent, KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
-import type { DisassemblyBookSummary, OpenDocumentTab, WorkbenchController } from "./hooks/useWorkbenchController.js";
+import { Command, Save, Search, User } from "lucide-react";
+import type { TreeNode } from "@xiaoshuo/shared";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { DisassemblyBookSummary } from "./hooks/useWorkbenchController.js";
 import { useWorkbenchController } from "./hooks/useWorkbenchController.js";
+import { ProductWorkspace, type DisassemblyUiState } from "./features/product/ProductWorkspace.js";
+import { CommandPalette, type SearchableDocument } from "./features/product/shared/CommandPalette.js";
 import { AppShell } from "./layout/AppShell.js";
-import { GuardBanner } from "./layout/RightRail.js";
-import { LeftSidebar } from "./layout/LeftSidebar.js";
 import { WorkbenchNavigation } from "./layout/WorkbenchNavigation.js";
-import type { CenterFeature } from "./navigation.js";
-import { CardDrawFeaturePage } from "./features/card-draw/CardDrawFeaturePage.js";
-import { HomeFeaturePage } from "./features/home/HomeFeaturePage.js";
-import { DisassembleFeaturePage } from "./features/disassembly/DisassemblyFeaturePage.js";
-import { SettingsFeaturePage } from "./features/settings/SettingsFeaturePage.js";
-import { SkillFeaturePage } from "./features/skills/SkillFeaturePage.js";
-import { VectorTestFeaturePage } from "./features/vector/VectorTestFeaturePage.js";
-import { LedgerFeaturePage } from "./features/ledger/LedgerFeaturePage.js";
-import { LegacyWorkbenchView, type LegacyWorkbenchTab } from "./features/legacy/LegacyWorkbenchView.js";
-import { LogsFeaturePage } from "./features/revision/LogsFeaturePage.js";
-import { NovelAgentWorkspace } from "./features/novel-agent/NovelAgentWorkspace.js";
-import { SourcesFeaturePage, StyleGenreFeaturePage } from "./features/library/ProjectLibraryPages.js";
-import { AutoReviewGeneratedToggle, ProjectFileSelect } from "./features/workflow/WorkflowControls.js";
-import { AgentTraceView } from "./views/AgentTraceView.js";
-import { MemoryGovernanceView } from "./views/MemoryGovernanceView.js";
-import { readWorkbenchRuntime } from "./lib/runtime.js";
-import { describeGeneratedSaveAction } from "./lib/workflow.js";
-import { buildRailStatusSummary } from "./lib/railStatus.js";
-import { attachmentDisplayName } from "./lib/attachments.js";
-import { parentDirectoryPath } from "./lib/projectTreeActions.js";
 import {
-  CrawlSourceOption,
-  loadInitialCrawlSources,
-  restoreDefaultCrawlSources,
-  isHttpUrl,
-  SELECTED_CRAWL_SOURCE_KEY,
-  CRAWL_SOURCES_STORAGE_KEY
-} from "./lib/crawlSources.js";
-
-const TerminalView = lazy(() => import("./views/TerminalView.js").then((module) => ({ default: module.TerminalView })));
+  defaultProductRoute,
+  navigationLabel,
+  parseProductRoute,
+  productCommands,
+  productRoutePath,
+  type ProductRoute,
+  type UserFeature
+} from "./navigation.js";
+import { readWorkbenchRuntime } from "./lib/runtime.js";
 
 const runtime = readWorkbenchRuntime();
-const APP_WINDOW_TITLE = "ArcWriter 0.9 Preview";
-const WEBSITE_HOME_URL = "https://matian.online/";
-const WEBSITE_REGISTER_URL = "https://matian.online/?page=api-relay&auth=register";
+const APP_WINDOW_TITLE = "ArcWriter";
 
-const punctuationMarks = ["“”", "‘’", "——", "……", "（）", "《》", "，", "。", "？", "！"];
-
-type DisassemblyUiState = {
-  selectedBookId: string;
-  fusionBookIds: string[];
-  onSelectBook: (bookId: string) => void;
-  onToggleFusionBook: (bookId: string) => void;
-};
-
-function disassemblyBookPrimaryPath(book: DisassemblyBookSummary | null): string {
-  if (!book) {
-    return "";
-  }
-  return book.paths.source || book.paths.detail_outline || book.paths.reverse_outline || book.paths.lore || "";
+function currentProductRoute(): ProductRoute | null {
+  const hashPath = window.location.hash.startsWith("#/") ? window.location.hash.slice(1) : "";
+  return parseProductRoute(hashPath) || parseProductRoute(window.location.pathname);
 }
 
-function disassemblyBookReadyForFusion(book: DisassemblyBookSummary | null): boolean {
-  if (!book || book.legacy) {
-    return false;
-  }
-  return Boolean(book.paths.lore || book.paths.reverse_outline || book.paths.detail_outline);
+function hasExplicitRouteLocation(): boolean {
+  if (window.location.hash.startsWith("#/")) return true;
+  return window.location.pathname !== "/" && !window.location.pathname.endsWith("/index.html");
 }
 
-function disassemblyBookIsRawSource(book: DisassemblyBookSummary | null): boolean {
-  if (!book || book.legacy) {
-    return false;
+function productLocation(route: ProductRoute): string {
+  const basePath = window.location.protocol === "file:" ? window.location.pathname : "/";
+  return `${basePath}${window.location.search}#${productRoutePath(route)}`;
+}
+
+function isReadyForFusion(book: DisassemblyBookSummary | null): boolean {
+  return Boolean(book && !book.legacy && (book.paths.lore || book.paths.reverse_outline || book.paths.detail_outline));
+}
+
+function collectSearchableDocuments(nodes: TreeNode[], result: SearchableDocument[] = []): SearchableDocument[] {
+  for (const node of nodes) {
+    if (node.kind === "file") result.push({ path: node.path, title: node.name.replace(/\.(txt|md)$/i, "") });
+    if (node.children?.length) collectSearchableDocuments(node.children, result);
   }
-  return Boolean(book.paths.source) && !disassemblyBookReadyForFusion(book);
+  return result;
 }
 
 export function App() {
   const controller = useWorkbenchController(runtime);
-  const [centerFeature, setCenterFeature] = useState<CenterFeature>("editor");
+  const [route, setRoute] = useState<ProductRoute>(() => currentProductRoute() || { feature: "home" });
+  const [commandOpen, setCommandOpen] = useState(false);
+  const [navigationCollapsed, setNavigationCollapsed] = useState(() => window.localStorage.getItem("arcwriter.navigation.collapsed") === "1");
   const [selectedDisassemblyBookId, setSelectedDisassemblyBookId] = useState("");
   const [fusionBookIds, setFusionBookIds] = useState<string[]>([]);
-  const [tutorialOpen, setTutorialOpen] = useState(false);
-  const [findRequestTick, setFindRequestTick] = useState(0);
-  const [replaceRequestTick, setReplaceRequestTick] = useState(0);
-  const [leftSidebarTab, setLeftSidebarTab] = useState<"project" | "disassembly">("project");
-  const [legacyWorkbenchTab, setLegacyWorkbenchTab] = useState<LegacyWorkbenchTab | null>(null);
-  const onboardingRef = useRef(false);
+  const initialRouteResolved = useRef(false);
+  const feature = route.feature;
 
-  useEffect(() => {
-    if (centerFeature === "crawl") {
-      setLeftSidebarTab("disassembly");
-    }
-  }, [centerFeature]);
+  const searchableDocuments = useMemo(
+    () => collectSearchableDocuments(controller.snapshot?.projectChrome.tree || []),
+    [controller.snapshot?.projectChrome.tree]
+  );
 
   useEffect(() => {
     document.title = APP_WINDOW_TITLE;
   }, []);
 
   useEffect(() => {
+    window.localStorage.setItem("arcwriter.navigation.collapsed", navigationCollapsed ? "1" : "0");
+  }, [navigationCollapsed]);
+
+  useEffect(() => {
     function protectUnsavedDocuments(event: BeforeUnloadEvent) {
-      if (!controller.openDocuments.some((document) => document.dirty)) {
-        return;
-      }
+      if (!controller.openDocuments.some((document) => document.dirty)) return;
       event.preventDefault();
       event.returnValue = "";
     }
@@ -170,1534 +82,132 @@ export function App() {
   }, [controller.openDocuments]);
 
   useEffect(() => {
-    const unsubscribeTutorial = window.xiaoshuoDesktop?.onOpenTutorial?.(() => setTutorialOpen(true));
     const unsubscribeRefresh = window.xiaoshuoDesktop?.onRequestRefresh?.(() => {
-      void (async () => {
-        await controller.refreshProjectWorkspace();
-        await controller.reopenDocumentFromDisk();
-      })();
+      void controller.refreshProjectWorkspace();
     });
-    const unsubscribeSave = window.xiaoshuoDesktop?.onRequestSave?.(() => {
-      void controller.saveActiveDocument();
-    });
-    const unsubscribeFind = window.xiaoshuoDesktop?.onRequestFind?.(() => {
-      setCenterFeature("editor");
-      setFindRequestTick((value) => value + 1);
-    });
-    const unsubscribeReplace = window.xiaoshuoDesktop?.onRequestReplace?.(() => {
-      setCenterFeature("editor");
-      setReplaceRequestTick((value) => value + 1);
-    });
-    const unsubscribeRun = window.xiaoshuoDesktop?.onRequestRun?.(() => {
-      setLegacyWorkbenchTab(null);
-      setCenterFeature("traces");
-      controller.setActiveTab("overview");
-    });
-    const unsubscribeVectorTest = window.xiaoshuoDesktop?.onRequestVectorTest?.(() => {
-      setLegacyWorkbenchTab(null);
-      setCenterFeature("vector_test");
-      controller.setActiveTab("overview");
-    });
+    const unsubscribeSave = window.xiaoshuoDesktop?.onRequestSave?.(() => void controller.saveAllDocuments());
+    const unsubscribeFind = window.xiaoshuoDesktop?.onRequestFind?.(() => navigate(defaultProductRoute("editor")));
+    const unsubscribeReplace = window.xiaoshuoDesktop?.onRequestReplace?.(() => navigate(defaultProductRoute("editor")));
     return () => {
-      unsubscribeTutorial?.();
       unsubscribeRefresh?.();
       unsubscribeSave?.();
       unsubscribeFind?.();
       unsubscribeReplace?.();
-      unsubscribeRun?.();
-      unsubscribeVectorTest?.();
     };
   }, [controller]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if (!(event.ctrlKey || event.metaKey) || event.altKey) {
-        return;
-      }
-      const key = event.key.toLowerCase();
-      if (key === "s") {
+      if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
+      if (event.key.toLowerCase() === "s") {
         event.preventDefault();
-        void controller.saveActiveDocument();
-        return;
-      }
-      if (key === "f") {
+        void controller.saveAllDocuments();
+      } else if (event.key.toLowerCase() === "k") {
         event.preventDefault();
-        setCenterFeature("editor");
-        setFindRequestTick((value) => value + 1);
-        return;
-      }
-      if (key === "h") {
-        event.preventDefault();
-        setCenterFeature("editor");
-        setReplaceRequestTick((value) => value + 1);
+        setCommandOpen(true);
       }
     }
-
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [controller]);
 
   useEffect(() => {
-    if (controller.snapshot?.currentProject.path) {
-      void controller.refreshDisassemblyLibrary();
+    function handlePopState() {
+      const next = currentProductRoute() || { feature: "home" };
+      setRoute(next);
+      syncControllerTab(next.feature);
     }
+    window.addEventListener("popstate", handlePopState);
+    return () => window.removeEventListener("popstate", handlePopState);
+  });
+
+  useEffect(() => {
+    if (controller.snapshot?.currentProject.path) void controller.refreshDisassemblyLibrary();
   }, [controller.snapshot?.currentProject.path]);
 
   useEffect(() => {
-    if (onboardingRef.current || !controller.configDraft || !controller.snapshot) {
+    if (initialRouteResolved.current || controller.status !== "ready") return;
+    initialRouteResolved.current = true;
+    const explicitRoute = currentProductRoute();
+    if (hasExplicitRouteLocation()) {
+      const nextRoute = explicitRoute || { feature: "home" } as const;
+      setRoute(nextRoute);
+      syncControllerTab(nextRoute.feature);
+      if (!explicitRoute) navigate(nextRoute, true);
       return;
     }
-    onboardingRef.current = true;
-    const localState = controller.snapshot.localState;
-    const hasRecentProjects = Boolean(localState?.recent_projects?.length);
-    if (hasUsableAiConfig(controller.configDraft)) {
-      return;
-    }
-    if (hasRecentProjects || controller.snapshot.currentProject.path) {
-      return;
-    }
-    setCenterFeature("settings");
-    controller.setActiveTab("config");
-    if (controller.configDraft.ai_config_mode !== "website") {
-      controller.patchConfig({ ai_config_mode: "website" });
-    }
-  }, [controller]);
+    navigate(defaultProductRoute(controller.activeDocumentPath ? "editor" : "home"), true);
+  }, [controller.activeDocumentPath, controller.status]);
 
   useEffect(() => {
     const books = controller.disassemblyBooks.filter((book) => !book.legacy);
     const ids = new Set(books.map((book) => book.id));
-    const fusionIds = new Set(books.filter(disassemblyBookReadyForFusion).map((book) => book.id));
-    setSelectedDisassemblyBookId((current) => {
-      if (!books.length) {
-        return "";
-      }
-      return current && ids.has(current) ? current : books[0]?.id || "";
-    });
+    const fusionIds = new Set(books.filter(isReadyForFusion).map((book) => book.id));
+    setSelectedDisassemblyBookId((current) => current && ids.has(current) ? current : books[0]?.id || "");
     setFusionBookIds((current) => current.filter((id) => fusionIds.has(id)));
   }, [controller.disassemblyBooks]);
 
-  function toggleFusionBook(bookId: string) {
-    setFusionBookIds((current) => (current.includes(bookId) ? current.filter((id) => id !== bookId) : [...current, bookId]));
+  function syncControllerTab(next: UserFeature) {
+    if (next === "home") controller.setActiveTab("project");
+    else if (next === "editor") controller.setActiveTab("editor");
+    else if (next === "conversations") controller.setActiveTab("conversations");
+    else if (next === "settings") controller.setActiveTab("config");
+    else if (next === "crawl" || next === "batch" || next === "transfer" || next === "skills") controller.setActiveTab("operations");
+    else controller.setActiveTab("overview");
   }
 
-  function selectCenterFeature(feature: CenterFeature) {
-    setLegacyWorkbenchTab(null);
-    setCenterFeature(feature);
-    if (feature === "home") {
-      controller.setActiveTab("project");
-      return;
-    }
-    if (feature === "conversations") {
-      controller.setActiveTab(feature);
-      return;
-    }
-    if (feature === "editor" || feature === "terminal") {
-      controller.setActiveTab(feature);
-      return;
-    }
-    if (feature === "settings") {
-      controller.setActiveTab("config");
-      return;
-    }
-    if (feature === "timeline" || feature === "clues" || feature === "ledger" || feature === "revision" || feature === "traces" || feature === "memory" || feature === "novel_agent" || feature === "studio" || feature === "vector_test") {
-      controller.setActiveTab("overview");
-      return;
-    }
-    controller.setActiveTab("operations");
+  function navigate(next: ProductRoute, replace = false) {
+    const location = productLocation(next);
+    const currentLocation = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (currentLocation !== location) window.history[replace ? "replaceState" : "pushState"]({}, "", location);
+    setRoute(next);
+    syncControllerTab(next.feature);
   }
 
-  function selectLegacyWorkbenchTab(tab: LegacyWorkbenchTab) {
-    setLegacyWorkbenchTab(tab);
-    controller.setActiveTab(tab);
-    if (tab === "editor" || tab === "conversations" || tab === "terminal") {
-      setCenterFeature(tab);
-    }
+  function selectFeature(next: UserFeature) {
+    navigate(defaultProductRoute(next));
   }
 
   const disassemblyUi: DisassemblyUiState = {
     selectedBookId: selectedDisassemblyBookId,
     fusionBookIds,
     onSelectBook: setSelectedDisassemblyBookId,
-    onToggleFusionBook: toggleFusionBook
+    onToggleFusionBook: (bookId) => setFusionBookIds((current) => current.includes(bookId) ? current.filter((id) => id !== bookId) : [...current, bookId])
   };
 
   return (
     <AppShell
-      navigation={
-        <WorkbenchNavigation
-          feature={centerFeature}
-          projectName={controller.snapshot?.currentProject.name || ""}
-          projectPath={controller.snapshot?.currentProject.path || ""}
-          onSelect={selectCenterFeature}
-          onOpenProject={() => controller.pickAndOpenProject("open")}
-        />
-      }
-      left={centerFeature === "editor" ? (
-        <LeftSidebar
-          controller={controller}
-          disassemblyUi={disassemblyUi}
-          leftSidebarTab={leftSidebarTab}
-          onSidebarTabChange={setLeftSidebarTab}
-          onOpenDocument={async (path) => {
-            const opened = await controller.openDocument(path);
-            if (opened) {
-              selectCenterFeature("editor");
-            }
-          }}
-          onOpenTimeline={() => selectCenterFeature("timeline")}
-        />
-      ) : undefined}
-      center={
-        <LegacyWorkbenchView
-          controller={controller}
-          activeTab={legacyWorkbenchTab}
-          onActiveTabChange={selectLegacyWorkbenchTab}
-        >
-          {controller.status === "loading" && <LoadingState />}
-          {controller.status === "error" && <ErrorState message={controller.error} />}
-          {controller.status === "ready" && controller.snapshot && controller.configDraft && (
-            <CenterWorkspace
-              controller={controller}
-              disassemblyUi={disassemblyUi}
-              feature={centerFeature}
-              findRequestTick={findRequestTick}
-              replaceRequestTick={replaceRequestTick}
-              onSelectFeature={selectCenterFeature}
-            />
-          )}
-        </LegacyWorkbenchView>
-      }
-      dialog={tutorialOpen ? <WebsiteTutorialDialog onClose={() => setTutorialOpen(false)} /> : undefined}
+      navigationCollapsed={navigationCollapsed}
+      navigation={<WorkbenchNavigation feature={feature} collapsed={navigationCollapsed} projectName={controller.snapshot?.currentProject.name || ""} projectPath={controller.snapshot?.currentProject.path || ""} onToggleCollapsed={() => setNavigationCollapsed((value) => !value)} onSelect={selectFeature} onOpenProject={() => controller.pickAndOpenProject("open")} />}
+      topbar={<WorkbenchTopbar feature={feature} projectName={controller.snapshot?.currentProject.name || ""} onSelectFeature={selectFeature} onOpenCommand={() => setCommandOpen(true)} onSave={() => void controller.saveAllDocuments()} saving={controller.documentBusy} />}
+      center={<>{controller.status === "loading" && <LoadingState />}{controller.status === "error" && <ErrorState message={controller.error} />}{controller.status === "ready" && controller.snapshot && controller.configDraft && <ProductWorkspace controller={controller} route={route} disassemblyUi={disassemblyUi} onNavigate={navigate} onSelectFeature={selectFeature} />}</>}
+      dialog={<CommandPalette open={commandOpen} commands={productCommands} documents={searchableDocuments} onClose={() => setCommandOpen(false)} onNavigate={navigate} onOpenDocument={(path) => { navigate({ feature: "editor" }); void controller.openDocument(path); }} />}
     />
   );
 }
 
-function hasUsableAiConfig(config: AppConfig): boolean {
-  const manualProfile = config.manual_profile;
-  const websiteProfile = config.website_profile;
-  const legacyManualReady = Boolean(config.api_key && config.base_url && config.model);
-  const manualReady = Boolean(manualProfile?.api_key && manualProfile?.base_url && manualProfile?.model);
-  const websiteReady = Boolean(websiteProfile?.api_key && websiteProfile?.model);
-  return legacyManualReady || manualReady || websiteReady;
-}
-
-function formatBytes(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) {
-    return "0 B";
-  }
-  if (value >= 1024 * 1024 * 1024) {
-    return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
-  }
-  if (value >= 1024 * 1024) {
-    return `${(value / 1024 / 1024).toFixed(1)} MB`;
-  }
-  if (value >= 1024) {
-    return `${(value / 1024).toFixed(1)} KB`;
-  }
-  return `${value} B`;
-}
-
-function formatDateShort(value: string): string {
-  if (!value) {
-    return "-";
-  }
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) {
-    return value;
-  }
-  return new Date(timestamp).toLocaleDateString("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit"
-  });
-}
-
-function webSearchTogglePatch(config: AppConfig, enabled: boolean): Partial<AppConfig> {
-  return {
-    web_search_enabled: enabled,
-    ...(enabled && config.web_search_provider === "custom" && !config.web_search_base_url?.trim() ? { web_search_provider: "bing" as const } : {})
-  };
-}
-
-function WebsiteTutorialDialog({ onClose }: { onClose: () => void }) {
+function WorkbenchTopbar({ feature, projectName, onSelectFeature, onOpenCommand, onSave, saving }: { feature: UserFeature; projectName: string; onSelectFeature: (feature: UserFeature) => void; onOpenCommand: () => void; onSave: () => void; saving: boolean }) {
   return (
-    <div className="xw-website-modal-backdrop" onClick={onClose}>
-      <section className="xw-tutorial-modal" onClick={(event) => event.stopPropagation()} aria-modal="true" role="dialog" aria-label="使用教程">
-        <div className="xw-tutorial-head">
-          <div>
-            <strong>使用教程</strong>
-            <span>分为网站使用和软件使用两部分，常用入口都从这里确认。</span>
-          </div>
-          <button className="xw-secondary-button compact" type="button" onClick={onClose} aria-label="关闭教程">
-            <X size={15} />
-          </button>
-        </div>
-
-        <div className="xw-tutorial-actions">
-          <a className="xw-primary-button compact" href={WEBSITE_REGISTER_URL} target="_blank" rel="noreferrer">
-            <ExternalLink size={14} />
-            注册账号
-          </a>
-          <a className="xw-secondary-button compact" href={WEBSITE_HOME_URL} target="_blank" rel="noreferrer">
-            <ExternalLink size={14} />
-            前往网站
-          </a>
-        </div>
-
-        <div className="xw-tutorial-sections">
-          <section className="xw-tutorial-section">
-            <h3>网站使用</h3>
-            <div className="xw-tutorial-list">
-              <article>
-                <strong>1. 注册网站账号</strong>
-                <p>点击“注册账号”，使用 QQ 邮箱获取验证码，设置密码后完成注册。注册完成后回到软件的“设置 - 网站配置”。</p>
-              </article>
-              <article>
-                <strong>2. 登录网站配置</strong>
-                <p>在软件里填写 QQ 邮箱和密码，点击“登录网站”。登录后会读取账号状态、余额、并发限制和可用模型列表。</p>
-              </article>
-              <article>
-                <strong>3. 选择模型并应用</strong>
-                <p>在“网站模型”中选择语言模型，按需要调整 temperature 和 top_p，然后点击“应用网站配置”。软件会隐藏写入中转连接信息，不在界面显示 URL、Key 或 token。</p>
-              </article>
-              <article>
-                <strong>4. 充值与兑换</strong>
-                <p>登录后可以在网站账号区点击“充值”选择档位，也可以点击“兑换”输入兑换码。支付或兑换成功后刷新网站状态即可看到余额变化。</p>
-              </article>
-            </div>
-          </section>
-
-          <section className="xw-tutorial-section">
-            <h3>软件使用</h3>
-            <div className="xw-tutorial-list">
-              <article>
-                <strong>1. 打开或新建项目</strong>
-                <p>左侧只保留“新建项目”和“打开项目”。项目打开后，项目树、拆书库、时间线会在左侧显示。</p>
-              </article>
-              <article>
-                <strong>2. 统一刷新入口</strong>
-                <p>点击中间顶部“状态 - 刷新”，会同时刷新项目工作区；如果当前有打开文档，也会读取当前文档最新版。</p>
-              </article>
-              <article>
-                <strong>3. 补全索引</strong>
-                <p>需要补全或重建向量索引时，进入“状态 - 向量测试”，点击“补全索引”。这里也能处理待嵌入文件和测试召回。</p>
-              </article>
-              <article>
-                <strong>4. 常用写作功能</strong>
-                <p>右侧功能入口包含 AI、批量、拆书、抽卡、伏笔、日志、技能、一致性和设置；常用功能页打开后仍保留在中间工作区。</p>
-              </article>
-            </div>
-          </section>
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function CenterWorkspace({
-  controller,
-  feature,
-  findRequestTick,
-  replaceRequestTick,
-  disassemblyUi,
-  onSelectFeature
-}: {
-  controller: WorkbenchController;
-  feature: CenterFeature;
-  findRequestTick: number;
-  replaceRequestTick: number;
-  disassemblyUi: DisassemblyUiState;
-  onSelectFeature: (feature: CenterFeature) => void;
-}) {
-  if (!controller.snapshot || !controller.configDraft) {
-    return null;
-  }
-
-  return <FeatureWorkbenchPanel controller={controller} feature={feature} findRequestTick={findRequestTick} replaceRequestTick={replaceRequestTick} disassemblyUi={disassemblyUi} onSelectFeature={onSelectFeature} />;
-}
-
-function FeatureWorkbenchPanel({
-  controller,
-  feature,
-  findRequestTick,
-  replaceRequestTick,
-  disassemblyUi,
-  onSelectFeature
-}: {
-  controller: WorkbenchController;
-  feature: CenterFeature;
-  findRequestTick: number;
-  replaceRequestTick: number;
-  disassemblyUi: DisassemblyUiState;
-  onSelectFeature: (feature: CenterFeature) => void;
-}) {
-  const activeDocument = controller.openDocuments.find((document) => document.path === controller.activeDocumentPath) || null;
-  const editorRef = useRef<HTMLTextAreaElement | null>(null);
-  const rightEditorRef = useRef<HTMLTextAreaElement | null>(null);
-  const findInputRef = useRef<HTMLInputElement | null>(null);
-  const replaceInputRef = useRef<HTMLInputElement | null>(null);
-  const [findOpen, setFindOpen] = useState(false);
-  const [replaceOpen, setReplaceOpen] = useState(false);
-  const [findQuery, setFindQuery] = useState("");
-  const [replaceQuery, setReplaceQuery] = useState("");
-  const [findMessage, setFindMessage] = useState("");
-
-  // 分屏管理状态
-  const [isSplit, setIsSplit] = useState(false);
-  const [activePane, setActivePane] = useState<"left" | "right">("left");
-  const [rightFeature, setRightFeature] = useState<CenterFeature>("conversations");
-  const [rightDocumentPath, setRightDocumentPath] = useState<string | null>(null);
-
-  // 动态降级：计算右侧正在显示的活动文档
-  const rightActiveDocument = controller.openDocuments.find((doc) => doc.path === rightDocumentPath) || controller.openDocuments[0] || null;
-
-  // 自动监测右侧文档是否已被关闭，若关闭则降级重置
-  useEffect(() => {
-    if (rightDocumentPath && !controller.openDocuments.some((doc) => doc.path === rightDocumentPath)) {
-      setRightDocumentPath(controller.openDocuments[0]?.path || null);
-    }
-  }, [controller.openDocuments, rightDocumentPath]);
-
-  // 根据当前聚焦侧获取当前面板对应的文档
-  const currentPaneDoc = isSplit
-    ? (activePane === "left" ? activeDocument : rightActiveDocument)
-    : activeDocument;
-  const dirtyDocumentCount = controller.openDocuments.filter((document) => document.dirty).length;
-  const editorVisible = feature === "editor" || (isSplit && rightFeature === "editor");
-
-  // 根据当前聚焦侧动态计算并展示头部标题
-  const title = isSplit
-    ? (activePane === "left" ? featureTitle(feature, activeDocument) : featureTitle(rightFeature, rightActiveDocument))
-    : featureTitle(feature, activeDocument);
-
-  useEffect(() => {
-    if (!findRequestTick) {
-      return;
-    }
-    setFindOpen(true);
-    setReplaceOpen(false);
-    setFindMessage("");
-    requestAnimationFrame(() => findInputRef.current?.focus());
-  }, [findRequestTick]);
-
-  useEffect(() => {
-    if (!replaceRequestTick) {
-      return;
-    }
-    setFindOpen(true);
-    setReplaceOpen(true);
-    setFindMessage("");
-    requestAnimationFrame(() => findInputRef.current?.focus());
-  }, [replaceRequestTick]);
-
-  function handlePaneFocus(pane: "left" | "right") {
-    setActivePane(pane);
-    if (pane === "left") {
-      if (activeDocument) {
-        controller.activateDocument(activeDocument.path);
-      }
-    } else {
-      if (rightActiveDocument) {
-        controller.activateDocument(rightActiveDocument.path);
-      }
-    }
-  }
-
-  function handleSelectRightFeature(nextFeature: CenterFeature) {
-    setRightFeature(nextFeature);
-    if (nextFeature === "editor") {
-      if (controller.activeDocumentPath) {
-        setRightDocumentPath(controller.activeDocumentPath);
-      }
-    }
-  }
-
-  function insertMark(mark: string) {
-    const doc = currentPaneDoc;
-    if (!doc) {
-      return;
-    }
-    const open = mark.length > 1 ? mark.slice(0, mark.length / 2) : mark;
-    const close = mark.length > 1 ? mark.slice(mark.length / 2) : "";
-    const ref = isSplit ? (activePane === "left" ? editorRef : rightEditorRef) : editorRef;
-    const editor = ref.current;
-    const start = editor?.selectionStart ?? doc.content.length;
-    const end = editor?.selectionEnd ?? start;
-    const selected = doc.content.slice(start, end);
-    const insertion = close ? `${open}${selected}${close}` : open;
-    const next = `${doc.content.slice(0, start)}${insertion}${doc.content.slice(end)}`;
-    controller.updateActiveDocument(next);
-    requestAnimationFrame(() => {
-      const cursor = close && selected ? start + insertion.length : start + open.length;
-      ref.current?.focus();
-      ref.current?.setSelectionRange(cursor, cursor);
-    });
-  }
-
-  function findNext() {
-    const doc = currentPaneDoc;
-    if (!doc || !findQuery.trim()) {
-      setFindMessage(findQuery.trim() ? "当前没有可查找文档" : "请输入查找内容");
-      return;
-    }
-    const ref = isSplit ? (activePane === "left" ? editorRef : rightEditorRef) : editorRef;
-    const editor = ref.current;
-    const content = doc.content;
-    const query = findQuery.trim();
-    const source = content.toLowerCase();
-    const needle = query.toLowerCase();
-    const start = Math.max(editor?.selectionEnd ?? 0, 0);
-    let index = source.indexOf(needle, start);
-    if (index < 0 && start > 0) {
-      index = source.indexOf(needle, 0);
-    }
-    if (index < 0) {
-      setFindMessage("未找到");
-      return;
-    }
-    setFindMessage(`已定位第 ${index + 1} 个字符`);
-    requestAnimationFrame(() => {
-      ref.current?.focus();
-      ref.current?.setSelectionRange(index, index + query.length);
-    });
-  }
-
-  function replaceCurrent() {
-    const doc = currentPaneDoc;
-    if (!doc || !findQuery.trim()) {
-      setFindMessage(findQuery.trim() ? "当前没有可替换文档" : "请输入查找内容");
-      return;
-    }
-    const ref = isSplit ? (activePane === "left" ? editorRef : rightEditorRef) : editorRef;
-    const editor = ref.current;
-    const query = findQuery.trim();
-    const selectedStart = Math.max(editor?.selectionStart ?? 0, 0);
-    const selectedEnd = Math.max(editor?.selectionEnd ?? selectedStart, selectedStart);
-    const selectedText = doc.content.slice(selectedStart, selectedEnd);
-    const selectionMatches = selectedText.toLowerCase() === query.toLowerCase();
-    if (!selectionMatches) {
-      findNext();
-      setFindMessage("已定位匹配项，再次替换");
-      return;
-    }
-
-    const next = `${doc.content.slice(0, selectedStart)}${replaceQuery}${doc.content.slice(selectedEnd)}`;
-    controller.updateActiveDocument(next);
-    setFindMessage("已替换 1 处");
-    const nextCursor = selectedStart + replaceQuery.length;
-    requestAnimationFrame(() => {
-      ref.current?.focus();
-      ref.current?.setSelectionRange(nextCursor, nextCursor);
-      findNextInText(next, nextCursor);
-    });
-  }
-
-  function replaceAll() {
-    const doc = currentPaneDoc;
-    const query = findQuery.trim();
-    if (!doc || !query) {
-      setFindMessage(query ? "当前没有可替换文档" : "请输入查找内容");
-      return;
-    }
-    const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const pattern = new RegExp(escaped, "gi");
-    let count = 0;
-    const next = doc.content.replace(pattern, () => {
-      count += 1;
-      return replaceQuery;
-    });
-    if (!count) {
-      setFindMessage("未找到");
-      return;
-    }
-    controller.updateActiveDocument(next);
-    setFindMessage(`已替换 ${count} 处`);
-    const ref = isSplit ? (activePane === "left" ? editorRef : rightEditorRef) : editorRef;
-    requestAnimationFrame(() => {
-      ref.current?.focus();
-      const cursor = Math.min(next.length, Math.max(0, ref.current?.selectionStart ?? 0));
-      ref.current?.setSelectionRange(cursor, cursor);
-    });
-  }
-
-  function findNextInText(content: string, from: number) {
-    const query = findQuery.trim();
-    if (!query) {
-      return;
-    }
-    const source = content.toLowerCase();
-    const needle = query.toLowerCase();
-    let index = source.indexOf(needle, Math.max(from, 0));
-    if (index < 0 && from > 0) {
-      index = source.indexOf(needle, 0);
-    }
-    if (index < 0) {
-      return;
-    }
-    const ref = isSplit ? (activePane === "left" ? editorRef : rightEditorRef) : editorRef;
-    ref.current?.setSelectionRange(index, index + query.length);
-  }
-
-  function closeStatusMenu(event: ReactMouseEvent<HTMLElement>) {
-    event.currentTarget.closest("details")?.removeAttribute("open");
-  }
-
-  function openStatusFeature(event: ReactMouseEvent<HTMLElement>, nextFeature: CenterFeature) {
-    closeStatusMenu(event);
-    onSelectFeature(nextFeature);
-  }
-
-  async function refreshWorkspaceAndDocument(event?: ReactMouseEvent<HTMLElement>) {
-    if (event) {
-      closeStatusMenu(event);
-    }
-    await controller.refreshProjectWorkspace();
-    if (currentPaneDoc) {
-      await controller.reopenDocumentFromDisk(currentPaneDoc.path);
-    }
-  }
-
-  return (
-    <div className="xw-editor-workbench">
-      <header className="xw-editor-topbar">
-        <div className="xw-editor-title">
-          <FilePenLine size={19} />
-          <strong>{title}</strong>
-          {controller.documentMessage && (
-            <span className="xw-document-status" role="status" aria-live="polite">
-              {controller.documentMessage}
-            </span>
-          )}
-        </div>
-        <div className="xw-top-actions">
-          {/* 分屏控制按钮 */}
-          <button
-            className={`xw-secondary-button compact ${isSplit ? "active" : ""}`}
-            onClick={() => {
-              setIsSplit(!isSplit);
-              if (!isSplit) {
-                setActivePane("left");
-              }
-            }}
-            type="button"
-            title="左右分屏显示"
-          >
-            <Columns size={15} />
-            <span>{isSplit ? "单屏" : "分屏"}</span>
-          </button>
-
-          <details className="xw-status-menu">
-            <summary className="xw-secondary-button compact xw-status-summary" title="状态操作">
-              <Activity size={15} />
-              <span>状态</span>
-              <ChevronDown size={14} />
-            </summary>
-            <div className="xw-status-menu-popover" role="menu">
-              <button
-                type="button"
-                role="menuitem"
-                onClick={(event) => void refreshWorkspaceAndDocument(event)}
-                disabled={controller.projectBusy || controller.documentBusy}
-              >
-                <RefreshCw size={15} />
-                <span>刷新</span>
-              </button>
-              <button type="button" role="menuitem" onClick={(event) => openStatusFeature(event, "traces")}>
-                <Activity size={15} />
-                <span>运行</span>
-              </button>
-              <button type="button" role="menuitem" onClick={(event) => openStatusFeature(event, "memory")}>
-                <Brain size={15} />
-                <span>项目记忆</span>
-              </button>
-              <button type="button" role="menuitem" onClick={(event) => openStatusFeature(event, "novel_agent")}>
-                <Bot size={15} />
-                <span>小说 Agent</span>
-              </button>
-              <button type="button" role="menuitem" onClick={(event) => openStatusFeature(event, "vector_test")}>
-                <Database size={15} />
-                <span>向量测试</span>
-              </button>
-            </div>
-          </details>
-          <button className="xw-secondary-button compact" onClick={() => void controller.saveAllDocuments()} disabled={!dirtyDocumentCount || controller.documentBusy}>
-            <SaveAll size={15} />
-            <span>保存全部{dirtyDocumentCount > 0 ? ` (${dirtyDocumentCount})` : ""}</span>
-          </button>
-          <button className="xw-primary-button compact" onClick={() => void controller.saveActiveDocument({ path: currentPaneDoc?.path })} disabled={!currentPaneDoc || controller.documentBusy}>
-            <Save size={15} />
-            <span>保存当前</span>
-          </button>
-        </div>
-      </header>
-
-      <div className="xw-editor-body" style={{ display: "flex", flexDirection: "column", minHeight: 0, flex: 1 }}>
-        {controller.openDocuments.length > 0 && (
-          <div className="xw-editor-tabs">
-            {controller.openDocuments.map((document) => {
-              const isActive = isSplit
-                ? (activePane === "left"
-                    ? document.path === controller.activeDocumentPath && feature === "editor"
-                    : document.path === rightDocumentPath && rightFeature === "editor")
-                : document.path === controller.activeDocumentPath && feature === "editor";
-              return (
-                <div key={document.path} className={`xw-editor-tab ${isActive ? "active" : ""}`}>
-                  <button
-                    className="xw-editor-tab-title"
-                    onClick={() => {
-                      if (isSplit && activePane === "right") {
-                        setRightDocumentPath(document.path);
-                        handleSelectRightFeature("editor");
-                        controller.activateDocument(document.path);
-                      } else {
-                        controller.activateDocument(document.path);
-                        onSelectFeature("editor");
-                      }
-                    }}
-                  >
-                    <span>{document.title}</span>
-                    {document.dirty && <em>●</em>}
-                  </button>
-                  <button className="xw-editor-tab-close" aria-label={`关闭 ${document.title}`} onClick={() => controller.closeDocument(document.path)}>
-                    <X size={13} />
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-        )}
-
-        {feature === "editor" && <div className="xw-quickbar">
-          <span>快速工具</span>
-          <button onClick={() => onSelectFeature("conversations")}>润色选段</button>
-          <button onClick={() => onSelectFeature("conversations")}>续写此处</button>
-          <button
-            onClick={() => void controller.runWorkflowSkill("lore_extract", {
-              instruction: "提取当前页面设定：只提取当前打开文档中明确出现的人物、体系、地图、道具设定，并与现有设定合并，避免臆造。",
-              write_result: true
-            } as any)}
-            disabled={!currentPaneDoc || controller.operationsBusy}
-          >
-            提取设定
-          </button>
-          <button
-            className={controller.configDraft?.auto_lore_extract_enabled ? "active" : ""}
-            onClick={() => controller.patchConfig({ auto_lore_extract_enabled: !controller.configDraft?.auto_lore_extract_enabled })}
-          >
-            自动提取设定
-          </button>
-        </div>}
-        {feature === "editor" && currentPaneDoc && <div className="xw-punctuation-bar" aria-label="中文标点快捷输入">
-          {punctuationMarks.map((mark) => (
-            <button key={mark} onClick={() => insertMark(mark)} disabled={!currentPaneDoc}>
-              {mark}
-            </button>
-          ))}
-        </div>}
-
-        {findOpen && (
-          <div className="xw-find-bar">
-            <input
-              ref={findInputRef}
-              value={findQuery}
-              onChange={(event) => setFindQuery(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") {
-                  event.preventDefault();
-                  findNext();
-                }
-                if (event.key === "Escape") {
-                  setFindOpen(false);
-                  setReplaceOpen(false);
-                  setFindMessage("");
-                  const ref = isSplit ? (activePane === "left" ? editorRef : rightEditorRef) : editorRef;
-                  ref.current?.focus();
-                }
-              }}
-              placeholder="查找当前文档"
-            />
-            {replaceOpen && (
-              <input
-                ref={replaceInputRef}
-                value={replaceQuery}
-                onChange={(event) => setReplaceQuery(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    replaceCurrent();
-                  }
-                  if (event.key === "Escape") {
-                    setFindOpen(false);
-                    setReplaceOpen(false);
-                    setFindMessage("");
-                    const ref = isSplit ? (activePane === "left" ? editorRef : rightEditorRef) : editorRef;
-                    ref.current?.focus();
-                  }
-                }}
-                placeholder="替换为"
-              />
-            )}
-            <button className="xw-secondary-button compact" type="button" onClick={findNext} disabled={!currentPaneDoc}>
-              查找
-            </button>
-            {replaceOpen ? (
-              <>
-                <button className="xw-secondary-button compact" type="button" onClick={replaceCurrent} disabled={!currentPaneDoc}>
-                  替换
-                </button>
-                <button className="xw-secondary-button compact" type="button" onClick={replaceAll} disabled={!currentPaneDoc}>
-                  全部替换
-                </button>
-              </>
-            ) : (
-              <button className="xw-secondary-button compact" type="button" onClick={() => {
-                setReplaceOpen(true);
-                requestAnimationFrame(() => replaceInputRef.current?.focus());
-              }}>
-                替换
-              </button>
-            )}
-            <button className="xw-secondary-button compact" type="button" onClick={() => {
-              setFindOpen(false);
-              setReplaceOpen(false);
-            }}>
-              关闭
-            </button>
-            <span>{findMessage || (replaceOpen ? "Enter 查找/替换，Esc 关闭" : "Enter 查找下一个，Esc 关闭")}</span>
-          </div>
-        )}
-
-        {editorVisible && controller.pendingCloseRequest && (
-          <GuardBanner
-            title={`${controller.pendingCloseRequest.title} 还有未保存修改`}
-            detail="继续关闭会直接丢掉本地草稿。"
-            primaryLabel="仍然关闭"
-            secondaryLabel="返回编辑"
-            onPrimary={controller.confirmCloseDocument}
-            onSecondary={controller.cancelCloseDocument}
-          />
-        )}
-        {editorVisible && controller.pendingReloadRequest && (
-          <GuardBanner
-            title={`${controller.pendingReloadRequest.title} 还有未保存修改`}
-            detail="读取最新版会用磁盘内容覆盖当前本地草稿。"
-            primaryLabel="丢弃草稿并读取"
-            secondaryLabel="继续编辑"
-            onPrimary={controller.confirmReloadDocument}
-            onSecondary={controller.cancelReloadDocument}
-          />
-        )}
-        {editorVisible && controller.pendingSaveConflictRequest && (
-          <GuardBanner
-            title={`${controller.pendingSaveConflictRequest.title} 磁盘已有新版`}
-            detail="普通保存已暂停，避免覆盖后台或其他窗口写入的内容。"
-            primaryLabel="确认覆盖"
-            secondaryLabel="继续编辑"
-            onPrimary={controller.confirmSaveOverwrite}
-            onSecondary={controller.cancelSaveConflict}
-          />
-        )}
-
-        {/* 核心页面区域条件渲染 */}
-        {isSplit ? (
-          <div style={{ display: "flex", gap: "12px", flex: 1, minHeight: 0, width: "100%", overflow: "hidden", marginTop: "8px" }}>
-            {/* 左侧分屏窗口 */}
-            <div
-              className={`xw-split-pane ${activePane === "left" ? "focused" : ""}`}
-              style={{
-                flex: 1,
-                minWidth: 0,
-                display: "flex",
-                flexDirection: "column",
-                border: activePane === "left" ? "2px solid var(--accent)" : "2px solid var(--line)",
-                boxShadow: activePane === "left" ? "0 0 8px rgba(11, 110, 104, 0.2)" : "none",
-                borderRadius: "12px",
-                overflow: "hidden",
-                transition: "all 0.2s ease"
-              }}
-              onMouseDown={() => handlePaneFocus("left")}
-            >
-              <FeatureContentSurface
-                controller={controller}
-                feature={feature}
-                disassemblyUi={disassemblyUi}
-                activeDocument={activeDocument}
-                editorRef={editorRef}
-                onSelectFeature={onSelectFeature}
-              />
-            </div>
-
-            {/* 右侧分屏窗口 */}
-            <div
-              className={`xw-split-pane ${activePane === "right" ? "focused" : ""}`}
-              style={{
-                flex: 1,
-                minWidth: 0,
-                display: "flex",
-                flexDirection: "column",
-                border: activePane === "right" ? "2px solid var(--accent)" : "2px solid var(--line)",
-                boxShadow: activePane === "right" ? "0 0 8px rgba(11, 110, 104, 0.2)" : "none",
-                borderRadius: "12px",
-                overflow: "hidden",
-                transition: "all 0.2s ease"
-              }}
-              onMouseDown={() => handlePaneFocus("right")}
-            >
-              <FeatureContentSurface
-                controller={controller}
-                feature={rightFeature}
-                disassemblyUi={disassemblyUi}
-                activeDocument={rightActiveDocument}
-                editorRef={rightEditorRef}
-                onSelectFeature={handleSelectRightFeature}
-              />
-            </div>
-          </div>
-        ) : (
-          <FeatureContentSurface
-            controller={controller}
-            feature={feature}
-            disassemblyUi={disassemblyUi}
-            activeDocument={activeDocument}
-            editorRef={editorRef}
-            onSelectFeature={onSelectFeature}
-          />
-        )}
+    <header className="topbar">
+      <div className="title-stack">
+        <span>{projectName || "本地小说项目"}</span>
+        <strong>{navigationLabel(feature)}</strong>
       </div>
-    </div>
-  );
-}
-
-function featureTitle(feature: CenterFeature, activeDocument: OpenDocumentTab | null): string {
-  const titles: Record<CenterFeature, string> = {
-    home: "项目首页",
-    editor: activeDocument?.title || "未打开文档",
-    conversations: "AI 对话",
-    outline: "故事大纲",
-    clues: "伏笔与时间线",
-    sources: "设定资料",
-    style: "风格与题材",
-    studio: "小说编辑室",
-    review: "全文审阅",
-    transfer: "素材迁移",
-    tasks: "后台任务",
-    timeline: "时间线",
-    "settings-set": "设定集",
-    "style-library": "风格库",
-    "theme-library": "题材库",
-    batch: "批量生成",
-    crawl: "拆书",
-    card_draw: "抽卡",
-    ledger: "伏笔",
-    revision: "日志",
-    skills: "技能",
-    traces: "Agent 运行",
-    memory: "项目记忆",
-    novel_agent: "小说 Agent 编辑室",
-    vector_test: "向量测试",
-    consistency: "一致性检查",
-    settings: "设置",
-    terminal: "终端"
-  };
-  return titles[feature];
-}
-
-function FeatureContentSurface({
-  controller,
-  feature,
-  disassemblyUi,
-  activeDocument,
-  editorRef,
-  onSelectFeature
-}: {
-  controller: WorkbenchController;
-  feature: CenterFeature;
-  disassemblyUi: DisassemblyUiState;
-  activeDocument: OpenDocumentTab | null;
-  editorRef: React.RefObject<HTMLTextAreaElement | null>;
-  onSelectFeature: (feature: CenterFeature) => void;
-}) {
-  if (feature === "home") {
-    return <HomeFeaturePage controller={controller} onSelectFeature={onSelectFeature} />;
-  }
-  if (feature === "editor") {
-    return <EditorFeaturePage controller={controller} activeDocument={activeDocument} editorRef={editorRef} />;
-  }
-  if (feature === "conversations") {
-    return <ConversationFeaturePage controller={controller} />;
-  }
-  if (feature === "timeline") {
-    return <TimelineFeaturePage controller={controller} />;
-  }
-  if (feature === "outline") {
-    return (
-      <DocumentLibraryFeaturePage
-        hint="大纲文件使用真实项目文档，打开后进入正文编辑器"
-        cards={[
-          ["故事大纲", "全书主线、阶段目标与核心冲突", "01_大纲/大纲.txt"],
-          ["情节细纲", "分卷推进、场景安排与人物线", "01_大纲/细纲.txt"],
-          ["章节章纲", "逐章目标、钩子与写作要求", "01_大纲/章纲.txt"]
-        ]}
-        onOpenDocument={async (path) => {
-          const opened = await controller.openDocument(path);
-          if (opened) onSelectFeature("editor");
-        }}
-      />
-    );
-  }
-  if (feature === "clues") {
-    return <CluesFeaturePage controller={controller} onSelectFeature={onSelectFeature} />;
-  }
-  if (feature === "sources") {
-    return <SourcesFeaturePage controller={controller} />;
-  }
-  if (feature === "style") {
-    return <StyleGenreFeaturePage controller={controller} />;
-  }
-  if (feature === "studio") {
-    feature = "novel_agent";
-  }
-  if (feature === "review") {
-    feature = "consistency";
-  }
-  if (feature === "transfer" || feature === "tasks") {
-    return (
-      <NovelAgentWorkspace
-        projectRoot={controller.snapshot?.currentProject.path || ""}
-        activePath={activeDocument?.path || ""}
-        activeContent={activeDocument?.content || ""}
-        sourceRevision={activeDocument?.updatedAt || ""}
-        initialTab={feature === "transfer" ? "transfer" : "tasks"}
-        onOpenSkills={() => onSelectFeature("skills")}
-      />
-    );
-  }
-  if (feature === "settings-set") {
-    return (
-      <DocumentLibraryFeaturePage
-        hint="点击卡片后在文档页打开并编辑"
-        cards={[
-          ["人物设定", "主角、配角、势力关系", "00_设定集/设定集/人物设定.txt"],
-          ["体系设定", "修炼、能力、规则边界", "00_设定集/设定集/体系设定.txt"],
-          ["地图设定", "地理、区域、移动路线", "00_设定集/设定集/地图设定.txt"],
-          ["道具设定", "关键物品、资源、装备", "00_设定集/设定集/道具设定.txt"]
-        ]}
-        onOpenDocument={async (path) => {
-          const opened = await controller.openDocument(path);
-          if (opened) {
-            onSelectFeature("editor");
-          }
-        }}
-      />
-    );
-  }
-  if (feature === "style-library") {
-    return (
-      <DocumentLibraryFeaturePage
-        hint="点击卡片后在文档页打开并编辑"
-        cards={[
-          ["写作风格", "项目默认文风与叙事规则", "00_设定集/风格库/写作风格.txt"],
-          ["风格示例", "可复用的段落样本", "00_设定集/风格库/风格示例.txt"],
-          ["参考素材", "语感、意象、资料摘录", "00_设定集/风格库/参考素材.txt"]
-        ]}
-        onOpenDocument={async (path) => {
-          const opened = await controller.openDocument(path);
-          if (opened) {
-            onSelectFeature("editor");
-          }
-        }}
-      />
-    );
-  }
-  if (feature === "theme-library") {
-    return (
-      <DocumentLibraryFeaturePage
-        hint="点击卡片后在文档页打开并编辑"
-        cards={[
-          ["题材规则", "世界类型、爽点、禁区", "00_设定集/题材库/题材规则.txt"],
-          ["题材素材", "桥段、场景、关键词", "00_设定集/题材库/题材素材.txt"],
-          ["战斗模板", "冲突推进与场面调度", "00_设定集/题材库/战斗模板.txt"],
-          ["违禁词", "敏感词与替代表达", "00_设定集/题材库/违禁词.txt"]
-        ]}
-        onOpenDocument={async (path) => {
-          const opened = await controller.openDocument(path);
-          if (opened) {
-            onSelectFeature("editor");
-          }
-        }}
-      />
-    );
-  }
-  if (feature === "ledger") {
-    return <LedgerFeaturePage controller={controller} onSelectFeature={onSelectFeature} />;
-  }
-  if (feature === "revision") {
-    return <LogsFeaturePage controller={controller} onSelectFeature={onSelectFeature} />;
-  }
-  if (feature === "skills") {
-    return <SkillFeaturePage controller={controller} />;
-  }
-  if (feature === "traces") {
-    return <AgentTraceView runtime={controller.runtime} />;
-  }
-  if (feature === "memory") {
-    return <MemoryGovernanceView runtime={controller.runtime} />;
-  }
-  if (feature === "novel_agent") {
-    return (
-      <NovelAgentWorkspace
-        projectRoot={controller.snapshot?.currentProject.path || ""}
-        activePath={activeDocument?.path || ""}
-        activeContent={activeDocument?.content || ""}
-        sourceRevision={activeDocument?.updatedAt || ""}
-        onOpenSkills={() => onSelectFeature("skills")}
-      />
-    );
-  }
-  if (feature === "vector_test") {
-    return <VectorTestFeaturePage controller={controller} />;
-  }
-  if (feature === "settings") {
-    return <SettingsFeaturePage controller={controller} onOpenVectorTest={() => onSelectFeature("vector_test")} />;
-  }
-  if (feature === "terminal") {
-    return <TerminalFeaturePage controller={controller} />;
-  }
-  return <WorkflowFeaturePage controller={controller} feature={feature} disassemblyUi={disassemblyUi} />;
-}
-
-function CluesFeaturePage({ controller, onSelectFeature }: { controller: WorkbenchController; onSelectFeature: (feature: CenterFeature) => void }) {
-  const [view, setView] = useState<"ledger" | "timeline">("ledger");
-  return (
-    <section className="xw-feature-page xw-combined-feature">
-      <div className="xw-combined-feature-head">
-        <div><span>全书规划</span><h2>伏笔与时间线</h2></div>
-        <div className="xw-segmented-control" role="tablist" aria-label="伏笔与时间线视图">
-          <button type="button" role="tab" aria-selected={view === "ledger"} className={view === "ledger" ? "active" : ""} onClick={() => setView("ledger")}>伏笔台账</button>
-          <button type="button" role="tab" aria-selected={view === "timeline"} className={view === "timeline" ? "active" : ""} onClick={() => setView("timeline")}>故事时间线</button>
-        </div>
+      <div className="top-actions">
+        <button className="search-trigger" type="button" onClick={onOpenCommand}><Search size={15} /><span>搜索项目</span><kbd>Ctrl K</kbd></button>
+        <button className="icon-button" type="button" title="命令面板" aria-label="命令面板" onClick={onOpenCommand}><Command size={16} /></button>
+        <button className="task-trigger" type="button" onClick={() => onSelectFeature("tasks")}><span className="pulse-dot" />后台任务</button>
+        <button className="avatar-button" type="button" aria-label="打开设置" onClick={() => onSelectFeature("settings")}><User size={16} /></button>
+        <button className="button primary top-save-button" type="button" onClick={onSave} disabled={saving}><Save size={15} />{saving ? "保存中" : "保存全部"}</button>
       </div>
-      <div role="tabpanel" className="xw-combined-feature-body">
-        {view === "ledger" ? <LedgerFeaturePage controller={controller} onSelectFeature={onSelectFeature} /> : <TimelineFeaturePage controller={controller} />}
-      </div>
-    </section>
-  );
-}
-
-function LegacyStyleAndGenreFeaturePage({ controller, onSelectFeature }: { controller: WorkbenchController; onSelectFeature: (feature: CenterFeature) => void }) {
-  const [view, setView] = useState<"style" | "genre">("style");
-  const cards: Array<[string, string, string]> = view === "style"
-    ? [
-        ["写作风格", "项目默认语气、视角与叙事规则", "00_设定集/风格库/写作风格.txt"],
-        ["风格示例", "可复用的段落和对白样本", "00_设定集/风格库/风格示例.txt"],
-        ["参考素材", "意象、语感与资料摘录", "00_设定集/风格库/参考素材.txt"]
-      ]
-    : [
-        ["题材规则", "世界类型、爽点与创作边界", "00_设定集/题材库/题材规则.txt"],
-        ["题材素材", "桥段、场景与关键词", "00_设定集/题材库/题材素材.txt"],
-        ["战斗模板", "冲突推进与场面调度", "00_设定集/题材库/战斗模板.txt"],
-        ["禁用表达", "敏感词和替代表达", "00_设定集/题材库/违禁词.txt"]
-      ];
-  return (
-    <section className="xw-feature-page xw-combined-feature">
-      <div className="xw-combined-feature-head">
-        <div><span>项目写作规则</span><h2>风格与题材</h2></div>
-        <div className="xw-segmented-control" role="tablist" aria-label="风格与题材视图">
-          <button type="button" role="tab" aria-selected={view === "style"} className={view === "style" ? "active" : ""} onClick={() => setView("style")}>写作风格</button>
-          <button type="button" role="tab" aria-selected={view === "genre"} className={view === "genre" ? "active" : ""} onClick={() => setView("genre")}>题材规则</button>
-        </div>
-      </div>
-      <DocumentLibraryFeaturePage
-        hint="打开真实项目文件编辑，所有规则都会随项目保存"
-        cards={cards}
-        onOpenDocument={async (path) => {
-          const opened = await controller.openDocument(path);
-          if (opened) onSelectFeature("editor");
-        }}
-      />
-    </section>
-  );
-}
-
-function EditorFeaturePage({
-  controller,
-  activeDocument,
-  editorRef
-}: {
-  controller: WorkbenchController;
-  activeDocument: OpenDocumentTab | null;
-  editorRef: React.RefObject<HTMLTextAreaElement | null>;
-}) {
-  return (
-    <div className="xw-editor-surface-wrap">
-      {activeDocument ? (
-        <textarea
-          ref={editorRef}
-          className="xw-editor-surface"
-          value={activeDocument.content}
-          onChange={(event) => controller.updateActiveDocument(event.target.value)}
-          spellCheck={false}
-          aria-label={`${activeDocument.title} 正文编辑器`}
-        />
-      ) : (
-        <div className="xw-editor-empty" aria-label="空白编辑区" />
-      )}
-    </div>
-  );
-}
-
-function DocumentLibraryFeaturePage({
-  cards,
-  hint,
-  onOpenDocument
-}: {
-  cards: Array<[string, string, string]>;
-  hint: string;
-  onOpenDocument: (path: string) => void | Promise<void>;
-}) {
-  return (
-    <section className="xw-feature-page">
-      <div className="xw-feature-grid">
-        {cards.map(([title, detail, path]) => (
-          <button key={path} className="xw-feature-card action" onClick={() => onOpenDocument(path)}>
-            <strong>{title}</strong>
-            <span>{detail}</span>
-            <small>{path}</small>
-          </button>
-        ))}
-      </div>
-      <p className="xw-feature-empty">{hint}</p>
-    </section>
-  );
-}
-
-function TimelineFeaturePage({ controller }: { controller: WorkbenchController }) {
-  const timeline = controller.snapshot?.timeline || [];
-  return (
-    <section className="xw-feature-page">
-      <div className="xw-feature-list">
-        {timeline.map((entry) => {
-          const firstFile = entry.files[0]?.path || entry.path || "";
-          return (
-            <article key={entry.id} className="xw-feature-card">
-              <div className="xw-feature-card-head">
-                <strong>{entry.summary || entry.title || "项目变更"}</strong>
-                <small>{entry.time || entry.timestamp || "未记录时间"}</small>
-              </div>
-              <span>{entry.source || "工作台"} · {entry.files.length} 个文件</span>
-              {firstFile && <small>{firstFile}</small>}
-              <div className="xw-feature-actions">
-                {firstFile && <button className="xw-secondary-button compact" onClick={() => void controller.openDocument(firstFile)}>打开</button>}
-                <button className="xw-secondary-button compact" onClick={() => void controller.rollbackTimelineEntry(entry.id)} disabled={controller.projectBusy}>
-                  回滚
-                </button>
-              </div>
-            </article>
-          );
-        })}
-      </div>
-      {!timeline.length && <p className="xw-feature-empty">暂无时间线记录</p>}
-    </section>
-  );
-}
-
-function SessionPlanCard({ message, controller }: { message: ConversationMessage; controller: WorkbenchController }) {
-  const parsedInlinePlan = inlinePlanMetadataSchema.safeParse(message.metadata?.inline_plan);
-  const inlinePlan = parsedInlinePlan.success ? parsedInlinePlan.data : null;
-  const plan = message.metadata?.skill_plan as { selected_reason?: string } | undefined;
-  const [collapsed, setCollapsed] = useState(true);
-  const [loading, setLoading] = useState(false);
-  const [run, setRun] = useState<AgentRunState | null>(null);
-  const [statusMessage, setStatusMessage] = useState("");
-  const runId = inlinePlan?.run_id || "";
-
-  useEffect(() => {
-    if (!runId) {
-      setRun(null);
-      return;
-    }
-    let active = true;
-    const updateRun = (next: AgentRunState) => {
-      if (active) {
-        setRun(next);
-      }
-    };
-    void controller.getConversationPlanRun(runId).then(updateRun).catch((error) => {
-      if (active) {
-        setStatusMessage(error instanceof Error ? error.message : String(error));
-      }
-    });
-    const unsubscribe = controller.subscribeConversationPlanRun(runId, updateRun, (error) => {
-      if (active) {
-        setStatusMessage(error instanceof Error ? error.message : String(error));
-      }
-    });
-    return () => {
-      active = false;
-      unsubscribe();
-    };
-    // A controller method is intentionally captured at mount; changes to its
-    // identity on unrelated Workbench renders must not restart the NDJSON stream.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId]);
-
-  if (!inlinePlan) {
-    return null;
-  }
-
-  const handleControl = async (action: "pause" | "resume" | "cancel" | "retry", stepId = "") => {
-    if (loading || !runId) {
-      return;
-    }
-    setLoading(true);
-    setStatusMessage("");
-    try {
-      const result = await controller.controlConversationPlanRun(runId, action, stepId);
-      setRun(result.run);
-      setStatusMessage(result.conflict ? "运行状态已在其他位置更新；本次操作没有自动重放。" : "操作已提交。");
-    } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : String(error));
-    } finally {
-      setLoading(false);
-    }
-  };
-  const steps = run?.steps || [];
-  const status = run?.status || "loading";
-  const canPause = status === "running";
-  const canResume = status === "paused";
-  const canCancel = status === "queued" || status === "planning" || status === "running" || status === "waiting_confirmation" || status === "cancelling";
-
-  return (
-    <section className="xw-session-plan-card" aria-label="Agent 执行计划" style={{ border: "1px solid #ddd", borderRadius: "6px", padding: "10px", marginTop: "8px", background: "#f9f9f9", color: "#333" }}>
-      <button
-        type="button"
-        aria-expanded={!collapsed}
-        onClick={() => setCollapsed((value) => !value)}
-        style={{ width: "100%", display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer", background: "transparent", border: 0, padding: 0, color: "inherit", textAlign: "left" }}
-      >
-        <strong>📋 智能执行计划 {plan?.selected_reason ? `(${plan.selected_reason})` : ""}</strong>
-        <span style={{ fontSize: "0.85em" }}>{collapsed ? "展开 ▼" : "折叠 ▲"}</span>
-      </button>
-
-      {!collapsed && (
-        <div style={{ marginTop: "10px" }}>
-          <p style={{ margin: "0 0 8px", fontSize: "0.85em" }}>运行 {runId} · 版本 {run?.version ?? inlinePlan.run_version} · 状态：{status}</p>
-          {steps.map((step) => {
-            const stepStatus = step.status || "pending";
-            const color = stepStatus === "done" ? "#2e7d32" : stepStatus === "failed" ? "#c62828" : stepStatus === "running" ? "#1565c0" : "#757575";
-            return (
-              <div key={step.step_id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: "1px dashed #eee" }}>
-                <div>
-                  <span style={{ color, marginRight: "8px" }}>● {stepStatus.toUpperCase()}</span>
-                  <strong>{step.action_id || step.type}</strong>
-                  {step.error && <p style={{ margin: "2px 0 0 18px", fontSize: "0.85em", color: "#666" }}>错误：{step.error}</p>}
-                </div>
-                {stepStatus === "failed" && (
-                  <button
-                    type="button"
-                    disabled={loading}
-                    onClick={() => void handleControl("retry", step.step_id)}
-                    style={{ fontSize: "0.85em", padding: "2px 6px", cursor: "pointer", borderRadius: "3px" }}
-                  >
-                    重试此步
-                  </button>
-                )}
-              </div>
-            );
-          })}
-
-          {!steps.length && <p style={{ margin: "8px 0" }}>正在读取 durable 步骤…</p>}
-          {statusMessage && <p role="status" aria-live="polite" style={{ margin: "8px 0", fontSize: "0.85em" }}>{statusMessage}</p>}
-          {runId && (
-            <div style={{ display: "flex", gap: "8px", marginTop: "12px" }}>
-              <button type="button" disabled={loading || !canPause} onClick={() => void handleControl("pause")} style={{ flex: 1, padding: "4px", cursor: "pointer" }}>暂停</button>
-              <button type="button" disabled={loading || !canResume} onClick={() => void handleControl("resume")} style={{ flex: 1, padding: "4px", cursor: "pointer" }}>恢复</button>
-              <button type="button" disabled={loading || !canCancel} onClick={() => void handleControl("cancel")} style={{ flex: 1, padding: "4px", cursor: "pointer" }}>取消</button>
-            </div>
-          )}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function ConversationFeaturePage({ controller }: { controller: WorkbenchController }) {
-  const messages = controller.conversationDetail?.messages || [];
-  const threadEndRef = useRef<HTMLDivElement | null>(null);
-  const lastMessage = messages.at(-1);
-
-  useEffect(() => {
-    if (!messages.length) {
-      return;
-    }
-    const frame = window.requestAnimationFrame(() => {
-      threadEndRef.current?.scrollIntoView({ block: "end" });
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [controller.conversationDetail?.id, messages.length, lastMessage?.id, lastMessage?.content.length]);
-
-  return (
-    <section className="xw-feature-page">
-      <div className="xw-feature-list conversation">
-        {messages.map((message) => (
-          <article key={message.id} className={`xw-message-row ${message.role}`}>
-            <strong>{message.role === "assistant" ? "AI" : message.role === "user" ? "我" : "系统"}</strong>
-            <p>{message.content}</p>
-            <SessionPlanCard message={message} controller={controller} />
-          </article>
-        ))}
-        <div ref={threadEndRef} aria-hidden="true" />
-      </div>
-      {!messages.length && <p className="xw-feature-empty">右侧选择或新建会话后开始写作</p>}
-    </section>
-  );
-}
-
-function WorkflowFeaturePage({ controller, feature, disassemblyUi }: { controller: WorkbenchController; feature: CenterFeature; disassemblyUi: DisassemblyUiState }) {
-  if (feature === "batch") {
-    return <BatchFeaturePage controller={controller} />;
-  }
-  if (feature === "crawl") {
-    return <DisassembleFeaturePage controller={controller} disassemblyUi={disassemblyUi} />;
-  }
-  if (feature === "card_draw") {
-    return <CardDrawFeaturePage controller={controller} />;
-  }
-  if (feature === "consistency") {
-    return <ConsistencyFeaturePage controller={controller} />;
-  }
-  return <BatchFeaturePage controller={controller} />;
-}
-
-function BatchFeaturePage({ controller }: { controller: WorkbenchController }) {
-  const [startChapter, setStartChapter] = useState(1);
-  const [endChapter, setEndChapter] = useState(3);
-  const [targetWords, setTargetWords] = useState(2500);
-  const [writeResult, setWriteResult] = useState(true);
-  const [instruction, setInstruction] = useState("");
-  const autoReview = Boolean(controller.configDraft?.enable_consistency_revision);
-  const reviewThreshold = controller.configDraft?.consistency_revision_score || 80;
-  return (
-    <section className="xw-feature-page">
-      <div className="xw-operation-form">
-        <div className="xw-operation-grid">
-          <label><span>起始章节</span><input type="number" min={1} value={startChapter} onChange={(event) => setStartChapter(Number(event.target.value))} /></label>
-          <label><span>结束章节</span><input type="number" min={startChapter} value={endChapter} onChange={(event) => setEndChapter(Number(event.target.value))} /></label>
-          <label><span>目标字数</span><input type="number" min={300} max={20000} value={targetWords} onChange={(event) => setTargetWords(Number(event.target.value))} /></label>
-          <button
-            type="button"
-            className={`xw-operation-toggle${writeResult ? " active" : ""}`}
-            aria-pressed={writeResult}
-            onClick={() => setWriteResult((current) => !current)}
-          >
-            <FilePenLine size={14} />
-            <span>生成后直接写入正文文件</span>
-          </button>
-          <AutoReviewGeneratedToggle controller={controller} />
-        </div>
-        <textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} placeholder="批量写作要求，例如节奏、爽点、角色行动、禁用桥段。" />
-        <button
-          className="xw-primary-button"
-          onClick={() => void controller.runWorkflowSkill("batch_generate", {
-            chapter: startChapter,
-            end_chapter: Math.max(startChapter, endChapter),
-            target_words: targetWords,
-            instruction,
-            write_result: writeResult,
-            auto_revision: autoReview,
-            score_threshold: reviewThreshold
-          } as any)}
-          disabled={controller.operationsBusy}
-        >
-          开始批量生成
-        </button>
-      </div>
-    </section>
-  );
-}
-
-function ConsistencyFeaturePage({ controller }: { controller: WorkbenchController }) {
-  const [sourcePath, setSourcePath] = useState("");
-  const [text, setText] = useState("");
-  const [threshold, setThreshold] = useState(controller.configDraft?.consistency_revision_score || 80);
-  const [instruction, setInstruction] = useState("");
-  const activeDocument = controller.openDocuments.find((document) => document.path === controller.activeDocumentPath) || null;
-  const data = controller.latestSkillResult?.data || {};
-  const autoConsistency = Boolean(controller.configDraft?.enable_consistency_revision);
-  const updateThreshold = (nextValue: number) => {
-    const nextThreshold = Math.max(1, Math.min(100, Number.isFinite(nextValue) ? nextValue : 80));
-    setThreshold(nextThreshold);
-    controller.patchConfig({ consistency_revision_score: nextThreshold });
-  };
-  return (
-    <section className="xw-feature-page">
-      <div className="xw-operation-form">
-        <div className="xw-operation-grid two">
-          <ProjectFileSelect label="检查来源文件" value={sourcePath} onChange={setSourcePath} controller={controller} />
-          <label><span>风险阈值</span><input type="number" min={1} max={100} value={threshold} onChange={(event) => updateThreshold(Number(event.target.value))} /></label>
-          <button
-            type="button"
-            className={`xw-operation-toggle${autoConsistency ? " active" : ""}`}
-            aria-pressed={autoConsistency}
-            onClick={() => controller.patchConfig({ enable_consistency_revision: !autoConsistency })}
-          >
-            <ScanSearch size={14} />
-            <span>自动一致性检查</span>
-          </button>
-        </div>
-        <textarea value={text} onChange={(event) => setText(event.target.value)} placeholder="可粘贴待检查正文。留空则使用当前文档或来源路径。" />
-        <textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} placeholder="补充检查要求，例如重点看人物动机、地图距离、伏笔承接。" />
-        <button className="xw-primary-button" onClick={() => void controller.runWorkflowSkill("consistency_check", { text: text || activeDocument?.content || "", source_path: sourcePath || activeDocument?.path || "", instruction, score_threshold: threshold } as any)} disabled={controller.operationsBusy}>开始一致性检查</button>
-      </div>
-      {controller.latestSkillResult?.data && (
-        <article className="xw-operation-result">
-          <strong>评分：{String(data.score ?? "未返回")}</strong>
-          <span>{String(data.reason || controller.latestSkillResult.result || "")}</span>
-          {Array.isArray(data.risks) && data.risks.length > 0 && <ul>{data.risks.map((risk, index) => <li key={index}>{String(risk)}</li>)}</ul>}
-        </article>
-      )}
-    </section>
-  );
-}
-
-function TerminalFeaturePage({ controller }: { controller: WorkbenchController }) {
-  return (
-    <section className="xw-feature-page terminal">
-      <div className="xw-feature-toolbar">
-        <strong>维护终端</strong>
-        <span>常用命令和项目维护集中在这里</span>
-      </div>
-      {controller.snapshot && (
-        <Suspense fallback={<LoadingState />}>
-          <TerminalView runtime={runtime} snapshot={controller.snapshot} />
-        </Suspense>
-      )}
-    </section>
+    </header>
   );
 }
 
 function LoadingState() {
-  return (
-    <section className="state-panel">
-      <div className="loading-line" />
-      <div className="loading-line short" />
-      <div className="loading-grid">
-        <div className="loading-card" />
-        <div className="loading-card" />
-        <div className="loading-card" />
-        <div className="loading-card" />
-      </div>
-    </section>
-  );
+  return <section className="aw-runtime-state" aria-live="polite"><div /><div /><div /></section>;
 }
 
 function ErrorState({ message }: { message: string }) {
-  return (
-    <section className="state-panel error-panel">
-      <h2>ArcWriter 暂时没连上本地服务</h2>
-      <p>{message}</p>
-      <p>当前默认后端地址是 `http://127.0.0.1:18453`，也可以用 `?api=` 指向别的实例。</p>
-    </section>
-  );
+  return <section className="aw-runtime-error" role="alert"><h1>暂时无法打开工作台</h1><p>{message || "本地服务还没有准备好。"}</p><button type="button" className="aw-primary-button" onClick={() => window.location.reload()}>重新连接</button></section>;
 }

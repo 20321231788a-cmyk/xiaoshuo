@@ -1243,16 +1243,18 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         conversation_id: conversationDetail?.id || "",
         source_path: input.sourcePath || input.targetPath || input.targetPaths?.[0] || "",
         target_path: "",
-        instruction: "自动提取设定：只提取这段新生成大纲、细纲或章纲中明确出现的人物、体系、地图、道具设定，并与现有设定合并，避免臆造。",
-        write_result: true,
+        instruction: "自动提取设定：只提取这段已确认写入的大纲、细纲、章纲或正文中明确出现的人物、体系、地图、道具设定，避免臆造；结果进入待确认设定，不直接写入项目事实。",
+        write_result: false,
         attachment_ids: []
       });
-      const savedPaths = skillSavedPaths(result);
-      if (savedPaths.length) {
-        await syncChangedPaths(savedPaths, { openFirst: false });
-        return `；已自动提取设定并写入 ${savedPaths.length} 个设定文件`;
+      const libraryDraft = result.data?.library_draft;
+      const draftRecords = libraryDraft && typeof libraryDraft === "object" && "records" in libraryDraft
+        ? Number((libraryDraft as { records?: unknown }).records || 0)
+        : 0;
+      if (draftRecords > 0) {
+        return `；已自动提取 ${draftRecords} 条设定，等待你在设定资料中确认`;
       }
-      return "；自动提取设定完成，但未发现可写入的设定段落";
+      return "；自动提取设定完成，未发现需要确认的明确设定";
     } catch (nextError) {
       return `；自动提取设定失败：${nextError instanceof Error ? nextError.message : "未知错误"}`;
     }
@@ -1304,15 +1306,6 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       setPendingGeneratedSave(pendingSave);
       void trackDesktopGeneratedCache(pendingSave, "pending");
       publishPendingSaveMessage(pendingSave, completionMessage);
-      const autoLoreMessage = await autoExtractLoreFromGeneratedOutline({
-        skillId: pendingSave.skillId,
-        content: pendingSave.content,
-        targetPath: pendingSave.targetPath,
-        targetPaths: pendingSave.targetPaths
-      });
-      if (autoLoreMessage) {
-        publishPendingSaveMessage(pendingSave, `${completionMessage}${autoLoreMessage}`);
-      }
       return;
     }
 
@@ -1881,10 +1874,10 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setConfigDraft((current) => (current ? normalizeConfigDraft({ ...current, ...patch }) : current));
   }
 
-  async function patchAndSaveConfig(patch: Partial<AppConfig>, message = "设置已保存。") {
+  async function patchAndSaveConfig(patch: Partial<AppConfig>, message = "设置已保存。"): Promise<boolean> {
     const baseConfig = configDraft;
     if (!baseConfig) {
-      return;
+      return false;
     }
     const nextConfig = normalizeConfigDraft({ ...baseConfig, ...patch });
     setConfigDraft(nextConfig);
@@ -1898,9 +1891,12 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       configDraftDirtyRef.current = false;
       setSnapshot((current) => (current ? { ...current, config: normalizedConfig } : current));
       setConfigMessage(message);
+      return true;
     } catch (nextError) {
-      configDraftDirtyRef.current = true;
+      setConfigDraft(baseConfig);
+      configDraftDirtyRef.current = configSignature(baseConfig) !== lastConfigSignatureRef.current;
       setConfigMessage(describeActionableError(nextError, "配置保存失败", "请检查联网搜索配置后重试。"));
+      return false;
     } finally {
       setConfigBusy(false);
     }
@@ -2236,6 +2232,34 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
+  async function deleteConversation(conversationId = conversationDetail?.id || "") {
+    if (!conversationId) {
+      return false;
+    }
+    setConversationBusy(true);
+    setConversationMessage("");
+    try {
+      await client.deleteConversation(conversationId);
+      const list = await client.getConversations();
+      setSnapshot((current) => (current ? { ...current, conversations: list } : current));
+      if (conversationDetail?.id === conversationId) {
+        if (list[0]?.id) {
+          const next = await client.getConversation(list[0].id);
+          setConversationDetail(next);
+        } else {
+          setConversationDetail(null);
+        }
+      }
+      setConversationMessage("会话已删除。");
+      return true;
+    } catch (nextError) {
+      setConversationMessage(describeActionableError(nextError, "删除会话失败", "请刷新会话列表后重试。"));
+      return false;
+    } finally {
+      setConversationBusy(false);
+    }
+  }
+
   async function summarizeConversation(useModel = false) {
     if (!conversationDetail?.id) {
       return;
@@ -2255,15 +2279,16 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   }
 
   async function pinCurrentDocumentToConversation() {
-    if (!conversationDetail?.id || !activeDocumentPathRef.current) {
-      setConversationMessage("请先选择会话并打开一个文档。");
+    if (!activeDocumentPathRef.current) {
+      setConversationMessage("请先打开一个文档。");
       return;
     }
 
     setConversationBusy(true);
     setConversationMessage("");
     try {
-      const detail = await client.pinConversationContext(conversationDetail.id, {
+      const conversationId = await ensureConversationId();
+      const detail = await client.pinConversationContext(conversationId, {
         kind: "document",
         path: activeDocumentPathRef.current
       });
@@ -2801,6 +2826,31 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
+  async function saveActiveDocumentCopy(): Promise<string> {
+    const active = getActiveDocument();
+    if (!active) {
+      setDocumentMessage("请先打开要另存的文档。");
+      return "";
+    }
+    const extensionMatch = /^(.*?)(\.[^./\\]+)?$/.exec(active.path);
+    const stamp = new Date().toISOString().replace(/[:T]/g, "-").replace(/\.\d{3}Z$/, "");
+    const targetPath = `${extensionMatch?.[1] || active.path}-副本-${stamp}${extensionMatch?.[2] || ""}`;
+    setDocumentBusy(true);
+    try {
+      const saved = await client.saveDocument(targetPath, active.content);
+      await refreshProjectChrome();
+      await openDocument(saved.path, { forceReload: true, discardDirty: true, activate: true });
+      setPendingSaveConflictRequest(null);
+      setDocumentMessage(`已另存为副本：${saved.path}`);
+      return saved.path;
+    } catch (nextError) {
+      setDocumentMessage(describeActionableError(nextError, "另存副本失败", "请确认项目目录可写后重试。"));
+      return "";
+    } finally {
+      setDocumentBusy(false);
+    }
+  }
+
   async function saveAllDocuments() {
     const dirtyPaths = openDocumentsRef.current.filter((item) => item.dirty).map((item) => item.path);
     if (!dirtyPaths.length) {
@@ -3098,11 +3148,12 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setOperationsMessage("");
     try {
       if (selectedSkillDetail.builtin) {
-        const skill = await client.toggleSkill(selectedSkillDetail.id, true);
+        const disabled = !selectedSkillDetail.disabled;
+        const skill = await client.toggleSkill(selectedSkillDetail.id, disabled);
         const skills = await refreshSkillCatalog();
         setSelectedSkillDetail(skill);
         setSelectedSkillId(skill.id);
-        setOperationsMessage(`默认技能已禁用：${skill.name}。AI 会自动尝试调用相近的可用技能。`);
+        setOperationsMessage(disabled ? `默认技能已禁用：${skill.name}。AI 会自动尝试调用相近的可用技能。` : `默认技能已恢复：${skill.name}`);
         if (!skills.some((item) => item.id === skill.id)) {
           setSelectedSkillId("");
           setSelectedSkillDetail(null);
@@ -3122,6 +3173,25 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       setOperationsMessage(result.deleted ? "已删除导入技能。" : "技能已处理。");
     } catch (nextError) {
       setOperationsMessage(describeActionableError(nextError, "处理技能失败"));
+    } finally {
+      setOperationsBusy(false);
+    }
+  }
+
+  async function setSkillEnabled(skillId: string, enabled: boolean): Promise<boolean> {
+    const id = skillId.trim();
+    if (!id) return false;
+    setOperationsBusy(true);
+    setOperationsMessage("");
+    try {
+      const skill = await client.toggleSkill(id, !enabled);
+      await refreshSkillCatalog();
+      if (selectedSkillId === id || selectedSkillDetail?.id === id) setSelectedSkillDetail(skill);
+      setOperationsMessage(`${skill.name}已${enabled ? "启用" : "禁用"}。`);
+      return true;
+    } catch (nextError) {
+      setOperationsMessage(describeActionableError(nextError, `${enabled ? "启用" : "禁用"}技能失败`));
+      return false;
     } finally {
       setOperationsBusy(false);
     }
@@ -3737,16 +3807,6 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       setPendingGeneratedSave(pendingSave);
       void trackDesktopGeneratedCache(pendingSave, "pending");
       publishPendingSaveMessage(pendingSave, "技能已生成内容，等待选择写入方式");
-      const autoLoreMessage = await autoExtractLoreFromGeneratedOutline({
-        skillId: pendingSave.skillId,
-        content: pendingSave.content,
-        targetPath: pendingSave.targetPath,
-        targetPaths: pendingSave.targetPaths,
-        sourcePath
-      });
-      if (autoLoreMessage) {
-        publishPendingSaveMessage(pendingSave, `技能已生成内容，等待选择写入方式${autoLoreMessage}`);
-      }
       return;
     }
 
@@ -3764,14 +3824,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       return;
     }
 
-    const autoLoreMessage = await autoExtractLoreFromGeneratedOutline({
-      skillId: String(result.data?.skill_id || skillId),
-      content: String(result.data?.result || result.result || ""),
-      targetPath: String(result.data?.target_path || ""),
-      targetPaths: stringListFromUnknown(result.data?.target_paths),
-      sourcePath
-    });
-    setOperationsMessage(result.result.trim() ? `技能执行完成，结果已显示在下方预览。${autoLoreMessage}` : `技能执行完成${autoLoreMessage}`);
+    setOperationsMessage(result.result.trim() ? "技能执行完成，结果已显示在下方预览。" : "技能执行完成");
   }
 
   async function runWorkflowSkill(skillId: string, payload: Partial<SkillRunRequest> = {}) {
@@ -3795,8 +3848,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       const skillPayload = {
         ...(payload as Record<string, unknown>),
         text: payload.text ?? activeDocument?.content ?? "",
-        chapter: payload.chapter ?? 0,
-        end_chapter: payload.end_chapter ?? 0,
+        chapter: payload.chapter && payload.chapter > 0 ? payload.chapter : undefined,
+        end_chapter: payload.end_chapter && payload.end_chapter > 0 ? payload.end_chapter : undefined,
         target_words: payload.target_words ?? 2500,
         instruction: payload.instruction ?? "",
         target_path: payload.target_path ?? "",
@@ -3879,8 +3932,10 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         }
       };
       await handleSkillRunResult(result, skillId, sourcePath);
+      return result;
     } catch (nextError) {
       setOperationsMessage(describeActionableError(nextError, "执行技能失败", "请确认已打开目标文档、模型配置可用后重试。"));
+      return null;
     } finally {
       if (workflowController && abortRef.current === workflowController) {
         abortRef.current = null;
@@ -4009,9 +4064,15 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       setPendingGeneratedSave(null);
       await syncChangedPaths(result.saved_paths, { openFirst: true });
       await trackDesktopGeneratedCache(currentPending, "saved", mode);
+      const autoLoreMessage = await autoExtractLoreFromGeneratedOutline({
+        skillId: currentPending.skillId,
+        content: currentPending.content,
+        targetPath: currentPending.targetPath,
+        targetPaths: currentPending.targetPaths
+      });
       publishPendingSaveMessage(
         currentPending,
-        describeSavedGeneratedResult(currentPending, mode, result.saved_paths)
+        `${describeSavedGeneratedResult(currentPending, mode, result.saved_paths)}${autoLoreMessage}`
       );
     } catch (nextError) {
       publishPendingSaveMessage(
@@ -4385,6 +4446,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     subscribeConversationPlanRun,
     controlConversationPlanRun,
     createConversation,
+    deleteConversation,
     updateConversationTitle,
     summarizeConversation,
     pinCurrentDocumentToConversation,
@@ -4429,6 +4491,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     confirmProjectSwitch,
     updateActiveDocument,
     saveActiveDocument,
+    saveActiveDocumentCopy,
     saveAllDocuments,
     selectedSkillId,
     selectedSkillDetail,
@@ -4462,6 +4525,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     discardPendingSkillDraft,
     openSkillFolder,
     deleteOrDisableSelectedSkill,
+    setSkillEnabled,
     restoreSelectedBuiltinSkill,
     updateSkillDescription,
     cloneSelectedSkill,

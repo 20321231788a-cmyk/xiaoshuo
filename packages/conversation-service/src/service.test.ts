@@ -74,6 +74,16 @@ describe("conversation-service", () => {
     await expect(conversations.renameConversation(detail.id, "  ")).rejects.toThrow("对话标题不能为空");
   });
 
+  it("deletes a conversation, its backup, and its attachment directory", async () => {
+    const conversations = service();
+    const detail = await conversations.createConversation({ title: "delete me" });
+    await conversations.addAttachment(detail.id, "note.txt", "text/plain", Buffer.from("attachment"));
+
+    await expect(conversations.deleteConversation(detail.id)).resolves.toEqual({ id: detail.id, deleted: true });
+    await expect(conversations.getConversation(detail.id)).rejects.toThrow(detail.id);
+    expect((await conversations.listConversations()).some((item) => item.id === detail.id)).toBe(false);
+  });
+
   it("appends valid messages and rejects empty content or invalid roles", async () => {
     const conversations = service();
     const detail = await conversations.createConversation();

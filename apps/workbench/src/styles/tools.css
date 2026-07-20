@@ -1,0 +1,30 @@
+.tool-tabs { display: flex; gap: 4px; margin-bottom: 14px; padding: 0 0 8px; border-bottom: 1px solid var(--line); }
+.tool-tabs button { min-height: 34px; padding: 0 10px; border: 0; border-radius: 5px; background: transparent; color: var(--muted); font-size: 13px; }
+.tool-tabs button:hover { background: var(--stone); color: var(--text); }
+.tool-tabs button.active { background: var(--accent-soft); color: var(--accent); font-weight: 650; }
+.automatic-tools { margin-bottom: 14px; padding: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--stone); }
+.automatic-tools-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 10px; }
+.automatic-tools-heading h2 { margin: 0; font-size: 16px; }
+.automatic-tools-heading p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+.automatic-tool-list { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--line); border-radius: 7px; overflow: hidden; background: var(--paper); }
+.automatic-tool-list article { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 13px; }
+.automatic-tool-list article + article { border-left: 1px solid var(--line); }
+.automatic-tool-list strong { font-size: 13px; }
+.automatic-tool-list p { margin: 4px 0 0; color: var(--muted); font-size: 12px; line-height: 18px; }
+.automatic-tool-list small { display: block; margin-top: 5px; color: var(--warning); font-size: 12px; }
+.automatic-tools-message { margin: 10px 0 0; color: var(--muted); font-size: 12px; }
+.tool-list { margin-top: 0; }
+.tool-row { width: 100%; min-height: 78px; border: 0; border-bottom: 1px solid var(--line); background: var(--paper); color: var(--text); text-align: left; }
+.tool-row:last-child { border-bottom: 0; }
+.tool-row:hover { background: var(--stone); }
+.tool-row strong { font-size: 13px !important; }
+.tool-row p { font-size: 12px !important; line-height: 18px; }
+.tool-row small, .tool-state { font-size: 12px !important; }
+.tool-list-empty { margin: 28px; color: var(--muted); font-size: 13px; text-align: center; }
+.safe-tools-note strong { font-size: 13px !important; }
+.safe-tools-note p { font-size: 12px !important; line-height: 18px; }
+
+@media (max-width: 1180px) {
+  .automatic-tool-list { grid-template-columns: 1fr; }
+  .automatic-tool-list article + article { border-top: 1px solid var(--line); border-left: 0; }
+}

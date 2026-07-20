@@ -9,10 +9,17 @@ const config = {
 };
 
 describe("renderer security", () => {
-  it("only trusts the configured renderer entry points", () => {
+  it("trusts the configured entry points and explicit production SPA routes", () => {
     expect(isTrustedRendererUrl("http://127.0.0.1:4312/?desktop=1", config)).toBe(true);
     expect(isTrustedRendererUrl("http://localhost:5173/?desktop=1", config)).toBe(true);
+    expect(isTrustedRendererUrl("http://localhost:5173/editor", config)).toBe(true);
+    expect(isTrustedRendererUrl("http://localhost:5173/settings/privacy", config)).toBe(true);
+    expect(isTrustedRendererUrl("http://localhost:5173/tools/skills/lore_extract/versions", config)).toBe(true);
+    expect(isTrustedRendererUrl("http://localhost:5173/tools/import", config)).toBe(true);
     expect(isTrustedRendererUrl("http://127.0.0.1:4312/api/agent/runs", config)).toBe(false);
+    expect(isTrustedRendererUrl("http://localhost:5173/terminal", config)).toBe(false);
+    expect(isTrustedRendererUrl("http://localhost:5173/traces", config)).toBe(false);
+    expect(isTrustedRendererUrl("http://localhost:5173/card_draw", config)).toBe(false);
     expect(isTrustedRendererUrl("http://localhost:5173/untrusted.html", config)).toBe(false);
   });
 

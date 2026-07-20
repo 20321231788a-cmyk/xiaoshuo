@@ -15,6 +15,7 @@ export function useConversationController(core: CoreWorkbenchController) {
     pendingReferenceResolution: core.pendingReferenceResolution,
     loadConversation: core.loadConversation,
     createConversation: core.createConversation,
+    deleteConversation: core.deleteConversation,
     updateConversationTitle: core.updateConversationTitle,
     summarizeConversation: core.summarizeConversation,
     pinCurrentDocumentToConversation: core.pinCurrentDocumentToConversation,

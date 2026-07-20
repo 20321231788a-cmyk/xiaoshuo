@@ -26,6 +26,7 @@ export function useDocumentController(core: CoreWorkbenchController) {
     toggleLedgerItem: core.toggleLedgerItem,
     updateActiveDocument: core.updateActiveDocument,
     saveActiveDocument: core.saveActiveDocument,
+    saveActiveDocumentCopy: core.saveActiveDocumentCopy,
     saveAllDocuments: core.saveAllDocuments,
     createProjectTreeFile: core.createProjectTreeFile,
     deleteProjectTreeFile: core.deleteProjectTreeFile

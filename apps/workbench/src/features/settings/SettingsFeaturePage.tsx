@@ -5,15 +5,19 @@ import type {
   WebsiteAiRechargeOption,
   WebsiteAiRechargeOrder
 } from "@xiaoshuo/shared";
-import { ArchiveRestore, Cable, Download, ExternalLink, Eye, EyeOff, Gift, RefreshCw, WalletCards } from "lucide-react";
+import { Archive, ArchiveRestore, Bot, Cable, Download, ExternalLink, Eye, EyeOff, Gift, Info, Keyboard, PenLine, RefreshCw, Shield, WalletCards } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { FormEvent as ReactFormEvent } from "react";
+import type { FormEvent as ReactFormEvent, ReactNode } from "react";
 import type { WorkbenchController } from "../../hooks/useWorkbenchController.js";
+import type { ProductRoute, SettingsSection } from "../../navigation.js";
+import { automaticFeatures, saveAutomaticFeature, type AutomaticConfigKey } from "../product/tools/automaticFeatures.js";
 
 const WEBSITE_HOME_URL = "https://matian.online/";
 const WEBSITE_REGISTER_URL = "https://matian.online/?page=api-relay&auth=register";
+type AiSettingsPanel = "model" | "retrieval" | "service" | "search";
 
-export function SettingsFeaturePage({ controller, onOpenVectorTest }: { controller: WorkbenchController; onOpenVectorTest?: () => void }) {
+export function SettingsFeaturePage({ controller, section, onNavigate, onOpenVectorTest }: { controller: WorkbenchController; section: SettingsSection; onNavigate: (route: ProductRoute) => void; onOpenVectorTest?: () => void }) {
   const config = controller.configDraft;
   const [showSecrets, setShowSecrets] = useState(false);
   const [websiteEmail, setWebsiteEmail] = useState("");
@@ -22,6 +26,8 @@ export function SettingsFeaturePage({ controller, onOpenVectorTest }: { controll
   const [websiteDialog, setWebsiteDialog] = useState<"redeem" | "recharge" | null>(null);
   const [redeemCode, setRedeemCode] = useState("");
   const [selectedRechargeIndex, setSelectedRechargeIndex] = useState(0);
+  const [automaticBusy, setAutomaticBusy] = useState<AutomaticConfigKey | "">("");
+  const [aiPanel, setAiPanel] = useState<AiSettingsPanel>(() => controller.configDraft?.ai_config_mode === "manual" ? "model" : "service");
   const websiteDashboard = controller.websiteAiDashboard;
   const rechargeOptions = websiteDashboard?.recharge_options || [];
   const rechargeOptionKey = rechargeOptions.map((item) => item.option_index).join("|");
@@ -56,6 +62,7 @@ export function SettingsFeaturePage({ controller, onOpenVectorTest }: { controll
 
   function switchMode(nextMode: AppConfig["ai_config_mode"]) {
     controller.patchConfig({ ai_config_mode: nextMode });
+    setAiPanel(nextMode === "website" ? "service" : "model");
     if (nextMode === "website") {
       void controller.refreshWebsiteAiDashboard();
     }
@@ -122,8 +129,35 @@ export function SettingsFeaturePage({ controller, onOpenVectorTest }: { controll
     }
   }
 
+  async function toggleAutomaticFeature(key: AutomaticConfigKey) {
+    if (!config || automaticBusy) return;
+    const feature = automaticFeatures.find((item) => item.key === key);
+    if (!feature) return;
+    setAutomaticBusy(key);
+    try {
+      await saveAutomaticFeature({
+        feature,
+        enabled: !Boolean(config[key]),
+        skills: controller.snapshot?.skills || [],
+        setSkillEnabled: controller.setSkillEnabled,
+        patchAndSaveConfig: controller.patchAndSaveConfig
+      });
+    } finally {
+      setAutomaticBusy("");
+    }
+  }
+
+  if (section !== "ai") {
+    return (
+      <SettingsShell controller={controller} section={section} onNavigate={onNavigate}>
+        <SettingsSecondaryPage controller={controller} section={section} automaticBusy={automaticBusy} onToggleAutomatic={toggleAutomaticFeature} />
+      </SettingsShell>
+    );
+  }
+
   return (
-    <section className="xw-feature-page">
+    <SettingsShell controller={controller} section={section} onNavigate={onNavigate}>
+    <section className="xw-feature-page settings-ai-page">
       <div className="xw-settings-header">
         <div>
           <strong>AI 配置</strong>
@@ -150,11 +184,24 @@ export function SettingsFeaturePage({ controller, onOpenVectorTest }: { controll
           )}
         </div>
       </div>
-      {mode === "manual" ? (
-        <ManualAiSettings config={activeConfig} profile={manualProfile} controller={controller} showSecrets={showSecrets} onProfileChange={patchManualProfile} onOpenVectorTest={onOpenVectorTest} />
-      ) : (
-        <div className="xw-settings-list ai">
-          <section className="xw-settings-section">
+      <div className="ai-config-tabs" role="tablist" aria-label="AI 配置分区">
+        {([
+          ["model", "模型"],
+          ["retrieval", "本地检索"],
+          ["service", "网站服务"],
+          ["search", "联网搜索"]
+        ] as Array<[AiSettingsPanel, string]>).map(([id, label]) => (
+          <button key={id} type="button" role="tab" aria-selected={aiPanel === id} className={aiPanel === id ? "active" : ""} onClick={() => setAiPanel(id)}>
+            {label}
+          </button>
+        ))}
+      </div>
+      <div className="ai-config-panel" role="tabpanel" tabIndex={0} aria-label={`${aiPanelLabel(aiPanel)}配置`}>
+        {mode === "manual" ? (
+          <ManualAiSettings panel={aiPanel} config={activeConfig} profile={manualProfile} controller={controller} showSecrets={showSecrets} onProfileChange={patchManualProfile} onOpenVectorTest={onOpenVectorTest} />
+        ) : (
+          <div className="xw-settings-list ai">
+          {aiPanel === "service" && <section className="xw-settings-section">
             <div className="xw-settings-section-head">
               <strong>网站账号</strong>
               <span>{websiteLoggedIn ? "已接入网站个人页中转配置。" : "使用 QQ 邮箱登录后读取个人页模型和额度。"}</span>
@@ -211,9 +258,9 @@ export function SettingsFeaturePage({ controller, onOpenVectorTest }: { controll
                 </button>
               </form>
             )}
-          </section>
+          </section>}
 
-          <section className="xw-settings-section">
+          {aiPanel === "model" && <section className="xw-settings-section">
             <div className="xw-settings-section-head">
               <strong>网站模型</strong>
               <span>软件会在本地隐藏写入中转连接信息，界面只保留可选模型。</span>
@@ -226,24 +273,35 @@ export function SettingsFeaturePage({ controller, onOpenVectorTest }: { controll
                 options={websiteModels.map((item) => ({ value: item.id, label: item.provider ? `${item.name} · ${item.provider}` : item.name }))}
                 onChange={(value) => patchWebsiteProfile({ model: value })}
               />
-              {websiteEmbeddingModels.length > 0 && (
-                <SelectSettingRow
-                  label="向量模型"
-                  value={websiteEmbeddingModel}
-                  placeholder="可选"
-                  options={websiteEmbeddingModels.map((item) => ({ value: item.id, label: item.provider ? `${item.name} · ${item.provider}` : item.name }))}
-                  onChange={(value) => patchWebsiteProfile({ embedding_model: value, embedding_enabled: Boolean(value) })}
-                />
-              )}
               <SliderSettingRow label="temperature" value={websiteTemp} min={0} max={2} step={0.01} onChange={(value) => patchWebsiteProfile({ temp: value })} />
               <SliderSettingRow label="top_p" value={websiteTopP} min={0} max={1} step={0.01} onChange={(value) => patchWebsiteProfile({ top_p: value })} />
             </div>
-          </section>
+          </section>}
 
-          <WebsiteWebSearchSettings config={activeConfig} controller={controller} />
-        </div>
-      )}
-      <SoftwareUpdateSettings />
+          {aiPanel === "retrieval" && (
+            <section className="xw-settings-section">
+              <div className="xw-settings-section-head">
+                <strong>本地检索与向量召回</strong>
+                <span>为项目记忆、资料与长文上下文选择向量模型和召回范围。</span>
+              </div>
+              <div className="xw-settings-grid">
+                <SelectSettingRow
+                  label="向量模型"
+                  value={websiteEmbeddingModel}
+                  placeholder="网站账号暂未提供向量模型"
+                  options={websiteEmbeddingModels.map((item) => ({ value: item.id, label: item.provider ? `${item.name} · ${item.provider}` : item.name }))}
+                  onChange={(value) => patchWebsiteProfile({ embedding_model: value, embedding_enabled: Boolean(value) })}
+                />
+                <NumberSettingRow label="召回条数" value={activeConfig.vector_top_k || 10} min={1} max={40} onChange={(value) => controller.patchConfig({ vector_top_k: value })} />
+                <NumberSettingRow label="召回上下文字符" value={activeConfig.vector_context_chars || 9000} min={1000} max={80000} onChange={(value) => controller.patchConfig({ vector_context_chars: value })} />
+              </div>
+            </section>
+          )}
+
+          {aiPanel === "search" && <WebsiteWebSearchSettings config={activeConfig} controller={controller} />}
+          </div>
+        )}
+      </div>
       <div className="xw-feature-actions">
         {mode === "manual" ? (
           <>
@@ -285,7 +343,150 @@ export function SettingsFeaturePage({ controller, onOpenVectorTest }: { controll
         />
       )}
     </section>
+    </SettingsShell>
   );
+}
+
+const settingsNavigation: Array<{ id: SettingsSection; label: string; icon: LucideIcon }> = [
+  { id: "ai", label: "AI 配置", icon: Bot },
+  { id: "writing", label: "写作体验", icon: PenLine },
+  { id: "backup", label: "项目与备份", icon: Archive },
+  { id: "privacy", label: "隐私与数据", icon: Shield },
+  { id: "shortcuts", label: "快捷键", icon: Keyboard },
+  { id: "about", label: "关于 ArcWriter", icon: Info }
+];
+
+function SettingsShell({ controller, section, onNavigate, children }: { controller: WorkbenchController; section: SettingsSection; onNavigate: (route: ProductRoute) => void; children: ReactNode }) {
+  const active = settingsNavigation.find((item) => item.id === section) || settingsNavigation[0]!;
+  const canSave = section === "ai" || section === "writing" || section === "privacy";
+  return (
+    <div className="settings-layout">
+      <aside className="settings-nav" aria-label="设置分类">
+        <strong>设置</strong>
+        <nav>
+          {settingsNavigation.map((item) => {
+            const Icon = item.icon;
+            return (
+              <button key={item.id} type="button" className={section === item.id ? "active" : ""} aria-current={section === item.id ? "page" : undefined} onClick={() => onNavigate({ feature: "settings", section: item.id })}>
+                <Icon size={16} /><span>{item.label}</span>
+              </button>
+            );
+          })}
+        </nav>
+      </aside>
+      <main className="settings-main">
+        <header className="settings-page-header">
+          <div><h1>{active.label}</h1><p>{settingsDescription(section)}</p></div>
+          {canSave && <button className="button primary" type="button" onClick={() => void controller.saveConfig()} disabled={controller.configBusy}>{controller.configBusy ? "保存中" : "保存设置"}</button>}
+        </header>
+        <div className={`settings-page-body${section === "ai" ? " ai" : ""}`}>
+          {section !== "ai" && controller.configMessage && <p className="settings-save-message" role="status">{controller.configMessage}</p>}
+          {children}
+        </div>
+      </main>
+    </div>
+  );
+}
+
+function aiPanelLabel(panel: AiSettingsPanel) {
+  if (panel === "model") return "模型";
+  if (panel === "retrieval") return "本地检索";
+  if (panel === "service") return "网站服务";
+  return "联网搜索";
+}
+
+function SettingsSecondaryPage({ controller, section, automaticBusy, onToggleAutomatic }: {
+  controller: WorkbenchController;
+  section: Exclude<SettingsSection, "ai">;
+  automaticBusy: AutomaticConfigKey | "";
+  onToggleAutomatic: (key: AutomaticConfigKey) => Promise<void>;
+}) {
+  const config = controller.configDraft;
+  if (!config) return null;
+
+  if (section === "writing") {
+    return (
+      <div className="settings-page-sections">
+        <section className="settings-section">
+          <div className="settings-section-title"><div><h2>自动写作处理</h2><p>与创作工具中的“写作与审阅”开关同步。</p></div></div>
+          <div className="settings-control-list">
+            <ToggleSettingRow label="自动提取明确设定" checked={Boolean(config.auto_lore_extract_enabled)} disabled={Boolean(automaticBusy)} onChange={() => void onToggleAutomatic("auto_lore_extract_enabled")} />
+            <ToggleSettingRow label="降低模板化表达" checked={Boolean(config.humanizer_enabled)} disabled={Boolean(automaticBusy)} onChange={() => void onToggleAutomatic("humanizer_enabled")} />
+            <ToggleSettingRow label="生成后一致性复查" checked={Boolean(config.enable_consistency_revision)} disabled={Boolean(automaticBusy)} onChange={() => void onToggleAutomatic("enable_consistency_revision")} />
+          </div>
+        </section>
+        <section className="settings-section">
+          <div className="settings-section-title"><div><h2>上下文与复查</h2><p>控制生成时读取的最大内容量和触发复查的分数。</p></div></div>
+          <div className="settings-grid">
+            <NumberSettingRow label="最大上下文字符" value={config.context_limit_chars || 262144} min={8192} max={1048576} onChange={(value) => controller.patchConfig({ context_limit_chars: value })} />
+            <NumberSettingRow label="一致性分数阈值" value={config.consistency_revision_score || 80} min={1} max={100} onChange={(value) => controller.patchConfig({ consistency_revision_score: value })} />
+          </div>
+        </section>
+      </div>
+    );
+  }
+
+  if (section === "backup") {
+    return (
+      <div className="settings-page-sections">
+        <section className="settings-section">
+          <div className="settings-section-title"><div><h2>项目备份</h2><p>导出完整项目归档，或从已有归档恢复项目。</p></div></div>
+          <div className="settings-action-row">
+            <button className="button primary" type="button" onClick={() => void controller.exportCurrentProject()} disabled={controller.projectBusy || !controller.snapshot?.currentProject.path}><Download size={15} />导出当前项目</button>
+            <button className="button secondary" type="button" onClick={() => void controller.importProjectArchive()} disabled={controller.projectBusy}><ArchiveRestore size={15} />从归档恢复</button>
+          </div>
+          {controller.projectMessage && <p className="settings-inline-note" role="status">{controller.projectMessage}</p>}
+        </section>
+        <section className="settings-section">
+          <div className="settings-section-title"><div><h2>本地保存</h2><p>正文、设定和版本记录保存在当前项目目录；切换项目时会先检查未保存内容。</p></div></div>
+          <p className="settings-inline-note">当前项目：{controller.snapshot?.currentProject.name || "尚未打开项目"}</p>
+        </section>
+      </div>
+    );
+  }
+
+  if (section === "privacy") {
+    return (
+      <div className="settings-page-sections">
+        <section className="settings-section">
+          <div className="settings-section-title"><div><h2>联网与文件访问</h2><p>联网搜索默认关闭；工具只能访问当前项目和你明确选择的文件。</p></div></div>
+          <div className="settings-control-list">
+            <ToggleSettingRow label="允许联网素材搜索" checked={Boolean(config.web_search_enabled)} onChange={() => controller.patchConfig({ web_search_enabled: !config.web_search_enabled })} />
+          </div>
+        </section>
+        <section className="settings-section">
+          <div className="settings-section-title"><div><h2>敏感配置</h2><p>密钥默认遮蔽显示，并保存在本机配置中。</p></div></div>
+        </section>
+      </div>
+    );
+  }
+
+  if (section === "shortcuts") {
+    return (
+      <section className="settings-section">
+        <div className="settings-section-title"><div><h2>键盘快捷键</h2><p>快捷键在编辑和浏览页面中保持一致。</p></div></div>
+        <dl className="shortcut-list">
+          <div><dt>保存全部文档</dt><dd><kbd>Ctrl</kbd><kbd>S</kbd></dd></div>
+          <div><dt>搜索项目与命令</dt><dd><kbd>Ctrl</kbd><kbd>K</kbd></dd></div>
+          <div><dt>关闭弹层</dt><dd><kbd>Esc</kbd></dd></div>
+        </dl>
+      </section>
+    );
+  }
+
+  return <SoftwareUpdateSettings />;
+}
+
+function settingsDescription(section: SettingsSection): string {
+  const descriptions: Record<SettingsSection, string> = {
+    ai: "配置写作模型、审阅模型、本地检索与网站服务。",
+    writing: "调整自动处理、写作上下文与一致性复查。",
+    backup: "导出、恢复并确认项目的本地保存位置。",
+    privacy: "控制联网能力、文件访问范围与敏感数据显示。",
+    shortcuts: "查看工作台当前支持的键盘操作。",
+    about: "查看版本并检查桌面软件更新。"
+  };
+  return descriptions[section];
 }
 
 function SoftwareUpdateSettings() {
@@ -714,6 +915,7 @@ function WebsiteRechargeDialog({
 }
 
 function ManualAiSettings({
+  panel,
   config,
   profile,
   controller,
@@ -721,6 +923,7 @@ function ManualAiSettings({
   onProfileChange,
   onOpenVectorTest
 }: {
+  panel: AiSettingsPanel;
   config: AppConfig;
   profile: Partial<AiConfigProfile>;
   controller: WorkbenchController;
@@ -730,7 +933,7 @@ function ManualAiSettings({
 }) {
   return (
     <div className="xw-settings-list ai">
-      <section className="xw-settings-section">
+      {panel === "model" && <section className="xw-settings-section">
         <div className="xw-settings-section-head">
           <strong>主模型</strong>
           <span>聊天、写作和技能执行的默认线路</span>
@@ -742,9 +945,9 @@ function ManualAiSettings({
           <SliderSettingRow label="temperature" value={profile.temp ?? 0.7} min={0} max={2} step={0.01} onChange={(value) => onProfileChange({ temp: value })} />
           <SliderSettingRow label="top_p" value={profile.top_p ?? 1} min={0} max={1} step={0.01} onChange={(value) => onProfileChange({ top_p: value })} />
         </div>
-      </section>
+      </section>}
 
-      <section className="xw-settings-section">
+      {panel === "model" && <section className="xw-settings-section">
         <div className="xw-settings-section-head">
           <strong>副模型</strong>
           <span>可用于备用线路或轻量任务，未填写时继续使用主模型</span>
@@ -756,9 +959,9 @@ function ManualAiSettings({
           <SliderSettingRow label="temperature" value={profile.secondary_temp ?? 0.5} min={0} max={2} step={0.01} onChange={(value) => onProfileChange({ secondary_temp: value })} />
           <SliderSettingRow label="top_p" value={profile.secondary_top_p ?? 1} min={0} max={1} step={0.01} onChange={(value) => onProfileChange({ secondary_top_p: value })} />
         </div>
-      </section>
+      </section>}
 
-      <section className="xw-settings-section">
+      {panel === "retrieval" && <section className="xw-settings-section">
         <div className="xw-settings-section-head with-action">
           <div>
             <strong>Embedding 与向量召回</strong>
@@ -799,9 +1002,9 @@ function ManualAiSettings({
           <NumberSettingRow label="召回上下文字符" value={config.vector_context_chars || 9000} min={1000} max={80000} onChange={(value) => controller.patchConfig({ vector_context_chars: value })} />
         </div>
         {controller.embeddingTestMessage && <p className="xw-setting-inline-message">{controller.embeddingTestMessage}</p>}
-      </section>
+      </section>}
 
-      <section className="xw-settings-section">
+      {panel === "search" && <section className="xw-settings-section">
         <div className="xw-settings-section-head">
           <strong>联网素材搜索</strong>
           <span>优先使用 Bing，为会话和生成任务补充外部素材来源</span>
@@ -822,23 +1025,20 @@ function ManualAiSettings({
           <NumberSettingRow label="搜索超时秒数" value={config.web_search_timeout || 10} min={3} max={60} onChange={(value) => controller.patchConfig({ web_search_timeout: value })} />
           <NumberSettingRow label="素材上下文字符" value={config.web_search_context_chars || 3000} min={800} max={8000} onChange={(value) => controller.patchConfig({ web_search_context_chars: value })} />
         </div>
-      </section>
+      </section>}
 
-      <section className="xw-settings-section">
+      {panel === "retrieval" && <section className="xw-settings-section">
         <div className="xw-settings-section-head">
-          <strong>写作上下文与修订</strong>
-          <span>控制生成上下文、设定提取、文本自然度和一致性复查</span>
+          <strong>上下文与复查阈值</strong>
+          <span>自动写作开关统一在“写作体验”中管理</span>
         </div>
         <div className="xw-settings-grid">
-          <ToggleSettingRow label="自动提取明确设定" checked={Boolean(config.auto_lore_extract_enabled)} onChange={() => controller.patchConfig({ auto_lore_extract_enabled: !config.auto_lore_extract_enabled })} />
-          <ToggleSettingRow label="降低模板化表达" checked={Boolean(config.humanizer_enabled)} onChange={() => controller.patchConfig({ humanizer_enabled: !config.humanizer_enabled })} />
-          <ToggleSettingRow label="生成后运行一致性复查" checked={Boolean(config.enable_consistency_revision)} onChange={() => controller.patchConfig({ enable_consistency_revision: !config.enable_consistency_revision })} />
           <NumberSettingRow label="最大上下文字符" value={config.context_limit_chars || 262144} min={8192} max={1048576} onChange={(value) => controller.patchConfig({ context_limit_chars: value })} />
           <NumberSettingRow label="触发修订分数" value={config.consistency_revision_score || 80} min={1} max={100} onChange={(value) => controller.patchConfig({ consistency_revision_score: value })} />
         </div>
-      </section>
+      </section>}
 
-      <section className="xw-settings-section">
+      {panel === "service" && <section className="xw-settings-section">
         <div className="xw-settings-section-head">
           <strong>授权</strong>
           <span>保存后可刷新当前设备授权状态</span>
@@ -846,7 +1046,7 @@ function ManualAiSettings({
         <div className="xw-settings-grid">
           <SecretSettingRow label="授权账号 Key" value={profile.license_account_key || ""} visible={showSecrets} onChange={(value) => onProfileChange({ license_account_key: value })} />
         </div>
-      </section>
+      </section>}
     </div>
   );
 }
@@ -1021,11 +1221,11 @@ function NumberSettingRow({
   );
 }
 
-function ToggleSettingRow({ label, checked, onChange }: { label: string; checked: boolean; onChange: () => void }) {
+function ToggleSettingRow({ label, checked, disabled = false, onChange }: { label: string; checked: boolean; disabled?: boolean; onChange: () => void }) {
   return (
     <label className="xw-setting-row">
       <span>{label}</span>
-      <input type="checkbox" checked={checked} onChange={onChange} />
+      <input type="checkbox" checked={checked} disabled={disabled} onChange={onChange} />
     </label>
   );
 }

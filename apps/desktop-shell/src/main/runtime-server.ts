@@ -34,6 +34,8 @@ import {
   handleJobRoutes,
   handleProjectDocumentRoutes,
   handleProjectLibraryRoutes,
+  handleReviewReportRoutes,
+  handleStoryPlanningRoutes,
   handleProjectReferenceRoutes,
   handleSkillRoutes,
   handleVectorRoutes,
@@ -225,6 +227,24 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
   }
 
   if (await handleProjectLibraryRoutes(request, response, pathname, context, {
+    ensureProjectSessionCurrent,
+    ensureDocumentSession,
+    readJsonBody,
+    writeJson
+  })) {
+    return;
+  }
+
+  if (await handleStoryPlanningRoutes(request, response, pathname, context, {
+    ensureProjectSessionCurrent,
+    ensureDocumentSession,
+    readJsonBody,
+    writeJson
+  })) {
+    return;
+  }
+
+  if (await handleReviewReportRoutes(request, response, pathname, context, {
     ensureProjectSessionCurrent,
     ensureDocumentSession,
     readJsonBody,

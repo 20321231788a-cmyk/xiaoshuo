@@ -58,7 +58,7 @@ export function LedgerFeaturePage({ controller, onSelectFeature }: { controller:
             text: scanText || activeDocument?.content || "",
             source_path: scanPath || activeDocument?.path || "",
             instruction: scanInstruction,
-            write_result: true
+            write_result: false
           })}
           disabled={controller.operationsBusy}
         >
@@ -70,7 +70,7 @@ export function LedgerFeaturePage({ controller, onSelectFeature }: { controller:
           <article key={item.id} className={`xw-feature-card ${item.status === "closed" ? "muted" : ""}`}>
             <div className="xw-feature-card-head">
               <strong>{item.desc}</strong>
-              <small>{item.status === "closed" ? "已关闭" : "未关闭"}</small>
+              <small>{ledgerPhaseLabel(item.phase, item.status)}</small>
             </div>
             <span>{item.updated_at || item.created_at}</span>
             <div className="xw-feature-actions">
@@ -96,4 +96,12 @@ export function LedgerFeaturePage({ controller, onSelectFeature }: { controller:
       {!ledger.length && <p className="xw-feature-empty">暂无伏笔记录</p>}
     </section>
   );
+}
+
+function ledgerPhaseLabel(phase: "planned" | "planted" | "due" | "resolved" | undefined, status: "open" | "closed"): string {
+  if (phase === "planned") return "待埋设";
+  if (phase === "planted") return "已埋设";
+  if (phase === "due") return "待回应";
+  if (phase === "resolved") return "已回应";
+  return status === "closed" ? "已回应" : "已埋设";
 }

@@ -4,6 +4,8 @@ import type { ChatCompletionMessage } from "@xiaoshuo/model-client";
 import type { AgentRunRequest, AgentRunResponse, ConversationDetail } from "@xiaoshuo/shared";
 import { GraphMemory, type CheckGraphDraftConsistencyResult } from "@xiaoshuo/vector-service";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { buildConsistencyCheckPrompt, parseConsistencyCheckResult } from "../prompts/consistency.js";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
 import { throwIfAborted } from "../cancellation.js";
@@ -169,6 +171,10 @@ async function resolveConsistencyChapterOutline(request: AgentRunRequest, contex
 }
 
 async function resolveWorkflowSourceText(request: AgentRunRequest, context: WorkflowRunContext): Promise<string> {
+  if ((request as { review_scope?: unknown }).review_scope === "project") {
+    const projectText = await readProjectBodyText(context.projectRoot);
+    if (projectText) return projectText;
+  }
   const direct = String(request.selection || "").trim();
   if (direct) {
     return direct;
@@ -199,6 +205,38 @@ async function resolveWorkflowSourceText(request: AgentRunRequest, context: Work
     }
   }
   return "";
+}
+
+async function readProjectBodyText(projectRoot: string): Promise<string> {
+  const bodyDir = path.join(projectRoot, "02_正文");
+  const entries = await fs.readdir(bodyDir, { withFileTypes: true }).catch(() => []);
+  const chapters = entries
+    .filter((entry) => entry.isFile() && /\.(?:txt|md)$/i.test(entry.name))
+    .map((entry) => entry.name)
+    .sort(compareChapterFiles);
+  let remaining = SOURCE_IMPORT_CHARS;
+  const sections: string[] = [];
+  for (const name of chapters) {
+    if (remaining <= 0) break;
+    const content = await fs.readFile(path.join(bodyDir, name), "utf8").catch(() => "");
+    const text = String(content || "").trim().slice(0, remaining);
+    if (!text) continue;
+    sections.push(`【${name}】\n${text}`);
+    remaining -= text.length;
+  }
+  return sections.join("\n\n");
+}
+
+function compareChapterFiles(left: string, right: string): number {
+  const leftNumber = chapterNumber(left);
+  const rightNumber = chapterNumber(right);
+  if (leftNumber !== rightNumber) return leftNumber - rightNumber;
+  return left.localeCompare(right, "zh-CN");
+}
+
+function chapterNumber(name: string): number {
+  const match = /(?:第\s*)?(\d+)\s*章/.exec(name) || /(\d+)/.exec(name);
+  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
 }
 
 function resolveWorkflowSourcePath(request: AgentRunRequest): string {

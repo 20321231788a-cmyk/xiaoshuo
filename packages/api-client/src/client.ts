@@ -392,6 +392,11 @@ export function createApiClient(options: ApiClientOptions) {
         pathParams: { conversation_id: conversationId },
         body: JSON.stringify({ title })
       }),
+    deleteConversation: (conversationId: string) =>
+      requestWithSchema("/api/conversations/{conversation_id}", z.object({ id: z.string(), deleted: z.literal(true) }), {
+        method: "DELETE",
+        pathParams: { conversation_id: conversationId }
+      }),
     summarizeConversation: (conversationId: string, useModel = false) =>
       requestWithSchema("/api/conversations/{conversation_id}/summarize", conversationDetailSchema, {
         method: "POST",

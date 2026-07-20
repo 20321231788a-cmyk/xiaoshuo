@@ -5,6 +5,7 @@ export const ledgerItemSchema = z
     id: z.string(),
     desc: z.string(),
     status: z.enum(["open", "closed"]),
+    phase: z.enum(["planned", "planted", "due", "resolved"]).optional(),
     created_at: z.string(),
     updated_at: z.string()
   })

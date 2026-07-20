@@ -10,5 +10,7 @@ export * from "./schemas/project.js";
 export * from "./schemas/skill.js";
 export * from "./schemas/workbench.js";
 export * from "./schemas/library.js";
+export * from "./schemas/story-planning.js";
+export * from "./schemas/review-report.js";
 export * from "./api.js";
 export * from "./desktop.js";

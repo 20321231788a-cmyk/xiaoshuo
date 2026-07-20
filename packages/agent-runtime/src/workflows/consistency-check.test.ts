@@ -151,6 +151,36 @@ describe("ConsistencyCheckWorkflow", () => {
     expect(result.skill_result?.result).toContain('"graph_score": 75');
   });
 
+  it("checks all project chapters when the author requests a full-book review", async () => {
+    await fs.writeFile(path.join(tempDir, "02_正文", "第01章.txt"), "第一章正文", "utf8");
+    await fs.writeFile(path.join(tempDir, "02_正文", "第02章.md"), "第二章正文", "utf8");
+    await fs.writeFile(path.join(tempDir, "02_正文", "第10章.txt"), "第十章正文", "utf8");
+    let prompt = "";
+    const workflow = new ConsistencyCheckWorkflow();
+    const context = createWorkflowContext({
+      requestCompletion: async (_config, messages) => {
+        prompt = String(messages.at(-1)?.content || "");
+        return JSON.stringify({ score: 90, risks: [], reason: "全书连续性稳定" });
+      }
+    });
+
+    await workflow.runAgent({
+      conversation_id: "",
+      content: "全书一致性检查",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "consistency_check",
+      attachment_ids: [],
+      review_scope: "project"
+    } as any, context);
+
+    expect(prompt).toContain("第一章正文");
+    expect(prompt).toContain("第二章正文");
+    const draftSection = prompt.split("【待审查正文】")[1] || "";
+    expect(draftSection.indexOf("第二章正文")).toBeLessThan(draftSection.indexOf("第十章正文"));
+  });
+
   it("keeps consistency_check successful when GraphMemory is unavailable", async () => {
     await fs.writeFile(path.join(tempDir, "00_设定集", ".agent"), "not a directory", "utf8");
     const workflow = new ConsistencyCheckWorkflow();

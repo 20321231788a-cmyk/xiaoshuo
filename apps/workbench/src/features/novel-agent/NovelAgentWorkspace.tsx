@@ -50,6 +50,7 @@ export function NovelAgentWorkspace({
   activeContent,
   sourceRevision,
   initialTab = "room",
+  showTabs = true,
   onOpenSkills
 }: {
   projectRoot: string;
@@ -57,6 +58,8 @@ export function NovelAgentWorkspace({
   activeContent: string;
   sourceRevision: string;
   initialTab?: NovelWorkspaceTab;
+  /** Product pages own navigation; retain tabs only for the embedded legacy surface. */
+  showTabs?: boolean;
   onOpenSkills: () => void;
 }) {
   const api = window.xiaoshuoDesktop?.novelAgent;
@@ -113,7 +116,7 @@ export function NovelAgentWorkspace({
 
   return (
     <section className="xw-feature-page xw-novel-agent-page">
-      <div className="xw-novel-agent-tabs" role="tablist" aria-label="小说 Agent 工作区">
+      {showTabs && <div className="xw-novel-agent-tabs" role="tablist" aria-label="小说 Agent 工作区">
         {([
           ["room", "编辑室"],
           ["tools", "工具与动作"],
@@ -126,7 +129,7 @@ export function NovelAgentWorkspace({
         <button type="button" className="xw-icon-button" title="刷新" aria-label="刷新小说 Agent 状态" onClick={() => void run(() => refresh())} disabled={!project || busy}>
           <RefreshCw size={15} />
         </button>
-      </div>
+      </div>}
 
       {tab === "room" && project && (
         <div id="novel-panel-room" role="tabpanel" aria-labelledby="novel-tab-room"><RoomPanel

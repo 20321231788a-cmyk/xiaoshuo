@@ -2,22 +2,26 @@ import type { ReactNode } from "react";
 
 export function AppShell({
   navigation,
-  left,
+  topbar,
   center,
-  dialog
+  dialog,
+  navigationCollapsed = false
 }: {
   navigation: ReactNode;
-  left?: ReactNode;
+  topbar: ReactNode;
   center: ReactNode;
   dialog?: ReactNode;
+  navigationCollapsed?: boolean;
 }) {
   return (
-    <div className="shell xw-shell">
-      <main className={`xw-workspace-shell ${left ? "with-project-sidebar" : "page-layout"}`}>
-        {navigation}
-        {left}
-        <section className="xw-center surface">{center}</section>
-      </main>
+    <div className={`app-shell${navigationCollapsed ? " nav-collapsed" : ""}`}>
+      {navigation}
+      <section className="app-main">
+        {topbar}
+        <div className="page-slot">
+          {center}
+        </div>
+      </section>
       {dialog}
     </div>
   );

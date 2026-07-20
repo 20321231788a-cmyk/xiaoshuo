@@ -38,6 +38,7 @@ export function useOperationsController(core: CoreWorkbenchController) {
     discardPendingSkillDraft: core.discardPendingSkillDraft,
     openSkillFolder: core.openSkillFolder,
     deleteOrDisableSelectedSkill: core.deleteOrDisableSelectedSkill,
+    setSkillEnabled: core.setSkillEnabled,
     restoreSelectedBuiltinSkill: core.restoreSelectedBuiltinSkill,
     updateSkillDescription: core.updateSkillDescription,
     cloneSelectedSkill: core.cloneSelectedSkill,

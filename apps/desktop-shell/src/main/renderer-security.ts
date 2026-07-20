@@ -17,17 +17,44 @@ export function isTrustedRendererUrl(value: string, config: RendererTrustConfig)
 
     const runtime = new URL(config.runtimeUrl);
     if (url.origin === runtime.origin) {
-      return url.pathname === runtime.pathname;
+      return isTrustedWorkbenchPath(url.pathname, runtime.pathname);
     }
 
     if (!config.rendererUrl) {
       return false;
     }
     const renderer = new URL(config.rendererUrl);
-    return url.origin === renderer.origin && url.pathname === renderer.pathname;
+    return url.origin === renderer.origin && isTrustedWorkbenchPath(url.pathname, renderer.pathname);
   } catch {
     return false;
   }
+}
+
+const PRODUCT_PATHS = new Set([
+  "/home",
+  "/editor",
+  "/assistant",
+  "/outline",
+  "/clues",
+  "/sources",
+  "/style",
+  "/studio",
+  "/review",
+  "/memory",
+  "/disassembly",
+  "/batch",
+  "/transfer",
+  "/tools",
+  "/tasks"
+]);
+
+function isTrustedWorkbenchPath(pathname: string, entrypoint: string): boolean {
+  if (pathname === entrypoint) return true;
+  if (entrypoint !== "/" && entrypoint !== "/index.html") return false;
+  if (PRODUCT_PATHS.has(pathname)) return true;
+  if (pathname === "/tools/import") return true;
+  if (/^\/settings\/(?:ai|writing|backup|privacy|shortcuts|about)$/.test(pathname)) return true;
+  return /^\/tools\/skills\/[^/]+(?:\/(?:edit|versions))?$/.test(pathname);
 }
 
 function trustedFileEntrypoints(config: RendererTrustConfig): string[] {

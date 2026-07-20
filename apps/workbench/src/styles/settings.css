@@ -1,0 +1,83 @@
+.settings-layout { height: 100%; min-height: 0; display: grid; grid-template-columns: 190px minmax(0, 1fr); overflow: hidden; background: var(--paper); }
+.settings-nav { min-height: 0; overflow-y: auto; padding: 18px 10px; border-right: 1px solid var(--line); background: var(--stone); }
+.settings-nav > strong { display: block; padding: 0 10px 12px; font-size: 16px; }
+.settings-nav nav { display: grid; gap: 3px; }
+.settings-nav nav button { width: 100%; min-height: 38px; display: flex; align-items: center; gap: 9px; padding: 0 10px; border: 0; border-radius: 5px; background: transparent; color: var(--text); font-size: 13px; text-align: left; }
+.settings-nav nav button:hover { background: var(--stone-deep); }
+.settings-nav nav button.active { background: var(--accent-soft); color: var(--accent); font-weight: 650; }
+.settings-main { min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0, 1fr); overflow: hidden; padding: 0 32px; }
+.settings-main > * { width: min(960px, 100%); }
+.settings-page-header { z-index: var(--aw-z-sticky); min-height: 86px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 18px 0 14px; border-bottom: 1px solid var(--line); background: var(--paper); }
+.settings-page-header h1 { margin: 0; font-size: 20px; }
+.settings-page-header p { margin: 4px 0 0; color: var(--muted); font-size: 13px; line-height: 19px; }
+.settings-save-message, .settings-inline-note { color: var(--muted); font-size: 13px; line-height: 20px; }
+.settings-save-message { margin: 10px 0; color: var(--success); }
+.settings-page-body { min-height: 0; overflow-y: auto; padding-bottom: 36px; scrollbar-gutter: stable; }
+.settings-page-body.ai { overflow: hidden; padding-bottom: 0; }
+.settings-page-sections { display: grid; gap: 14px; padding-top: 18px; }
+.settings-section { width: 100%; max-width: none; margin: 0; padding: 18px 20px; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
+.settings-section-title { margin-bottom: 14px; }
+.settings-section-title h2 { margin: 0; font-size: 16px; }
+.settings-section-title p { margin: 4px 0 0; color: var(--muted); font-size: 13px; line-height: 19px; }
+.settings-control-list { display: grid; gap: 0; }
+.settings-main .xw-setting-row { min-height: 48px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; margin: 0; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: var(--text); font-weight: 500; }
+.settings-main .xw-setting-row input[type="checkbox"] { width: 18px; height: 18px; margin: 0; }
+.settings-control-list .xw-setting-row { border-bottom: 1px solid var(--line); border-radius: 0; }
+.settings-control-list .xw-setting-row:last-child { border-bottom: 0; }
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.settings-action-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.shortcut-list { margin: 0; }
+.shortcut-list div { min-height: 48px; display: flex; align-items: center; justify-content: space-between; gap: 18px; border-top: 1px solid var(--line); }
+.shortcut-list dt { font-size: 13px; }
+.shortcut-list dd { display: flex; gap: 4px; margin: 0; }
+.shortcut-list kbd { font-size: 12px; }
+
+.settings-ai-page { height: 100%; min-height: 0; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: 0; overflow: hidden; padding: 18px 0 0; }
+.settings-ai-page .xw-settings-header { min-height: 42px; margin-bottom: 12px; }
+.settings-ai-page .xw-settings-header > div:first-child { display: none; }
+.ai-config-tabs { height: 42px; display: flex; align-items: end; gap: 4px; margin-bottom: 0; border-bottom: 1px solid var(--line); overflow-x: auto; }
+.ai-config-tabs button { flex: 0 0 auto; min-width: 92px; min-height: 36px; padding: 0 12px; border: 0; border-bottom: 2px solid transparent; border-radius: 5px 5px 0 0; background: transparent; color: var(--muted); font-size: 13px; }
+.ai-config-tabs button:hover { background: var(--stone); color: var(--text); }
+.ai-config-tabs button.active { border-bottom-color: var(--accent); color: var(--accent); font-weight: 650; }
+.ai-config-panel { min-width: 0; min-height: 0; overflow-y: auto; padding: 14px 4px 14px 0; scrollbar-gutter: stable; }
+.ai-config-panel:focus-visible { outline: 2px solid var(--accent-mid); outline-offset: -2px; }
+.settings-ai-page .xw-settings-list { display: grid; gap: 14px; }
+.settings-main .xw-settings-section { max-width: none; margin: 0; padding: 18px 20px; border-radius: 8px; }
+.settings-main .xw-settings-section-head strong { font-size: 15px; }
+.settings-main .xw-settings-section-head span,
+.settings-main .xw-setting-inline-message,
+.settings-main .xw-feature-empty,
+.settings-main .xw-feature-actions span { font-size: 12px; line-height: 18px; }
+.settings-main .xw-setting-field > span,
+.settings-main .xw-setting-row > span { font-size: 13px; }
+.settings-main input,
+.settings-main select,
+.settings-main textarea,
+.settings-main button,
+.settings-main a { font-size: 13px; }
+.settings-main input,
+.settings-main select { min-height: 36px; }
+.settings-main .xw-segmented-control button { min-height: 32px; }
+.settings-main .xw-primary-button,
+.settings-main .xw-secondary-button,
+.settings-main .button { min-height: 34px; }
+.settings-main .xw-feature-actions { position: static; min-height: 58px; margin-top: 0; padding: 11px 0 12px; border-top: 1px solid var(--line); background: var(--paper); }
+
+@media (max-width: 1120px) {
+  .settings-layout { grid-template-columns: 180px minmax(0, 1fr); }
+  .settings-main { padding-inline: 24px; }
+}
+
+@media (max-width: 1024px) {
+  .settings-layout { grid-template-columns: 172px minmax(0, 1fr); }
+  .settings-grid, .settings-main .xw-settings-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-height: 780px) {
+  .settings-nav { padding-top: 14px; }
+  .settings-page-header { min-height: 72px; padding-block: 12px 10px; }
+  .settings-ai-page { padding-top: 12px; }
+  .settings-ai-page .xw-settings-header { margin-bottom: 8px; }
+  .ai-config-panel { padding-top: 10px; padding-bottom: 10px; }
+  .settings-main .xw-feature-actions { min-height: 52px; padding-block: 8px 9px; }
+}

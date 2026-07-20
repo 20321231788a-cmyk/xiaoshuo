@@ -112,6 +112,23 @@ export class ConversationService {
     return this.saveDetail(detail);
   }
 
+  async deleteConversation(conversationId: string): Promise<{ id: string; deleted: true }> {
+    const detail = await this.loadDetail(conversationId);
+    const conversationPath = await this.conversationPath(detail.id);
+    const backupPath = await this.conversationBackupPath(detail.id);
+    const attachmentRoot = path.resolve(await this.agentRoot(), "attachments");
+    const attachmentPath = path.resolve(attachmentRoot, detail.id);
+    if (attachmentPath !== attachmentRoot && !attachmentPath.startsWith(`${attachmentRoot}${path.sep}`)) {
+      throw new Error("会话附件路径越界");
+    }
+    await Promise.all([
+      fs.rm(conversationPath, { force: true }),
+      fs.rm(backupPath, { force: true }),
+      fs.rm(attachmentPath, { recursive: true, force: true })
+    ]);
+    return { id: detail.id, deleted: true };
+  }
+
   async appendMessage(conversationId: string, payload: AppendMessagePayload): Promise<ConversationDetail> {
     const detail = await this.loadDetail(conversationId);
     const content = (payload.content || "").trim();
