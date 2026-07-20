@@ -8,7 +8,7 @@
 
 ## 1. 当前结论
 
-0.5.0～0.9.0 已合并为一次交付，不再维护五套开发和验收周期。P0～P7 及小说 Agent 七项受控替代能力保持既有集中验收结论；本次“新 UI 资料库适配”作为独立增量，使用本章定义的 `acceptance:ui-library` 集中验收，不回填或复用旧 UI 验收统计。普通 Desktop 启动默认启用集成 Preview 配置，`--safe-agent` 可一键回退。
+0.5.0～0.9.0 已合并为一次交付，不再维护五套开发和验收周期。P0～P7 及小说 Agent 七项受控替代能力保持既有集中验收结论；结构化资料库、全量生产工作台、会话模型控制、封面生成和 AI 对话界面作为后续增量分别记录验收证据，不回填或复用旧统计。普通 Desktop 启动默认启用集成 Preview 配置，`--safe-agent` 可一键回退。
 
 Agent 当前执行口径只认两份文档：
 
@@ -153,6 +153,18 @@ npm run acceptance:preview
 - 完整收口验收曾通过：全 workspace typecheck；123 个 Vitest 文件、920 项测试；3/3 Node tests；全部 eval；Workbench/Desktop production build；7/7 Browser E2E；Desktop smoke；`git diff --check`。设置分区和短窗口高度修复后再次通过 Workbench typecheck、production build、8/8 Browser E2E 与 `git diff --check`。
 - 本批代码提交为 `9a4e579`（`feat(ui): complete ArcWriter production workbench`）。Workbench 主包约 453 kB，不再触发 Vite 500 kB chunk 警告。
 
+### 6.3 会话模型、封面生成与 AI 对话界面（2026-07-20）
+
+- AI 助手输入区支持当前会话模型覆盖和低/中/高思考等级。设置页继续管理全局默认模型；会话偏好写入会话 JSON，不影响其他会话、批量生成、审阅或技能任务。
+- 手动 OpenAI 兼容配置可通过本地受保护 runtime 发现 `/models`，过滤图片、Embedding、重排、音频和审核模型。OpenAI 推理模型发送真实 `reasoning_effort`；DeepSeek 只启用其真实支持的高思考档位；未知或非推理模型不发送伪造参数。
+- 工具导航新增“封面生成”。页面只提供书名、作者名、字体风格、题材风格及文生图/图生图模式；题材默认读取结构化题材库。封面始终使用网站账户配置的生图模型，手动文本 API 不新增图片模型配置，也不会接收网站令牌。
+- 封面 runtime 支持 OpenAI 兼容的 `/images/generations`、`/images/edits`、`b64_json` 和 HTTPS 图片响应。参考图限制为 10 MB 且仅用于当前请求；上游响应限制为 20 MB，超时为 180 秒。Electron `nativeImage` 中心裁切并输出精确 `600x800` PNG。
+- 模型原图和成品按稳定 ID 版本化保存到项目 `封面/`，索引位于 `00_设定集/.agent/covers/index.json`。索引不保存令牌、完整提示词或参考图片；删除版本会移动到 `99_回收站/封面`。
+- AI 对话中用户消息改为右侧浅色气泡，AI 消息改为左侧无框正文流。输入栏合并上下文、模型与思考等级入口，支持自动增高、`Enter` 发送、`Shift+Enter` 换行、中文输入法组合保护、流式生成和停止响应。
+- 上下文弹层与右侧完整上下文栏使用同一会话数据源，固定文档、附件上传和删除会即时同步。`1024x720`、`1280x720`、`1440x900` 下消息、输入栏和弹层均无页面级横向溢出。
+- 最终验收通过：全 workspace typecheck；126 个 Vitest 文件、943 项测试；3/3 Node tests；Workbench/Desktop production build；12/12 Browser E2E；Desktop smoke；`git diff --check`。视觉截图保存于忽略提交的 `output/playwright/assistant-redesign/`。
+- 本批代码提交为 `f4376f6`（`feat(ai): add model controls, cover generation, and chat UI`）。只创建本地 Git commit，未创建 tag、未推送 Release。
+
 `desktop-rc.yml` 的 nightly 路径可生成无签名 Preview artifact；严格 `channel=rc` 和 `release.yml` 留给未来商业化，不阻塞本次小范围使用。
 
 ## 7. 打包与回退
@@ -254,3 +266,11 @@ git diff --check
 - 修复 AppShell 高度链和设置页滚动归属，`1280x720` 下 1000px 高的模型表单在 365px 内容区内独立滚动，分区标签和底部操作保持可见，无页面级横向溢出；
 - 最终代码提交为 `9a4e579`；只创建本地 Git commit，未创建 tag、未推送 Release；
 - 网站配置若显示 `fetch failed`，当前已确认原因是外部 `matian.online` 证书过期，不属于 Workbench 布局或本地 runtime 故障。
+
+2026-07-20 会话模型、封面与对话界面增量：
+
+- 当前会话可覆盖默认文本模型并选择真实支持的思考等级；手动 OpenAI 兼容配置可发现文本模型，网站配置独立管理默认生图模型；
+- 新增文生图/图生图封面工作台、严格中文封面提示词、`600x800` 标准化输出、版本历史和回收站删除；
+- AI 对话采用用户右侧气泡、AI 左侧正文和单容器输入栏，上下文、附件、模型和思考等级均保留真实交互；
+- 完整验证为 126 files / 943 tests、3/3 Node tests、两个 production build、Browser E2E 12/12、Desktop smoke 和 diff check；
+- 代码提交为 `f4376f6`，维护记录随后的独立文档提交不改变该代码证据。
