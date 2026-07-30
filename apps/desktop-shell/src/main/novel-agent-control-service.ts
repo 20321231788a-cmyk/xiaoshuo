@@ -726,7 +726,7 @@ function buildCatalog(): NovelToolCatalogEntry[] {
     name: name as string,
     description: description as string,
     sha256: sha256(`arcwriter-builtin:${toolId}:1.0.0`),
-    compatible_app_versions: ">=0.9.0 <1.0.0",
+    compatible_app_versions: ">=0.9.0 <2.0.0",
     permissions: permissions as NovelToolCatalogEntry["permissions"],
     input_schema_id: `${toolId}.input.v1`,
     output_schema_id: `${toolId}.output.v1`,

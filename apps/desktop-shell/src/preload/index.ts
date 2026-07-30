@@ -5,6 +5,8 @@ import {
   cloudProjectDeleteResponseSchema,
   cloudProjectDownloadRequestSchema,
   cloudProjectDownloadResponseSchema,
+  cloudProjectInspectRequestSchema,
+  cloudProjectInspectResponseSchema,
   cloudProjectListResponseSchema,
   cloudProjectUploadRequestSchema,
   cloudProjectUploadResponseSchema,
@@ -136,6 +138,10 @@ const desktopApi: XiaoShuoDesktopApi = {
   importProject: async () => desktopProjectArchiveResponseSchema.parse(await ipcRenderer.invoke(ipcChannels.shellImportProject)),
   cloudProjects: {
     list: async () => cloudProjectListResponseSchema.parse(await ipcRenderer.invoke(ipcChannels.shellCloudProjectsList)),
+    inspect: async (request) =>
+      cloudProjectInspectResponseSchema.parse(
+        await ipcRenderer.invoke(ipcChannels.shellCloudProjectsInspect, cloudProjectInspectRequestSchema.parse(request))
+      ),
     upload: async (request) =>
       cloudProjectUploadResponseSchema.parse(
         await ipcRenderer.invoke(ipcChannels.shellCloudProjectsUpload, cloudProjectUploadRequestSchema.parse(request))

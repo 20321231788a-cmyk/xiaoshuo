@@ -1,4 +1,4 @@
-import { ArrowUp, FileText, Paperclip, Plus, ShieldCheck, Square, X } from "lucide-react";
+import { ArrowUp, FileText, Paperclip, Plus, Square, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { WorkbenchController } from "../../../hooks/useWorkbenchController.js";
 import { AssistantModelControls } from "./AssistantModelControls.js";
@@ -9,6 +9,7 @@ const MAX_TEXTAREA_HEIGHT = 160;
 
 export function AssistantComposer({ controller }: { controller: WorkbenchController }) {
   const [contextOpen, setContextOpen] = useState(false);
+  const [visibleStatus, setVisibleStatus] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
   const contextRootRef = useRef<HTMLDivElement | null>(null);
@@ -48,6 +49,17 @@ export function AssistantComposer({ controller }: { controller: WorkbenchControl
     };
   }, [contextOpen]);
 
+  useEffect(() => {
+    const message = controller.conversationMessage.trim();
+    if (!message) {
+      setVisibleStatus("");
+      return;
+    }
+    setVisibleStatus(message);
+    const timer = window.setTimeout(() => setVisibleStatus(""), 3_000);
+    return () => window.clearTimeout(timer);
+  }, [controller.conversationMessage]);
+
   function send() {
     if (!controller.messageInput.trim() || controller.sendingMessage || sendLocked) return;
     void controller.sendMessage();
@@ -77,12 +89,6 @@ export function AssistantComposer({ controller }: { controller: WorkbenchControl
           onKeyDown={handleKeyDown}
           placeholder="继续提问，或描述你想要的修改……"
         />
-
-        {controller.conversationMessage && (
-          <p className="assistant-composer-status" role="status" title={controller.conversationMessage}>
-            {controller.conversationMessage}
-          </p>
-        )}
 
         <div className="assistant-composer-toolbar">
           <div className="assistant-composer-tools">
@@ -116,7 +122,6 @@ export function AssistantComposer({ controller }: { controller: WorkbenchControl
                 aria-expanded={contextOpen}
                 onClick={() => setContextOpen((value) => !value)}
               >
-                <ShieldCheck size={15} />
                 <span>上下文 {contextCount} 项</span>
               </button>
 
@@ -160,6 +165,11 @@ export function AssistantComposer({ controller }: { controller: WorkbenchControl
 
           <div className="assistant-composer-actions">
             <AssistantModelControls controller={controller} />
+            {visibleStatus && (
+              <p className="assistant-composer-status" role="status" aria-live="polite" title={visibleStatus}>
+                {visibleStatus}
+              </p>
+            )}
             {controller.sendingMessage ? (
               <button className="assistant-send-button stop" type="button" title="停止生成" aria-label="停止生成" onClick={() => controller.stopMessage()}>
                 <Square size={14} fill="currentColor" />

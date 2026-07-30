@@ -38,6 +38,7 @@ import {
 import {
   cloudProjectDeleteRequestSchema,
   cloudProjectDownloadRequestSchema,
+  cloudProjectInspectRequestSchema,
   cloudProjectUploadRequestSchema,
   desktopProjectExportRequestSchema,
   ipcChannels,
@@ -264,7 +265,8 @@ async function createWindow(): Promise<BrowserWindow> {
 function registerIpc(): void {
   const cloudProjectService = new CloudProjectService({
     appRoot: resolveProjectRoot(app.getAppPath()),
-    tempRoot: app.getPath("temp")
+    tempRoot: app.getPath("temp"),
+    stateRoot: path.join(app.getPath("userData"), "state")
   });
   novelAgentControlService = new NovelAgentControlService({
     appRoot: resolveProjectRoot(app.getAppPath()),
@@ -352,6 +354,9 @@ function registerIpc(): void {
     return { path: projectPath, canceled: false };
   });
   ipcMain.handle(ipcChannels.shellCloudProjectsList, async () => cloudProjectService.list());
+  ipcMain.handle(ipcChannels.shellCloudProjectsInspect, async (_event, request) =>
+    cloudProjectService.inspect(cloudProjectInspectRequestSchema.parse(request))
+  );
   ipcMain.handle(ipcChannels.shellCloudProjectsUpload, async (_event, request) =>
     cloudProjectService.upload(cloudProjectUploadRequestSchema.parse(request))
   );

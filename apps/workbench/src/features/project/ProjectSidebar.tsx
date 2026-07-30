@@ -1,8 +1,5 @@
 import {
   ArchiveRestore,
-  ChevronDown,
-  ChevronUp,
-  Cloud,
   Download,
   FileText,
   Folder,
@@ -10,9 +7,7 @@ import {
   FolderPlus,
   History,
   RefreshCw,
-  Sparkles,
-  Trash2,
-  Upload
+  Sparkles
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent as ReactKeyboardEvent, MouseEvent as ReactMouseEvent } from "react";
@@ -38,38 +33,6 @@ function disassemblyBookReadyForFusion(book: DisassemblyBookSummary | null): boo
     return false;
   }
   return Boolean(book.paths.lore || book.paths.reverse_outline || book.paths.detail_outline);
-}
-
-function formatBytes(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) {
-    return "0 B";
-  }
-  if (value >= 1024 * 1024 * 1024) {
-    return `${(value / 1024 / 1024 / 1024).toFixed(2)} GB`;
-  }
-  if (value >= 1024 * 1024) {
-    return `${(value / 1024 / 1024).toFixed(1)} MB`;
-  }
-  if (value >= 1024) {
-    return `${(value / 1024).toFixed(1)} KB`;
-  }
-  return `${value} B`;
-}
-
-function formatDateShort(value: string): string {
-  if (!value) {
-    return "-";
-  }
-  const timestamp = Date.parse(value);
-  if (!Number.isFinite(timestamp)) {
-    return value;
-  }
-  return new Date(timestamp).toLocaleDateString("zh-CN", {
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit"
-  });
 }
 
 function NovelFolderNode({
@@ -381,13 +344,8 @@ export function ProjectSidebar({
   const projectName = project?.name || "未打开项目";
   const projectPath = project?.path || "先打开一个小说目录";
   const [renamingProject, setRenamingProject] = useState(false);
-  const [cloudPanelOpen, setCloudPanelOpen] = useState(false);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const cancelRenameRef = useRef(false);
-  const cloudSlots = [1, 2, 3].map((slotId) => ({
-    slotId,
-    slot: controller.cloudProjectSlots.find((item) => item.slot_id === slotId) || null
-  }));
 
   useEffect(() => {
     if (!renamingProject) {
@@ -490,85 +448,13 @@ export function ProjectSidebar({
             <FolderOpen size={15} />
             <span>打开项目</span>
           </button>
-          <div className={`xw-cloud-project-strip ${cloudPanelOpen ? "open" : ""}`}>
-            <button
-              className="xw-cloud-project-strip-head"
-              onClick={() => {
-                setCloudPanelOpen((value) => !value);
-                if (!cloudPanelOpen) {
-                  void controller.refreshCloudProjects({ silent: true });
-                }
-              }}
-              type="button"
-            >
-              <Cloud size={15} />
-              <strong>上传/同步项目</strong>
-              <small>{controller.cloudProjectSlots.length}/3</small>
-              {cloudPanelOpen ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+          <div className="xw-project-archive-actions">
+            <button className="xw-secondary-button compact" onClick={() => void controller.exportCurrentProject()} disabled={controller.projectBusy || !project?.path}>
+              <Download size={14} /><span>导出 ZIP</span>
             </button>
-            {cloudPanelOpen && (
-              <div className="xw-cloud-project-panel">
-                <div className="xw-cloud-project-group">
-                  <span>本地项目</span>
-                  <div className="xw-cloud-project-local">
-                    <button className="xw-secondary-button compact" onClick={() => void controller.exportCurrentProject()} disabled={controller.projectBusy || !project?.path}>
-                      <Download size={14} />
-                      <span>导出项目 ZIP</span>
-                    </button>
-                    <button className="xw-secondary-button compact" onClick={() => void controller.importProjectArchive()} disabled={controller.projectBusy}>
-                      <ArchiveRestore size={14} />
-                      <span>导入项目 ZIP</span>
-                    </button>
-                  </div>
-                </div>
-                <div className="xw-cloud-project-group">
-                  <div className="xw-cloud-project-group-head">
-                    <span>云项目</span>
-                    <button className="xw-icon-button" onClick={() => void controller.refreshCloudProjects()} disabled={controller.cloudProjectBusy} aria-label="刷新云项目">
-                      <RefreshCw size={13} className={controller.cloudProjectBusy ? "spin" : ""} />
-                    </button>
-                  </div>
-                  <div className="xw-cloud-slot-list">
-                    {cloudSlots.map(({ slotId, slot }) => (
-                      <article key={slotId} className={`xw-cloud-slot ${slot ? "filled" : "empty"}`}>
-                        <div className="xw-cloud-slot-main">
-                          <strong>槽位 {slotId}</strong>
-                          <span>{slot ? slot.project_name || slot.file_name : "空槽"}</span>
-                          {slot && <small>{formatBytes(slot.size)} · {formatDateShort(slot.updated_at)}</small>}
-                        </div>
-                        <div className="xw-cloud-slot-actions">
-                          <button
-                            className="xw-secondary-button compact"
-                            onClick={() => void controller.uploadCurrentProjectToCloud(slotId)}
-                            disabled={controller.cloudProjectBusy || controller.projectBusy || !project?.path}
-                          >
-                            <Upload size={13} />
-                            <span>{slot ? "覆盖上传" : "上传当前项目"}</span>
-                          </button>
-                          {slot && (
-                            <>
-                              <button
-                                className="xw-secondary-button compact"
-                                onClick={() => void controller.syncCloudProjectToCurrent(slot)}
-                                disabled={controller.cloudProjectBusy || controller.projectBusy || !project?.path}
-                              >
-                                <ArchiveRestore size={13} />
-                                <span>同步</span>
-                              </button>
-                              <button className="xw-danger-button compact" onClick={() => void controller.deleteCloudProject(slot)} disabled={controller.cloudProjectBusy}>
-                                <Trash2 size={13} />
-                                <span>删除</span>
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-                </div>
-                {controller.cloudProjectMessage && <p className="xw-cloud-project-message">{controller.cloudProjectMessage}</p>}
-              </div>
-            )}
+            <button className="xw-secondary-button compact" onClick={() => void controller.importProjectArchive()} disabled={controller.projectBusy}>
+              <ArchiveRestore size={14} /><span>导入 ZIP</span>
+            </button>
           </div>
         </div>
       </section>

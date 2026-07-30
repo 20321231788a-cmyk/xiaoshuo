@@ -1,10 +1,11 @@
 import { Command, Save, Search, User } from "lucide-react";
 import type { TreeNode } from "@xiaoshuo/shared";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { DisassemblyBookSummary } from "./hooks/useWorkbenchController.js";
 import { useWorkbenchController } from "./hooks/useWorkbenchController.js";
 import { ProductWorkspace, type DisassemblyUiState } from "./features/product/ProductWorkspace.js";
 import { CommandPalette, type SearchableDocument } from "./features/product/shared/CommandPalette.js";
+import { TutorialDialog } from "./features/product/shared/TutorialDialog.js";
 import { AppShell } from "./layout/AppShell.js";
 import { WorkbenchNavigation } from "./layout/WorkbenchNavigation.js";
 import {
@@ -52,11 +53,13 @@ export function App() {
   const controller = useWorkbenchController(runtime);
   const [route, setRoute] = useState<ProductRoute>(() => currentProductRoute() || { feature: "home" });
   const [commandOpen, setCommandOpen] = useState(false);
+  const [tutorialOpen, setTutorialOpen] = useState(false);
   const [navigationCollapsed, setNavigationCollapsed] = useState(() => window.localStorage.getItem("arcwriter.navigation.collapsed") === "1");
   const [selectedDisassemblyBookId, setSelectedDisassemblyBookId] = useState("");
   const [fusionBookIds, setFusionBookIds] = useState<string[]>([]);
   const initialRouteResolved = useRef(false);
   const feature = route.feature;
+  const closeTutorial = useCallback(() => setTutorialOpen(false), []);
 
   const searchableDocuments = useMemo(
     () => collectSearchableDocuments(controller.snapshot?.projectChrome.tree || []),
@@ -88,16 +91,23 @@ export function App() {
     const unsubscribeSave = window.xiaoshuoDesktop?.onRequestSave?.(() => void controller.saveAllDocuments());
     const unsubscribeFind = window.xiaoshuoDesktop?.onRequestFind?.(() => navigate(defaultProductRoute("editor")));
     const unsubscribeReplace = window.xiaoshuoDesktop?.onRequestReplace?.(() => navigate(defaultProductRoute("editor")));
+    const unsubscribeTutorial = window.xiaoshuoDesktop?.onOpenTutorial?.(() => setTutorialOpen(true));
     return () => {
       unsubscribeRefresh?.();
       unsubscribeSave?.();
       unsubscribeFind?.();
       unsubscribeReplace?.();
+      unsubscribeTutorial?.();
     };
   }, [controller]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "F1") {
+        event.preventDefault();
+        setTutorialOpen(true);
+        return;
+      }
       if (!(event.ctrlKey || event.metaKey) || event.altKey) return;
       if (event.key.toLowerCase() === "s") {
         event.preventDefault();
@@ -181,7 +191,12 @@ export function App() {
       navigation={<WorkbenchNavigation feature={feature} collapsed={navigationCollapsed} projectName={controller.snapshot?.currentProject.name || ""} projectPath={controller.snapshot?.currentProject.path || ""} onToggleCollapsed={() => setNavigationCollapsed((value) => !value)} onSelect={selectFeature} onOpenProject={() => controller.pickAndOpenProject("open")} />}
       topbar={<WorkbenchTopbar feature={feature} projectName={controller.snapshot?.currentProject.name || ""} onSelectFeature={selectFeature} onOpenCommand={() => setCommandOpen(true)} onSave={() => void controller.saveAllDocuments()} saving={controller.documentBusy} />}
       center={<>{controller.status === "loading" && <LoadingState />}{controller.status === "error" && <ErrorState message={controller.error} />}{controller.status === "ready" && controller.snapshot && controller.configDraft && <ProductWorkspace controller={controller} route={route} disassemblyUi={disassemblyUi} onNavigate={navigate} onSelectFeature={selectFeature} />}</>}
-      dialog={<CommandPalette open={commandOpen} commands={productCommands} documents={searchableDocuments} onClose={() => setCommandOpen(false)} onNavigate={navigate} onOpenDocument={(path) => { navigate({ feature: "editor" }); void controller.openDocument(path); }} />}
+      dialog={(
+        <>
+          <CommandPalette open={commandOpen} commands={productCommands} documents={searchableDocuments} onClose={() => setCommandOpen(false)} onNavigate={navigate} onOpenDocument={(path) => { navigate({ feature: "editor" }); void controller.openDocument(path); }} />
+          <TutorialDialog open={tutorialOpen} onClose={closeTutorial} onNavigate={navigate} />
+        </>
+      )}
     />
   );
 }

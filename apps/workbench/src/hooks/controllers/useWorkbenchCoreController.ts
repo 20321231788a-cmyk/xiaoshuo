@@ -8,6 +8,7 @@ import type {
   CardDrawRequest,
   CardDrawResult,
   CardDrawSelectRequest,
+  CloudProjectListResponse,
   CloudProjectSlot,
   ConversationDetail,
   ConversationAttachment,
@@ -390,7 +391,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [manualModelDiscoveryBusy, setManualModelDiscoveryBusy] = useState(false);
   const [manualModelDiscoveryMessage, setManualModelDiscoveryMessage] = useState("");
   const [cloudProjectSlots, setCloudProjectSlots] = useState<CloudProjectSlot[]>([]);
+  const [cloudProjectSummary, setCloudProjectSummary] = useState<CloudProjectListResponse | null>(null);
   const [cloudProjectBusy, setCloudProjectBusy] = useState(false);
+  const [cloudProjectActivePath, setCloudProjectActivePath] = useState("");
   const [cloudProjectMessage, setCloudProjectMessage] = useState("");
   const [conversationDetail, setConversationDetail] = useState<ConversationDetail | null>(null);
   const [conversationBusy, setConversationBusy] = useState(false);
@@ -1661,6 +1664,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     try {
       const result = await window.xiaoshuoDesktop.cloudProjects.list();
       setCloudProjectSlots(result.slots);
+      setCloudProjectSummary(result);
       if (!options.silent) {
         setCloudProjectMessage(result.slots.length ? "云项目已刷新。" : "当前账号还没有云项目。");
       }
@@ -1670,6 +1674,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         setCloudProjectMessage(describeActionableError(nextError, "刷新云项目失败", "请确认已登录网站账号并且网络可用。"));
       }
       setCloudProjectSlots([]);
+      setCloudProjectSummary(null);
       return [];
     } finally {
       if (!options.silent) {
@@ -1679,83 +1684,102 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   }
 
   useEffect(() => {
-    if (!snapshot?.currentProject.path) {
-      setCloudProjectSlots([]);
-      return;
-    }
     void refreshCloudProjects({ silent: true });
   }, [snapshot?.currentProject.path, runtime.isDesktopShell]);
 
-  async function uploadCurrentProjectToCloud(slotId: number) {
+  async function uploadProjectToCloud(targetProject: CurrentProject, slotId: number, syncMode: "manual" | "auto" = "manual") {
     const currentProject = snapshot?.currentProject;
     if (!runtime.isDesktopShell || !window.xiaoshuoDesktop?.cloudProjects) {
       setCloudProjectMessage("云项目需要桌面版。");
       return;
     }
-    if (!currentProject?.path) {
+    if (!targetProject.path) {
       setCloudProjectMessage("先打开一个项目，再上传。");
-      return;
+      return null;
     }
-    if (hasDirtyOpenDocuments()) {
+    if (targetProject.path === currentProject?.path && hasDirtyOpenDocuments()) {
       setCloudProjectMessage("当前有未保存文档，请先保存后再上传项目。");
-      return;
+      return null;
     }
 
     setCloudProjectBusy(true);
+    setCloudProjectActivePath(targetProject.path);
     setCloudProjectMessage(`正在上传到云项目槽位 ${slotId}...`);
     try {
       const result = await window.xiaoshuoDesktop.cloudProjects.upload({
         slot_id: slotId,
-        project_path: currentProject.path,
-        project_name: currentProject.name
+        project_path: targetProject.path,
+        project_name: targetProject.name,
+        sync_mode: syncMode
       });
       await refreshCloudProjects({ silent: true });
-      setCloudProjectMessage(`已上传到槽位 ${result.slot.slot_id}：${result.slot.project_name || currentProject.name}`);
+      setCloudProjectMessage(result.unchanged ? "云端已是最新版本，没有产生上传流量。" : `已同步到云端：${result.slot.project_name || targetProject.name}`);
+      return result;
     } catch (nextError) {
-      setCloudProjectMessage(describeActionableError(nextError, "上传云项目失败", "请确认项目小于 20MB、网站账号已登录且网络可用。"));
+      setCloudProjectMessage(describeActionableError(nextError, "同步云项目失败", "请确认核心数据不超过 30MB、网站账号已登录且网络可用。"));
+      return null;
     } finally {
       setCloudProjectBusy(false);
+      setCloudProjectActivePath("");
     }
   }
 
-  async function syncCloudProjectToCurrent(slot: CloudProjectSlot) {
+  async function uploadCurrentProjectToCloud(slotId: number) {
     const currentProject = snapshot?.currentProject;
+    if (!currentProject?.path) {
+      setCloudProjectMessage("先打开一个项目，再上传。");
+      return null;
+    }
+    return uploadProjectToCloud(currentProject, slotId, "manual");
+  }
+
+  async function restoreCloudProject(slot: CloudProjectSlot, targetProject?: CurrentProject) {
+    const currentProject = snapshot?.currentProject;
+    const restoreTarget = targetProject?.path ? targetProject : currentProject;
     if (!runtime.isDesktopShell || !window.xiaoshuoDesktop?.cloudProjects) {
       setCloudProjectMessage("云项目需要桌面版。");
       return;
     }
-    if (!currentProject?.path) {
-      setCloudProjectMessage("先打开一个本地项目，再同步云项目。");
+    if (!restoreTarget?.path) {
+      setCloudProjectMessage("请先选择一个本地项目目录，再恢复云端内容。");
       return;
     }
-    const unsavedState = getUnsavedWorkbenchState();
+    const unsavedState = restoreTarget.path === currentProject?.path ? getUnsavedWorkbenchState() : { hasUnsavedState: false, summary: "" };
     if (unsavedState.hasUnsavedState) {
       setCloudProjectMessage(`同步前请先处理未保存内容：${unsavedState.summary}。`);
       return;
     }
-    if (!window.confirm(`确认用云项目“${slot.project_name || `槽位 ${slot.slot_id}`}”覆盖当前项目吗？软件会先自动备份当前项目。`)) {
+    if (!window.confirm(`确认将云端“${slot.project_name || `槽位 ${slot.slot_id}`}”的核心文件恢复到“${restoreTarget.name || "所选项目"}”吗？软件会先备份本地项目，其他文件不会删除。`)) {
       return;
     }
 
     setCloudProjectBusy(true);
+    setCloudProjectActivePath(restoreTarget.path);
     setCloudProjectMessage("正在备份当前项目并同步云项目...");
     try {
       const result = await window.xiaoshuoDesktop.cloudProjects.downloadToProject({
         id: slot.id,
-        project_path: currentProject.path,
-        project_name: currentProject.name
+        project_path: restoreTarget.path,
+        project_name: restoreTarget.name
       });
-      setOpenDocuments([]);
-      setActiveDocumentPath("");
-      setPendingGeneratedSave(null);
-      await refreshProjectWorkspace();
+      if (restoreTarget.path === currentProject?.path) {
+        setOpenDocuments([]);
+        setActiveDocumentPath("");
+        setPendingGeneratedSave(null);
+        await refreshProjectWorkspace();
+      }
       await refreshCloudProjects({ silent: true });
-      setCloudProjectMessage(`云项目已同步到当前项目。备份：${result.backup_path}`);
+      setCloudProjectMessage(`已恢复 ${result.restored_files} 个核心文件，并保留同步前备份。`);
     } catch (nextError) {
       setCloudProjectMessage(describeActionableError(nextError, "同步云项目失败", "已尽量保留同步前备份，请根据提示路径检查。"));
     } finally {
       setCloudProjectBusy(false);
+      setCloudProjectActivePath("");
     }
+  }
+
+  async function syncCloudProjectToCurrent(slot: CloudProjectSlot) {
+    return restoreCloudProject(slot);
   }
 
   async function deleteCloudProject(slot: CloudProjectSlot) {
@@ -4594,10 +4618,14 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     manualModelDiscoveryMessage,
     refreshManualModelCatalog,
     cloudProjectSlots,
+    cloudProjectSummary,
     cloudProjectBusy,
+    cloudProjectActivePath,
     cloudProjectMessage,
     refreshCloudProjects,
     uploadCurrentProjectToCloud,
+    uploadProjectToCloud,
+    restoreCloudProject,
     syncCloudProjectToCurrent,
     deleteCloudProject,
     loginWebsiteAi,

@@ -12,6 +12,9 @@ import "./styles/typography.css";
 import "./styles/components.css";
 import "./styles/cover.css";
 import "./styles/assistant.css";
+import "./styles/cloud-sync.css";
+import "./styles/disassembly.css";
+import "./styles/tutorial.css";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

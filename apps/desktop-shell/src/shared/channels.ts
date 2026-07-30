@@ -93,6 +93,7 @@ export const ipcChannels = {
   shellExportProject: "shell:export-project",
   shellImportProject: "shell:import-project",
   shellCloudProjectsList: "shell:cloud-projects:list",
+  shellCloudProjectsInspect: "shell:cloud-projects:inspect",
   shellCloudProjectsUpload: "shell:cloud-projects:upload",
   shellCloudProjectsDownload: "shell:cloud-projects:download",
   shellCloudProjectsDelete: "shell:cloud-projects:delete",
@@ -213,8 +214,11 @@ export const cloudProjectSlotSchema = z
     id: z.string().default(""),
     slot_id: z.number().int().min(1).max(3),
     project_name: z.string().default(""),
+    project_id: z.string().default(""),
     file_name: z.string().default(""),
     size: z.number().int().nonnegative().default(0),
+    core_size: z.number().int().nonnegative().default(0),
+    revision: z.number().int().nonnegative().default(0),
     sha256: z.string().default(""),
     created_at: z.string().default(""),
     updated_at: z.string().default("")
@@ -225,17 +229,42 @@ export const cloudProjectListResponseSchema = z
   .object({
     slots: z.array(cloudProjectSlotSchema).default([]),
     limit: z.number().int().default(3),
-    max_upload_bytes: z.number().int().default(20 * 1024 * 1024),
+    max_upload_bytes: z.number().int().default(30 * 1024 * 1024),
     daily_upload_limit: z.number().int().default(10),
     today_upload_count: z.number().int().nonnegative().default(0),
-    today_upload_remaining: z.number().int().nonnegative().default(10)
+    today_upload_remaining: z.number().int().nonnegative().default(10),
+    daily_upload_bytes_limit: z.number().int().nonnegative().default(0),
+    daily_upload_bytes_used: z.number().int().nonnegative().default(0),
+    daily_upload_bytes_remaining: z.number().int().nonnegative().default(0),
+    monthly_upload_bytes_limit: z.number().int().nonnegative().default(0),
+    monthly_upload_bytes_used: z.number().int().nonnegative().default(0),
+    monthly_upload_bytes_remaining: z.number().int().nonnegative().default(0),
+    monthly_download_bytes_limit: z.number().int().nonnegative().default(0),
+    monthly_download_bytes_used: z.number().int().nonnegative().default(0),
+    monthly_download_bytes_remaining: z.number().int().nonnegative().default(0),
+    quota_resets_at: z.string().default("")
   })
   .passthrough();
 
 export const cloudProjectUploadRequestSchema = z.object({
   slot_id: z.number().int().min(1).max(3),
   project_path: z.string().min(1),
-  project_name: z.string().default("")
+  project_name: z.string().default(""),
+  project_id: z.string().default(""),
+  sync_mode: z.enum(["manual", "auto"]).default("manual")
+});
+
+export const cloudProjectInspectRequestSchema = z.object({
+  project_path: z.string().min(1)
+});
+
+export const cloudProjectInspectResponseSchema = z.object({
+  ok: z.boolean().default(true),
+  project_path: z.string(),
+  core_bytes: z.number().int().nonnegative(),
+  file_count: z.number().int().nonnegative(),
+  max_upload_bytes: z.number().int().nonnegative().default(30 * 1024 * 1024),
+  largest_files: z.array(z.object({ path: z.string(), size: z.number().int().nonnegative() })).default([])
 });
 
 export const cloudProjectDownloadRequestSchema = z.object({
@@ -255,7 +284,9 @@ export const cloudProjectUploadResponseSchema = z
     uploaded_bytes: z.number().int().nonnegative().default(0),
     daily_upload_limit: z.number().int().default(10),
     today_upload_count: z.number().int().nonnegative().default(0),
-    today_upload_remaining: z.number().int().nonnegative().default(10)
+    today_upload_remaining: z.number().int().nonnegative().default(10),
+    core_bytes: z.number().int().nonnegative().default(0),
+    unchanged: z.boolean().default(false)
   })
   .passthrough();
 
@@ -263,7 +294,9 @@ export const cloudProjectDownloadResponseSchema = z
   .object({
     ok: z.boolean().default(true),
     project_path: z.string().default(""),
-    backup_path: z.string().default("")
+    backup_path: z.string().default(""),
+    restored_files: z.number().int().nonnegative().default(0),
+    restored_bytes: z.number().int().nonnegative().default(0)
   })
   .passthrough();
 
@@ -422,6 +455,8 @@ export type DesktopProjectExportRequest = z.input<typeof desktopProjectExportReq
 export type DesktopProjectArchiveResponse = z.infer<typeof desktopProjectArchiveResponseSchema>;
 export type CloudProjectSlot = z.infer<typeof cloudProjectSlotSchema>;
 export type CloudProjectListResponse = z.infer<typeof cloudProjectListResponseSchema>;
+export type CloudProjectInspectRequest = z.input<typeof cloudProjectInspectRequestSchema>;
+export type CloudProjectInspectResponse = z.infer<typeof cloudProjectInspectResponseSchema>;
 export type CloudProjectUploadRequest = z.input<typeof cloudProjectUploadRequestSchema>;
 export type CloudProjectDownloadRequest = z.input<typeof cloudProjectDownloadRequestSchema>;
 export type CloudProjectDeleteRequest = z.input<typeof cloudProjectDeleteRequestSchema>;
@@ -463,6 +498,7 @@ export type XiaoShuoDesktopApi = {
   importProject: () => Promise<DesktopProjectArchiveResponse>;
   cloudProjects: {
     list: () => Promise<CloudProjectListResponse>;
+    inspect: (request: CloudProjectInspectRequest) => Promise<CloudProjectInspectResponse>;
     upload: (request: CloudProjectUploadRequest) => Promise<CloudProjectUploadResponse>;
     downloadToProject: (request: CloudProjectDownloadRequest) => Promise<CloudProjectDownloadResponse>;
     delete: (request: CloudProjectDeleteRequest) => Promise<CloudProjectDeleteResponse>;

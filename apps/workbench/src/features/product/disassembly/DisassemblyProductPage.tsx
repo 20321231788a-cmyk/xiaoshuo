@@ -10,8 +10,10 @@ import {
   Plus,
   RefreshCw,
   Search,
+  SlidersHorizontal,
   Sparkles,
-  Upload
+  Upload,
+  Wand2
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { WorkbenchController, DisassemblyBookSummary } from "../../../hooks/useWorkbenchController.js";
@@ -27,6 +29,15 @@ type DisassemblyUiState = {
 type AnalysisArtifactId = "source" | "detail_outline" | "reverse_outline" | "lore";
 type AnalysisArtifact = { id: AnalysisArtifactId; label: string; path: string };
 
+function isReadyForFusion(book: DisassemblyBookSummary): boolean {
+  return Boolean(!book.legacy && (book.paths.detail_outline || book.paths.reverse_outline || book.paths.lore));
+}
+
+function primaryBookPath(book: DisassemblyBookSummary | null): string {
+  if (!book) return "";
+  return book.paths.source || book.paths.detail_outline || book.paths.reverse_outline || book.paths.lore || book.source_path || "";
+}
+
 export function DisassemblyProductPage({
   controller,
   disassemblyUi
@@ -40,7 +51,9 @@ export function DisassemblyProductPage({
   const [selectedMethods, setSelectedMethods] = useState<AnalysisArtifactId[]>([]);
 
   const books = controller.disassemblyBooks.filter((book) => !book.legacy);
+  const fusionReadyBooks = books.filter(isReadyForFusion);
   const selectedBook = books.find((book) => book.id === disassemblyUi.selectedBookId) || books[0] || null;
+  const selectedFusionBooks = fusionReadyBooks.filter((book) => disassemblyUi.fusionBookIds.includes(book.id));
   const allAnalysisArtifacts: AnalysisArtifact[] = selectedBook ? [
     { id: "source", label: "原始文本", path: selectedBook.paths.source || selectedBook.source_path || "" },
     { id: "detail_outline", label: "章节细纲", path: selectedBook.paths.detail_outline || "" },
@@ -113,6 +126,37 @@ export function DisassemblyProductPage({
     });
   }
 
+  function runDistillation() {
+    if (!selectedBook) return;
+    if (
+      controller.styleDistillationProfile
+      && !window.confirm(`当前项目已使用《${controller.styleDistillationProfile.book_title || "未命名作品"}》的蒸馏文风，确认替换为《${selectedBook.title}》吗？`)
+    ) {
+      return;
+    }
+    void controller.runNuwaStyleDistillation({
+      replace: Boolean(controller.styleDistillationProfile),
+      sourceBookId: selectedBook.id,
+      sourcePath: primaryBookPath(selectedBook),
+      bookTitle: selectedBook.title,
+      text: ""
+    });
+  }
+
+  function runFusion() {
+    if (selectedFusionBooks.length < 3) return;
+    void controller.runWorkflowSkill("book_fusion", {
+      text: "",
+      source_path: "",
+      instruction: "抽象融合所选作品的核心设定、剧情骨架、人物驱动力与题材氛围，生成去同质化的原创候选方案。不得复写原文句式、专有名词、可识别桥段或固定角色关系。",
+      custom_prompt: "优先保留可迁移的方法与冲突结构，主动拆散原作组合关系，输出可继续展开的原创方案。",
+      output_mode: "candidate",
+      source_book_ids: selectedFusionBooks.map((book) => book.id),
+      write_result: true,
+      attachment_ids: []
+    } as any);
+  }
+
   // 过滤书库
   const filteredBooks = books.filter((b) => b.title.toLowerCase().includes(searchQuery.toLowerCase()));
 
@@ -136,7 +180,7 @@ export function DisassemblyProductPage({
 
       <div className="disassembly-layout" style={{ flex: 1, minHeight: 0 }}>
         {/* 左栏：参考书库 */}
-        <aside className="book-library" style={{ width: "210px", display: "flex", flexDirection: "column" }}>
+        <aside className="book-library" style={{ display: "flex", flexDirection: "column" }}>
           <div className="panel-head">
             <strong>参考书库</strong>
             <button className="icon-button subtle" type="button" onClick={refreshLibrary}>
@@ -253,7 +297,67 @@ export function DisassemblyProductPage({
         </main>
 
         {/* 右栏：应用到当前项目 */}
-        <aside className="extract-panel" style={{ width: "230px", overflowY: "auto", borderLeft: "1px solid var(--line)", paddingLeft: "10px" }}>
+        <aside className="extract-panel disassembly-transform-panel" style={{ overflowY: "auto", borderLeft: "1px solid var(--line)", paddingLeft: "10px" }}>
+          <div className="detail-head">
+            <span>融梗与蒸馏</span>
+          </div>
+
+          <section className="disassembly-action-section">
+            <div className="disassembly-action-title">
+              <Wand2 size={15} />
+              <strong>蒸馏当前作品</strong>
+            </div>
+            <p>
+              {selectedBook
+                ? `提取《${selectedBook.title}》的叙事节奏、对白和描写习惯。`
+                : "先从左侧选择一本参考作品。"}
+            </p>
+            {controller.styleDistillationProfile && (
+              <small>当前使用：{controller.styleDistillationProfile.book_title || "未命名作品"}</small>
+            )}
+            <button
+              className="button secondary"
+              type="button"
+              onClick={runDistillation}
+              disabled={!selectedBook || !primaryBookPath(selectedBook) || controller.operationsBusy}
+            >
+              <Wand2 size={14} />
+              {controller.styleDistillationProfile ? "替换蒸馏文风" : "蒸馏此书"}
+            </button>
+          </section>
+
+          <section className="disassembly-action-section">
+            <div className="disassembly-action-title">
+              <SlidersHorizontal size={15} />
+              <strong>多书融梗</strong>
+              <span>{selectedFusionBooks.length} / 3+</span>
+            </div>
+            <p>选择至少三本已完成拆解的作品，生成原创候选方案。</p>
+            <div className="disassembly-fusion-books">
+              {fusionReadyBooks.map((book) => (
+                <label key={book.id}>
+                  <input
+                    type="checkbox"
+                    checked={disassemblyUi.fusionBookIds.includes(book.id)}
+                    onChange={() => disassemblyUi.onToggleFusionBook(book.id)}
+                  />
+                  <span>{book.title}</span>
+                </label>
+              ))}
+              {!fusionReadyBooks.length && <small>完成拆解后，作品会出现在这里。</small>}
+            </div>
+            <button
+              className="button primary"
+              type="button"
+              onClick={runFusion}
+              disabled={selectedFusionBooks.length < 3 || controller.operationsBusy}
+            >
+              <SlidersHorizontal size={14} />
+              生成融梗方案
+            </button>
+          </section>
+
+          <div className="disassembly-panel-divider" />
           <div className="detail-head">
             <span>应用到当前项目</span>
           </div>
@@ -284,6 +388,9 @@ export function DisassemblyProductPage({
           <button className="button primary" style={{ width: "100%", minHeight: "32px", marginTop: "20px" }} type="button" onClick={generateMigrationPreview} disabled={!selectedBook || !selectedMethods.length || controller.operationsBusy}>
             <ArrowLeftRight size={14} /> 生成迁移预览
           </button>
+          {controller.operationsMessage && (
+            <p className="disassembly-action-status" role="status">{controller.operationsMessage}</p>
+          )}
         </aside>
       </div>
     </div>
