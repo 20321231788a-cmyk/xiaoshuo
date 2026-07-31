@@ -1,4 +1,5 @@
 import {
+  BookCheck,
   FileText,
   MessageSquare,
   MoreHorizontal,
@@ -12,21 +13,28 @@ import {
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import type { ConversationSummary } from "@xiaoshuo/shared";
 import type { WorkbenchController } from "../../../hooks/useWorkbenchController.js";
+import type { UserFeature } from "../../../navigation.js";
 import { RichText } from "../../../components/RichText.js";
 import { describePendingGeneratedTarget } from "../../../lib/workflow.js";
 import { AssistantComposer } from "./AssistantComposer.js";
 import { formatAssistantAttachmentSize } from "./assistantComposerUtils.js";
+import { automaticFeatures, saveAutomaticFeature } from "../tools/automaticFeatures.js";
+import { runConsistencyReview } from "../review/reviewReports.js";
 
 const CardDrawFeaturePage = lazy(() =>
   import("../../card-draw/CardDrawFeaturePage.js").then((module) => ({ default: module.CardDrawFeaturePage }))
 );
 
-export function AssistantProductPage({ controller }: { controller: WorkbenchController }) {
+export function AssistantProductPage({ controller, onSelectFeature }: { controller: WorkbenchController; onSelectFeature: (feature: UserFeature) => void }) {
   const [mode, setMode] = useState<"chat" | "draw">("chat");
   const [searchQuery, setSearchQuery] = useState("");
   const [conversationMenuOpen, setConversationMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [renameDraft, setRenameDraft] = useState("");
+  const [automaticBusy, setAutomaticBusy] = useState(false);
+  const [automaticMessage, setAutomaticMessage] = useState("");
+  const [consistencyBusy, setConsistencyBusy] = useState(false);
+  const [consistencySummary, setConsistencySummary] = useState<{ score: number | null; issueCount: number; saved: boolean; message: string } | null>(null);
   const threadEndRef = useRef<HTMLDivElement | null>(null);
 
   const snapshot = controller.snapshot;
@@ -86,6 +94,53 @@ export function AssistantProductPage({ controller }: { controller: WorkbenchCont
     setRenameDraft(conversationDetail?.title || "");
     setConfirmDelete(false);
     setConversationMenuOpen((value) => !value);
+  }
+
+  async function toggleAutomaticLore() {
+    const config = controller.configDraft;
+    const feature = automaticFeatures.find((item) => item.key === "auto_lore_extract_enabled");
+    if (!config || !feature || automaticBusy) return;
+    setAutomaticBusy(true);
+    setAutomaticMessage("");
+    try {
+      const enabled = !Boolean(config.auto_lore_extract_enabled);
+      const saved = await saveAutomaticFeature({
+        feature,
+        enabled,
+        skills: controller.snapshot?.skills || [],
+        setSkillEnabled: controller.setSkillEnabled,
+        patchAndSaveConfig: controller.patchAndSaveConfig
+      });
+      setAutomaticMessage(saved ? `自动提取设定已${enabled ? "开启" : "关闭"}。` : "自动提取设定保存失败。");
+    } finally {
+      setAutomaticBusy(false);
+    }
+  }
+
+  async function checkCurrentChapter() {
+    if (!activeDocument || consistencyBusy) return;
+    setConsistencyBusy(true);
+    setConsistencySummary(null);
+    try {
+      const outcome = await runConsistencyReview({
+        controller,
+        scope: "chapter",
+        sourcePath: activeDocument.path,
+        text: activeDocument.content
+      });
+      if (!outcome) {
+        setConsistencySummary({ score: null, issueCount: 0, saved: false, message: controller.operationsMessage || "一致性检查未返回可用结果。" });
+        return;
+      }
+      setConsistencySummary({
+        score: outcome.score,
+        issueCount: outcome.issueCount,
+        saved: Boolean(outcome.bundle),
+        message: outcome.saveError ? "检查已完成，但报告保存失败。" : "检查完成，报告已保存。"
+      });
+    } finally {
+      setConsistencyBusy(false);
+    }
   }
 
   // 渲染助手或抽卡
@@ -315,6 +370,47 @@ export function AssistantProductPage({ controller }: { controller: WorkbenchCont
                 <span>只修改当前章节，提交前预览差异</span>
               </div>
             </div>
+
+            <section className="context-assist-tools" aria-label="写作辅助">
+              <div className="context-assist-heading">
+                <strong>写作辅助</strong>
+                <span>与写作设置保持同步</span>
+              </div>
+              <div className="context-assist-toggle-row">
+                <div>
+                  <strong>自动提取设定</strong>
+                  <span>确认写入后送到待确认设定</span>
+                </div>
+                <button
+                  className={`toggle${controller.configDraft?.auto_lore_extract_enabled ? " on" : ""}`}
+                  type="button"
+                  role="switch"
+                  aria-checked={Boolean(controller.configDraft?.auto_lore_extract_enabled)}
+                  aria-label={`${controller.configDraft?.auto_lore_extract_enabled ? "关闭" : "开启"}自动提取设定`}
+                  disabled={automaticBusy || controller.configBusy}
+                  onClick={() => void toggleAutomaticLore()}
+                ><i /></button>
+              </div>
+              <button className="button secondary context-check-button" type="button" disabled={!activeDocument || consistencyBusy || controller.operationsBusy} onClick={() => void checkCurrentChapter()}>
+                <BookCheck size={14} />{consistencyBusy ? "正在检查" : "检查当前章节"}
+              </button>
+              {!activeDocument && <p className="context-assist-note">先在正文编辑中打开一个章节。</p>}
+              {(consistencyBusy || consistencySummary || automaticBusy || automaticMessage) && (
+                <div className="context-assist-status" aria-live="polite">
+                  {consistencyBusy ? (
+                    <span>正在核对人物、设定、章纲与连续性...</span>
+                  ) : consistencySummary ? (
+                    <>
+                      <strong>{consistencySummary.message}</strong>
+                      {consistencySummary.score !== null && <span>得分 {consistencySummary.score}，发现 {consistencySummary.issueCount} 项建议。</span>}
+                      {consistencySummary.saved && <button type="button" onClick={() => onSelectFeature("review")}>查看完整报告</button>}
+                    </>
+                  ) : (
+                    <span>{automaticBusy ? "正在保存自动提取设定..." : automaticMessage}</span>
+                  )}
+                </div>
+              )}
+            </section>
           </aside>
         </div>
       )}

@@ -195,6 +195,68 @@ test("production navigation, settings history, and diagnostic isolation", async 
   }
 });
 
+test("home creates named novels inline and keeps cancellation non-destructive", async ({ page }) => {
+  const projectName = `home-create-${Date.now()}`;
+  let cancelNextPick = true;
+  await page.setViewportSize({ width: 1024, height: 720 });
+  await page.route(`${runtimeApi}/api/projects/pick`, (route) => {
+    void route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ path: cancelNextPick ? "" : sandboxProjectsPath })
+    });
+    cancelNextPick = false;
+  });
+
+  await page.goto(workbenchUrl("/home"));
+  await page.getByRole("button", { name: "新建小说", exact: true }).click();
+  const createPanel = page.getByRole("form", { name: "新建小说" });
+  await expect(createPanel).toBeVisible();
+  await createPanel.getByLabel("小说名称").fill(projectName);
+  await createPanel.getByRole("button", { name: "选择位置并创建", exact: true }).click();
+  await expect(page.getByText("已取消创建，新小说尚未写入磁盘。")).toBeVisible();
+
+  await createPanel.getByRole("button", { name: "选择位置并创建", exact: true }).click();
+  await expect(page.locator(".title-stack span")).toHaveText(projectName, { timeout: 20_000 });
+  await expect(page.getByText(/新项目已创建并打开/)).toBeVisible();
+
+  await page.getByRole("button", { name: "新建小说", exact: true }).click();
+  const duplicatePanel = page.getByRole("form", { name: "新建小说" });
+  await duplicatePanel.getByLabel("小说名称").fill(projectName);
+  await duplicatePanel.getByRole("button", { name: "选择位置并创建", exact: true }).click();
+  await expect(page.locator(".title-stack span")).toHaveText(`${projectName} (2)`, { timeout: 20_000 });
+  const dimensions = await page.evaluate(() => ({ clientWidth: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }));
+  expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
+});
+
+test("new novel creation confirms before leaving an unsaved chapter", async ({ page }) => {
+  const currentProjectName = await createWritingProject("unsaved-create-guard");
+  const nextProjectName = `guard-target-${Date.now()}`;
+  await page.route(`${runtimeApi}/api/projects/pick`, (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({ path: sandboxProjectsPath })
+  }));
+
+  await page.goto(workbenchUrl("/editor"));
+  const editor = await openEditorDocument(page, "正文");
+  await editor.fill("尚未保存的章节内容");
+  const navigation = page.getByRole("complementary", { name: "主导航" });
+  await navigation.getByRole("button", { name: "项目首页", exact: true }).click();
+  await page.getByRole("button", { name: "新建小说", exact: true }).click();
+  const createPanel = page.getByRole("form", { name: "新建小说" });
+  await createPanel.getByLabel("小说名称").fill(nextProjectName);
+  await createPanel.getByRole("button", { name: "选择位置并创建", exact: true }).click();
+
+  await expect(page.getByRole("heading", { name: "当前有未保存内容，确认要新建并切换项目吗？" })).toBeVisible();
+  await page.getByRole("button", { name: "返回当前项目", exact: true }).click();
+  await expect(page.locator(".title-stack span")).toHaveText(currentProjectName);
+
+  await createPanel.getByRole("button", { name: "选择位置并创建", exact: true }).click();
+  await page.getByRole("button", { name: "仍然继续", exact: true }).click();
+  await expect(page.locator(".title-stack span")).toHaveText(nextProjectName, { timeout: 20_000 });
+});
+
 test("cover workspace keeps four inputs, website-only model selection and version preview", async ({ page }) => {
   const projectName = await createWritingProject("cover-e2e");
   let generated = false;
@@ -504,6 +566,37 @@ test("automatic writing switches stay synchronized with settings", async ({ page
   await page.getByRole("complementary", { name: "主导航" }).getByRole("button", { name: "创作工具", exact: true }).click();
   await page.getByRole("tab", { name: "写作与审阅", exact: true }).click();
   await expect(page.getByRole("switch", { name: /自动提取明确设定/ })).toHaveAttribute("aria-checked", String(original));
+});
+
+test("assistant sidebar synchronizes automatic lore and saves chapter consistency reports", async ({ page }) => {
+  await createWritingProject("e2e-assistant-writing-tools");
+  await saveRuntimeDocument("02_正文/E2E一致性.txt", "林默在雨夜抵达旧城，准备寻找失踪多年的兄长。");
+  await configureMockModel();
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.goto(workbenchUrl("/editor"));
+  await openEditorDocument(page, "E2E一致性");
+  await page.getByRole("complementary", { name: "主导航" }).getByRole("button", { name: "AI 助手", exact: true }).click();
+  await page.setViewportSize({ width: 1024, height: 720 });
+
+  const sidebar = page.locator(".context-panel");
+  const autoLoreSwitch = sidebar.getByRole("switch", { name: /自动提取设定/ });
+  await expect(autoLoreSwitch).toHaveAttribute("aria-checked", "false");
+  await autoLoreSwitch.click();
+  await expect(autoLoreSwitch).toHaveAttribute("aria-checked", "true");
+  await expect(sidebar).toContainText("自动提取设定已开启");
+
+  await sidebar.getByRole("button", { name: "检查当前章节", exact: true }).click();
+  await expect(sidebar).toContainText("检查完成，报告已保存。", { timeout: 20_000 });
+  await expect(sidebar).toContainText("得分 0");
+  await sidebar.getByRole("button", { name: "查看完整报告", exact: true }).click();
+  await expect(page).toHaveURL(/#\/review$/);
+  await expect(page.getByRole("heading", { name: "全文审阅", exact: true })).toBeVisible();
+  await expect(page.locator(".review-score strong")).toHaveText("0");
+
+  await page.goto(workbenchUrl("/settings/writing"));
+  await expect(page.getByLabel("自动提取明确设定")).toBeChecked();
+  const dimensions = await page.evaluate(() => ({ clientWidth: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth }));
+  expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
 });
 
 test("skill view, edit, versions, and import preview use tertiary routes", async ({ page }) => {

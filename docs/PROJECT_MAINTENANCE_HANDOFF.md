@@ -1,14 +1,14 @@
 # ArcWriter 项目维护交接
 
-> 更新：2026-07-30
+> 更新：2026-07-31
 >
-> 当前版本：`1.1.0`（GitHub Release 版本）
+> 当前代码版本：`1.1.1`（GitHub Release 仍为 `1.1.0`；`1.1.1` 标签与 Release 须等待同提交 RC 证据）
 >
 > 定位：免费、小范围使用的 AI 小说写作 Preview，不按商业软件验收
 
 ## 1. 当前结论
 
-1.1.0 汇总此前 0.5.0～0.9.0 Preview 与后续 UI、AI、封面、云同步、拆书和教程增量。P0～P7 及小说 Agent 七项受控替代能力保持既有集中验收结论；每批新增能力分别记录验收证据，不回填或复用旧统计。普通 Desktop 启动默认启用集成 Preview 配置，`--safe-agent` 可一键回退。
+1.1.1 在 1.1.0 基线上修复新建小说流程，增加可恢复的最近项目移除操作，并把自动设定提取与当前章节一致性检查接入 AI 侧栏。P0～P7 及小说 Agent 七项受控替代能力保持既有集中验收结论；每批新增能力分别记录验收证据，不回填或复用旧统计。普通 Desktop 启动默认启用集成 Preview 配置，`--safe-agent` 可一键回退。
 
 Agent 当前执行口径只认两份文档：
 
@@ -89,7 +89,7 @@ Desktop 普通启动默认开启：durable execution、Model Gateway、replannin
 
 ## 5. 小说 Agent 七项受控能力
 
-当前 `1.1.0` 仍硬禁用以下原始能力：
+当前 `1.1.1` 仍硬禁用以下原始能力：
 
 1. 多 Agent 并行协作；
 2. Agent 自行安装工具/库；
@@ -175,6 +175,16 @@ npm run acceptance:preview
 - AI 对话输入栏删除“上下文”前的冗余小图标。用户可操作的短提示移动到发送箭头旁，三秒后自动消失，不再长期占用输入区域。
 - F1 和顶栏教程入口打开完整功能教程。教程按项目、写作、规划、资料、审阅、工具、任务与设置七类覆盖全部生产页面，逐项说明入口、操作顺序、结果去向、同步/写入边界和可直接跳转的页面。
 - 1.1.0 本地发布前验收已通过：全 workspace typecheck；127 个 Vitest 文件、951 项测试；3/3 发布脚本测试；Workbench/Desktop production build；12/12 Browser E2E；Desktop source smoke；Windows NSIS 安装包构建和 `git diff --check`。正式签名、同提交 RC、安装升级证据和 GitHub Release 仍由仓库发布工作流复核。
+
+### 6.5 新建小说、最近项目移除与 AI 侧栏工具（2026-07-31）
+
+- 首页“新建小说”改为内联命名后选择父目录，名称去除首尾空格并限制 80 字；重复目录沿用 `名称 (2)` 规则。取消选择不切换项目，成功与失败均在首页反馈。
+- 新建并切换项目前复用未保存内容确认；用户取消时保留当前项目和草稿，确认后打开新项目及默认正文。
+- 最近项目行增加低强调移除按钮。Desktop bridge、IPC 和本地状态服务只删除 `recent_projects` 记录，不删除小说目录、云端副本、会话、任务或生成缓存；存在云端副本时继续显示为仅云端项目。
+- AI 侧栏“写作辅助”增加自动提取设定开关，与 `auto_lore_extract_enabled` 和设置页共用配置，并复用既有逻辑恢复被禁用的设定提取技能。
+- “检查当前章节”只读取当前文档运行 `consistency_check`，不改写正文；结果映射与报告保存逻辑由 AI 侧栏和全文审阅页共用，侧栏显示进度、得分、问题数与完整报告入口。
+- 新增 shared schema、Desktop 本地状态、审阅报告和 Browser E2E 回归测试；1024、1280、1440 宽度保持无页面级横向溢出。
+- 版本基线为 `1.1.1`。完整 `npm run acceptance:preview` 已通过：全 workspace typecheck；129 个 Vitest 文件、954 项测试；3/3 Node 测试；8 类 eval manifest；Workbench/Desktop production build；15/15 Browser E2E；Desktop smoke；`git diff --check`。正式标签、签名安装包和 GitHub Release 仍必须按 `docs/RELEASE_GATES.md` 使用同提交 RC 证据晋升，不得由本次代码推送提前创建。
 
 `desktop-rc.yml` 的 nightly 路径可生成无签名 Preview artifact；严格 `channel=rc` 和 `release.yml` 留给未来商业化，不阻塞本次小范围使用。
 
@@ -285,3 +295,12 @@ git diff --check
 - AI 对话采用用户右侧气泡、AI 左侧正文和单容器输入栏，上下文、附件、模型和思考等级均保留真实交互；
 - 完整验证为 126 files / 943 tests、3/3 Node tests、两个 production build、Browser E2E 12/12、Desktop smoke 和 diff check；
 - 代码提交为 `f4376f6`，维护记录随后的独立文档提交不改变该代码证据。
+
+2026-07-31 1.1.1 项目创建与写作辅助维护：
+
+- 修复首页无法可靠新建小说的问题，补齐显式名称、目录取消、重名和未保存草稿确认路径；
+- 最近项目支持仅移除本机历史记录，本地小说文件、云端副本和生成缓存均不删除；
+- AI 侧栏接入自动设定提取和当前章节一致性检查，检查报告与全文审阅页共享持久化格式；
+- 桌面版本和锁文件更新为 `1.1.1`，新增 `docs/releases/v1.1.1.md`；
+- 完整 `npm run acceptance:preview` 已通过：全 workspace typecheck；129 files / 954 tests；3/3 Node tests；8 类 eval；两个 production build；Browser E2E 15/15；Desktop smoke；`git diff --check`；
+- 推送 `main` 只生成代码基线/夜间 Preview，未创建 `v1.1.1` 标签或 GitHub Release。

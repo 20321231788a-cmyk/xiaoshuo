@@ -1,36 +1,13 @@
 import {
   BookCheck,
   BookOpen,
-  CircleAlert,
-  FileText,
   Filter,
-  History,
   Search
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
-import type { ReviewReportsBundle, ReviewIssueStatus, CreateReviewReportRequest } from "@xiaoshuo/shared";
+import type { ReviewReportsBundle, ReviewIssueStatus } from "@xiaoshuo/shared";
 import type { WorkbenchController } from "../../../hooks/useWorkbenchController.js";
-import { EmptyState } from "../shared/SharedStates.js";
-
-type ConsistencyReviewResult = {
-  score?: unknown;
-  reason?: unknown;
-  risks?: unknown;
-  graph_score?: unknown;
-  graph_risks?: unknown;
-};
-
-async function reviewRequest<T>(controller: WorkbenchController, pathname: string, init?: RequestInit): Promise<T> {
-  const fetchFn = controller.runtime.fetchFn || fetch;
-  const response = await fetchFn(new URL(pathname, controller.runtime.apiBase), {
-    ...init,
-    headers: { "Content-Type": "application/json", ...(init?.headers || {}) }
-  });
-  const text = await response.text();
-  const payload = text ? JSON.parse(text) : {};
-  if (!response.ok) throw new Error(String(payload.detail || response.statusText || "审阅报告请求失败"));
-  return payload as T;
-}
+import { reviewRequest, runConsistencyReview } from "./reviewReports.js";
 
 function useReviewReports(controller: WorkbenchController) {
   const [bundle, setBundle] = useState<ReviewReportsBundle | null>(null);
@@ -60,18 +37,6 @@ function useReviewReports(controller: WorkbenchController) {
     void refresh();
   }, [refresh]);
 
-  async function create(input: Omit<CreateReviewReportRequest, "base_revision">) {
-    if (!projectPath) throw new Error("请先打开小说项目。");
-    const current = bundle || await reviewRequest<ReviewReportsBundle>(controller, "/api/review-reports");
-    const next = await reviewRequest<ReviewReportsBundle>(controller, "/api/review-reports", {
-      method: "POST",
-      body: JSON.stringify({ ...input, base_revision: current.revision })
-    });
-    setBundle(next);
-    setMessage("审阅报告已保存。");
-    return next;
-  }
-
   async function updateIssue(reportId: string, issueId: string, status: ReviewIssueStatus) {
     if (!projectPath) throw new Error("请先打开小说项目。");
     const current = bundle || await reviewRequest<ReviewReportsBundle>(controller, "/api/review-reports");
@@ -83,27 +48,7 @@ function useReviewReports(controller: WorkbenchController) {
     setMessage(status === "accepted" ? "已标记为采纳。" : "已忽略这条建议。");
   }
 
-  return { bundle, loading, message, refresh, create, updateIssue, setMessage };
-}
-
-function numericScore(value: unknown): number | null {
-  const score = Number(value);
-  return Number.isInteger(score) && score >= 0 && score <= 100 ? score : null;
-}
-
-function reviewInputFromResult(input: { scope: "chapter" | "project"; sourcePath: string; result: ConsistencyReviewResult }): Omit<CreateReviewReportRequest, "base_revision"> {
-  const risks = Array.isArray(input.result.risks) ? input.result.risks : [];
-  const graphRisks = Array.isArray(input.result.graph_risks) ? input.result.graph_risks : [];
-  return {
-    scope: input.scope,
-    source_paths: input.sourcePath ? [input.sourcePath] : ["02_正文"],
-    summary: String(input.result.reason || "审阅已完成，请逐项处理建议。"),
-    dimensions: [
-      { id: "continuity", label: "连续性", score: numericScore(input.result.score) },
-      ...(input.result.graph_score === undefined ? [] : [{ id: "story_facts", label: "已确认事实", score: numericScore(input.result.graph_score) }])
-    ],
-    issues: [...risks, ...graphRisks].map((risk) => ({ title: "建议处理", detail: String(risk), source_path: input.sourcePath, excerpt: "" }))
-  };
+  return { bundle, loading, message, refresh, updateIssue, setMessage, setBundle };
 }
 
 export function ReviewProductPage({
@@ -131,22 +76,20 @@ export function ReviewProductPage({
 
   async function runReview() {
     const sourcePath = scope === "chapter" ? activeDocument?.path || "" : "";
-    const skillResult = await controller.runWorkflowSkill("consistency_check", {
-      text: scope === "chapter" ? activeDocument?.content || "" : "",
-      source_path: sourcePath,
-      review_scope: scope,
-      instruction: "检查剧情连续性与事实冲突",
-      write_result: false
-    } as any);
-
-    const result = skillResult?.data as ConsistencyReviewResult | undefined;
-    if (!result || numericScore(result.score) === null) return;
-    try {
-      const next = await reports.create(reviewInputFromResult({ scope, sourcePath, result }));
-      setSelectedReportId(next.reports[0]?.id || "");
-    } catch (e) {
+    const outcome = await runConsistencyReview({
+      controller,
+      scope,
+      sourcePath,
+      text: scope === "chapter" ? activeDocument?.content || "" : ""
+    });
+    if (!outcome) return;
+    if (!outcome.bundle) {
       reports.setMessage("审阅已完成，但报告未能保存。");
+      return;
     }
+    reports.setBundle(outcome.bundle);
+    reports.setMessage("审阅报告已保存。");
+    setSelectedReportId(outcome.reportId);
   }
 
   function prepareRevision(detail: string) {

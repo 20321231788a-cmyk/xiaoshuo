@@ -11,6 +11,7 @@ import {
   healthSchema,
   jobInfoSchema,
   localStateRecordProjectRequestSchema,
+  localStateRemoveRecentProjectRequestSchema,
   localStateSnapshotSchema,
   projectChromeSnapshotSchema,
   projectOpenRequestSchema,
@@ -225,8 +226,13 @@ describe("shared schemas", () => {
       path: snapshot.recent_projects[0]?.path,
       name: snapshot.recent_projects[0]?.name
     });
+    const removeRequest = localStateRemoveRecentProjectRequestSchema.parse({
+      path: ` ${snapshot.recent_projects[0]?.path} `
+    });
 
     expect(snapshot.recent_projects).toHaveLength(1);
     expect(recordRequest.opened_at).toBeUndefined();
+    expect(removeRequest.path).toBe(snapshot.recent_projects[0]?.path);
+    expect(() => localStateRemoveRecentProjectRequestSchema.parse({ path: "  " })).toThrow();
   });
 });

@@ -195,6 +195,20 @@ export function App() {
         <>
           <CommandPalette open={commandOpen} commands={productCommands} documents={searchableDocuments} onClose={() => setCommandOpen(false)} onNavigate={navigate} onOpenDocument={(path) => { navigate({ feature: "editor" }); void controller.openDocument(path); }} />
           <TutorialDialog open={tutorialOpen} onClose={closeTutorial} onNavigate={navigate} />
+          {controller.pendingProjectSwitchRequest && (
+            <div className="cloud-replace-backdrop">
+              <section className="cloud-replace-dialog project-switch-dialog" role="dialog" aria-modal="true" aria-labelledby="project-switch-title" aria-describedby="project-switch-detail">
+                <div>
+                  <h2 id="project-switch-title">{controller.pendingProjectSwitchRequest.title}</h2>
+                  <p id="project-switch-detail">{controller.pendingProjectSwitchRequest.detail}</p>
+                </div>
+                <div className="cloud-replace-actions">
+                  <button className="button secondary" type="button" onClick={controller.cancelProjectSwitch} autoFocus>返回当前项目</button>
+                  <button className="button primary" type="button" onClick={() => void controller.confirmProjectSwitch()} disabled={controller.projectBusy}>{controller.projectBusy ? "处理中" : "仍然继续"}</button>
+                </div>
+              </section>
+            </div>
+          )}
         </>
       )}
     />

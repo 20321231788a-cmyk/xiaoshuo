@@ -1,5 +1,5 @@
 import type { CloudProjectSlot, CurrentProject, LocalStateProject } from "@xiaoshuo/shared";
-import { BookOpen, Bot, Cloud, CloudDownload, CloudUpload, FolderOpen, PenLine, Plus, RefreshCw, ShieldCheck } from "lucide-react";
+import { BookOpen, Bot, Cloud, CloudDownload, CloudUpload, FolderOpen, PenLine, Plus, RefreshCw, ShieldCheck, Trash2, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import type { WorkbenchController } from "../../../hooks/useWorkbenchController.js";
 import type { UserFeature } from "../../../navigation.js";
@@ -20,7 +20,11 @@ export function HomeProductPage({
   const [replacement, setReplacement] = useState<ReplacementRequest | null>(null);
   const [replacementSlotId, setReplacementSlotId] = useState<number>(0);
   const [replacementStep, setReplacementStep] = useState<"select" | "confirm">("select");
+  const [creationOpen, setCreationOpen] = useState(false);
+  const [newProjectName, setNewProjectName] = useState("");
+  const [creationOriginPath, setCreationOriginPath] = useState<string | null>(null);
   const recentProjects = snapshot?.localState?.recent_projects || [];
+  const currentProjectPath = snapshot?.currentProject.path || "";
   const mergedRows = useMemo(() => mergeProjectRows(recentProjects, controller.cloudProjectSlots, controller.cloudSyncPreferences), [recentProjects, controller.cloudProjectSlots, controller.cloudSyncPreferences]);
 
   useEffect(() => {
@@ -30,6 +34,11 @@ export function HomeProductPage({
       }
     }
   }, [controller, recentProjects]);
+
+  useEffect(() => {
+    if (creationOriginPath === null || !currentProjectPath || currentProjectPath === creationOriginPath) return;
+    closeCreation();
+  }, [creationOriginPath, currentProjectPath]);
 
   if (!snapshot) return null;
   const project = snapshot.currentProject;
@@ -82,6 +91,21 @@ export function HomeProductPage({
     await controller.restoreCloudProject(slot, { path: picked.path, name: slot.project_name || "恢复的小说" });
   }
 
+  async function submitNewProject() {
+    const name = newProjectName.trim().slice(0, 80);
+    if (!name) return;
+    setCreationOriginPath(project.path);
+    const result = await controller.pickAndCreateProject(name);
+    if (result === "created") closeCreation();
+    if (result === "cancelled" || result === "failed") setCreationOriginPath(null);
+  }
+
+  function closeCreation() {
+    setCreationOpen(false);
+    setNewProjectName("");
+    setCreationOriginPath(null);
+  }
+
   const summary = controller.cloudProjectSummary;
   const quotaLabel = summary
     ? `云端 ${controller.cloudProjectSlots.length}/3 · 今日剩余 ${summary.today_upload_remaining}/${summary.daily_upload_limit}${summary.monthly_upload_bytes_remaining ? ` · 本月上传剩余 ${formatBytes(summary.monthly_upload_bytes_remaining)}` : ""}`
@@ -98,11 +122,30 @@ export function HomeProductPage({
           <button className="button secondary" type="button" onClick={() => void controller.pickAndOpenProject("open")} disabled={controller.projectBusy}>
             <FolderOpen size={15} />打开项目
           </button>
-          <button className="button primary" type="button" onClick={() => void controller.pickAndOpenProject("create")} disabled={controller.projectBusy}>
+          <button className="button primary" type="button" aria-expanded={creationOpen} aria-controls="home-create-panel" onClick={() => setCreationOpen(true)} disabled={controller.projectBusy}>
             <Plus size={15} />新建小说
           </button>
         </div>
       </div>
+
+      {creationOpen && (
+        <form id="home-create-panel" className="home-create-panel" aria-label="新建小说" onSubmit={(event) => { event.preventDefault(); void submitNewProject(); }}>
+          <div className="home-create-copy">
+            <strong>给新小说起个名字</strong>
+            <span>下一步选择保存位置，ArcWriter 会自动创建大纲、设定和正文目录。</span>
+          </div>
+          <label className="home-create-name">
+            <span>小说名称</span>
+            <input value={newProjectName} onChange={(event) => setNewProjectName(event.target.value)} maxLength={80} placeholder="例如：雾城回声" autoFocus disabled={controller.projectBusy} />
+          </label>
+          <div className="home-create-actions">
+            <button className="icon-button subtle" type="button" aria-label="取消新建小说" title="取消" onClick={closeCreation} disabled={controller.projectBusy}><X size={15} /></button>
+            <button className="button primary" type="submit" disabled={controller.projectBusy || !newProjectName.trim()}><FolderOpen size={15} />{controller.projectBusy ? "处理中" : "选择位置并创建"}</button>
+          </div>
+        </form>
+      )}
+
+      {controller.projectMessage && <p className="home-project-message" role="status">{controller.projectMessage}</p>}
 
       {project.path ? (
         <section className="continue-band">
@@ -157,6 +200,14 @@ export function HomeProductPage({
                 </label>
                 <button className="button secondary compact cloud-sync-now" type="button" disabled={controller.cloudProjectBusy} onClick={() => void syncProject(row.local!)}><CloudUpload size={14} />立即同步</button>
                 {row.slot && <button className="cloud-restore-button" type="button" disabled={controller.cloudProjectBusy} onClick={() => void controller.restoreCloudProject(row.slot!, row.local!)}><CloudDownload size={14} />恢复</button>}
+                <button
+                  className="cloud-remove-recent"
+                  type="button"
+                  title="从最近项目中移除，本地文件不会删除"
+                  aria-label={`从最近项目中移除${row.local.name}`}
+                  disabled={controller.recentProjectRemovingPath === row.local.path}
+                  onClick={() => void controller.removeRecentProject(row.local!.path)}
+                ><Trash2 size={14} /></button>
               </article>
             ) : (
               <article className="cloud-project-row cloud-only" key={`cloud:${row.slot!.id}`}>

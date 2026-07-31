@@ -55,7 +55,7 @@ export function ProductWorkspace({
     case "editor":
       return <EditorProductPage controller={controller} onSelectFeature={onSelectFeature} />;
     case "conversations":
-      return deferredPage(<AssistantProductPage controller={controller} />);
+      return deferredPage(<AssistantProductPage controller={controller} onSelectFeature={onSelectFeature} />);
     case "outline":
       return deferredPage(<OutlineProductPage controller={controller} />);
     case "clues":

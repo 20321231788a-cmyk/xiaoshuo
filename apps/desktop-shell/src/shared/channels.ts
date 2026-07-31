@@ -99,6 +99,7 @@ export const ipcChannels = {
   shellCloudProjectsDelete: "shell:cloud-projects:delete",
   localStateGet: "local-state:get",
   localStateRecordProject: "local-state:record-project",
+  localStateRemoveRecentProject: "local-state:remove-recent-project",
   localStateSyncProject: "local-state:sync-project",
   localStatePatchSettings: "local-state:patch-settings",
   localStateTrackGeneratedCache: "local-state:track-generated-cache",
@@ -356,6 +357,10 @@ export const localStateRecordProjectRequestSchema = z.object({
   previous_path: z.string().optional()
 });
 
+export const localStateRemoveRecentProjectRequestSchema = z.object({
+  path: z.string().trim().min(1)
+});
+
 export const localStateSyncProjectRequestSchema = z.object({
   project: localStateRecordProjectRequestSchema,
   conversations: z.array(z.unknown()).default([]),
@@ -467,6 +472,7 @@ export type DesktopVersions = z.infer<typeof desktopVersionsSchema>;
 export type DesktopWorkbenchSettings = z.infer<typeof desktopWorkbenchSettingsSchema>;
 export type LocalStateSnapshot = z.infer<typeof localStateSnapshotSchema>;
 export type LocalStateRecordProjectRequest = z.infer<typeof localStateRecordProjectRequestSchema>;
+export type LocalStateRemoveRecentProjectRequest = z.infer<typeof localStateRemoveRecentProjectRequestSchema>;
 export type LocalStateSyncProjectRequest = z.infer<typeof localStateSyncProjectRequestSchema>;
 export type LocalStatePatchSettingsRequest = z.infer<typeof localStatePatchSettingsRequestSchema>;
 export type LocalStateTrackGeneratedCacheRequest = z.infer<typeof localStateTrackGeneratedCacheRequestSchema>;
@@ -506,6 +512,7 @@ export type XiaoShuoDesktopApi = {
   localState: {
     get: () => Promise<LocalStateSnapshot>;
     recordProject: (request: LocalStateRecordProjectRequest) => Promise<LocalStateSnapshot>;
+    removeRecentProject: (request: LocalStateRemoveRecentProjectRequest) => Promise<LocalStateSnapshot>;
     syncProject: (request: LocalStateSyncProjectRequest) => Promise<LocalStateSnapshot>;
     patchSettings: (request: LocalStatePatchSettingsRequest) => Promise<LocalStateSnapshot>;
     trackGeneratedCache: (request: LocalStateTrackGeneratedCacheRequest) => Promise<LocalStateSnapshot>;

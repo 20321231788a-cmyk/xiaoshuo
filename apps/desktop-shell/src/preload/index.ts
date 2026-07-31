@@ -18,6 +18,7 @@ import {
   ipcChannels,
   localStatePatchSettingsRequestSchema,
   localStateRecordProjectRequestSchema,
+  localStateRemoveRecentProjectRequestSchema,
   localStateSnapshotSchema,
   localStateSyncProjectRequestSchema,
   localStateTrackGeneratedCacheRequestSchema,
@@ -159,6 +160,8 @@ const desktopApi: XiaoShuoDesktopApi = {
     get: async () => localStateSnapshotSchema.parse(await ipcRenderer.invoke(ipcChannels.localStateGet)),
     recordProject: async (request) =>
       localStateSnapshotSchema.parse(await ipcRenderer.invoke(ipcChannels.localStateRecordProject, localStateRecordProjectRequestSchema.parse(request))),
+    removeRecentProject: async (request) =>
+      localStateSnapshotSchema.parse(await ipcRenderer.invoke(ipcChannels.localStateRemoveRecentProject, localStateRemoveRecentProjectRequestSchema.parse(request))),
     syncProject: async (request) =>
       localStateSnapshotSchema.parse(await ipcRenderer.invoke(ipcChannels.localStateSyncProject, localStateSyncProjectRequestSchema.parse(request))),
     patchSettings: async (request) =>

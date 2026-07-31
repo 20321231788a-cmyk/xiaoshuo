@@ -15,6 +15,7 @@ import {
   getLocalStateSnapshot,
   patchWorkbenchSettings,
   recordRecentProject,
+  removeRecentProject,
   syncProjectLocalState,
   trackGeneratedCacheMetadata
 } from "./local-state.js";
@@ -42,6 +43,7 @@ import {
   cloudProjectUploadRequestSchema,
   desktopProjectExportRequestSchema,
   ipcChannels,
+  localStateRemoveRecentProjectRequestSchema,
   novelBackgroundTaskControlSchema,
   novelBackgroundTaskCreateSchema,
   novelMemoryBatchDesktopRequestSchema,
@@ -368,6 +370,9 @@ function registerIpc(): void {
   );
   ipcMain.handle(ipcChannels.localStateGet, () => getLocalStateSnapshot());
   ipcMain.handle(ipcChannels.localStateRecordProject, (_event, request) => recordRecentProject(request));
+  ipcMain.handle(ipcChannels.localStateRemoveRecentProject, (_event, request) =>
+    removeRecentProject(localStateRemoveRecentProjectRequestSchema.parse(request))
+  );
   ipcMain.handle(ipcChannels.localStateSyncProject, (_event, request) => syncProjectLocalState(request));
   ipcMain.handle(ipcChannels.localStatePatchSettings, (_event, request) => patchWorkbenchSettings(request));
   ipcMain.handle(ipcChannels.localStateTrackGeneratedCache, (_event, request) => trackGeneratedCacheMetadata(request));

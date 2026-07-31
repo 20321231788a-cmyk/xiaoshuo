@@ -369,6 +369,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [projectBusy, setProjectBusy] = useState(false);
   const [projectMessage, setProjectMessage] = useState("");
+  const [recentProjectRemovingPath, setRecentProjectRemovingPath] = useState("");
   const [vectorSearchBusy, setVectorSearchBusy] = useState(false);
   const [vectorSearchMessage, setVectorSearchMessage] = useState("");
   const [vectorSearchResults, setVectorSearchResults] = useState<VectorSearchHit[]>([]);
@@ -1473,14 +1474,16 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
-  async function performCreateProject(parentPath: string, projectName: string) {
+  async function performCreateProject(parentPath: string, projectName: string): Promise<"created" | "failed"> {
     setProjectBusy(true);
     setProjectMessage("");
     try {
       const created = await client.createProject(parentPath, projectName);
       await finalizeProjectSwitch(created, "新项目已创建并打开");
+      return "created";
     } catch (nextError) {
       setProjectMessage(describeActionableError(nextError, "创建项目失败", "请确认父目录存在并且允许写入。"));
+      return "failed";
     } finally {
       setProjectBusy(false);
     }
@@ -1530,16 +1533,16 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     await performOpenProject(targetPath);
   }
 
-  async function createProjectFromInput(pathOverride?: string) {
+  async function createProjectFromInput(pathOverride?: string): Promise<"created" | "queued" | "failed"> {
     const parentPath = (pathOverride ?? projectPathInput).trim();
     const projectName = projectNameInput.trim();
     if (!parentPath) {
       setProjectMessage("先填一个父目录，再创建项目。");
-      return;
+      return "failed";
     }
     if (!projectName) {
       setProjectMessage("给新项目起个名字吧。");
-      return;
+      return "failed";
     }
 
     const unsavedState = getUnsavedWorkbenchState();
@@ -1551,15 +1554,60 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         title: "当前有未保存草稿，确认要新建并切换项目吗？",
         detail: `${unsavedState.detail} 继续后会在 ${parentPath} 下创建 ${projectName}。`
       });
-      return;
+      return "queued";
     }
 
-    await performCreateProject(parentPath, projectName);
+    return performCreateProject(parentPath, projectName);
+  }
+
+  async function pickAndCreateProject(projectNameInput: string): Promise<"created" | "queued" | "cancelled" | "failed"> {
+    const projectName = projectNameInput.trim().slice(0, 80);
+    if (!projectName) {
+      setProjectMessage("给新小说起个名字吧。");
+      return "failed";
+    }
+
+    setProjectBusy(true);
+    setProjectMessage("请选择保存新小说的父目录。");
+    try {
+      const picked =
+        runtime.isDesktopShell && window.xiaoshuoDesktop?.pickProjectDirectory
+          ? await window.xiaoshuoDesktop.pickProjectDirectory()
+          : await client.pickProject();
+      if (!picked.path) {
+        setProjectMessage("已取消创建，新小说尚未写入磁盘。");
+        return "cancelled";
+      }
+
+      setProjectPathInput(picked.path);
+      const unsavedState = getUnsavedWorkbenchState();
+      if (unsavedState.hasUnsavedState) {
+        queueProjectSwitch({
+          mode: "create",
+          parentPath: picked.path,
+          projectName,
+          title: "当前有未保存内容，确认要新建并切换项目吗？",
+          detail: `${unsavedState.detail} 继续后会在 ${picked.path} 下创建 ${projectName}。`
+        });
+        return "queued";
+      }
+
+      return await performCreateProject(picked.path, projectName);
+    } catch (nextError) {
+      setProjectMessage(describeActionableError(nextError, "选择目录失败", "请重新选择一个可访问的目录。"));
+      return "failed";
+    } finally {
+      setProjectBusy(false);
+    }
   }
 
   async function pickAndOpenProject(mode: "open" | "create") {
+    if (mode === "create") {
+      await pickAndCreateProject(projectNameInput);
+      return;
+    }
     setProjectBusy(true);
-    setProjectMessage(mode === "create" ? "请选择一个父目录，用来生成新项目。" : "请选择要打开的项目目录。");
+    setProjectMessage("请选择要打开的项目目录。");
     try {
       const picked =
         runtime.isDesktopShell && window.xiaoshuoDesktop?.pickProjectDirectory
@@ -1571,17 +1619,35 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       }
 
       setProjectPathInput(picked.path);
-      if (mode === "create") {
-        await createProjectFromInput(picked.path);
-      } else {
-        await openProjectFromInput(picked.path);
-      }
+      await openProjectFromInput(picked.path);
     } catch (nextError) {
       setProjectMessage(
-        describeActionableError(nextError, mode === "create" ? "选择目录失败" : "选择项目失败", "请重新选择一个可访问的目录。")
+        describeActionableError(nextError, "选择项目失败", "请重新选择一个可访问的目录。")
       );
     } finally {
       setProjectBusy(false);
+    }
+  }
+
+  async function removeRecentProject(projectPath: string): Promise<boolean> {
+    const path = projectPath.trim();
+    if (!path || !runtime.isDesktopShell || !window.xiaoshuoDesktop?.localState?.removeRecentProject) {
+      setProjectMessage("最近项目管理需要桌面版。");
+      return false;
+    }
+
+    setRecentProjectRemovingPath(path);
+    setProjectMessage("");
+    try {
+      const localState = await window.xiaoshuoDesktop.localState.removeRecentProject({ path });
+      setSnapshot((current) => (current ? { ...current, localState } : current));
+      setProjectMessage("已从最近项目中移除，本地小说文件和云端副本均未删除。");
+      return true;
+    } catch (nextError) {
+      setProjectMessage(describeActionableError(nextError, "移除最近项目失败", "请稍后重试，本地小说文件没有变化。"));
+      return false;
+    } finally {
+      setRecentProjectRemovingPath("");
     }
   }
 
@@ -4577,6 +4643,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     refreshAll,
     projectBusy,
     projectMessage,
+    recentProjectRemovingPath,
     vectorSearchBusy,
     vectorSearchMessage,
     vectorSearchResults,
@@ -4587,7 +4654,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     refreshProjectWorkspace,
     openProjectFromInput,
     createProjectFromInput,
+    pickAndCreateProject,
     pickAndOpenProject,
+    removeRecentProject,
     exportCurrentProject,
     importProjectArchive,
     renameCurrentProject,

@@ -5,6 +5,7 @@ import type {
   LocalStateGeneratedCache,
   LocalStateProject,
   LocalStateRecordProjectRequest,
+  LocalStateRemoveRecentProjectRequest,
   LocalStateSnapshot,
   LocalStateSyncProjectRequest,
   LocalStateTrackGeneratedCacheRequest
@@ -17,6 +18,7 @@ import {
   desktopWorkbenchSettingsSchema,
   localStatePatchSettingsRequestSchema,
   localStateRecordProjectRequestSchema,
+  localStateRemoveRecentProjectRequestSchema,
   localStateSyncProjectRequestSchema,
   localStateTrackGeneratedCacheRequestSchema
 } from "../shared/channels.js";
@@ -375,6 +377,13 @@ export async function recordRecentProject(request: LocalStateRecordProjectReques
     )
     .run(project.path, project.name, project.opened_at || new Date().toISOString());
 
+  return getLocalStateSnapshot();
+}
+
+export async function removeRecentProject(request: LocalStateRemoveRecentProjectRequest): Promise<LocalStateSnapshot> {
+  const project = localStateRemoveRecentProjectRequestSchema.parse(request);
+  const database = await openDatabase();
+  database.prepare("DELETE FROM recent_projects WHERE path = ?").run(project.path);
   return getLocalStateSnapshot();
 }
 
