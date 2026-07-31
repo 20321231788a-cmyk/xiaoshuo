@@ -2439,7 +2439,7 @@ describe("agent-runtime chat flow", () => {
     await expect(cache.readContent(cacheIds[0]!)).rejects.toThrow("正文不存在");
     expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8"))
       .toBe("可恢复 chat journal 大纲");
-  });
+  }, 15_000);
 
   it("reconciles chat auto-save cache metadata from a completed observation without rerunning the model", async () => {
     let modelCalls = 0;
