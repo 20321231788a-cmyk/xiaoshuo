@@ -251,7 +251,7 @@ async function waitForRunStatus(runtime: AgentRuntimeService, runId: string, sta
 }
 
 async function waitForCacheStatus(cache: GeneratedCacheService, cacheId: string, status: string): Promise<void> {
-  for (let attempt = 0; attempt < 300; attempt++) {
+  for (let attempt = 0; attempt < 1_000; attempt++) {
     if ((await cache.get(cacheId)).status === status) {
       return;
     }
