@@ -656,7 +656,10 @@ test("editor punctuation, typing speed, save-all, and conflict recovery", async 
   await page.getByRole("button", { name: "查看差异", exact: true }).click();
   await expect(page.getByRole("region", { name: "保存冲突差异" })).toContainText("后台磁盘新版");
   await page.getByRole("button", { name: "保留我的版本", exact: true }).click();
-  await expect.poll(async () => (await readRuntimeDocument("02_正文/E2E冲突.txt")).content).toBe("本地修改稿");
+  await expect.poll(
+    async () => (await readRuntimeDocument("02_正文/E2E冲突.txt")).content,
+    { timeout: 15_000 }
+  ).toBe("本地修改稿");
 });
 
 test("skill generation requires preview confirmation before writing", async ({ page }) => {

@@ -186,6 +186,7 @@ npm run acceptance:preview
 - 新增 shared schema、Desktop 本地状态、审阅报告和 Browser E2E 回归测试；1024、1280、1440 宽度保持无页面级横向溢出。
 - 版本基线为 `1.1.1`。完整 `npm run acceptance:preview` 已通过：全 workspace typecheck；129 个 Vitest 文件、954 项测试；3/3 Node 测试；8 类 eval manifest；Workbench/Desktop production build；15/15 Browser E2E；Desktop smoke；`git diff --check`。无签名小范围版本在用户明确发出发布口令后可作为 GitHub Preview 预发布；签名稳定版仍必须按 `docs/RELEASE_GATES.md` 使用同提交 RC 证据晋升。
 - 1.1.1 最终发布流水线曾在两条 chat 写回/自动保存崩溃恢复用例上出现 Windows 并行负载抖动：一次触发默认 5 秒测试超时，一次在后台 run 已完成后未能于 3 秒内观察到缓存元数据收口。本地定向复现为 197ms 且断言全部通过；已将相关单用例超时设为 15 秒、缓存状态轮询上限设为 10 秒，生产逻辑以及恢复后必须完成、不重复调用模型、不重复写回的断言均未放宽。
+- Nightly 的编辑器保存冲突 E2E 也曾在高负载下超过默认 5 秒磁盘观察窗口，而同提交 Windows 质量门已通过该流程；该 `expect.poll` 上限调整为 15 秒，最终磁盘内容必须精确等于用户选择的本地版本这一断言保持不变。
 
 `desktop-rc.yml` 的 nightly 路径可生成无签名 Preview artifact；严格 `channel=rc` 和 `release.yml` 留给未来商业化，不阻塞本次小范围使用。
 
