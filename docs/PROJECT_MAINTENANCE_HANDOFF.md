@@ -185,7 +185,7 @@ npm run acceptance:preview
 - “检查当前章节”只读取当前文档运行 `consistency_check`，不改写正文；结果映射与报告保存逻辑由 AI 侧栏和全文审阅页共用，侧栏显示进度、得分、问题数与完整报告入口。
 - 新增 shared schema、Desktop 本地状态、审阅报告和 Browser E2E 回归测试；1024、1280、1440 宽度保持无页面级横向溢出。
 - 版本基线为 `1.1.1`。完整 `npm run acceptance:preview` 已通过：全 workspace typecheck；129 个 Vitest 文件、954 项测试；3/3 Node 测试；8 类 eval manifest；Workbench/Desktop production build；15/15 Browser E2E；Desktop smoke；`git diff --check`。无签名小范围版本在用户明确发出发布口令后可作为 GitHub Preview 预发布；签名稳定版仍必须按 `docs/RELEASE_GATES.md` 使用同提交 RC 证据晋升。
-- 1.1.1 最终发布流水线曾在两条 chat 写回/自动保存崩溃恢复用例上出现 Windows 并行负载抖动：一次触发默认 5 秒测试超时，一次在后台 run 已完成后未能于 3 秒内观察到缓存元数据收口。本地定向复现为 197ms 且断言全部通过；已将相关单用例超时设为 15 秒、缓存状态轮询上限设为 10 秒，生产逻辑以及恢复后必须完成、不重复调用模型、不重复写回的断言均未放宽。
+- 1.1.1 最终发布流水线曾在两条 chat 写回/自动保存崩溃恢复用例上出现 Windows 并行负载抖动：一次触发默认 5 秒测试超时，一次在后台 run 已完成后未能及时观察到缓存元数据收口。本地定向复现为 197ms 且断言全部通过；两条用例内部最多包含约 3 秒 run 等待和 10 秒缓存等待，因此单用例总时限设为 30 秒以保留 SQLite 初始化与断言余量，缓存状态轮询仍限制为 10 秒。生产逻辑以及恢复后必须完成、不重复调用模型、不重复写回的断言均未放宽。
 - Nightly 的编辑器保存冲突 E2E 也曾在高负载下超过默认 5 秒磁盘观察窗口，而同提交 Windows 质量门已通过该流程；该 `expect.poll` 上限调整为 15 秒，最终磁盘内容必须精确等于用户选择的本地版本这一断言保持不变。
 - 后续 Windows 质量门又在既有 ExecutionStore SQLite CRUD 用例上随机超过默认 5 秒，而同提交 Nightly 的 954 项测试全部通过。由于高负载 runner 已在三个互不相关的 SQLite/文件测试上产生同类误报，Vitest 全局单测超时统一设为 15 秒；测试断言、错误条件、测试文件数量和生产实现均未改变，真实卡死仍会失败。
 

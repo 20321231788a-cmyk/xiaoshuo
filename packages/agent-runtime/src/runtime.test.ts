@@ -1881,7 +1881,7 @@ describe("agent-runtime chat flow", () => {
     expect(detail.messages.filter((message) =>
       message.role === "system" && message.content.includes("已写回 02_正文/第一章.txt")
     )).toHaveLength(1);
-  }, 15_000);
+  }, 30_000);
 
   it("streams conversation write_target through the durable journal before yielding the final event", async () => {
     const conversations = new ConversationService({ projectRoot: tempDir });
@@ -2439,7 +2439,7 @@ describe("agent-runtime chat flow", () => {
     await expect(cache.readContent(cacheIds[0]!)).rejects.toThrow("正文不存在");
     expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8"))
       .toBe("可恢复 chat journal 大纲");
-  }, 15_000);
+  }, 30_000);
 
   it("reconciles chat auto-save cache metadata from a completed observation without rerunning the model", async () => {
     let modelCalls = 0;
