@@ -2,7 +2,7 @@
 
 > 更新：2026-07-31
 >
-> 当前代码版本：`1.1.1`（GitHub Release 仍为 `1.1.0`；`1.1.1` 标签与 Release 须等待同提交 RC 证据）
+> 当前版本：`1.1.1`（GitHub Preview Release 版本）
 >
 > 定位：免费、小范围使用的 AI 小说写作 Preview，不按商业软件验收
 
@@ -184,7 +184,7 @@ npm run acceptance:preview
 - AI 侧栏“写作辅助”增加自动提取设定开关，与 `auto_lore_extract_enabled` 和设置页共用配置，并复用既有逻辑恢复被禁用的设定提取技能。
 - “检查当前章节”只读取当前文档运行 `consistency_check`，不改写正文；结果映射与报告保存逻辑由 AI 侧栏和全文审阅页共用，侧栏显示进度、得分、问题数与完整报告入口。
 - 新增 shared schema、Desktop 本地状态、审阅报告和 Browser E2E 回归测试；1024、1280、1440 宽度保持无页面级横向溢出。
-- 版本基线为 `1.1.1`。完整 `npm run acceptance:preview` 已通过：全 workspace typecheck；129 个 Vitest 文件、954 项测试；3/3 Node 测试；8 类 eval manifest；Workbench/Desktop production build；15/15 Browser E2E；Desktop smoke；`git diff --check`。正式标签、签名安装包和 GitHub Release 仍必须按 `docs/RELEASE_GATES.md` 使用同提交 RC 证据晋升，不得由本次代码推送提前创建。
+- 版本基线为 `1.1.1`。完整 `npm run acceptance:preview` 已通过：全 workspace typecheck；129 个 Vitest 文件、954 项测试；3/3 Node 测试；8 类 eval manifest；Workbench/Desktop production build；15/15 Browser E2E；Desktop smoke；`git diff --check`。无签名小范围版本在用户明确发出发布口令后可作为 GitHub Preview 预发布；签名稳定版仍必须按 `docs/RELEASE_GATES.md` 使用同提交 RC 证据晋升。
 
 `desktop-rc.yml` 的 nightly 路径可生成无签名 Preview artifact；严格 `channel=rc` 和 `release.yml` 留给未来商业化，不阻塞本次小范围使用。
 
@@ -197,6 +197,13 @@ npm run dist -w @xiaoshuo/desktop-shell
 产物目录：`apps/desktop-shell/release/`。无签名包可能触发 Windows SmartScreen，符合当前小范围 Preview 定位。
 
 回退优先使用 `--safe-agent`。版本回退前备份整个小说项目；不要用旧版本写入已经升级的 SQLite schema。卸载默认不删除用户数据。
+
+### 7.1 发布口令约定
+
+- 当用户输入“推送 GitHub”并同时给出明确版本号（例如 `1.1.1`）时，视为授权执行该版本的完整发布流程，不得只推送源码后停止。
+- 完整流程包括：核对并更新 Desktop 与锁文件版本、更新维护文档和版本说明、运行发布前验收、生成 Windows 安装包、提交并推送 `main`、创建对应版本标签和 GitHub Release，并上传安装包、`.blockmap` 与 `latest.yml`。
+- 若同提交已具备受保护 RC、代码签名和发布证据，则走正式稳定版工作流；若仍处于无签名小范围使用阶段，则创建名称明确包含 `Preview` 的预发布，并在说明中提示 Windows SmartScreen 风险，不能伪装为已签名稳定版。
+- 发布结束必须核对远端分支、标签目标、Release 状态、附件名称、大小和 SHA-256；失败时保留代码与本地项目数据，并向用户明确报告未完成的发布环节。
 
 ## 8. 常见问题
 
