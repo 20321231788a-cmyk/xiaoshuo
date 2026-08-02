@@ -38,15 +38,20 @@ jobs:
 
       - name: Validate tagged version
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          $tagType = (git cat-file -t "refs/tags/$env:GITHUB_REF_NAME").Trim()
-          if ($tagType -ne 'tag') { throw 'Release tags must be annotated tags' }
+          $tagRef = gh api "/repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:GITHUB_REF_NAME" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $tagRef.object.type -ne 'tag') { throw 'Release tag must be an annotated tag' }
+          $tagObject = gh api "/repos/$env:GITHUB_REPOSITORY/git/tags/$($tagRef.object.sha)" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $tagObject.object.type -ne 'commit') { throw 'Annotated release tag target is invalid' }
           $version = [string](Get-Content apps/desktop-shell/package.json -Raw | ConvertFrom-Json).version
           if ($version -ne '1.2.0' -or $env:GITHUB_REF_NAME -ne 'v1.2.0') {
             throw "Expected v1.2.0, found tag $env:GITHUB_REF_NAME and package version $version"
           }
           $sourceCommit = (git rev-list -n 1 $env:GITHUB_REF).Trim()
           if ($sourceCommit -notmatch '^[0-9a-f]{40}$') { throw 'Unable to resolve tagged source commit' }
+          if ($tagObject.object.sha -ne $sourceCommit) { throw 'Remote tag target does not match checked-out source' }
 
       - name: Run release checks
         run: npm run acceptance:preview
