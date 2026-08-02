@@ -505,6 +505,8 @@ test("assistant uses split message alignment and a compact keyboard-first compos
   const assistantMessage = page.locator('.assistant-message.ai[data-message-role="assistant"]').last();
   await expect(userMessage).toContainText("请回复这条消息");
   await expect(assistantMessage).toContainText("E2E 模型回复", { timeout: 20_000 });
+  await expect(userMessage.locator(".assistant-message-body")).toBeVisible();
+  await expect(assistantMessage.locator(".assistant-message-body")).toBeVisible();
 
   const [userBox, assistantBox] = await Promise.all([
     userMessage.locator(".assistant-message-body").boundingBox(),
