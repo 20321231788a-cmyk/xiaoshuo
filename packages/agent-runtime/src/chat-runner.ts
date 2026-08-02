@@ -5,6 +5,7 @@ import {
   canRetryWithoutStream,
   OpenAICompatibleClient,
   type ChatCompletionMessage,
+  type ModelCompletionResult,
   type ModelRequestOptions
 } from "@xiaoshuo/model-client";
 import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
@@ -50,7 +51,7 @@ const MAX_CONTEXT_CHARS = 36_000;
 const MAX_COMPACT_CONTEXT_CHARS = 14_000;
 
 type ChatModelClient = Pick<OpenAICompatibleClient, "requestCompletion"> &
-  Partial<Pick<OpenAICompatibleClient, "streamCompletion">>;
+  Partial<Pick<OpenAICompatibleClient, "streamCompletion" | "streamDetailedCompletion" | "requestDetailedCompletion">>;
 
 export type ChatContextAssemblyObserver = (event: { scope: string; context: AssembledContext }) => void;
 
@@ -124,11 +125,12 @@ export class AgentChatRunner {
     throwIfAborted(options.signal);
 
     try {
-      const reply = String(await this.modelClient.requestCompletion(config, messages, config.temperature, requestOptions)).trim();
+      const detailed = await this.completeDetailedOnce(config, messages, state.detail.reasoning_enabled, options, requestOptions);
+      const reply = detailed.answer;
       throwIfAborted(options.signal);
       const humanized = await this.humanizeConversationText(state.detail, reply, options);
       throwIfAborted(options.signal);
-      const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized);
+      const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized, detailed.reasoning);
       return this.buildResponse(intent, humanized.text, conversation, webSearchSources);
     } catch (error) {
       if (isCancellationError(error, options.signal)) {
@@ -139,11 +141,12 @@ export class AgentChatRunner {
       }
       const compactMessages = await this.buildMessages(state.detail, payload, true, undefined, contextObserver);
       throwIfAborted(options.signal);
-      const reply = String(await this.modelClient.requestCompletion(config, compactMessages, config.temperature, requestOptions)).trim();
+      const detailed = await this.completeDetailedOnce(config, compactMessages, state.detail.reasoning_enabled, options, requestOptions);
+      const reply = detailed.answer;
       throwIfAborted(options.signal);
       const humanized = await this.humanizeConversationText(state.detail, reply, options);
       throwIfAborted(options.signal);
-      const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized);
+      const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized, detailed.reasoning);
       return this.buildResponse(intent, humanized.text, conversation, webSearchSources);
     }
   }
@@ -169,6 +172,8 @@ export class AgentChatRunner {
     const baseMessages = await this.buildMessages(state.detail, payload, false, webSearchSources, contextObserver);
     const compactMessages = await this.buildMessages(state.detail, payload, true, undefined, contextObserver);
     const streamCompletion = this.modelClient.streamCompletion?.bind(this.modelClient);
+    const streamDetailedCompletion = this.modelClient.streamDetailedCompletion?.bind(this.modelClient);
+    const reasoningParts: string[] = [];
     const replyParts: string[] = [];
     let stoppedPersisted = false;
     const persistStoppedReply = async () => {
@@ -180,10 +185,62 @@ export class AgentChatRunner {
         return;
       }
       stoppedPersisted = true;
-      await this.persistStoppedAssistantReply(state.detail.id, partial, webSearchSources).catch(() => {});
+       await this.persistStoppedAssistantReply(state.detail.id, partial, webSearchSources, reasoningParts.join("")).catch(() => {});
     };
 
-    if (streamCompletion) {
+    if (streamDetailedCompletion) {
+      try {
+        for await (const chunk of streamDetailedCompletion(config, baseMessages, config.temperature, requestOptions)) {
+          throwIfAborted(options.signal);
+          if (!chunk.text) continue;
+          if (chunk.channel === "reasoning") {
+            if (!state.detail.reasoning_enabled) continue;
+            reasoningParts.push(chunk.text);
+            yield { type: "delta", channel: "reasoning", text: chunk.text };
+            continue;
+          }
+          replyParts.push(chunk.text);
+          for (const visibleChunk of splitVisibleStreamText(chunk.text)) {
+            yield { type: "delta", channel: "answer", text: visibleChunk };
+          }
+        }
+      } catch (error) {
+        if (isCancellationError(error, options.signal)) {
+          await persistStoppedReply();
+          throw error;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        if (replyParts.length || reasoningParts.length) {
+          yield { type: "error", message };
+          return;
+        }
+        try {
+          const fallback = looksGatewayTimeout(error)
+            ? await this.completeDetailedOnce(config, compactMessages, state.detail.reasoning_enabled, options, requestOptions)
+            : canRetryWithoutStream(message)
+              ? await this.completeDetailedOnce(config, baseMessages, state.detail.reasoning_enabled, options, requestOptions)
+              : { reasoning: "", answer: "" };
+          if (!fallback.answer && !looksGatewayTimeout(error) && !canRetryWithoutStream(message)) throw error;
+          if (fallback.reasoning) {
+            reasoningParts.push(fallback.reasoning);
+            yield { type: "delta", channel: "reasoning", text: fallback.reasoning };
+          }
+          if (fallback.answer) {
+            replyParts.push(fallback.answer);
+            for (const visibleChunk of splitVisibleStreamText(fallback.answer)) {
+              yield { type: "delta", channel: "answer", text: visibleChunk };
+            }
+          }
+        } catch (fallbackError) {
+          if (isCancellationError(fallbackError, options.signal)) {
+            await persistStoppedReply();
+            throw fallbackError;
+          }
+          yield { type: "error", message: fallbackError instanceof Error ? fallbackError.message : String(fallbackError) };
+          return;
+        }
+      }
+    } else if (streamCompletion) {
       try {
         for await (const chunk of streamCompletion(config, baseMessages, config.temperature, requestOptions)) {
           throwIfAborted(options.signal);
@@ -194,6 +251,7 @@ export class AgentChatRunner {
           for (const visibleChunk of splitVisibleStreamText(chunk)) {
             yield {
               type: "delta",
+              channel: "answer",
               text: visibleChunk
             };
           }
@@ -225,6 +283,7 @@ export class AgentChatRunner {
             for (const visibleChunk of splitVisibleStreamText(fallbackReply)) {
               yield {
                 type: "delta",
+                channel: "answer",
                 text: visibleChunk
               };
             }
@@ -249,6 +308,7 @@ export class AgentChatRunner {
           for (const visibleChunk of splitVisibleStreamText(reply)) {
             yield {
               type: "delta",
+              channel: "answer",
               text: visibleChunk
             };
           }
@@ -268,6 +328,7 @@ export class AgentChatRunner {
             for (const visibleChunk of splitVisibleStreamText(reply)) {
               yield {
                 type: "delta",
+                channel: "answer",
                 text: visibleChunk
               };
             }
@@ -294,6 +355,7 @@ export class AgentChatRunner {
           for (const visibleChunk of splitVisibleStreamText(reply)) {
             yield {
               type: "delta",
+              channel: "answer",
               text: visibleChunk
             };
           }
@@ -317,13 +379,14 @@ export class AgentChatRunner {
       if (await this.shouldRunConversationHumanizer(state.detail, reply)) {
         yield {
           type: "delta",
+          channel: "answer",
           text: "",
           stage: "humanizer_start"
         };
       }
       const humanized = await this.humanizeConversationText(state.detail, reply, options);
       throwIfAborted(options.signal);
-      const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized);
+      const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized, reasoningParts.join(""));
       yield {
         type: "final",
         payload: this.buildResponse(intent, humanized.text, conversation, webSearchSources)
@@ -349,6 +412,25 @@ export class AgentChatRunner {
     })).trim();
     throwIfAborted(options.signal);
     return reply;
+  }
+
+  private async completeDetailedOnce(
+    config: ModelConfig,
+    messages: ChatCompletionMessage[],
+    reasoningEnabled: boolean,
+    options: AgentRunOptions = {},
+    requestOptions: Pick<ModelRequestOptions, "reasoningEffort"> = {}
+  ): Promise<ModelCompletionResult> {
+    throwIfAborted(options.signal);
+    if (reasoningEnabled && this.modelClient.requestDetailedCompletion) {
+      const result = await this.modelClient.requestDetailedCompletion(config, messages, config.temperature, {
+        ...requestOptions,
+        signal: options.signal
+      });
+      throwIfAborted(options.signal);
+      return { reasoning: String(result.reasoning || "").trim(), answer: String(result.answer || "").trim() };
+    }
+    return { reasoning: "", answer: await this.completeOnce(config, messages, options, requestOptions) };
   }
 
   private async prepareConversationState(payload: AgentRunRequest): Promise<{ detail: ConversationDetail }> {
@@ -419,11 +501,13 @@ export class AgentChatRunner {
     conversationId: string,
     reply: string,
     webSearchSources: WebSearchSource[] = [],
-    humanizer?: { applied: boolean; error?: string }
+    humanizer?: { applied: boolean; error?: string },
+    reasoningContent = ""
   ): Promise<ConversationDetail> {
     let detail = await this.conversations.appendMessage(conversationId, {
       role: "assistant",
       content: String(reply || "").trim() || "已完成。",
+      reasoning_content: String(reasoningContent || "").trim(),
       metadata: {
         ...(humanizer?.applied ? { humanized: true, humanizer_skill_id: "humanizer_zh" } : {}),
         ...(humanizer?.error ? { humanizer_error: humanizer.error } : {}),
@@ -465,11 +549,13 @@ export class AgentChatRunner {
   private async persistStoppedAssistantReply(
     conversationId: string,
     partialReply: string,
-    webSearchSources: WebSearchSource[] = []
+    webSearchSources: WebSearchSource[] = [],
+    reasoningContent = ""
   ): Promise<ConversationDetail> {
     return this.conversations.appendMessage(conversationId, {
       role: "assistant",
       content: String(partialReply || "").trim() || "已停止。",
+      reasoning_content: String(reasoningContent || "").trim(),
       metadata: {
         stopped: true,
         cancelled: true,
@@ -488,9 +574,10 @@ export class AgentChatRunner {
   }
 
   private modelRequestOptions(
-    detail: Pick<ConversationDetail, "model_override" | "reasoning_effort">,
+    detail: Pick<ConversationDetail, "model_override" | "reasoning_enabled" | "reasoning_effort">,
     signal?: AbortSignal
   ): ModelRequestOptions {
+    if (!detail.reasoning_enabled) return { signal };
     const modelId = String(detail.model_override || "").trim();
     const capability = modelId ? resolveModelRequestCapability(modelId) : null;
     const selected = detail.reasoning_effort || "medium";

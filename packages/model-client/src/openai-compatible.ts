@@ -27,6 +27,16 @@ export type ModelRequestOptions = {
   dispatchLifecycle?: ModelDispatchLifecycle;
 };
 
+export type ModelStreamChunk = {
+  channel: "reasoning" | "answer";
+  text: string;
+};
+
+export type ModelCompletionResult = {
+  reasoning: string;
+  answer: string;
+};
+
 export type ModelDispatchInput = {
   config: Pick<ModelConfig, "base_url" | "model">;
   messages: ChatCompletionMessage[];
@@ -109,7 +119,51 @@ export class OpenAICompatibleClient {
     }
   }
 
+  async requestDetailedCompletion(config: ModelConfig, messages: ChatCompletionMessage[], temperature?: number, options: ModelRequestOptions = {}): Promise<ModelCompletionResult> {
+    let streamError = "";
+    try {
+      const reasoningParts: string[] = [];
+      const answerParts: string[] = [];
+      for await (const chunk of this.streamDetailedCompletion(config, messages, temperature, options)) {
+        (chunk.channel === "reasoning" ? reasoningParts : answerParts).push(chunk.text);
+      }
+      const answer = answerParts.join("").trim();
+      if (answer) {
+        return { reasoning: reasoningParts.join("").trim(), answer };
+      }
+    } catch (error) {
+      if (isAbortLike(error, options.signal)) throw createAbortError();
+      streamError = error instanceof Error ? error.message : String(error);
+      if (!canRetryWithoutStream(streamError)) throw error;
+    }
+
+    const response = await this.fetchChatCompletions(config, buildRequestBody(config, messages, temperature, options), options);
+    try {
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        throw new Error(formatApiError(response.status, text));
+      }
+      const payload = await response.json();
+      const usage = extractProviderUsage(payload);
+      if (usage) await this.recordDispatchUsage(response, usage);
+      const result = extractMessageParts(payload);
+      if (result.answer.trim()) return { reasoning: result.reasoning.trim(), answer: result.answer.trim() };
+      throw new Error(streamError ? `模型返回空内容（流式错误：${streamError}）` : "模型返回空内容");
+    } catch (error) {
+      await this.finishDispatch(response, error);
+      throw error;
+    } finally {
+      await this.finishDispatch(response);
+    }
+  }
+
   async *streamCompletion(config: ModelConfig, messages: ChatCompletionMessage[], temperature?: number, options: ModelRequestOptions = {}): AsyncGenerator<string> {
+    for await (const chunk of this.streamDetailedCompletion(config, messages, temperature, options)) {
+      if (chunk.channel === "answer") yield chunk.text;
+    }
+  }
+
+  async *streamDetailedCompletion(config: ModelConfig, messages: ChatCompletionMessage[], temperature?: number, options: ModelRequestOptions = {}): AsyncGenerator<ModelStreamChunk> {
     const response = await this.fetchChatCompletions(config, {
       ...buildRequestBody(config, messages, temperature, options),
       stream: true,
@@ -340,15 +394,30 @@ function normalizeBaseUrl(baseUrl: string): string {
 }
 
 function extractMessageText(payload: unknown): string {
+  return extractMessageParts(payload).answer;
+}
+
+function extractMessageParts(payload: unknown): ModelCompletionResult {
   const choices = asArray((payload as { choices?: unknown })?.choices);
-  const content = choices
+  const answer = choices
     .flatMap((choice) => {
       const record = asRecord(choice);
       const message = asRecord(record?.message);
       return [...normalizeContent(message?.content), ...normalizeContent(record?.text)];
     })
     .join("");
-  return content || extractTopLevelText(payload);
+  const reasoning = choices
+    .flatMap((choice) => {
+      const record = asRecord(choice);
+      const message = asRecord(record?.message);
+      return [
+        ...normalizeContent(message?.reasoning_content),
+        ...normalizeContent(message?.reasoning),
+        ...normalizeThinkingContent(message?.content)
+      ];
+    })
+    .join("");
+  return { answer: answer || extractTopLevelText(payload), reasoning };
 }
 
 function extractDeltaText(payload: unknown): string {
@@ -369,17 +438,48 @@ function extractDeltaText(payload: unknown): string {
   return content || extractTopLevelText(payload);
 }
 
-function parseStreamLinePayload(line: string): { chunks: string[]; usage?: ModelUsage } | null {
+function extractDetailedDelta(payload: unknown): ModelStreamChunk[] {
+  const choices = asArray((payload as { choices?: unknown })?.choices);
+  const chunks: ModelStreamChunk[] = [];
+  for (const choice of choices) {
+    const record = asRecord(choice);
+    const delta = asRecord(record?.delta);
+    const message = asRecord(record?.message);
+    const reasoning = [
+      ...normalizeContent(delta?.reasoning_content),
+      ...normalizeContent(delta?.reasoning),
+      ...normalizeContent(message?.reasoning_content),
+      ...normalizeContent(message?.reasoning),
+      ...normalizeThinkingContent(delta?.content),
+      ...normalizeThinkingContent(message?.content)
+    ].join("");
+    const answer = [
+      ...normalizeContent(delta?.content),
+      ...normalizeContent(delta?.text),
+      ...normalizeContent(message?.content),
+      ...normalizeContent(record?.text)
+    ].join("");
+    if (reasoning) chunks.push({ channel: "reasoning", text: reasoning });
+    if (answer) chunks.push({ channel: "answer", text: answer });
+  }
+  if (!chunks.length) {
+    const answer = extractTopLevelText(payload);
+    if (answer) chunks.push({ channel: "answer", text: answer });
+  }
+  return chunks;
+}
+
+function parseStreamLinePayload(line: string): { chunks: ModelStreamChunk[]; usage?: ModelUsage } | null {
   const payloadText = normalizeStreamPayloadLine(line);
   if (!payloadText) {
     return null;
   }
   try {
     const parsed = JSON.parse(payloadText);
-    const chunk = extractDeltaText(parsed);
+    const chunks = extractDetailedDelta(parsed);
     const usage = extractProviderUsage(parsed);
     return {
-      chunks: chunk ? [chunk] : [],
+      chunks,
       ...(usage ? { usage } : {})
     };
   } catch {
@@ -450,6 +550,16 @@ function normalizeContent(value: unknown): string[] {
     });
   }
   return [];
+}
+
+function normalizeThinkingContent(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const record = asRecord(item);
+    const type = String(record?.type || "").toLowerCase();
+    if (!record || !["thinking", "reasoning", "reasoning_content"].includes(type)) return [];
+    return [...normalizeContent(record.text), ...normalizeContent(record.content), ...normalizeContent(record.thinking)];
+  });
 }
 
 function extractTopLevelText(payload: unknown): string {

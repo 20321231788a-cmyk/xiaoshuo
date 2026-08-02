@@ -1,5 +1,6 @@
 import type { CurrentProject, ContinuityContext, DocumentContent, StyleDistillationProfile } from "@xiaoshuo/shared";
 import fs from "node:fs/promises";
+import { createHash } from "node:crypto";
 import path from "node:path";
 
 export const SETTINGS_DIR = "00_设定集";
@@ -335,7 +336,10 @@ export async function buildProjectContinuityContext(projectDir: string): Promise
     }
   }
 
-  const outline = await readTextWithLimit(path.join(resolvedProjectDir, OUTLINE_DIR, "大纲.txt"), 12000);
+  const outline = await readFirstExistingText([
+    path.join(resolvedProjectDir, OUTLINE_DIR, "故事大纲.md"),
+    path.join(resolvedProjectDir, OUTLINE_DIR, "大纲.txt")
+  ], 12000);
   const detailedOutline = await readTextWithLimit(path.join(resolvedProjectDir, OUTLINE_DIR, "细纲.txt"), 12000);
   const chapterOutline = await readTextWithLimit(path.join(resolvedProjectDir, OUTLINE_DIR, "章纲.txt"), 12000);
 
@@ -359,16 +363,21 @@ export async function buildProjectContinuityContext(projectDir: string): Promise
   };
 
   const styleDistillation = await readProjectStyleDistillation(resolvedProjectDir);
-  const style: Record<string, string> = styleDistillation?.enabled && styleDistillation.profile_text.trim()
-    ? {
-        "Nuwa蒸馏文风": styleDistillation.profile_text,
-        "当前蒸馏书籍": styleDistillation.book_title,
-        "蒸馏来源摘要": styleDistillation.source_summary
-      }
-    : {
+  const distillationEvidence = styleDistillation?.enabled && styleDistillation.status === "active"
+    ? await readDistillationEvidence(resolvedProjectDir, styleDistillation)
+    : "";
+  const style: Record<string, string> = {
     "写作风格": await readTextWithLimit(path.join(resolvedProjectDir, SETTINGS_DIR, STYLE_DIR, "写作风格.txt"), 8000),
     "风格示例": await readTextWithLimit(path.join(resolvedProjectDir, SETTINGS_DIR, STYLE_DIR, "风格示例.txt"), 8000),
-    "参考素材": await readTextWithLimit(path.join(resolvedProjectDir, SETTINGS_DIR, STYLE_DIR, "参考素材.txt"), 8000)
+    "参考素材": await readTextWithLimit(path.join(resolvedProjectDir, SETTINGS_DIR, STYLE_DIR, "参考素材.txt"), 8000),
+    ...(styleDistillation?.enabled && styleDistillation.status === "active" && styleDistillation.profile_text.trim()
+      ? {
+          "Nuwa蒸馏文风": styleDistillation.profile_text,
+          "当前蒸馏书籍": styleDistillation.book_title,
+          "蒸馏来源摘要": styleDistillation.source_summary,
+          ...(distillationEvidence ? { "蒸馏原文证据": distillationEvidence } : {})
+        }
+      : {})
   };
 
   const genre: Record<string, string> = {
@@ -405,11 +414,27 @@ export async function readProjectStyleDistillation(projectDir: string): Promise<
     if (!profileText || !bookTitle) {
       return null;
     }
+    const sourceBookId = String(parsed.source_book_id || "").trim();
+    let status: StyleDistillationProfile["status"] = parsed.status === "orphaned" ? "orphaned" : parsed.status === "stale" ? "stale" : "active";
+    if (sourceBookId) {
+      const sourceFile = path.join(path.resolve(projectDir), "00_设定集", "拆书库", sourceBookId, "原文.txt");
+      const source = await fs.readFile(sourceFile, "utf8").catch(() => "");
+      if (!source) {
+        status = "orphaned";
+      } else if (String(parsed.source_hash || "").trim() && createHash("sha256").update(source, "utf8").digest("hex") !== String(parsed.source_hash).trim()) {
+        status = "stale";
+      }
+    }
     return {
       book_title: bookTitle,
       source_summary: String(parsed.source_summary || ""),
       source_path: String(parsed.source_path || ""),
       source_hash: String(parsed.source_hash || ""),
+      source_book_id: String(parsed.source_book_id || ""),
+      source_report_path: String(parsed.source_report_path || ""),
+      evidence_spans: Array.isArray(parsed.evidence_spans) ? parsed.evidence_spans as StyleDistillationProfile["evidence_spans"] : [],
+      evidence_version: Number(parsed.evidence_version || 1),
+      status,
       distilled_at: String(parsed.distilled_at || ""),
       enabled: Boolean(parsed.enabled),
       profile_text: profileText
@@ -425,6 +450,11 @@ export async function writeProjectStyleDistillation(projectDir: string, profile:
     source_summary: String(profile.source_summary || "").trim(),
     source_path: String(profile.source_path || "").trim(),
     source_hash: String(profile.source_hash || "").trim(),
+    source_book_id: String(profile.source_book_id || "").trim(),
+    source_report_path: String(profile.source_report_path || "").trim(),
+    evidence_spans: Array.isArray(profile.evidence_spans) ? profile.evidence_spans : [],
+    evidence_version: Number(profile.evidence_version || 1),
+    status: profile.status === "stale" || profile.status === "orphaned" ? profile.status : "active",
     distilled_at: String(profile.distilled_at || "").trim(),
     enabled: Boolean(profile.enabled),
     profile_text: String(profile.profile_text || "").trim()
@@ -437,6 +467,20 @@ export async function writeProjectStyleDistillation(projectDir: string, profile:
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
   return normalized;
+}
+
+async function readDistillationEvidence(projectDir: string, profile: StyleDistillationProfile): Promise<string> {
+  if (!profile.source_book_id) return "";
+  const sourcePath = path.join(path.resolve(projectDir), "00_设定集", "拆书库", profile.source_book_id, "原文.txt");
+  const source = await fs.readFile(sourcePath, "utf8").catch(() => "");
+  if (!source) return "";
+  const hash = createHash("sha256").update(source, "utf8").digest("hex");
+  if (profile.source_hash && hash !== profile.source_hash) return "";
+  const max = 6000;
+  if (source.length <= max) return `【原文证据 · 全文】\n${source}`;
+  const size = Math.floor(max / 4);
+  const positions = [0, Math.floor((source.length - size) / 3), Math.floor((source.length - size) * 2 / 3), source.length - size];
+  return positions.map((start, index) => `【原文证据 · 阶段${index + 1} · 偏移${start + 1}-${start + size}】\n${source.slice(start, start + size)}`).join("\n\n");
 }
 
 export async function deleteProjectStyleDistillation(projectDir: string): Promise<void> {

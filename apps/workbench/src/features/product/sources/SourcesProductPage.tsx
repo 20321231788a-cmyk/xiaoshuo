@@ -19,6 +19,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ProjectLibraryBundle, ProjectLibraryRecord } from "@xiaoshuo/shared";
 import { projectLibraryBundleSchema } from "@xiaoshuo/shared";
 import type { WorkbenchController } from "../../../hooks/useWorkbenchController.js";
+import { LibraryDraftReview } from "../shared/LibraryDraftReview.js";
 import { EmptyState } from "../shared/SharedStates.js";
 
 type LoadState = "loading" | "ready" | "error";
@@ -228,6 +229,8 @@ export function SourcesProductPage({ controller }: { controller: WorkbenchContro
           </button>
         </div>
       </div>
+
+      <LibraryDraftReview controller={controller} domains={["lore"]} onChanged={load} />
 
       <div className="source-tabs" style={{ display: "flex", gap: "10px", marginBottom: "15px", borderBottom: "1px solid var(--line)", paddingBottom: "6px" }}>
         {entityTabs.map(([kind, label, Icon]) => (

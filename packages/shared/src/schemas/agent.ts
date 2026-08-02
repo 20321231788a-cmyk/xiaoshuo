@@ -1036,6 +1036,7 @@ export const agentStreamEventSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("delta"),
     text: z.string(),
+    channel: z.enum(["reasoning", "answer"]).optional(),
     stage: z.string().optional(),
     skill_id: z.string().optional(),
     cache_id: z.string().optional(),

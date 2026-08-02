@@ -9,7 +9,7 @@ export function encodeNdjsonEvent(event: AgentStreamEvent): string {
 }
 
 export type StreamingModelClient = Pick<OpenAICompatibleClient, "requestCompletion"> &
-  Partial<Pick<OpenAICompatibleClient, "streamCompletion">>;
+  Partial<Pick<OpenAICompatibleClient, "streamCompletion" | "streamDetailedCompletion" | "requestDetailedCompletion">>;
 
 const MIN_VISIBLE_CHUNK_CHARS = 24;
 const MAX_VISIBLE_CHUNK_CHARS = 48;

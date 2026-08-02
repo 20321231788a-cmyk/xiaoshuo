@@ -21,6 +21,14 @@
 .editor-meta { font-size: 12px; }
 .editor-status { min-height: 32px; font-size: 12px; }
 .manuscript textarea { min-height: 360px; }
+.editor-mini-chat-empty { margin: 0; padding: 10px; border: 1px dashed var(--line); border-radius: 6px; color: var(--muted); font-size: 12px; line-height: 18px; }
+.editor-mini-message { margin-bottom: 10px; padding: 9px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--paper); }
+.editor-mini-message.user { margin-left: 24px; background: var(--accent-soft); }
+.editor-mini-message > strong { display: block; margin-bottom: 4px; color: var(--ink); font-size: 12px; }
+.editor-mini-message > p,
+.editor-mini-message details p { margin: 0; color: var(--text); font-size: 12px; line-height: 19px; white-space: pre-wrap; }
+.editor-mini-message details { margin-bottom: 7px; padding: 6px 7px; border: 1px solid var(--line); border-radius: 5px; background: var(--stone); }
+.editor-mini-message summary { cursor: pointer; color: var(--muted); font-size: 12px; }
 
 @media (max-width: 1120px) {
   .punctuation-toolbar { padding-inline: 8px; }

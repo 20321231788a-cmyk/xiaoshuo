@@ -69,7 +69,7 @@ describe("ContinueDisassembleWorkflow", () => {
     expect(result.intent).toBe("skill");
     expect(book?.dir).toContain("00_设定集/拆书库/");
     expect(result.saved_paths).toEqual([`${book?.dir}/拆书细纲.txt`]);
-    expect(await fs.readFile(path.join(tempDir, "01_大纲", "拆书细纲.txt"), "utf8")).toContain("第001章");
+    await expect(fs.readFile(path.join(tempDir, "01_大纲", "拆书细纲.txt"), "utf8")).rejects.toThrow();
     expect(await fs.readFile(path.join(tempDir, book?.dir || "", "拆书细纲.txt"), "utf8")).toContain("第001章");
   });
 
@@ -94,10 +94,10 @@ describe("ContinueDisassembleWorkflow", () => {
 
     const book = result.skill_result?.data?.book as { dir?: string } | undefined;
     expect(result.saved_paths).toEqual([`${book?.dir}/拆书细纲.txt`]);
-    expect(await fs.readFile(path.join(tempDir, "01_大纲", "拆书细纲.txt"), "utf8")).toContain("继续扩展");
+    await expect(fs.readFile(path.join(tempDir, "01_大纲", "拆书细纲.txt"), "utf8")).rejects.toThrow();
   });
 
-  it("journals durable detail-outline, legacy-sync, and manifest writes", async () => {
+  it("journals durable detail-outline and manifest writes without project-level legacy sync", async () => {
     const runtime = new AgentRuntimeService({
       projectRoot: tempDir,
       config: { configPath },
@@ -122,7 +122,6 @@ describe("ContinueDisassembleWorkflow", () => {
       expect.objectContaining({ action: "workflow.continue_disassemble.book.source", stage: "finalized" }),
       expect.objectContaining({ action: "workflow.continue_disassemble.book.manifest.initial", stage: "finalized" }),
       expect.objectContaining({ action: "workflow.continue_disassemble.detail_outline.output", stage: "finalized" }),
-      expect.objectContaining({ action: "workflow.continue_disassemble.detail_outline.legacy_sync", stage: "finalized" }),
       expect.objectContaining({ action: "workflow.continue_disassemble.book.manifest.detail_outline", stage: "finalized" })
     ]));
     expect(new Set(journal.map((entry) => `${entry.run_id}:${entry.step_id}:${entry.attempt_id}`))).toEqual(

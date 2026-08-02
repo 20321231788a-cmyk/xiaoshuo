@@ -12,6 +12,7 @@ import {
   Plus,
   RefreshCw,
   SquarePen,
+  Trash2,
   Users,
   X
 } from "lucide-react";
@@ -79,6 +80,7 @@ function useStoryPlanning(controller: WorkbenchController) {
       body: JSON.stringify({ base_revision: bundle.revision, outline, timeline: bundle.timeline })
     });
     setBundle(next);
+    await controller.refreshProjectWorkspace();
   }
 
   return { bundle, state, message, refresh, migrate, save };
@@ -88,6 +90,8 @@ export function OutlineProductPage({ controller }: { controller: WorkbenchContro
   const planning = useStoryPlanning(controller);
   const [activeTab, setActiveTab] = useState<"main" | "character" | "chapter">("main");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [inlineEditingId, setInlineEditingId] = useState<string | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
 
   // 编辑详情状态
   const [editTitle, setEditTitle] = useState("");
@@ -179,6 +183,29 @@ export function OutlineProductPage({ controller }: { controller: WorkbenchContro
       return item;
     });
     await planning.save(nextOutline);
+    setInlineEditingId(null);
+  }
+
+  function handleStartInlineEdit(item: StoryOutlineNode) {
+    setSelectedNodeId(item.id);
+    setEditTitle(item.title);
+    setEditSummary(item.summary || "");
+    setEditChapters(item.chapter_paths.join(", "));
+    setInlineEditingId(item.id);
+    setDeleteConfirmId(null);
+  }
+
+  async function handleDelete(id: string) {
+    if (!bundle) return;
+    if (deleteConfirmId !== id) {
+      setDeleteConfirmId(id);
+      return;
+    }
+    const nextOutline = bundle.outline.filter((item) => item.id !== id).map((item, index) => ({ ...item, order: index }));
+    await planning.save(nextOutline);
+    setDeleteConfirmId(null);
+    setInlineEditingId(null);
+    setSelectedNodeId(nextOutline[0]?.id || null);
   }
 
   // 改变顺序
@@ -295,17 +322,33 @@ export function OutlineProductPage({ controller }: { controller: WorkbenchContro
                       ▼
                     </button>
                   </div>
-                  <button className="beat-select" type="button" onClick={() => setSelectedNodeId(item.id)}>
-                    <span className="beat-index">{(index + 1).toString().padStart(2, "0")}</span>
-                    <div className="beat-copy">
+                  {inlineEditingId === item.id ? (
+                    <div className="beat-inline-editor">
+                      <input aria-label="情节点标题" value={editTitle} onChange={(event) => setEditTitle(event.target.value)} />
+                      <textarea aria-label="情节点摘要" rows={3} value={editSummary} onChange={(event) => setEditSummary(event.target.value)} />
+                      <input aria-label="关联章节" placeholder="关联章节，逗号分隔" value={editChapters} onChange={(event) => setEditChapters(event.target.value)} />
                       <div>
-                        <strong>{item.title}</strong>
-                        <span className="state-tag state-2" style={{ marginLeft: "10px" }}>{item.status === "done" ? "已完成" : "待处理"}</span>
+                        <button className="button secondary compact" type="button" onClick={() => setInlineEditingId(null)}><X size={14} />取消</button>
+                        <button className="button primary compact" type="button" onClick={() => void handleSaveEdit()} disabled={!editTitle.trim()}><Check size={14} />保存</button>
                       </div>
-                      <p style={{ fontSize: "12px", color: "var(--muted)", margin: "4px 0" }}>{item.summary}</p>
-                      <small>关联章节：{item.chapter_paths.join(", ") || "未关联"}</small>
                     </div>
-                  </button>
+                  ) : (
+                    <button className="beat-select" type="button" onClick={() => setSelectedNodeId(item.id)} onDoubleClick={() => handleStartInlineEdit(item)}>
+                      <span className="beat-index">{(index + 1).toString().padStart(2, "0")}</span>
+                      <div className="beat-copy">
+                        <div>
+                          <strong>{item.title}</strong>
+                          <span className="state-tag state-2" style={{ marginLeft: "10px" }}>{item.status === "done" ? "已完成" : "待处理"}</span>
+                        </div>
+                        <p>{item.summary}</p>
+                        <small>关联章节：{item.chapter_paths.join(", ") || "未关联"}</small>
+                      </div>
+                    </button>
+                  )}
+                  <div className="beat-row-actions">
+                    <button className="icon-button subtle" type="button" title="就地编辑" aria-label={`编辑${item.title}`} onClick={() => handleStartInlineEdit(item)}><SquarePen size={14} /></button>
+                    <button className={`icon-button subtle${deleteConfirmId === item.id ? " danger" : ""}`} type="button" title={deleteConfirmId === item.id ? "再次点击确认删除" : "删除情节点"} aria-label={deleteConfirmId === item.id ? `确认删除${item.title}` : `删除${item.title}`} onClick={() => void handleDelete(item.id)}><Trash2 size={14} /></button>
+                  </div>
                 </article>
               );
             })

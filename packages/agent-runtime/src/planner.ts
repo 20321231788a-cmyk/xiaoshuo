@@ -22,7 +22,7 @@ const FIXED_TEXT_TARGETS: Record<string, string> = {
 export type AgentPlannerOptions = {
   projectRoot: string;
   config?: ConfigServiceOptions;
-  modelClient?: Pick<OpenAICompatibleClient, "requestCompletion"> & Partial<Pick<OpenAICompatibleClient, "streamCompletion">>;
+  modelClient?: Pick<OpenAICompatibleClient, "requestCompletion"> & Partial<Pick<OpenAICompatibleClient, "streamCompletion" | "streamDetailedCompletion" | "requestDetailedCompletion">>;
   webSearchClient?: import("./web-search.js").WebSearchClient;
 };
 

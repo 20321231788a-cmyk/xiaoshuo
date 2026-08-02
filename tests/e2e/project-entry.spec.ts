@@ -178,9 +178,9 @@ test("production navigation, settings history, and diagnostic isolation", async 
   await expect(aiSections).toBeVisible();
   await aiSections.getByRole("tab", { name: "网站服务", exact: true }).click();
   await expect(page.getByText("网站账号", { exact: true })).toBeVisible();
-  await aiSections.getByRole("tab", { name: "模型", exact: true }).click();
-  await expect(page.getByText("网站模型", { exact: true })).toBeVisible();
-  await expect(page.getByText("网站账号", { exact: true })).toHaveCount(0);
+  await expect(aiSections.getByRole("tab", { name: "模型", exact: true })).toHaveCount(0);
+  await aiSections.getByRole("tab", { name: "连接参数", exact: true }).click();
+  await expect(page.getByText("文本模型统一在 AI 助手中选择；这里仅管理生成参数。", { exact: true })).toBeVisible();
   await aiSections.getByRole("tab", { name: "本地检索", exact: true }).click();
   await expect(page.getByText("本地检索与向量召回", { exact: true })).toBeVisible();
   await aiSections.getByRole("tab", { name: "联网搜索", exact: true }).click();
@@ -363,8 +363,9 @@ test("cover workspace keeps four inputs, website-only model selection and versio
   const settingsTabs = page.getByRole("tablist", { name: "AI 配置分区" });
   await settingsTabs.getByRole("tab", { name: "网站服务", exact: true }).click();
   await expect(page.getByLabel("封面生图模型")).toHaveValue("gpt-image-2");
-  await settingsTabs.getByRole("tab", { name: "模型", exact: true }).click();
-  await expect(page.getByLabel("封面生图模型")).toHaveCount(0);
+  await expect(settingsTabs.getByRole("tab", { name: "模型", exact: true })).toHaveCount(0);
+  await settingsTabs.getByRole("tab", { name: "连接参数", exact: true }).click();
+  await expect(page.getByText(/文本模型统一在 AI 助手中选择/)).toBeVisible();
 });
 
 test("shell has no page-level horizontal overflow at supported desktop widths", async ({ page }) => {
@@ -392,9 +393,9 @@ test("AI settings remain complete and reachable in a short desktop window", asyn
   const modeTabs = page.getByRole("tablist", { name: "AI 配置模式" });
   await modeTabs.getByRole("button", { name: "手动配置", exact: true }).click();
   const sectionTabs = page.getByRole("tablist", { name: "AI 配置分区" });
-  await sectionTabs.getByRole("tab", { name: "模型", exact: true }).click();
+  await sectionTabs.getByRole("tab", { name: "连接参数", exact: true }).click();
 
-  const panel = page.getByRole("tabpanel", { name: "模型配置" });
+  const panel = page.getByRole("tabpanel", { name: "连接参数配置" });
   const actions = page.locator(".settings-ai-page > .xw-feature-actions");
   await expect(sectionTabs).toBeVisible();
   await expect(panel).toBeVisible();
@@ -416,7 +417,7 @@ test("AI settings remain complete and reachable in a short desktop window", asyn
   expect(dimensions.overflowY).toBe("auto");
 
   await panel.evaluate((element) => { element.scrollTop = element.scrollHeight; });
-  await expect(panel.locator(".xw-settings-section-head > strong").filter({ hasText: "副模型" })).toBeVisible();
+  await expect(panel.locator(".xw-settings-section-head > strong").filter({ hasText: "备用线路" })).toBeVisible();
   await expect(sectionTabs).toBeVisible();
   await expect(actions).toBeVisible();
 });
@@ -451,10 +452,12 @@ test("assistant model discovery and reasoning preferences persist per conversati
   await trigger.click();
   await page.getByPlaceholder("搜索模型").fill("GPT 5");
   await page.locator(".assistant-model-list").getByRole("option", { name: /GPT 5 Mini/ }).click();
-  await expect(trigger).toContainText("GPT 5 Mini · 中");
+  await expect(trigger).toHaveText("GPT 5 Mini");
 
   const reasoningPanel = page.locator(".assistant-reasoning-panel");
   await expect(reasoningPanel).toBeVisible();
+  await reasoningPanel.getByRole("switch", { name: "开启思考模式", exact: true }).click();
+  await expect(trigger).toContainText("GPT 5 Mini · 中");
   await reasoningPanel.getByRole("button", { name: "高", exact: true }).click();
   await expect(reasoningPanel.getByRole("button", { name: "高", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(trigger).toContainText("GPT 5 Mini · 高");

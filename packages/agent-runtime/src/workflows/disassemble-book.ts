@@ -44,7 +44,19 @@ export class DisassembleBookWorkflow implements WorkflowHandler {
     if (action === "archive_source") {
       return archiveDisassembleSource(request, context);
     }
-    return runFullDisassemble(request, context);
+    try {
+      return await runFullDisassemble(request, context);
+    } catch (error) {
+      const book = await resolveDisassembleBookForRequest(request, context).catch(() => null);
+      if (book && !book.legacy && book.dir) {
+        await writeDisassembleBookManifest({
+          ...book,
+          status: "failed",
+          error: error instanceof Error ? error.message : String(error)
+        }, context, { writeKey: "book.manifest.failed" }).catch(() => null);
+      }
+      throw error;
+    }
   }
 }
 
@@ -119,19 +131,24 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
   if (!book) {
     const existingBook = await resolveDisassembleBookForRequest(request, context);
     const directSource = await resolveWorkflowSourceText(request, context);
-    source = directSource.trim() || (existingBook ? await readDisassembleBookText(existingBook, "source", context, DISASSEMBLE_SOURCE_IMPORT_CHARS) : "");
+    source = directSource.trim() || (existingBook ? await readDisassembleBookText(existingBook, "source", context) : "");
     if (!source.trim()) {
       throw new Error("拆书需要上传文件、来源文件或直接输入文本");
     }
-    book = await createDisassembleBook(
-      {
-        title: String((request as any).book_title || existingBook?.title || "").trim() || (await inferDisassembleBookTitle(request, source)),
-        sourceText: source,
-        sourcePath: existingBook?.source_path || request.current_path || "",
-        origin: request.attachment_ids?.length ? "upload" : request.current_path ? "document" : existingBook?.origin || "input"
-      },
-      context
-    );
+    book = existingBook && !existingBook.legacy
+      ? await writeDisassembleBookManifest({ ...existingBook, status: "analyzing", error: "" }, context, { writeKey: "book.manifest.analyzing" })
+      : await createDisassembleBook(
+        {
+          title: String((request as any).book_title || existingBook?.title || "").trim() || (await inferDisassembleBookTitle(request, source)),
+          sourceText: source,
+          sourcePath: existingBook?.source_path || request.current_path || "",
+          origin: request.attachment_ids?.length ? "upload" : request.current_path ? "document" : existingBook?.origin || "input"
+        },
+        context
+      );
+    if (book.status !== "analyzing") {
+      book = await writeDisassembleBookManifest({ ...book, status: "analyzing", error: "" }, context, { writeKey: "book.manifest.analyzing" });
+    }
     context.checkpoint?.completeUnit({
       workflow_id: "disassemble_book",
       unit_id: "book",
@@ -144,7 +161,7 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
   if (lore) {
     book = lore.book;
   } else {
-    source = source || await readDisassembleBookText(book, "source", context, DISASSEMBLE_SOURCE_IMPORT_CHARS);
+    source = source || await readDisassembleBookText(book, "source", context);
     if (!source.trim()) {
       throw new Error("拆书需要上传文件、来源文件或直接输入文本");
     }
@@ -166,9 +183,6 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
     await writeDisassembleBookDocument(lorePath, text, "拆书写入设定", context, {
       writeKey: "lore.output"
     });
-    await writeDisassembleBookDocument(LEGACY_DISASSEMBLE_LORE_PATH, text, "拆书写入设定 legacy 同步", context, {
-      writeKey: "lore.legacy_sync"
-    });
     book = await writeDisassembleBookManifest({
       ...book,
       paths: { ...book.paths, lore: lorePath }
@@ -185,7 +199,7 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
   if (reverseOutline) {
     book = reverseOutline.book;
   } else {
-    source = source || await readDisassembleBookText(book, "source", context, DISASSEMBLE_SOURCE_IMPORT_CHARS);
+    source = source || await readDisassembleBookText(book, "source", context);
     if (!source.trim()) {
       throw new Error("拆书需要上传文件、来源文件或直接输入文本");
     }
@@ -207,9 +221,6 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
     await writeDisassembleBookDocument(reversePath, text, "拆书写入反向细纲", context, {
       writeKey: "reverse_outline.output"
     });
-    await writeDisassembleBookDocument(LEGACY_REVERSE_OUTLINE_PATH, text, "拆书写入反向细纲 legacy 同步", context, {
-      writeKey: "reverse_outline.legacy_sync"
-    });
     book = await writeDisassembleBookManifest({
       ...book,
       paths: { ...book.paths, reverse_outline: reversePath }
@@ -224,7 +235,22 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
 
   const lorePath = lore.path;
   const reversePath = reverseOutline.path;
-  const updatedBook = reverseOutline.book;
+  const reportPath = `${reverseOutline.book.dir}/拆书报告.md`;
+  const loreText = await readDisassembleBookText(reverseOutline.book, "lore", context, 80_000);
+  const reverseText = await readDisassembleBookText(reverseOutline.book, "reverse_outline", context, 120_000);
+  await writeDisassembleBookDocument(
+    reportPath,
+    buildDisassemblyReport(reverseOutline.book, loreText, reverseText),
+    "生成正式拆书报告",
+    context,
+    { writeKey: "report.output" }
+  );
+  const updatedBook = await writeDisassembleBookManifest({
+    ...reverseOutline.book,
+    status: "ready",
+    error: "",
+    paths: { ...reverseOutline.book.paths, report: reportPath }
+  }, context, { writeKey: "book.manifest.ready" });
 
   const savedPaths = [lorePath, reversePath];
   const reply = `已写入 ${savedPaths.length} 个文件：\n${savedPaths.join("\n")}`;
@@ -244,8 +270,9 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
         saved_paths: savedPaths,
         lore_path: savedPaths[0],
         outline_path: savedPaths[1],
+        report_path: reportPath,
         book: updatedBook,
-        legacy_saved_paths: [LEGACY_DISASSEMBLE_LORE_PATH, LEGACY_REVERSE_OUTLINE_PATH]
+        legacy_saved_paths: []
       }
     },
     saved_paths: savedPaths,
@@ -295,6 +322,8 @@ function restoreDisassembleBook(value: unknown): DisassembleBookManifest | null 
     ? source.paths as Record<string, unknown>
     : {};
   return {
+    schema_version: Number(source.schema_version || 1),
+    template_version: String(source.template_version || "1"),
     id,
     title,
     dir,
@@ -303,14 +332,103 @@ function restoreDisassembleBook(value: unknown): DisassembleBookManifest | null 
     origin: String(source.origin || "").trim(),
     source_path: String(source.source_path || "").trim(),
     source_summary: String(source.source_summary || "").trim(),
+    source_hash: String(source.source_hash || "").trim(),
     chars: Number.isFinite(Number(source.chars)) ? Math.max(0, Math.trunc(Number(source.chars))) : 0,
+    status: ["imported", "analyzing", "ready", "failed", "stale"].includes(String(source.status || ""))
+      ? source.status as DisassembleBookManifest["status"]
+      : "imported",
+    analysis_version: Number.isFinite(Number(source.analysis_version)) ? Math.max(1, Math.trunc(Number(source.analysis_version))) : 1,
+    error: String(source.error || "").trim(),
+    analyzed_at: String(source.analyzed_at || "").trim(),
+    source: source.source && typeof source.source === "object" && !Array.isArray(source.source)
+      ? source.source as DisassembleBookManifest["source"]
+      : { path: String(source.source_path || ""), hash: String(source.source_hash || ""), chars: Number(source.chars || 0), chapter_count: 0, import_complete: Boolean(paths.source) },
+    progress: source.progress && typeof source.progress === "object" && !Array.isArray(source.progress)
+      ? source.progress as DisassembleBookManifest["progress"]
+      : { stage: String(source.status || "imported"), completed_chapters: 0, total_chapters: 0, last_error: String(source.error || "") },
+    coverage: source.coverage && typeof source.coverage === "object" && !Array.isArray(source.coverage)
+      ? source.coverage as DisassembleBookManifest["coverage"]
+      : { first_chapter: 0, last_chapter: 0, analyzed_chapters: [], missing_chapters: [] },
     paths: {
       source: String(paths.source || "").trim(),
       lore: String(paths.lore || "").trim(),
       reverse_outline: String(paths.reverse_outline || "").trim(),
-      detail_outline: String(paths.detail_outline || "").trim()
+      detail_outline: String(paths.detail_outline || "").trim(),
+      report: String(paths.report || "").trim(),
+      chapter_index: String(paths.chapter_index || "").trim(),
+      evidence_index: String(paths.evidence_index || "").trim()
     }
   };
+}
+
+function buildDisassemblyReport(book: DisassembleBookManifest, lore: string, reverseOutline: string): string {
+  const sourceMeta = [
+    `> 拆解范围：已归档原文，原文字数 ${book.chars}；生成时间：${new Date().toISOString()}；模板版本：1；覆盖率：以原文可识别章节为准。`,
+    "> 报告由设定提取、反向细纲和原文元数据合成；未识别内容标记为“原文未明确”。"
+  ].join("\n");
+  return [
+    `# 《${book.title}》剧情拆解与大事件`,
+    "",
+    sourceMeta,
+    "",
+    "## 核心设定速览",
+    "### 主角与初始身份",
+    extractReportSection(lore, "人物设定"),
+    "",
+    "### 核心前提 / 金手指",
+    extractReportSection(lore, "体系设定"),
+    "",
+    "### 世界与规则",
+    extractReportSection(lore, "地图设定"),
+    "",
+    "### 核心爽点循环",
+    extractReportSection(reverseOutline, "全书结构总览"),
+    "",
+    "## 逐章速览",
+    extractReportSection(reverseOutline, "逐章速览"),
+    "",
+    "## 黄金三章与前十章",
+    "### 黄金三章拆解",
+    "依据逐章速览和大事件拆解提取开局承诺、首次冲突与第一轮反馈；原文未明确。",
+    "",
+    "### 前十章阶段推进",
+    "依据逐章速览提取前十章的目标、升级、兑现和章末钩子；原文未明确。",
+    "",
+    "### 开篇钩子、兑现与章末悬念",
+    "请结合上方逐章速览复核；原文未明确。",
+    "",
+    "## 大事件起承转合",
+    "## 大事件拆解",
+    extractReportSection(reverseOutline, "大事件拆解"),
+    "",
+    "## 可复用创作模板",
+    "### 金手指公式\n原文未明确。\n\n### 主角公式\n原文未明确。\n\n### 单元事件节奏\n依据大事件拆解迁移，禁止复写原文。\n\n### 升级阶梯\n原文未明确。\n\n### 角色配置\n原文未明确。\n\n### 爽点公式\n原文未明确。\n\n### 避坑清单\n不得照抄专有名词、句式、固定关系或可识别桥段。",
+    "",
+    "## 主角成长弧",
+    "### 一句话成长弧\n原文未明确。\n\n### 明线 / 暗线推进\n" + extractReportSection(reverseOutline, "全书结构总览"),
+    "",
+    "### 核心张力\n原文未明确。\n\n### 未完成弧线\n原文未明确。",
+    "",
+    "## 证据与缺口",
+    `- 已覆盖章节：按原文可识别章节生成；原文长度 ${book.chars}。`,
+    "- 未识别或未分析章节：原文未明确。",
+    "- 关键结论证据位置：见设定提取与逐章速览的章节标注。",
+    "",
+    "## 来源信息",
+    `- 原文文件：${book.source_path || book.paths.source || "拆书库/原文.txt"}`,
+    `- 原文哈希：${book.source_hash || "旧数据未记录"}`,
+    "- 拆解模板版本：1",
+    "",
+    "<!-- 机器分析原料：全书结构总览 -->",
+    extractReportSection(reverseOutline, "全书结构总览"),
+    ""
+  ].join("\n");
+}
+
+function extractReportSection(markdown: string, title: string): string {
+  const escaped = escapeRegExp(title);
+  const match = new RegExp(`^##\\s+${escaped}\\s*$([\\s\\S]*?)(?=^##\\s+|$)`, "m").exec(markdown);
+  return String(match?.[1] || "原文未明确。").trim();
 }
 
 function buildLoreInstruction(bookTitle: string, request: AgentRunRequest): string {

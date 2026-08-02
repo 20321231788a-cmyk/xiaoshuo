@@ -88,18 +88,37 @@ export function AssistantModelControls({ controller }: { controller: WorkbenchCo
         : efforts.includes("medium")
           ? "medium"
           : preferences.reasoning_effort;
-    const saved = await controller.updateConversationModelPreferences({
+    const nextPreferences = {
       model_override: modelOverride,
+      reasoning_enabled: Boolean(preferences.reasoning_enabled && efforts.length),
       reasoning_effort: nextEffort
-    });
+    };
+    const saved = modelOverride
+      ? await controller.updateConversationModelAndDefault(modelOverride, nextPreferences)
+      : await controller.updateConversationModelPreferences(nextPreferences);
     if (saved) {
       setQuery("");
     }
   }
 
   async function selectEffort(effort: ReasoningEffort) {
-    if (!supportedEfforts.includes(effort) || locked) return;
+    if (!preferences.reasoning_enabled || !supportedEfforts.includes(effort) || locked) return;
     await controller.updateConversationModelPreferences({ ...preferences, reasoning_effort: effort });
+  }
+
+  async function toggleReasoning() {
+    if (!supportedEfforts.length || locked) return;
+    const nextEnabled = !preferences.reasoning_enabled;
+    const nextEffort = supportedEfforts.includes(preferences.reasoning_effort)
+      ? preferences.reasoning_effort
+      : supportedEfforts.includes("medium")
+        ? "medium"
+        : supportedEfforts[0]!;
+    await controller.updateConversationModelPreferences({
+      ...preferences,
+      reasoning_enabled: nextEnabled,
+      reasoning_effort: nextEffort
+    });
   }
 
   async function refreshModels() {
@@ -113,11 +132,13 @@ export function AssistantModelControls({ controller }: { controller: WorkbenchCo
   const reasoningTitle = !selectedModel
     ? "请先选择模型"
     : !supportedEfforts.length
-      ? "该模型不支持思考等级"
+      ? "该模型不支持思考模式"
       : supportedEfforts.length === 1
         ? "该模型当前只支持高思考等级"
-        : "设置当前会话的思考等级";
-  const effectiveEffort = supportedEfforts.includes(preferences.reasoning_effort)
+        : preferences.reasoning_enabled
+          ? "已开启，可设置当前会话的思考等级"
+          : "开启后可选择思考等级";
+  const effectiveEffort = preferences.reasoning_enabled && supportedEfforts.includes(preferences.reasoning_effort)
     ? preferences.reasoning_effort
     : supportedEfforts.length === 1
       ? supportedEfforts[0]
@@ -183,7 +204,7 @@ export function AssistantModelControls({ controller }: { controller: WorkbenchCo
                 disabled={locked}
                 onClick={() => void selectModel(model.id)}
               >
-                <span><strong>{model.name}</strong><small>{model.provider || "OpenAI 兼容"} · {describeReasoning(model)}</small></span>
+                <span><strong>{model.name}</strong><small>{model.provider || "OpenAI 兼容"} · {describeReasoning(model)}{model.id === defaultModel ? " · 全局默认" : ""}</small></span>
                 {preferences.model_override === model.id && <Check size={14} />}
               </button>
             ))}
@@ -193,9 +214,18 @@ export function AssistantModelControls({ controller }: { controller: WorkbenchCo
           <div className="assistant-reasoning-panel" title={reasoningTitle}>
             <div>
               <Brain size={14} />
-              <span><strong>思考等级</strong><small>{reasoningTitle}</small></span>
+              <span><strong>思考模式</strong><small>{reasoningTitle}</small></span>
+              <button
+                className={`toggle${preferences.reasoning_enabled ? " on" : ""}`}
+                type="button"
+                role="switch"
+                aria-checked={preferences.reasoning_enabled}
+                aria-label={`${preferences.reasoning_enabled ? "关闭" : "开启"}思考模式`}
+                disabled={locked || !supportedEfforts.length}
+                onClick={() => void toggleReasoning()}
+              />
             </div>
-            <ReasoningSegments value={preferences.reasoning_effort} supported={supportedEfforts} locked={locked} onSelect={selectEffort} />
+            <ReasoningSegments value={preferences.reasoning_effort} supported={supportedEfforts} locked={locked || !preferences.reasoning_enabled} onSelect={selectEffort} />
           </div>
           {discoveryMessage && <p className="assistant-model-message" title={discoveryMessage}>{discoveryMessage}</p>}
         </div>

@@ -82,8 +82,7 @@ describe("DisassembleBookWorkflow", () => {
     expect(result.saved_paths).toEqual([`${book?.dir}/拆书设定提取.txt`, `${book?.dir}/反向细纲.txt`]);
     expect(book?.paths?.lore).toBe(`${book?.dir}/拆书设定提取.txt`);
     expect(book?.paths?.reverse_outline).toBe(`${book?.dir}/反向细纲.txt`);
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "设定集", "拆书设定提取.txt"), "utf8")).toContain("林默");
-    expect(await fs.readFile(path.join(tempDir, "01_大纲", "反向细纲.txt"), "utf8")).toContain("第一章");
+    await expect(fs.readFile(path.join(tempDir, "00_设定集", "设定集", "拆书设定提取.txt"), "utf8")).rejects.toThrow();
     expect(loreText).toContain(`# 《${title}》拆书设定提取`);
     expect(loreText).toContain("## 人物设定");
     expect(loreText).toContain("## 伏笔与可复用素材");
@@ -219,18 +218,18 @@ describe("DisassembleBookWorkflow", () => {
     const journal = runtime.listDurableCommitJournal(response.run_id);
     const actions = journal.map((entry) => entry.action).sort();
 
-    expect(journal).toHaveLength(8);
+    expect(journal).toHaveLength(10);
     expect(journal).toEqual(expect.arrayContaining([
       expect.objectContaining({ action: "workflow.disassemble_book.book.source", run_id: response.run_id, stage: "finalized" }),
       expect.objectContaining({ action: "workflow.disassemble_book.book.manifest.initial", run_id: response.run_id, stage: "finalized" }),
       expect.objectContaining({ action: "workflow.disassemble_book.book.manifest.lore", run_id: response.run_id, stage: "finalized" }),
       expect.objectContaining({ action: "workflow.disassemble_book.book.manifest.reverse_outline", run_id: response.run_id, stage: "finalized" }),
       expect.objectContaining({ action: "workflow.disassemble_book.lore.output", run_id: response.run_id, stage: "finalized" }),
-      expect.objectContaining({ action: "workflow.disassemble_book.lore.legacy_sync", run_id: response.run_id, stage: "finalized" }),
       expect.objectContaining({ action: "workflow.disassemble_book.reverse_outline.output", run_id: response.run_id, stage: "finalized" }),
-      expect.objectContaining({ action: "workflow.disassemble_book.reverse_outline.legacy_sync", run_id: response.run_id, stage: "finalized" })
+      expect.objectContaining({ action: "workflow.disassemble_book.report.output", run_id: response.run_id, stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.disassemble_book.book.manifest.ready", run_id: response.run_id, stage: "finalized" })
     ]));
-    expect(actions).toHaveLength(8);
+    expect(actions).toHaveLength(10);
     expect(new Set(journal.map((entry) => `${entry.run_id}:${entry.step_id}:${entry.attempt_id}`)).size).toBe(1);
 
     // A journaled action is only useful if it is the durable commit for the
@@ -240,11 +239,10 @@ describe("DisassembleBookWorkflow", () => {
     const book = response.skill_result?.data?.book as { dir?: string } | undefined;
     const expectedFinalWrites = [
       { action: "workflow.disassemble_book.book.source", relativePath: `${book?.dir}/原文.txt` },
-      { action: "workflow.disassemble_book.book.manifest.reverse_outline", relativePath: `${book?.dir}/manifest.jsonl` },
+      { action: "workflow.disassemble_book.book.manifest.ready", relativePath: `${book?.dir}/manifest.jsonl` },
       { action: "workflow.disassemble_book.lore.output", relativePath: `${book?.dir}/拆书设定提取.txt` },
-      { action: "workflow.disassemble_book.lore.legacy_sync", relativePath: "00_设定集/设定集/拆书设定提取.txt" },
       { action: "workflow.disassemble_book.reverse_outline.output", relativePath: `${book?.dir}/反向细纲.txt` },
-      { action: "workflow.disassemble_book.reverse_outline.legacy_sync", relativePath: "01_大纲/反向细纲.txt" }
+      { action: "workflow.disassemble_book.report.output", relativePath: `${book?.dir}/拆书报告.md` }
     ];
     for (const expected of expectedFinalWrites) {
       const entry = journal.find((item) => item.action === expected.action);

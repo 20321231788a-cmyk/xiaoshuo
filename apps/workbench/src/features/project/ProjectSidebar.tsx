@@ -32,7 +32,7 @@ function disassemblyBookReadyForFusion(book: DisassemblyBookSummary | null): boo
   if (!book || book.legacy) {
     return false;
   }
-  return Boolean(book.paths.lore || book.paths.reverse_outline || book.paths.detail_outline);
+  return book.status === "ready" && Boolean(book.paths.report && book.paths.lore && book.paths.reverse_outline);
 }
 
 function NovelFolderNode({

@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   windows:
+    if: ${{ github.ref_name != 'v1.2.0' }}
     name: Publish the verified RC artifact
     runs-on: windows-latest
     environment: production

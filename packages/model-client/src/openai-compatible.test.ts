@@ -43,6 +43,33 @@ describe("model-client", () => {
     expect(chunks).toEqual(["你", "好"]);
   });
 
+  it("keeps reasoning and answer stream channels separate", async () => {
+    const client = new OpenAICompatibleClient({
+      fetchFn: vi.fn(async () =>
+        new Response(
+          [
+            'data: {"choices":[{"delta":{"reasoning_content":"先分析"}}]}',
+            'data: {"choices":[{"delta":{"reasoning":"再核对"}}]}',
+            'data: {"choices":[{"delta":{"content":"最终答案"}}]}',
+            "data: [DONE]"
+          ].join("\n"),
+          { status: 200 }
+        )
+      ) as typeof fetch
+    });
+
+    const chunks = [];
+    for await (const chunk of client.streamDetailedCompletion(configuredModel, [{ role: "user", content: "hi" }])) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { channel: "reasoning", text: "先分析" },
+      { channel: "reasoning", text: "再核对" },
+      { channel: "answer", text: "最终答案" }
+    ]);
+  });
+
   it("streams naked ndjson delta events", async () => {
     const client = new OpenAICompatibleClient({
       fetchFn: vi.fn(async () =>

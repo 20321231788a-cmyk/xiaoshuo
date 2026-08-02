@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import {
   createDisassembleBook,
   inferDisassembleBookTitle,
-  LEGACY_DISASSEMBLE_DETAIL_PATH,
   readDisassembleBookText,
   resolveContinueDisassembleSource,
   resolveDisassembleBookForRequest,
@@ -38,25 +37,23 @@ export class ContinueDisassembleWorkflow implements WorkflowHandler {
     }, { signal: context.signal });
     throwIfAborted(context.signal);
 
-    const book = await createDisassembleBook(
-      {
-        title: String((request as any).book_title || sourceBook?.title || "").trim() || (await inferDisassembleBookTitle(request, source)),
-        sourceText: source,
-        sourcePath: sourceBook?.source_path || request.current_path || "",
-        origin: sourceBook?.legacy ? "continue_disassemble:legacy" : "continue_disassemble",
-        workflowId: this.id
-      },
-      context
-    );
+    const book = sourceBook && !sourceBook.legacy
+      ? await writeDisassembleBookManifest({ ...sourceBook, status: "stale", error: "" }, context, { workflowId: this.id, writeKey: "book.manifest.stale" })
+      : await createDisassembleBook(
+        {
+          title: String((request as any).book_title || sourceBook?.title || "").trim() || (await inferDisassembleBookTitle(request, source)),
+          sourceText: source,
+          sourcePath: sourceBook?.source_path || request.current_path || "",
+          origin: sourceBook?.legacy ? "continue_disassemble:legacy" : "continue_disassemble",
+          workflowId: this.id
+        },
+        context
+      );
     throwIfAborted(context.signal);
     const detailPath = `${book.dir}/拆书细纲.txt`;
     await writeDisassembleBookDocument(detailPath, result.result || "", "继续拆细纲", context, {
       workflowId: this.id,
       writeKey: "detail_outline.output"
-    });
-    await writeDisassembleBookDocument(LEGACY_DISASSEMBLE_DETAIL_PATH, result.result || "", "继续拆细纲 legacy 同步", context, {
-      workflowId: this.id,
-      writeKey: "detail_outline.legacy_sync"
     });
     const updatedBook = await writeDisassembleBookManifest(
       {
@@ -89,7 +86,7 @@ export class ContinueDisassembleWorkflow implements WorkflowHandler {
           saved_paths: savedPaths,
           path: savedPaths[0],
           book: updatedBook,
-          legacy_saved_paths: [LEGACY_DISASSEMBLE_DETAIL_PATH]
+        legacy_saved_paths: []
         }
       },
       saved_paths: savedPaths,

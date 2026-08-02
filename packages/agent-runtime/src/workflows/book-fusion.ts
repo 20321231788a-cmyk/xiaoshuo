@@ -23,6 +23,7 @@ type FusionSourceBook = DisassembleBookManifest & {
   lore?: string;
   reverseOutline?: string;
   detailOutline?: string;
+  report?: string;
 };
 
 export class BookFusionWorkflow implements WorkflowHandler {
@@ -30,6 +31,9 @@ export class BookFusionWorkflow implements WorkflowHandler {
 
   async runAgent(request: AgentRunRequest, context: WorkflowRunContext): Promise<AgentRunResponse> {
     throwIfAborted(context.signal);
+    if (String((request as any).action || "").trim() === "mark_applied") {
+      return markFusionApplied(request, context);
+    }
     const result = await runBookFusion(request, context);
     const savedPaths = resolveSavedPaths(result);
     const reply = savedPaths.length ? `融梗方案已生成：\n${savedPaths.join("\n")}` : result.result || "融梗方案已生成。";
@@ -76,7 +80,8 @@ async function runBookFusion(request: AgentRunRequest, context: WorkflowRunConte
         `【来源】${book.source_path || book.dir || "已拆书籍"}`,
         `【拆书设定】\n${book.lore || "无"}`,
         `【反向细纲】\n${book.reverseOutline || "无"}`,
-        `【拆书细纲】\n${book.detailOutline || "无"}`
+        `【拆书细纲】\n${book.detailOutline || "无"}`,
+        `【拆书报告】\n${book.report || "无"}`
       ].join("\n")
     )
     .join("\n\n");
@@ -142,9 +147,14 @@ async function runBookFusion(request: AgentRunRequest, context: WorkflowRunConte
     output_mode: outputMode,
     created_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
-    result_path: `${fusionDir}/融梗候选.txt`
+    result_path: `${fusionDir}/融梗候选.md`,
+    legacy_result_path: `${fusionDir}/融梗候选.txt`
   };
 
+  await context.documents.saveDocument(`${fusionDir}/融梗候选.md`, raw, {
+    source: "skill",
+    summary: "融梗候选方案 Markdown"
+  });
   await context.documents.saveDocument(`${fusionDir}/融梗候选.txt`, raw, {
     source: "skill",
     summary: "融梗候选方案"
@@ -175,13 +185,38 @@ async function runBookFusion(request: AgentRunRequest, context: WorkflowRunConte
       custom_prompt: customPrompt,
       genre_hint: genreHint,
       output_mode: outputMode,
+      candidate_markdown_path: `${fusionDir}/融梗候选.md`,
       saved_paths: [
         `${fusionDir}/融梗候选.txt`,
         `${fusionDir}/融梗提示词.txt`,
         `${fusionDir}/来源书籍.jsonl`,
-        `${fusionDir}/${BOOK_MANIFEST_PATH}`
+        `${fusionDir}/${BOOK_MANIFEST_PATH}`,
+        `${fusionDir}/融梗候选.md`
       ]
     }
+  };
+}
+
+async function markFusionApplied(request: AgentRunRequest, context: WorkflowRunContext): Promise<AgentRunResponse> {
+  const fusionId = String((request as any).fusion_id || "").trim();
+  if (!fusionId) throw new Error("缺少融梗候选 ID");
+  const manifestPath = `${FUSION_LIBRARY_DIR}/${fusionId}/${BOOK_MANIFEST_PATH}`;
+  const raw = await context.documents.readRawText(manifestPath, 200_000).catch(() => "");
+  if (!raw.trim()) throw new Error("未找到融梗候选 manifest");
+  const manifest = JSON.parse(raw.split(/\r?\n/)[0] || "{}") as Record<string, unknown>;
+  manifest.applied_target = String((request as any).applied_target || "").trim();
+  manifest.applied_revision = Number((request as any).target_revision || 0);
+  manifest.applied_at = new Date().toISOString();
+  await context.documents.saveDocument(manifestPath, `${JSON.stringify(manifest)}\n`, { source: "skill", summary: "记录融梗应用回执" });
+  const reply = `融梗候选已应用到${manifest.applied_target || "当前项目"}。`;
+  return {
+    intent: "skill",
+    reply,
+    conversation: null,
+    results: [],
+    skill_result: { status: "done", result: reply, saved_path: manifestPath, data: { skill_id: "book_fusion", fusion_id: fusionId, applied_target: manifest.applied_target, applied_revision: manifest.applied_revision } },
+    saved_paths: [manifestPath],
+    requires_confirmation: false
   };
 }
 
@@ -200,14 +235,17 @@ async function loadBooksForFusion(sourceBookIds: string[], context: WorkflowRunC
       ...book,
       lore: await readDisassembleBookText(book, "lore", context, 24_000),
       reverseOutline: await readDisassembleBookText(book, "reverse_outline", context, 24_000),
-      detailOutline: await readDisassembleBookText(book, "detail_outline", context, 24_000)
+      detailOutline: await readDisassembleBookText(book, "detail_outline", context, 24_000),
+      report: await readDisassembleBookText(book, "report", context, 80_000)
     });
   }
   return selected;
 }
 
 function isDisassembleBookReadyForFusion(book: DisassembleBookManifest & { legacy?: boolean }): boolean {
-  return Boolean(book.paths.lore || book.paths.reverse_outline || book.paths.detail_outline);
+  // 旧项目可能只有设定与反向细纲，没有新版本的报告字段；允许其继续融梗，
+  // 新导入流程仍只有生成报告后才会把 status 标记为 ready。
+  return book.status === "ready" && Boolean(book.paths.lore && book.paths.reverse_outline);
 }
 
 async function recordSkillExchange(

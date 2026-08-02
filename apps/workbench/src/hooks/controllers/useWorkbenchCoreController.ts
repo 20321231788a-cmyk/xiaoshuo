@@ -3,6 +3,7 @@ import type {
   AppConfig,
   AiConfigProfile,
   AiModelOption,
+  AgentConfirmation,
   AgentRunResponse,
   AgentRunState,
   CardDrawRequest,
@@ -88,6 +89,8 @@ export type OpenDocumentTab = {
 };
 
 export type DisassemblyBookSummary = {
+  schema_version: number;
+  template_version: string;
   id: string;
   title: string;
   dir: string;
@@ -96,13 +99,24 @@ export type DisassemblyBookSummary = {
   origin: string;
   source_path: string;
   source_summary: string;
+  source_hash: string;
   chars: number;
+  status: "imported" | "analyzing" | "ready" | "failed" | "stale";
+  analysis_version: number;
+  error: string;
+  analyzed_at: string;
+  source: { path: string; hash: string; chars: number; chapter_count: number; import_complete: boolean };
+  progress: { stage: string; completed_chapters: number; total_chapters: number; last_error: string };
+  coverage: { first_chapter: number; last_chapter: number; analyzed_chapters: number[]; missing_chapters: number[] };
   legacy?: boolean;
   paths: {
     source?: string;
     lore?: string;
     reverse_outline?: string;
     detail_outline?: string;
+    report?: string;
+    chapter_index?: string;
+    evidence_index?: string;
   };
 };
 
@@ -228,6 +242,11 @@ function readStyleDistillationProfileFromResult(result: SkillRunResponse | null)
     source_summary: String(raw.source_summary || ""),
     source_path: String(raw.source_path || ""),
     source_hash: String(raw.source_hash || ""),
+    source_book_id: String(raw.source_book_id || ""),
+    source_report_path: String(raw.source_report_path || ""),
+    evidence_spans: Array.isArray(raw.evidence_spans) ? raw.evidence_spans as StyleDistillationProfile["evidence_spans"] : [],
+    evidence_version: Number(raw.evidence_version || 1),
+    status: raw.status === "stale" || raw.status === "orphaned" ? raw.status : "active",
     distilled_at: String(raw.distilled_at || ""),
     enabled: Boolean(raw.enabled),
     profile_text: profileText
@@ -245,7 +264,10 @@ function readDisassemblyBookFromUnknown(value: unknown): DisassemblyBookSummary 
     return null;
   }
   const paths = raw.paths && typeof raw.paths === "object" && !Array.isArray(raw.paths) ? raw.paths : {};
+  const source = raw.source && typeof raw.source === "object" && !Array.isArray(raw.source) ? raw.source as DisassemblyBookSummary["source"] : { path: String(raw.source_path || ""), hash: String(raw.source_hash || ""), chars: Number(raw.chars || 0), chapter_count: 0, import_complete: Boolean(paths.source) };
   return {
+    schema_version: Number(raw.schema_version || 1),
+    template_version: String(raw.template_version || "1"),
     id,
     title,
     dir: String(raw.dir || ""),
@@ -254,13 +276,26 @@ function readDisassemblyBookFromUnknown(value: unknown): DisassemblyBookSummary 
     origin: String(raw.origin || ""),
     source_path: String(raw.source_path || ""),
     source_summary: String(raw.source_summary || ""),
+    source_hash: String(raw.source_hash || ""),
     chars: Number(raw.chars || 0),
+    status: ["imported", "analyzing", "ready", "failed", "stale"].includes(String(raw.status || ""))
+      ? raw.status as DisassemblyBookSummary["status"]
+      : "imported",
+    analysis_version: Number(raw.analysis_version || 1),
+    error: String(raw.error || ""),
+    analyzed_at: String(raw.analyzed_at || ""),
+    source,
+    progress: raw.progress && typeof raw.progress === "object" && !Array.isArray(raw.progress) ? raw.progress as DisassemblyBookSummary["progress"] : { stage: String(raw.status || "imported"), completed_chapters: 0, total_chapters: 0, last_error: String(raw.error || "") },
+    coverage: raw.coverage && typeof raw.coverage === "object" && !Array.isArray(raw.coverage) ? raw.coverage as DisassemblyBookSummary["coverage"] : { first_chapter: 0, last_chapter: 0, analyzed_chapters: [], missing_chapters: [] },
     legacy: Boolean(raw.legacy),
     paths: {
       source: String(paths.source || ""),
       lore: String(paths.lore || ""),
       reverse_outline: String(paths.reverse_outline || ""),
-      detail_outline: String(paths.detail_outline || "")
+      detail_outline: String(paths.detail_outline || ""),
+      report: String(paths.report || ""),
+      chapter_index: String(paths.chapter_index || ""),
+      evidence_index: String(paths.evidence_index || "")
     }
   };
 }
@@ -404,6 +439,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [sendingMessage, setSendingMessage] = useState(false);
   const [conversationModelPreferences, setConversationModelPreferences] = useState<ConversationModelPreferences>({
     model_override: "",
+    reasoning_enabled: false,
     reasoning_effort: "medium"
   });
   const [conversationModelPreferenceBusy, setConversationModelPreferenceBusy] = useState(false);
@@ -428,6 +464,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [selectedSkillVersions, setSelectedSkillVersions] = useState<SkillVersionEntry[]>([]);
   const [latestCardDrawResult, setLatestCardDrawResult] = useState<CardDrawResult | null>(null);
   const [pendingGeneratedSave, setPendingGeneratedSave] = useState<PendingGeneratedSave | null>(null);
+  const [pendingAgentConfirmations, setPendingAgentConfirmations] = useState<AgentConfirmation[]>([]);
+  const [pendingAgentConfirmationBusy, setPendingAgentConfirmationBusy] = useState("");
   const [styleDistillationProfile, setStyleDistillationProfile] = useState<StyleDistillationProfile | null>(null);
   const [disassemblyBooks, setDisassemblyBooks] = useState<DisassemblyBookSummary[]>([]);
   const [disassemblyLibraryBusy, setDisassemblyLibraryBusy] = useState(false);
@@ -446,6 +484,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const manualModelRefreshKeyRef = useRef("");
   const conversationModelPreferencesRef = useRef<ConversationModelPreferences>({
     model_override: "",
+    reasoning_enabled: false,
     reasoning_effort: "medium"
   });
   const client = useMemo(() => createApiClient({ baseUrl: runtime.apiBase, fetchFn: runtime.fetchFn }), [runtime.apiBase, runtime.fetchFn]);
@@ -703,9 +742,10 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
     setConversationModelPreferences({
       model_override: conversationDetail.model_override || "",
+      reasoning_enabled: Boolean(conversationDetail.reasoning_enabled),
       reasoning_effort: conversationDetail.reasoning_effort || "medium"
     });
-  }, [conversationDetail?.id, conversationDetail?.model_override, conversationDetail?.reasoning_effort]);
+  }, [conversationDetail?.id, conversationDetail?.model_override, conversationDetail?.reasoning_enabled, conversationDetail?.reasoning_effort]);
 
   useEffect(() => {
     if (!snapshot?.skills.length || selectedSkillId) {
@@ -1007,6 +1047,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setMessageInput("");
     setPendingReferenceResolution(null);
     setPendingGeneratedSave(null);
+    setPendingAgentConfirmations([]);
+    setPendingAgentConfirmationBusy("");
     setLatestSkillResult(null);
     setPendingSkillPatchPreview(null);
     setSelectedSkillVersions([]);
@@ -1021,7 +1063,11 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     });
   }
 
-  async function finalizeProjectSwitch(nextProject: CurrentProject, successMessage: string) {
+  async function finalizeProjectSwitch(
+    nextProject: CurrentProject,
+    successMessage: string,
+    options: { landing?: "project" | "assistant" } = {}
+  ) {
     clearProjectScopedState(nextProject);
     await recordDesktopProject(nextProject);
     setProjectPathInput(nextProject.path);
@@ -1064,6 +1110,12 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         : current
     );
     await syncDesktopProjectSnapshot(resolvedProject, nextConversations, nextJobs);
+
+    if (options.landing === "assistant") {
+      setActiveTab("conversations");
+      setProjectMessage(`${successMessage}，已进入 AI 助手。`);
+      return;
+    }
 
     const warnings: string[] = [];
     if (projectChromeResult.status === "rejected") {
@@ -1268,7 +1320,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
 
     let detail = await client.createConversation();
     const preferences = conversationModelPreferencesRef.current;
-    if (preferences.model_override || preferences.reasoning_effort !== "medium") {
+    if (preferences.model_override || preferences.reasoning_enabled || preferences.reasoning_effort !== "medium") {
       detail = await client.updateConversationModelPreferences(detail.id, preferences);
     }
     const conversations = await client.getConversations();
@@ -1323,10 +1375,23 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   async function handleAgentRunPayload(_conversationId: string, reply: string, payload: AgentRunResponse) {
     const pendingSave = pendingSaveFromSkill(payload.skill_result, "chat");
     const skillResultData = payload.skill_result?.data || {};
+    const libraryDraft = skillResultData.library_draft && typeof skillResultData.library_draft === "object" && !Array.isArray(skillResultData.library_draft)
+      ? skillResultData.library_draft as Record<string, unknown>
+      : null;
+    const libraryDraftDomain = String(libraryDraft?.domain || "");
+    const libraryDraftLabel = libraryDraftDomain === "lore"
+      ? "设定资料"
+      : libraryDraftDomain === "style"
+        ? "写作风格"
+        : libraryDraftDomain === "genre"
+          ? "题材规则"
+          : "项目资料";
     const completionMessage = pendingSave
       ? "生成完成，等待选择写入方式"
+      : libraryDraft
+        ? `${libraryDraftLabel}草稿已生成，请在下方预览后确认写入或丢弃；确认前不会修改项目文件`
       : payload.requires_confirmation
-        ? "已生成待确认的操作预览，下一步把确认执行接进新工作台"
+        ? "已生成待确认的操作预览，请检查内容后再执行写入"
         : payload.results.length
           ? "智能体已完成文件改动"
           : payload.skill_result?.status === "job_created"
@@ -1336,6 +1401,18 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     if (payload.conversation) {
       setConversationDetail(payload.conversation);
       await refreshConversationsList();
+    }
+
+    if (payload.requires_confirmation && payload.run_id) {
+      try {
+        const confirmations = await client.getAgentRunConfirmations(payload.run_id);
+        setPendingAgentConfirmations(confirmations.filter((item) => item.status === "pending"));
+      } catch (nextError) {
+        setPendingAgentConfirmations([]);
+        setConversationMessage(`已生成待确认操作，但读取确认详情失败：${nextError instanceof Error ? nextError.message : "未知错误"}`);
+      }
+    } else if (!payload.requires_confirmation) {
+      setPendingAgentConfirmations([]);
     }
 
     if (payload.skill_result) {
@@ -1479,7 +1556,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setProjectMessage("");
     try {
       const created = await client.createProject(parentPath, projectName);
-      await finalizeProjectSwitch(created, "新项目已创建并打开");
+      await finalizeProjectSwitch(created, "新项目已创建并打开", { landing: "assistant" });
       return "created";
     } catch (nextError) {
       setProjectMessage(describeActionableError(nextError, "创建项目失败", "请确认父目录存在并且允许写入。"));
@@ -2141,7 +2218,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
-  async function applyWebsiteAiConfig(payload: WebsiteAiApplyRequest) {
+  async function applyWebsiteAiConfig(payload: WebsiteAiApplyRequest): Promise<boolean> {
     setWebsiteAiBusy(true);
     setWebsiteAiMessage("");
     try {
@@ -2152,8 +2229,10 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       }
       await syncLicenseStatus();
       setWebsiteAiMessage(dashboard.message || "网站模型配置已应用。");
+      return true;
     } catch (nextError) {
       setWebsiteAiMessage(describeActionableError(nextError, "应用网站配置失败", "请先登录网站账号并选择可用模型。"));
+      return false;
     } finally {
       setWebsiteAiBusy(false);
     }
@@ -2321,6 +2400,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       setConversationDetail(detail);
       setConversationModelPreferences({
         model_override: detail.model_override || "",
+        reasoning_enabled: Boolean(detail.reasoning_enabled),
         reasoning_effort: detail.reasoning_effort || "medium"
       });
       if (options.activateTab ?? true) {
@@ -2404,7 +2484,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setConversationMessage("");
     try {
       const detail = await client.createConversation();
-      const defaults: ConversationModelPreferences = { model_override: "", reasoning_effort: "medium" };
+      const defaults: ConversationModelPreferences = { model_override: "", reasoning_enabled: false, reasoning_effort: "medium" };
       conversationModelPreferencesRef.current = defaults;
       setConversationModelPreferences(defaults);
       const list = await client.getConversations();
@@ -2426,6 +2506,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
     const normalized: ConversationModelPreferences = {
       model_override: nextPreferences.model_override.trim(),
+      reasoning_enabled: Boolean(nextPreferences.reasoning_enabled),
       reasoning_effort: nextPreferences.reasoning_effort
     };
     const previous = conversationModelPreferencesRef.current;
@@ -2448,6 +2529,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       patchConversationSummary(conversationId, (item) => ({
         ...item,
         model_override: detail.model_override,
+        reasoning_enabled: detail.reasoning_enabled,
         reasoning_effort: detail.reasoning_effort,
         updated_at: detail.updated_at
       }));
@@ -2463,6 +2545,47 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     } finally {
       setConversationModelPreferenceBusy(false);
     }
+  }
+
+  async function updateConversationModelAndDefault(
+    modelId: string,
+    nextPreferences: ConversationModelPreferences
+  ): Promise<boolean> {
+    const normalizedModel = modelId.trim();
+    const baseConfig = configDraft;
+    if (!normalizedModel || !baseConfig) {
+      setConversationMessage("模型选择失败：没有可保存的模型或配置。");
+      return false;
+    }
+    const previous = conversationModelPreferencesRef.current;
+    const conversationSaved = await updateConversationModelPreferences({
+      ...nextPreferences,
+      model_override: normalizedModel
+    });
+    if (!conversationSaved) return false;
+
+    const mode = baseConfig.ai_config_mode === "website" ? "website" : "manual";
+    const globalSaved = mode === "website"
+      ? await applyWebsiteAiConfig({
+          model: normalizedModel,
+          embedding_model: baseConfig.website_profile?.embedding_model || "",
+          temp: baseConfig.website_profile?.temp ?? baseConfig.temp ?? 0.7,
+          top_p: baseConfig.website_profile?.top_p ?? baseConfig.top_p ?? 1
+        })
+      : await patchAndSaveConfig({
+          manual_profile: normalizeConfigDraft({
+            ...baseConfig,
+            manual_profile: { ...baseConfig.manual_profile, model: normalizedModel } as AiConfigProfile
+          }).manual_profile!
+        }, "");
+
+    if (!globalSaved) {
+      await updateConversationModelPreferences(previous);
+      setConversationMessage("模型未设为全局默认，已恢复保存前的会话选择。请检查连接或登录状态后重试。");
+      return false;
+    }
+    setConversationMessage("已设为当前会话模型和全局默认。其他 AI 功能将使用这个模型。");
+    return true;
   }
 
   async function updateConversationTitle(title: string, conversationId = conversationDetail?.id || "") {
@@ -3838,9 +3961,65 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setConversationMessage("已取消本次引用确认。");
   }
 
+  async function resolvePendingAgentConfirmation(confirmation: AgentConfirmation, action: "approve" | "reject") {
+    if (pendingAgentConfirmationBusy) {
+      return;
+    }
+    const operationId = `op_assistant_confirmation_${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Date.now()}`;
+    setPendingAgentConfirmationBusy(confirmation.confirmation_id);
+    try {
+      const payload = {
+        operation_id: operationId,
+        expected_version: confirmation.version,
+        expected_scope_fingerprint: confirmation.scope_fingerprint || ""
+      };
+      const resolved = action === "approve"
+        ? await client.approveAgentConfirmation(confirmation.confirmation_id, payload)
+        : await client.rejectAgentConfirmation(confirmation.confirmation_id, payload);
+
+      if (action === "approve" && resolved.status === "approved") {
+        const run = await client.getAgentRun(confirmation.run_id);
+        await client.resumeAgentRun(run.run_id, {
+          operation_id: `${operationId}_resume`,
+          expected_version: run.version
+        });
+        setConversationMessage("操作已批准并继续执行；完成后会显示真实系统回执。");
+      } else {
+        setConversationMessage("操作已拒绝，未执行对应写入。");
+      }
+      setPendingAgentConfirmations((current) => current.filter((item) => item.confirmation_id !== resolved.confirmation_id));
+    } catch (nextError) {
+      setConversationMessage(describeActionableError(nextError, action === "approve" ? "批准操作失败" : "拒绝操作失败"));
+    } finally {
+      setPendingAgentConfirmationBusy("");
+    }
+  }
+
   async function sendConversationPrompt(content: string, options: SendConversationOptions = {}) {
     const trimmed = content.trim();
     if (!trimmed || sendingMessage) {
+      return;
+    }
+
+    const normalizedConfirmation = trimmed.replace(/\s+/g, "");
+    if (
+      pendingGeneratedSave &&
+      /^(确认|确认保存|确认写入)$/.test(normalizedConfirmation)
+    ) {
+      setMessageInput("");
+      await savePendingGenerated(pendingGeneratedSave.defaultMode || "replace");
+      return;
+    }
+
+    const pendingAgentConfirmation = pendingAgentConfirmations.length === 1 ? pendingAgentConfirmations[0] : null;
+    if (pendingAgentConfirmation && /^(确认|确认保存|确认写入)$/.test(normalizedConfirmation)) {
+      setMessageInput("");
+      await resolvePendingAgentConfirmation(pendingAgentConfirmation, "approve");
+      return;
+    }
+
+    if (pendingAgentConfirmations.length > 0) {
+      setConversationMessage("当前有多个待确认操作，请在确认卡片中选择具体操作后再继续。");
       return;
     }
 
@@ -3901,6 +4080,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setMessageInput("");
 
     let streamedText = "";
+    let streamedReasoning = "";
     let streamedAssistantMetadata: Record<string, unknown> = {};
     try {
       await client.streamConversationMessage(
@@ -3931,7 +4111,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
                 skill_plan: event.skill_plan,
                 skill_steps: event.skill_steps || []
               };
-              upsertLocalMessage(conversationId, { ...assistantMessage, content: streamedText, metadata: streamedAssistantMetadata });
+               upsertLocalMessage(conversationId, { ...assistantMessage, content: streamedText, reasoning_content: streamedReasoning, metadata: streamedAssistantMetadata });
             }
           },
           onDelta: (event) => {
@@ -3942,14 +4122,19 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
             if (!event.text) {
               return;
             }
+            if (event.channel === "reasoning") {
+              streamedReasoning += event.text;
+              upsertLocalMessage(conversationId, { ...assistantMessage, content: streamedText, reasoning_content: streamedReasoning, metadata: streamedAssistantMetadata });
+              return;
+            }
             streamedText += event.text;
-            upsertLocalMessage(conversationId, { ...assistantMessage, content: streamedText, metadata: streamedAssistantMetadata });
+            upsertLocalMessage(conversationId, { ...assistantMessage, content: streamedText, reasoning_content: streamedReasoning, metadata: streamedAssistantMetadata });
           },
           onFinal: async (event) => {
             activeConversationRunIdRef.current = "";
             const reply = resolveAssistantReply(event.payload, streamedText);
             if (reply.trim()) {
-              upsertLocalMessage(conversationId, { ...assistantMessage, content: reply, metadata: streamedAssistantMetadata });
+              upsertLocalMessage(conversationId, { ...assistantMessage, content: reply, reasoning_content: streamedReasoning, metadata: streamedAssistantMetadata });
             }
             await handleAgentRunPayload(conversationId, reply, event.payload);
           },
@@ -4237,7 +4422,11 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       const profile = readStyleDistillationProfileFromResult(result);
       setStyleDistillationProfile(profile);
       await refreshProjectChrome().catch(() => null);
-      setOperationsMessage(profile ? `已蒸馏：${profile.book_title}，并已启用为生成文风。` : result.result || "蒸馏完成。");
+      setOperationsMessage(profile
+        ? (result.data?.requires_confirmation
+          ? `已蒸馏：${profile.book_title}。风格库草稿已生成，等待确认；当前档案仅作为本次试用文风。`
+          : `已蒸馏：${profile.book_title}，并已启用为生成文风。`)
+        : result.result || "蒸馏完成。");
     } catch (nextError) {
       setOperationsMessage(describeActionableError(nextError, "执行蒸馏失败", "请确认已打开拆书原文、拆书产物存在，且模型配置可用。"));
     } finally {
@@ -4718,6 +4907,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     conversationModelPreferences,
     conversationModelPreferenceBusy,
     updateConversationModelPreferences,
+    updateConversationModelAndDefault,
     pendingReferenceResolution,
     loadConversation,
     getConversationPlanRun,
@@ -4783,6 +4973,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     selectedSkillVersions,
     latestCardDrawResult,
     pendingGeneratedSave,
+    pendingAgentConfirmations,
+    pendingAgentConfirmationBusy,
     styleDistillationProfile,
     selectSkill,
     refreshSkillCatalog,
@@ -4817,6 +5009,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     deleteNuwaStyleDistillation,
     savePendingGenerated,
     savePendingGeneratedAsDraft,
+    resolvePendingAgentConfirmation,
     copyPendingGeneratedContent,
     discardPendingGenerated,
     restoreGeneratedCache,

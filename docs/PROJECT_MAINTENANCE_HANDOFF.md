@@ -1,14 +1,14 @@
 # ArcWriter 项目维护交接
 
-> 更新：2026-07-31
+> 更新：2026-08-02
 >
-> 当前版本：`1.1.1`（GitHub Preview Release 版本）
+> 当前版本：`1.2.0`（GitHub 正式 Release，小规模使用）
 >
-> 定位：免费、小范围使用的 AI 小说写作 Preview，不按商业软件验收
+> 定位：免费、小范围使用的 AI 小说写作正式版；本版本跳过 RC，仅面向小规模用户使用，不代表商业化质量承诺
 
 ## 1. 当前结论
 
-1.1.1 在 1.1.0 基线上修复新建小说流程，增加可恢复的最近项目移除操作，并把自动设定提取与当前章节一致性检查接入 AI 侧栏。P0～P7 及小说 Agent 七项受控替代能力保持既有集中验收结论；每批新增能力分别记录验收证据，不回填或复用旧统计。普通 Desktop 启动默认启用集成 Preview 配置，`--safe-agent` 可一键回退。
+1.2.0 在 1.1.1 基线上完成故事大纲编辑与删除、AI 助手思考流、统一预览确认与真实写入回执、正文侧栏独立对话、拆书状态流、融梗/蒸馏原文证据注入等改造。普通 Desktop 启动默认启用集成配置，`--safe-agent` 可一键回退。
 
 Agent 当前执行口径只认两份文档：
 
@@ -26,7 +26,7 @@ Agent 当前执行口径只认两份文档：
 npm run acceptance:preview
 ```
 
-该结果只用于 Preview 代码验收。签名、950 条商业数据集、sealed holdout、1000 次故障注入、2 小时 soak、固定设备性能、盲评和正式 release evidence 均为未来商业化事项。
+该结果用于 1.2.0 小规模正式版的发布前质量门。由于本版本明确跳过 RC，未声称已完成签名、商业数据集、sealed holdout、1000 次故障注入、2 小时 soak、固定设备性能、盲评或商业级 release evidence；这些仍是后续扩大范围前的独立工作项。
 
 ## 2. 快速开始
 
@@ -184,12 +184,12 @@ npm run acceptance:preview
 - AI 侧栏“写作辅助”增加自动提取设定开关，与 `auto_lore_extract_enabled` 和设置页共用配置，并复用既有逻辑恢复被禁用的设定提取技能。
 - “检查当前章节”只读取当前文档运行 `consistency_check`，不改写正文；结果映射与报告保存逻辑由 AI 侧栏和全文审阅页共用，侧栏显示进度、得分、问题数与完整报告入口。
 - 新增 shared schema、Desktop 本地状态、审阅报告和 Browser E2E 回归测试；1024、1280、1440 宽度保持无页面级横向溢出。
-- 版本基线为 `1.1.1`。完整 `npm run acceptance:preview` 已通过：全 workspace typecheck；129 个 Vitest 文件、954 项测试；3/3 Node 测试；8 类 eval manifest；Workbench/Desktop production build；15/15 Browser E2E；Desktop smoke；`git diff --check`。无签名小范围版本在用户明确发出发布口令后可作为 GitHub Preview 预发布；签名稳定版仍必须按 `docs/RELEASE_GATES.md` 使用同提交 RC 证据晋升。
+- 版本基线为 `1.1.1`，并在本次提交升级为 `1.2.0`。本批完整验证通过：全 workspace typecheck；130 个 Vitest 文件、958 项测试；3/3 Node 测试；Workbench/Desktop production build；15/15 Browser E2E；Desktop smoke；`git diff --check`。按用户明确要求，本版本跳过 RC，作为 GitHub 正式 Release 发布，仅小规模使用；安装包未宣称签名稳定版。
 - 1.1.1 最终发布流水线曾在两条 chat 写回/自动保存崩溃恢复用例上出现 Windows 并行负载抖动：一次触发默认 5 秒测试超时，一次在后台 run 已完成后未能及时观察到缓存元数据收口。本地定向复现为 197ms 且断言全部通过；两条用例内部最多包含约 3 秒 run 等待和 10 秒缓存等待，因此单用例总时限设为 30 秒以保留 SQLite 初始化与断言余量，缓存状态轮询仍限制为 10 秒。生产逻辑以及恢复后必须完成、不重复调用模型、不重复写回的断言均未放宽。
 - Nightly 的编辑器保存冲突 E2E 也曾在高负载下超过默认 5 秒磁盘观察窗口，而同提交 Windows 质量门已通过该流程；该 `expect.poll` 上限调整为 15 秒，最终磁盘内容必须精确等于用户选择的本地版本这一断言保持不变。
 - 后续 Windows 质量门又在既有 ExecutionStore SQLite CRUD 用例上随机超过默认 5 秒，而同提交 Nightly 的 954 项测试全部通过。由于高负载 runner 已在三个互不相关的 SQLite/文件测试上产生同类误报，Vitest 全局单测超时统一设为 15 秒；测试断言、错误条件、测试文件数量和生产实现均未改变，真实卡死仍会失败。
 
-`desktop-rc.yml` 的 nightly 路径可生成无签名 Preview artifact；严格 `channel=rc` 和 `release.yml` 留给未来商业化，不阻塞本次小范围使用。
+`desktop-rc.yml` 继续保留 nightly/RC 能力供后续商业化使用。本次 `v1.2.0` 采用小规模正式发布路径，直接由 tagged source 构建并发布，不等待 RC，不把该版本标记为 Preview。
 
 ## 7. 打包与回退
 
@@ -197,15 +197,15 @@ npm run acceptance:preview
 npm run dist -w @xiaoshuo/desktop-shell
 ```
 
-产物目录：`apps/desktop-shell/release/`。无签名包可能触发 Windows SmartScreen，符合当前小范围 Preview 定位。
+产物目录：`apps/desktop-shell/release/`。本版本安装包可能未签名，可能触发 Windows SmartScreen；这与“小规模正式发布、非商业稳定版”的定位一致。
 
 回退优先使用 `--safe-agent`。版本回退前备份整个小说项目；不要用旧版本写入已经升级的 SQLite schema。卸载默认不删除用户数据。
 
 ### 7.1 发布口令约定
 
-- 当用户输入“推送 GitHub”并同时给出明确版本号（例如 `1.1.1`）时，视为授权执行该版本的完整发布流程，不得只推送源码后停止。
+- 当用户输入“推送 GitHub”并同时给出明确版本号（例如 `1.2.0`）时，视为授权执行该版本的完整发布流程，不得只推送源码后停止。
 - 完整流程包括：核对并更新 Desktop 与锁文件版本、更新维护文档和版本说明、运行发布前验收、生成 Windows 安装包、提交并推送 `main`、创建对应版本标签和 GitHub Release，并上传安装包、`.blockmap` 与 `latest.yml`。
-- 若同提交已具备受保护 RC、代码签名和发布证据，则走正式稳定版工作流；若仍处于无签名小范围使用阶段，则创建名称明确包含 `Preview` 的预发布，并在说明中提示 Windows SmartScreen 风险，不能伪装为已签名稳定版。
+- `1.2.0` 为本次明确批准的例外：跳过 RC，使用小规模正式发布工作流创建非预发布 GitHub Release；Release 说明必须明确“小规模使用、可能未签名、非商业稳定版”，不能伪装成已完成商业发布门槛的版本。后续版本默认仍按 `docs/RELEASE_GATES.md` 的 RC/正式晋升流程执行，除非用户再次明确授权同类例外。
 - 发布结束必须核对远端分支、标签目标、Release 状态、附件名称、大小和 SHA-256；失败时保留代码与本地项目数据，并向用户明确报告未完成的发布环节。
 
 ## 8. 常见问题
@@ -305,6 +305,14 @@ git diff --check
 - AI 对话采用用户右侧气泡、AI 左侧正文和单容器输入栏，上下文、附件、模型和思考等级均保留真实交互；
 - 完整验证为 126 files / 943 tests、3/3 Node tests、两个 production build、Browser E2E 12/12、Desktop smoke 和 diff check；
 - 代码提交为 `f4376f6`，维护记录随后的独立文档提交不改变该代码证据。
+
+2026-08-02 1.2.0 全局 AI 写入、助手流式思考与拆书链路收口：
+
+- 故事大纲中间区域支持就地编辑、保存、取消和删除，写入 StoryPlanningService 并同步投影；风格、题材、设定草稿统一进入预览确认流程。
+- AI 助手支持模型最近选择作为全局默认、独立思考开关、思考流式输出、项目上下文链路、Agent 待确认操作卡和真实保存回执。
+- 正文侧栏改为独立迷你会话，新增“扩写当前段落”；拆书改为导入待拆、原书拆解、正式入库，蒸馏保存全书原文证据，融梗/蒸馏确认后才写入目标资料。
+- 版本和锁文件更新为 `1.2.0`，新增 `docs/releases/v1.2.0.md`；跳过 RC，创建正式 GitHub Release，仅小规模使用。
+- 发布前验证：130 个 Vitest 文件、958 项测试；3/3 Node 测试；Workbench/Desktop production build；15/15 Browser E2E；Desktop smoke；`git diff --check`。
 
 2026-07-31 1.1.1 项目创建与写作辅助维护：
 

@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ProjectLibraryBundle, ProjectLibraryDomain, ProjectLibraryRecord } from "@xiaoshuo/shared";
 import { projectLibraryBundleSchema } from "@xiaoshuo/shared";
 import type { WorkbenchController } from "../../../hooks/useWorkbenchController.js";
+import { LibraryDraftReview } from "../shared/LibraryDraftReview.js";
 import { EmptyState } from "../shared/SharedStates.js";
 
 type LoadState = "loading" | "ready" | "error";
@@ -246,6 +247,8 @@ export function StyleProductPage({ controller }: { controller: WorkbenchControll
           </button>
         </div>
       </div>
+
+      <LibraryDraftReview controller={controller} domains={["style", "genre"]} onChanged={load} />
 
       <div className="style-layout" style={{ flex: 1, minHeight: 0 }}>
         {/* 左栏：分类导航 */}

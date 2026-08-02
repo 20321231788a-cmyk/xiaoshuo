@@ -145,6 +145,7 @@ describe("project-session", () => {
 
     const projectPath = created.path;
     await fs.writeFile(path.join(projectPath, "01_大纲", "大纲.txt"), "测试大纲内容", "utf8");
+    await fs.writeFile(path.join(projectPath, "01_大纲", "故事大纲.md"), "结构化故事大纲内容", "utf8");
     await fs.writeFile(path.join(projectPath, "01_大纲", "细纲.txt"), "测试细纲内容", "utf8");
     await fs.writeFile(path.join(projectPath, "01_大纲", "章纲.txt"), "测试章纲内容", "utf8");
 
@@ -162,7 +163,7 @@ describe("project-session", () => {
 
     const context = await sessions.buildContinuityContext();
 
-    expect(context.outline).toBe("测试大纲内容");
+    expect(context.outline).toBe("结构化故事大纲内容");
     expect(context.detailed_outline).toBe("测试细纲内容");
     expect(context.chapter_outline).toBe("测试章纲内容");
     expect(context.lore["人物设定"]).toBe("主角张三");

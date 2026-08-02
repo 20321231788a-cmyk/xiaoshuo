@@ -20,6 +20,7 @@ import { AssistantComposer } from "./AssistantComposer.js";
 import { formatAssistantAttachmentSize } from "./assistantComposerUtils.js";
 import { automaticFeatures, saveAutomaticFeature } from "../tools/automaticFeatures.js";
 import { runConsistencyReview } from "../review/reviewReports.js";
+import { LibraryDraftReview } from "../shared/LibraryDraftReview.js";
 
 const CardDrawFeaturePage = lazy(() =>
   import("../../card-draw/CardDrawFeaturePage.js").then((module) => ({ default: module.CardDrawFeaturePage }))
@@ -58,7 +59,7 @@ export function AssistantProductPage({ controller, onSelectFeature }: { controll
       });
       return () => window.cancelAnimationFrame(frame);
     }
-  }, [conversationDetail?.id, messages.length, lastMessage?.id, lastMessage?.content.length]);
+  }, [conversationDetail?.id, messages.length, lastMessage?.id, lastMessage?.content.length, lastMessage?.reasoning_content?.length]);
 
   // 会话搜索与按今天/昨天分组
   const groupedConversations = useMemo(() => {
@@ -301,10 +302,24 @@ export function AssistantProductPage({ controller, onSelectFeature }: { controll
                     );
                   }
                   const userMessage = entry.role === "user";
+                  const lastAssistantId = [...messages].reverse().find((message) => message.role === "assistant")?.id;
+                  const isLastAssistant = entry.id === lastAssistantId;
+                  const showReasoning = !userMessage && (
+                    Boolean(entry.reasoning_content) ||
+                    (isLastAssistant && !sendingMessage && controller.conversationModelPreferences.reasoning_enabled)
+                  );
                   return (
                     <article className={`assistant-message ${userMessage ? "user" : "ai"}`} data-message-role={entry.role} key={entry.id}>
                       {!userMessage && <span className="assistant-message-avatar" aria-hidden="true"><Sparkles size={14} /></span>}
                       <div className="assistant-message-body">
+                        {showReasoning && (
+                          <details className="assistant-reasoning-content" open={Boolean(sendingMessage && isLastAssistant && entry.reasoning_content && !entry.content)}>
+                            <summary>{sendingMessage && isLastAssistant ? (entry.content ? "思考完成" : "正在思考") : "思考过程"}</summary>
+                            {entry.reasoning_content
+                              ? <RichText text={entry.reasoning_content} />
+                              : <p>当前模型本轮未返回可展示的思考内容。</p>}
+                          </details>
+                        )}
                         <RichText text={entry.content} />
 
                         {controller.pendingGeneratedSave && entry.id === [...messages].reverse().find((message) => message.role === "assistant")?.id && (
@@ -325,6 +340,49 @@ export function AssistantProductPage({ controller, onSelectFeature }: { controll
                   );
                 })}
 
+                <LibraryDraftReview
+                  controller={controller}
+                  domains={["lore", "style", "genre"]}
+                  refreshKey={messages.length}
+                  compact
+                />
+
+                {controller.pendingAgentConfirmations.map((confirmation) => (
+                  <section className="assistant-agent-confirmation" aria-label="待确认操作" key={confirmation.confirmation_id}>
+                    <div className="assistant-agent-confirmation-head">
+                      <strong>{confirmation.summary || confirmation.action || "待确认操作"}</strong>
+                      <span>{confirmation.risk_level} 风险 · 版本 {confirmation.version}</span>
+                    </div>
+                    {confirmation.target_paths.length > 0 && (
+                      <p>目标：{confirmation.target_paths.join("、")}</p>
+                    )}
+                    {confirmation.action_payload && (
+                      <details>
+                        <summary>查看操作参数</summary>
+                        <pre>{JSON.stringify(confirmation.action_payload, null, 2)}</pre>
+                      </details>
+                    )}
+                    <div className="assistant-write-actions">
+                      <button
+                        className="button primary compact"
+                        type="button"
+                        disabled={Boolean(controller.pendingAgentConfirmationBusy)}
+                        onClick={() => void controller.resolvePendingAgentConfirmation(confirmation, "approve")}
+                      >
+                        {controller.pendingAgentConfirmationBusy === confirmation.confirmation_id ? "正在批准..." : "批准并继续"}
+                      </button>
+                      <button
+                        className="button secondary compact danger"
+                        type="button"
+                        disabled={Boolean(controller.pendingAgentConfirmationBusy)}
+                        onClick={() => void controller.resolvePendingAgentConfirmation(confirmation, "reject")}
+                      >
+                        拒绝
+                      </button>
+                    </div>
+                  </section>
+                ))}
+
                 {sendingMessage && !(lastMessage?.role === "assistant" && lastMessage.content.trim()) && (
                   <div className="assistant-message ai generating" data-message-role="assistant" role="status">
                     <span className="assistant-message-avatar" aria-hidden="true"><Sparkles size={14} /></span>
@@ -344,7 +402,14 @@ export function AssistantProductPage({ controller, onSelectFeature }: { controll
               <strong>本次上下文</strong>
               <button className="icon-button subtle" type="button" title="固定当前文档" aria-label="固定当前文档" onClick={() => void controller.pinCurrentDocumentToConversation()} disabled={!activeDocument || busy}><Plus size={15} /></button>
             </div>
-            <p className="panel-note">AI 只会读取这里列出的内容。</p>
+            <p className="panel-note">AI 会自动读取项目大纲、设定、风格题材与近期正文；你还可以为本次会话补充文档和附件。</p>
+            <div className="assistant-auto-context" aria-label="自动项目上下文">
+              <strong>自动项目上下文</strong>
+              <span>故事大纲（优先读取结构化大纲）</span>
+              <span>人物与世界设定</span>
+              <span>风格、题材与近期正文</span>
+            </div>
+            <div className="assistant-extra-context-title">本次额外上下文</div>
             <div style={{ display: "flex", flexDirection: "column", gap: "8px", padding: "10px" }}>
               {(conversationDetail?.pinned_context || []).map((item) => (
                 <div className="context-item" key={item.id}>
@@ -360,7 +425,7 @@ export function AssistantProductPage({ controller, onSelectFeature }: { controll
                   <button type="button" aria-label={`删除附件${item.name}`} onClick={() => void controller.deleteConversationAttachment(item.id)}><X size={13} /></button>
                 </div>
               ))}
-              {!conversationDetail?.pinned_context.length && !conversationDetail?.attachments.length && <p className="panel-note">固定当前文档或上传资料后会显示在这里。</p>}
+              {!conversationDetail?.pinned_context.length && !conversationDetail?.attachments.length && <p className="panel-note">尚未补充额外上下文。固定当前文档或上传资料后会显示在这里。</p>}
             </div>
 
             <div className="context-scope" style={{ margin: "10px", borderTop: "1px solid var(--line)", paddingTop: "12px" }}>

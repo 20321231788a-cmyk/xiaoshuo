@@ -193,7 +193,7 @@ export function SettingsFeaturePage({ controller, section, onNavigate, onOpenVec
       </div>
       <div className="ai-config-tabs" role="tablist" aria-label="AI 配置分区">
         {([
-          ["model", "模型"],
+          ["model", "连接参数"],
           ["retrieval", "本地检索"],
           ["service", "网站服务"],
           ["search", "联网搜索"]
@@ -287,17 +287,10 @@ export function SettingsFeaturePage({ controller, section, onNavigate, onOpenVec
 
           {aiPanel === "model" && <section className="xw-settings-section">
             <div className="xw-settings-section-head">
-              <strong>网站模型</strong>
-              <span>软件会在本地隐藏写入中转连接信息，界面只保留可选模型。</span>
+              <strong>网站生成参数</strong>
+              <span>文本模型统一在 AI 助手中选择；这里仅管理生成参数。</span>
             </div>
             <div className="xw-settings-grid">
-              <SelectSettingRow
-                label="语言模型"
-                value={websiteModel}
-                placeholder="登录后读取模型"
-                options={websiteModels.map((item) => ({ value: item.id, label: item.provider ? `${item.name} · ${item.provider}` : item.name }))}
-                onChange={(value) => patchWebsiteProfile({ model: value })}
-              />
               <SliderSettingRow label="temperature" value={websiteTemp} min={0} max={2} step={0.01} onChange={(value) => patchWebsiteProfile({ temp: value })} />
               <SliderSettingRow label="top_p" value={websiteTopP} min={0} max={1} step={0.01} onChange={(value) => patchWebsiteProfile({ top_p: value })} />
             </div>
@@ -342,7 +335,7 @@ export function SettingsFeaturePage({ controller, section, onNavigate, onOpenVec
           </>
         ) : (
           <>
-            <button className="xw-primary-button compact" onClick={applyWebsiteConfig} disabled={controller.websiteAiBusy || !websiteModel}>应用网站配置</button>
+            <button className="xw-primary-button compact" onClick={applyWebsiteConfig} disabled={controller.websiteAiBusy || !websiteModel}>保存连接参数</button>
             <button className="xw-secondary-button compact" onClick={() => void controller.refreshWebsiteAiDashboard()} disabled={controller.websiteAiBusy}>刷新网站状态</button>
             <span>{controller.websiteAiMessage || websiteDashboard?.message || "网站配置会应用到后续聊天、生成和技能调用。"}</span>
           </>
@@ -420,7 +413,7 @@ function SettingsShell({ controller, section, onNavigate, children }: { controll
 }
 
 function aiPanelLabel(panel: AiSettingsPanel) {
-  if (panel === "model") return "模型";
+  if (panel === "model") return "连接参数";
   if (panel === "retrieval") return "本地检索";
   if (panel === "service") return "网站服务";
   return "联网搜索";
@@ -966,20 +959,12 @@ function ManualAiSettings({
     <div className="xw-settings-list ai">
       {panel === "model" && <section className="xw-settings-section">
         <div className="xw-settings-section-head">
-          <strong>主模型</strong>
-          <span>聊天、写作和技能执行的默认线路</span>
+          <strong>主线路</strong>
+          <span>填写接口连接；文本模型统一在 AI 助手中选择</span>
         </div>
         <div className="xw-settings-grid">
           <SecretSettingRow label="API Key" value={profile.api_key || ""} visible={showSecrets} onChange={(value) => onProfileChange({ api_key: value })} />
           <TextSettingRow label="Base URL" value={profile.base_url || ""} placeholder="https://api.openai.com/v1" onChange={(value) => onProfileChange({ base_url: value })} />
-          <ManualModelSettingRow
-            value={profile.model || ""}
-            models={controller.manualModelCatalog}
-            busy={controller.manualModelDiscoveryBusy}
-            message={controller.manualModelDiscoveryMessage}
-            onChange={(value) => onProfileChange({ model: value })}
-            onRefresh={() => void controller.refreshManualModelCatalog(profile, { force: true })}
-          />
           <SliderSettingRow label="temperature" value={profile.temp ?? 0.7} min={0} max={2} step={0.01} onChange={(value) => onProfileChange({ temp: value })} />
           <SliderSettingRow label="top_p" value={profile.top_p ?? 1} min={0} max={1} step={0.01} onChange={(value) => onProfileChange({ top_p: value })} />
         </div>
@@ -987,13 +972,12 @@ function ManualAiSettings({
 
       {panel === "model" && <section className="xw-settings-section">
         <div className="xw-settings-section-head">
-          <strong>副模型</strong>
-          <span>可用于备用线路或轻量任务，未填写时继续使用主模型</span>
+          <strong>备用线路</strong>
+          <span>可用于备用接口或轻量任务，模型仍由 AI 助手统一选择</span>
         </div>
         <div className="xw-settings-grid">
           <SecretSettingRow label="副 API Key" value={profile.secondary_api_key || ""} visible={showSecrets} onChange={(value) => onProfileChange({ secondary_api_key: value })} />
           <TextSettingRow label="副 Base URL" value={profile.secondary_base_url || ""} placeholder="留空沿用主 Base URL" onChange={(value) => onProfileChange({ secondary_base_url: value })} />
-          <TextSettingRow label="副模型" value={profile.secondary_model || ""} placeholder="可选" onChange={(value) => onProfileChange({ secondary_model: value })} />
           <SliderSettingRow label="temperature" value={profile.secondary_temp ?? 0.5} min={0} max={2} step={0.01} onChange={(value) => onProfileChange({ secondary_temp: value })} />
           <SliderSettingRow label="top_p" value={profile.secondary_top_p ?? 1} min={0} max={1} step={0.01} onChange={(value) => onProfileChange({ secondary_top_p: value })} />
         </div>

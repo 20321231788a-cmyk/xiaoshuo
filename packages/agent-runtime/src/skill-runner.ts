@@ -18,6 +18,7 @@ import { isSectionedGeneratedSkillId, sectionedGeneratedTargetPaths } from "./se
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import { streamModelText, StreamingGenerationSession, type StreamingModelClient } from "./stream.js";
 import { isCancellationError, throwIfAborted, type AgentRunOptions } from "./cancellation.js";
+import { skillRunResponseRequiresConfirmation } from "./pending-confirmation.js";
 
 const DEFAULT_TARGETS: Record<string, string> = {
   outline_generate: "01_大纲/大纲.txt",
@@ -637,7 +638,7 @@ export class PromptSkillRunner {
       results: [],
       skill_result: result,
       saved_paths: savedPaths,
-      requires_confirmation: false,
+      requires_confirmation: skillRunResponseRequiresConfirmation(result),
       current_skill: skill.name || skill.id
     };
   }

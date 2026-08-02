@@ -20,8 +20,9 @@ import {
   BookCheck,
   CircleAlert
 } from "lucide-react";
-import type { TreeNode } from "@xiaoshuo/shared";
-import { useMemo, useRef, useState } from "react";
+import type { ConversationMessage, TreeNode } from "@xiaoshuo/shared";
+import { createApiClient } from "@xiaoshuo/api-client";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent } from "react";
 import type { WorkbenchController } from "../../../hooks/useWorkbenchController.js";
 import type { UserFeature } from "../../../navigation.js";
@@ -43,15 +44,29 @@ export function EditorProductPage({
   const [conflictDiskContent, setConflictDiskContent] = useState<string | null>(null);
   const editorRef = useRef<HTMLTextAreaElement | null>(null);
   const compositionStartLengthRef = useRef<number | null>(null);
+  const sidebarConversationIdRef = useRef("");
+  const sidebarAbortRef = useRef<AbortController | null>(null);
+  const [sidebarMessages, setSidebarMessages] = useState<ConversationMessage[]>([]);
+  const [sidebarInput, setSidebarInput] = useState("");
+  const [sidebarSending, setSidebarSending] = useState(false);
+  const [sidebarStatus, setSidebarStatus] = useState("");
 
   const snapshot = controller.snapshot;
   const activeDocument = controller.openDocuments.find((item) => item.path === controller.activeDocumentPath) || null;
   const typingMetrics = useTypingMetrics(activeDocument?.path || "");
   const isMarkdown = Boolean(activeDocument?.path.match(/\.md$/i));
-  const latestAssistantMessage = useMemo(
-    () => [...(controller.conversationDetail?.messages || [])].reverse().find((message) => message.role === "assistant") || null,
-    [controller.conversationDetail?.messages]
+  const sidebarClient = useMemo(
+    () => createApiClient({ baseUrl: controller.runtime.apiBase, fetchFn: controller.runtime.fetchFn }),
+    [controller.runtime.apiBase, controller.runtime.fetchFn]
   );
+
+  useEffect(() => {
+    sidebarAbortRef.current?.abort();
+    sidebarConversationIdRef.current = "";
+    setSidebarMessages([]);
+    setSidebarInput("");
+    setSidebarStatus("");
+  }, [snapshot?.currentProject.path]);
 
   // 过滤树，只保留正文部分卷与章，去除设定、JSON、开发哈希与.agent文件
   const chaptersTree = useMemo(() => {
@@ -61,14 +76,80 @@ export function EditorProductPage({
 
   if (!snapshot) return null;
 
-  function send() {
-    if (!controller.messageInput.trim() || controller.sendingMessage || controller.conversationBusy) return;
-    void controller.sendMessage();
+  async function ensureSidebarConversation(): Promise<string> {
+    if (sidebarConversationIdRef.current) return sidebarConversationIdRef.current;
+    const detail = await sidebarClient.createConversation({ title: "正文侧栏对话" });
+    const preferences = controller.conversationModelPreferences;
+    const configured = await sidebarClient.updateConversationModelPreferences(detail.id, {
+      model_override: "",
+      reasoning_enabled: preferences.reasoning_enabled,
+      reasoning_effort: preferences.reasoning_effort
+    });
+    sidebarConversationIdRef.current = configured.id;
+    setSidebarMessages(configured.messages);
+    return configured.id;
+  }
+
+  async function send() {
+    const prompt = sidebarInput.trim();
+    if (!prompt || sidebarSending) return;
+    setSidebarSending(true);
+    setSidebarStatus("正在生成...");
+    const abortController = new AbortController();
+    sidebarAbortRef.current = abortController;
+    try {
+      const conversationId = await ensureSidebarConversation();
+      const userMessage = localSidebarMessage("user", prompt);
+      const assistantMessage = localSidebarMessage("assistant", "");
+      setSidebarMessages((current) => [...current, userMessage, assistantMessage]);
+      setSidebarInput("");
+      let answer = "";
+      let reasoning = "";
+      await sidebarClient.streamConversationMessage(conversationId, {
+        content: prompt,
+        skill_id: "",
+        agent_name: "",
+        write_target: "",
+        insert_mode: "none",
+        current_path: activeDocument?.path || "",
+        runtime_context: activeDocument
+          ? `当前章节：${activeDocument.path}\n\n${activeDocument.content.slice(0, 8000)}`
+          : "",
+        attachment_ids: []
+      }, {
+        onDelta: (event) => {
+          if (event.channel === "reasoning") reasoning += event.text;
+          else answer += event.text;
+          setSidebarMessages((current) => current.map((message) => message.id === assistantMessage.id
+            ? { ...message, content: answer, reasoning_content: reasoning }
+            : message));
+        },
+        onFinal: (event) => {
+          if (event.payload.conversation) setSidebarMessages(event.payload.conversation.messages);
+          setSidebarStatus(event.payload.requires_confirmation ? "本轮包含待确认操作，请在完整 AI 助手中继续处理。" : "");
+        },
+        onError: (event) => setSidebarStatus(event.message || "生成失败，请重试。")
+      }, abortController.signal);
+    } catch (error) {
+      if (!abortController.signal.aborted) setSidebarStatus(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (sidebarAbortRef.current === abortController) sidebarAbortRef.current = null;
+      setSidebarSending(false);
+    }
   }
 
   // 快捷发送
   function handleShortcut(prompt: string) {
-    controller.setMessageInput(prompt);
+    setSidebarInput(prompt);
+  }
+
+  function expandCurrentParagraph() {
+    if (!activeDocument) return;
+    const cursor = editorRef.current?.selectionStart ?? activeDocument.content.length;
+    const paragraph = currentParagraph(activeDocument.content, cursor);
+    setSidebarInput(paragraph
+      ? `请扩写下面这个当前段落，保持事实、人物口吻和叙事视角不变，增加动作、感官与情绪细节：\n\n${paragraph}`
+      : "请扩写当前段落，保持事实、人物口吻和叙事视角不变，增加动作、感官与情绪细节。");
   }
 
   function insertWritingMark(mark: WritingMark) {
@@ -322,31 +403,33 @@ export function EditorProductPage({
           </div>
           <div className="context-strip">
             <span>本次读取</span>
-            {(controller.conversationDetail?.pinned_context || []).map((item) => (
-              <button key={item.id} type="button" onClick={() => void controller.removePinnedConversationContext(item.id)}>{item.label} <X size={12} /></button>
-            ))}
-            <button type="button" onClick={() => void controller.pinCurrentDocumentToConversation()}>+ 当前章节</button>
+            <button type="button" disabled>当前章节</button>
+            <button type="button" disabled>大纲 / 设定</button>
           </div>
 
           <div className="assistant-thread" style={{ overflowY: "auto", flex: 1 }}>
-            {controller.conversationMessage && (
+            {sidebarStatus && (
               <p style={{ fontSize: "12px", padding: "6px", background: "var(--stone-deep)", borderRadius: "4px", margin: "0 0 10px" }}>
-                {controller.conversationMessage}
+                {sidebarStatus}
               </p>
             )}
 
-            {latestAssistantMessage && (
-              <div className="ai-message">
-                <strong>ArcWriter AI</strong>
-                <p style={{ fontSize: "12px", lineHeight: "1.6" }}>{latestAssistantMessage.content}</p>
-                <div><button type="button" onClick={() => onSelectFeature("conversations")}>进入完整对话</button></div>
+            {!sidebarMessages.length && <p className="editor-mini-chat-empty">这是独立的新对话。可直接提问，不会切换到完整 AI 助手。</p>}
+            {sidebarMessages.map((message) => (
+              <div className={`editor-mini-message ${message.role}`} key={message.id}>
+                <strong>{message.role === "user" ? "你" : "ArcWriter AI"}</strong>
+                {message.reasoning_content && <details><summary>思考过程</summary><p>{message.reasoning_content}</p></details>}
+                <p>{message.content || (sidebarSending && message.role === "assistant" ? "正在生成..." : "")}</p>
               </div>
-            )}
+            ))}
 
             <div className="suggestion-block" style={{ marginTop: "15px" }}>
               <span>快捷操作</span>
               <button type="button" onClick={() => handleShortcut("续写当前段落，保持现有叙事视角和文风。")}>
                 <WandSparkles size={14} /> 续写当前段落
+              </button>
+              <button type="button" onClick={expandCurrentParagraph}>
+                <Plus size={14} /> 扩写当前段落
               </button>
               <button type="button" onClick={() => handleShortcut("检查当前章节的人物口吻，避免现代用语。")}>
                 <BookCheck size={14} /> 检查人物口吻
@@ -359,19 +442,19 @@ export function EditorProductPage({
 
           <div className="composer">
             <textarea
-              value={controller.messageInput}
-              onChange={(e) => controller.setMessageInput(e.target.value)}
+              value={sidebarInput}
+              onChange={(e) => setSidebarInput(e.target.value)}
               placeholder="输入续写、修改或分析要求..."
             />
             <div>
-              <button className="context-button" type="button" onClick={() => void controller.pinCurrentDocumentToConversation()}>
-                <Bot size={14} /> {controller.conversationDetail?.pinned_context.length || 0} 项上下文
+              <button className="context-button" type="button" disabled>
+                <Bot size={14} /> 当前章节 · 自动项目上下文
               </button>
               <button
                 className="send-button"
                 type="button"
                 onClick={send}
-                disabled={!controller.messageInput.trim() || controller.sendingMessage || controller.conversationBusy}
+                disabled={!sidebarInput.trim() || sidebarSending}
               >
                 <Sparkles size={16} />
               </button>
@@ -386,6 +469,27 @@ export function EditorProductPage({
       )}
     </section>
   );
+}
+
+function localSidebarMessage(role: ConversationMessage["role"], content: string): ConversationMessage {
+  return {
+    id: `sidebar-${globalThis.crypto?.randomUUID?.() || Date.now()}`,
+    role,
+    content,
+    created_at: new Date().toISOString(),
+    metadata: {}
+  };
+}
+
+function currentParagraph(content: string, cursor: number): string {
+  const safeCursor = Math.max(0, Math.min(cursor, content.length));
+  const before = content.slice(0, safeCursor);
+  const after = content.slice(safeCursor);
+  const startBreak = before.search(/(?:\r?\n){2}[^\n]*$/);
+  const start = startBreak >= 0 ? startBreak + before.slice(startBreak).match(/^(?:\r?\n){2}/)![0].length : 0;
+  const endMatch = after.match(/(?:\r?\n){2}/);
+  const end = endMatch?.index === undefined ? content.length : safeCursor + endMatch.index;
+  return content.slice(start, end).trim();
 }
 
 // 递归章节树项组件

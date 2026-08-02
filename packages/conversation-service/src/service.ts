@@ -32,6 +32,7 @@ export type ConversationCreatePayload = {
 export type AppendMessagePayload = {
   role: ConversationMessage["role"];
   content: string;
+  reasoning_content?: string;
   metadata?: Record<string, unknown>;
 };
 
@@ -95,6 +96,7 @@ export class ConversationService {
       message_count: 0,
       attachment_count: 0,
       model_override: "",
+      reasoning_enabled: false,
       reasoning_effort: "medium"
     };
     await this.saveDetail(detail);
@@ -118,11 +120,12 @@ export class ConversationService {
 
   async updateModelPreferences(
     conversationId: string,
-    preferences: ConversationModelPreferences
+    preferences: Omit<ConversationModelPreferences, "reasoning_enabled"> & Partial<Pick<ConversationModelPreferences, "reasoning_enabled">>
   ): Promise<ConversationDetail> {
     const detail = await this.loadDetail(conversationId);
     const normalized = conversationModelPreferencesSchema.parse(preferences);
     detail.model_override = normalized.model_override;
+    detail.reasoning_enabled = normalized.reasoning_enabled;
     detail.reasoning_effort = normalized.reasoning_effort;
     detail.updated_at = this.now();
     return this.saveDetail(detail);
@@ -158,6 +161,7 @@ export class ConversationService {
       id: this.idFactory(),
       role: payload.role,
       content,
+      reasoning_content: String(payload.reasoning_content || "").trim(),
       created_at: this.now(),
       metadata: payload.metadata || {}
     });
@@ -465,6 +469,7 @@ export class ConversationService {
       message_count: detail.messages.length,
       attachment_count: detail.attachments.length,
       model_override: detail.model_override,
+      reasoning_enabled: detail.reasoning_enabled,
       reasoning_effort: detail.reasoning_effort
     };
   }

@@ -30,7 +30,7 @@ function disassemblyBookReadyForFusion(book: DisassemblyBookSummary | null): boo
   if (!book || book.legacy) {
     return false;
   }
-  return Boolean(book.paths.lore || book.paths.reverse_outline || book.paths.detail_outline);
+  return book.status === "ready" && Boolean(book.paths.report && book.paths.lore && book.paths.reverse_outline);
 }
 
 function disassemblyBookIsRawSource(book: DisassemblyBookSummary | null): boolean {
@@ -95,7 +95,7 @@ export function DisassembleFeaturePage({ controller, disassemblyUi }: { controll
   const genreReady = genreCards.some((card) => card.exists);
   const distillationSourceTitle = selectedBook?.title || activeDocument?.title || "未选择源书";
   const distillationSourcePath = selectedBook ? selectedBookSourcePath : activeDocument?.path || "";
-  const hasDistillationSource = Boolean(selectedBookSourcePath || activeDocument?.content || activeDocument?.path);
+  const hasDistillationSource = selectedBook ? selectedBook.status === "ready" && Boolean(selectedBook.paths.source) : Boolean(activeDocument?.content || activeDocument?.path);
   const profilePreview = distillation?.profile_text ? distillation.profile_text.slice(0, 620) : "";
 
   async function archiveUploadedBook(file: File | null) {
@@ -114,11 +114,15 @@ export function DisassembleFeaturePage({ controller, disassemblyUi }: { controll
   }
 
   function runDisassemble() {
+    if (!selectedBook) {
+      setCrawlSourceMessage("请先导入原文并在待拆队列中选择书籍，再开始拆解。");
+      return;
+    }
     void controller.runWorkflowSkill("disassemble_book", {
-      text: selectedBook ? "" : activeDocument?.content || "",
-      source_path: selectedBookSourcePath || activeDocument?.path || "",
-      source_book_id: selectedBook?.id || "",
-      book_title: selectedBook?.title || activeDocument?.title || crawlQuery,
+      text: "",
+      source_path: selectedBookSourcePath,
+      source_book_id: selectedBook.id,
+      book_title: selectedBook.title,
       instruction,
       write_result: true,
       attachment_ids: []
@@ -126,11 +130,15 @@ export function DisassembleFeaturePage({ controller, disassemblyUi }: { controll
   }
 
   function runContinueDisassemble() {
+    if (!selectedBook) {
+      setCrawlSourceMessage("请先选择已导入的拆书书籍，再继续拆解。");
+      return;
+    }
     void controller.runWorkflowSkill("continue_disassemble", {
-      text: selectedBook ? "" : activeDocument?.content || "",
-      source_path: selectedBook?.paths.reverse_outline || selectedBookSourcePath || activeDocument?.path || "",
-      source_book_id: selectedBook?.id || "",
-      book_title: selectedBook?.title || activeDocument?.title || crawlQuery,
+      text: "",
+      source_path: selectedBook.paths.reverse_outline || selectedBookSourcePath,
+      source_book_id: selectedBook.id,
+      book_title: selectedBook.title,
       instruction,
       write_result: true,
       attachment_ids: []

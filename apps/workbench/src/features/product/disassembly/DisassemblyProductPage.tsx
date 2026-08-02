@@ -16,8 +16,10 @@ import {
   Wand2
 } from "lucide-react";
 import { useEffect, useState } from "react";
+import type { StoryPlanningBundle } from "@xiaoshuo/shared";
 import type { WorkbenchController, DisassemblyBookSummary } from "../../../hooks/useWorkbenchController.js";
 import { EmptyState } from "../shared/SharedStates.js";
+import { LibraryDraftReview } from "../shared/LibraryDraftReview.js";
 
 type DisassemblyUiState = {
   selectedBookId: string;
@@ -26,11 +28,11 @@ type DisassemblyUiState = {
   onToggleFusionBook: (bookId: string) => void;
 };
 
-type AnalysisArtifactId = "source" | "detail_outline" | "reverse_outline" | "lore";
+type AnalysisArtifactId = "report" | "source" | "detail_outline" | "reverse_outline" | "lore";
 type AnalysisArtifact = { id: AnalysisArtifactId; label: string; path: string };
 
 function isReadyForFusion(book: DisassemblyBookSummary): boolean {
-  return Boolean(!book.legacy && (book.paths.detail_outline || book.paths.reverse_outline || book.paths.lore));
+  return Boolean(!book.legacy && book.status === "ready" && book.paths.report && book.paths.reverse_outline && book.paths.lore);
 }
 
 function primaryBookPath(book: DisassemblyBookSummary | null): string {
@@ -49,12 +51,15 @@ export function DisassemblyProductPage({
   const [activeAnalysisTab, setActiveAnalysisTab] = useState<"summary" | AnalysisArtifactId>("summary");
   const [methodTarget, setMethodTarget] = useState("style/narrative");
   const [selectedMethods, setSelectedMethods] = useState<AnalysisArtifactId[]>([]);
+  const [fusionPreview, setFusionPreview] = useState<{ text: string; fusionId: string } | null>(null);
+  const [applyingFusion, setApplyingFusion] = useState(false);
 
   const books = controller.disassemblyBooks.filter((book) => !book.legacy);
   const fusionReadyBooks = books.filter(isReadyForFusion);
   const selectedBook = books.find((book) => book.id === disassemblyUi.selectedBookId) || books[0] || null;
   const selectedFusionBooks = fusionReadyBooks.filter((book) => disassemblyUi.fusionBookIds.includes(book.id));
   const allAnalysisArtifacts: AnalysisArtifact[] = selectedBook ? [
+    { id: "report", label: "拆书报告", path: selectedBook.paths.report || "" },
     { id: "source", label: "原始文本", path: selectedBook.paths.source || selectedBook.source_path || "" },
     { id: "detail_outline", label: "章节细纲", path: selectedBook.paths.detail_outline || "" },
     { id: "reverse_outline", label: "逆向大纲", path: selectedBook.paths.reverse_outline || "" },
@@ -64,7 +69,7 @@ export function DisassemblyProductPage({
 
   useEffect(() => {
     setActiveAnalysisTab("summary");
-    setSelectedMethods(analysisArtifacts.filter((item) => item.id !== "source").map((item) => item.id));
+    setSelectedMethods(analysisArtifacts.filter((item) => item.id !== "source" && item.id !== "report").map((item) => item.id));
   }, [selectedBook?.id]);
 
   async function handleUploadBook(e: React.ChangeEvent<HTMLInputElement>) {
@@ -82,9 +87,9 @@ export function DisassemblyProductPage({
   }
 
   // 运行一键拆解
-  function runDisassemble() {
+  async function runDisassemble() {
     if (!selectedBook) return;
-    void controller.runWorkflowSkill("disassemble_book", {
+    await controller.runWorkflowSkill("disassemble_book", {
       text: "",
       source_path: selectedBook.paths.source || "",
       source_book_id: selectedBook.id,
@@ -93,6 +98,7 @@ export function DisassemblyProductPage({
       write_result: true,
       attachment_ids: []
     } as any);
+    await controller.refreshDisassemblyLibrary();
   }
 
   // 刷新书库
@@ -102,7 +108,7 @@ export function DisassemblyProductPage({
 
   function openReport() {
     if (!selectedBook) return;
-    const path = selectedBook.paths.detail_outline || selectedBook.paths.reverse_outline || selectedBook.paths.lore || selectedBook.paths.source || "";
+    const path = selectedBook.paths.report || selectedBook.paths.reverse_outline || selectedBook.paths.lore || selectedBook.paths.source || "";
     if (path) void controller.openDocument(path);
   }
 
@@ -143,9 +149,9 @@ export function DisassemblyProductPage({
     });
   }
 
-  function runFusion() {
+  async function runFusion() {
     if (selectedFusionBooks.length < 3) return;
-    void controller.runWorkflowSkill("book_fusion", {
+    const result = await controller.runWorkflowSkill("book_fusion", {
       text: "",
       source_path: "",
       instruction: "抽象融合所选作品的核心设定、剧情骨架、人物驱动力与题材氛围，生成去同质化的原创候选方案。不得复写原文句式、专有名词、可识别桥段或固定角色关系。",
@@ -155,6 +161,48 @@ export function DisassemblyProductPage({
       write_result: true,
       attachment_ids: []
     } as any);
+    if (result?.result) {
+      setFusionPreview({ text: result.result, fusionId: String(result.data?.fusion_id || "") });
+    }
+  }
+
+  async function applyFusionToOutline() {
+    if (!fusionPreview || applyingFusion) return;
+    setApplyingFusion(true);
+    try {
+      const current = await planningRequest<StoryPlanningBundle>(controller, "/api/story-planning");
+      const now = new Date().toISOString();
+      const node = {
+        id: globalThis.crypto?.randomUUID?.().replace(/-/g, "") || `${Date.now()}${Math.random().toString(16).slice(2)}`,
+        kind: "main_arc" as const,
+        parent_id: null,
+        title: "融梗候选方案",
+        summary: fusionPreview.text,
+        order: current.outline.length,
+        chapter_paths: [],
+        entity_ids: [],
+        status: "planned" as const,
+        created_at: now,
+        updated_at: now
+      };
+      const nextBundle = await planningRequest<StoryPlanningBundle>(controller, "/api/story-planning", {
+        method: "PUT",
+        body: JSON.stringify({ base_revision: current.revision, outline: [...current.outline, node], timeline: current.timeline })
+      });
+      if (fusionPreview.fusionId) {
+        await controller.runWorkflowSkill("book_fusion", {
+          action: "mark_applied",
+          fusion_id: fusionPreview.fusionId,
+          applied_target: "story_planning",
+          target_revision: nextBundle.revision,
+          source_book_ids: []
+        } as any);
+      }
+      await controller.refreshProjectWorkspace();
+      setFusionPreview(null);
+    } finally {
+      setApplyingFusion(false);
+    }
   }
 
   // 过滤书库
@@ -172,7 +220,7 @@ export function DisassemblyProductPage({
             <Upload size={15} /> 导入文本
             <input type="file" onChange={handleUploadBook} style={{ display: "none" }} />
           </label>
-          <button className="button primary" type="button" onClick={runDisassemble} disabled={!selectedBook || controller.operationsBusy}>
+          <button className="button primary" type="button" onClick={() => void runDisassemble()} disabled={!selectedBook || controller.operationsBusy}>
             <Sparkles size={15} /> 一键拆解
           </button>
         </div>
@@ -225,7 +273,7 @@ export function DisassemblyProductPage({
                   </span>
                   <span style={{ flex: 1 }}>
                     <strong style={{ fontSize: "12px", display: "block" }}>{book.title}</strong>
-                    <small style={{ fontSize: "12px", color: "var(--muted)" }}>{Object.values(book.paths).filter(Boolean).length > 1 ? "已有拆解结果" : "等待拆解"}</small>
+                    <small style={{ fontSize: "12px", color: book.status === "failed" ? "var(--danger)" : "var(--muted)" }}>{bookStatusLabel(book)}</small>
                   </span>
                 </button>
               );
@@ -245,12 +293,12 @@ export function DisassemblyProductPage({
                   {selectedBook.title.slice(0, 1)}
                 </span>
                 <div style={{ flex: 1 }}>
-                  <span className="eyebrow" style={{ fontSize: "12px", color: "var(--success)" }}>{analysisArtifacts.length > 1 ? "已有拆解结果" : "等待拆解"}</span>
+                  <span className="eyebrow" style={{ fontSize: "12px", color: selectedBook.status === "failed" ? "var(--danger)" : "var(--success)" }}>{bookStatusLabel(selectedBook)}</span>
                   <h2>{selectedBook.title}</h2>
                   <p style={{ fontSize: "12px", color: "var(--muted)" }}>{analysisArtifacts.length} 份项目资料可用</p>
                 </div>
                 <div style={{ display: "flex", gap: "8px" }}>
-                  <button className="button secondary compact" type="button" onClick={openReport} disabled={!Object.values(selectedBook.paths).some(Boolean)}>
+                  <button className="button secondary compact" type="button" onClick={openReport} disabled={!selectedBook.paths.report}>
                     <Download size={14} /> 打开报告
                   </button>
                   <button className="button primary compact" type="button" onClick={refreshLibrary}>
@@ -282,7 +330,7 @@ export function DisassemblyProductPage({
                       <p style={{ fontSize: "12px", color: "var(--muted)", margin: "6px 0", overflowWrap: "anywhere" }}>{artifact.path}</p>
                       <div style={{ display: "flex", gap: "8px" }}>
                         <button className="button secondary compact" type="button" onClick={() => void controller.openDocument(artifact.path)}>打开资料</button>
-                        {artifact.id !== "source" && <button className="button primary compact" type="button" onClick={() => addMethodToPreview(artifact)}>提取写作方法</button>}
+                        {artifact.id !== "source" && artifact.id !== "report" && <button className="button primary compact" type="button" onClick={() => addMethodToPreview(artifact)}>提取写作方法</button>}
                       </div>
                     </article>
                   ) : null;
@@ -319,7 +367,7 @@ export function DisassemblyProductPage({
               className="button secondary"
               type="button"
               onClick={runDistillation}
-              disabled={!selectedBook || !primaryBookPath(selectedBook) || controller.operationsBusy}
+              disabled={!selectedBook || selectedBook.status !== "ready" || !selectedBook.paths.source || controller.operationsBusy}
             >
               <Wand2 size={14} />
               {controller.styleDistillationProfile ? "替换蒸馏文风" : "蒸馏此书"}
@@ -355,7 +403,25 @@ export function DisassemblyProductPage({
               <SlidersHorizontal size={14} />
               生成融梗方案
             </button>
+            {fusionPreview && (
+              <div className="disassembly-fusion-preview">
+                <strong>写入大纲前预览</strong>
+                <pre>{fusionPreview.text}</pre>
+                <div className="content-actions">
+                  <button className="button secondary compact" type="button" onClick={() => setFusionPreview(null)}>丢弃</button>
+                  <button className="button primary compact" type="button" onClick={applyFusionToOutline} disabled={applyingFusion}>
+                    {applyingFusion ? "写入中..." : "确认写入故事大纲"}
+                  </button>
+                </div>
+              </div>
+            )}
           </section>
+
+          <LibraryDraftReview
+            controller={controller}
+            domains={["style"]}
+            refreshKey={String(controller.latestSkillResult?.data?.library_draft && JSON.stringify(controller.latestSkillResult.data.library_draft))}
+          />
 
           <div className="disassembly-panel-divider" />
           <div className="detail-head">
@@ -365,13 +431,13 @@ export function DisassemblyProductPage({
             选择要参考的拆解资料，AI 会为当前项目生成规则迁移预览。
           </p>
           <div style={{ display: "flex", flexDirection: "column", gap: "8px", margin: "10px 0" }}>
-            {analysisArtifacts.filter((artifact) => artifact.id !== "source").map((artifact) => (
+            {analysisArtifacts.filter((artifact) => artifact.id !== "source" && artifact.id !== "report").map((artifact) => (
               <label key={artifact.id} className="check-line" style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "12px" }}>
                 <input type="checkbox" checked={selectedMethods.includes(artifact.id)} onChange={() => setSelectedMethods((current) => current.includes(artifact.id) ? current.filter((item) => item !== artifact.id) : [...current, artifact.id])} />
                 <span>{artifact.label}</span>
               </label>
             ))}
-            {!analysisArtifacts.some((artifact) => artifact.id !== "source") && <p className="panel-note">当前参考书还没有可迁移的拆解资料。</p>}
+            {!analysisArtifacts.some((artifact) => artifact.id !== "source" && artifact.id !== "report") && <p className="panel-note">当前参考书还没有可迁移的拆解资料。</p>}
           </div>
           <label style={{ display: "block", marginTop: "12px" }}>
             <span style={{ fontSize: "12px", color: "var(--muted)", display: "block" }}>目标位置</span>
@@ -395,4 +461,24 @@ export function DisassemblyProductPage({
       </div>
     </div>
   );
+}
+
+function bookStatusLabel(book: DisassemblyBookSummary): string {
+  if (book.status === "ready") return "拆解完成";
+  if (book.status === "analyzing") return "正在拆解";
+  if (book.status === "failed") return book.error ? `拆解失败：${book.error}` : "拆解失败";
+  if (book.status === "stale") return "结果待重新拆解";
+  return "已导入，等待拆解";
+}
+
+async function planningRequest<T>(controller: WorkbenchController, pathname: string, init?: RequestInit): Promise<T> {
+  const fetchFn = controller.runtime.fetchFn || fetch;
+  const response = await fetchFn(new URL(pathname, controller.runtime.apiBase), {
+    ...init,
+    headers: { "Content-Type": "application/json", ...(init?.headers || {}) }
+  });
+  const text = await response.text();
+  const payload = text ? JSON.parse(text) : {};
+  if (!response.ok) throw new Error(String(payload.detail || response.statusText || "故事规划请求失败"));
+  return payload as T;
 }

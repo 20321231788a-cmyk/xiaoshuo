@@ -87,6 +87,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { applyHumanizerIfEnabled } from "./humanizer.js";
 import { GeneratedSavePlanner, hasExplicitWriteIntent } from "./generated-save-planner.js";
+import { skillRunResponseRequiresConfirmation } from "./pending-confirmation.js";
 import { SmartSkillOrchestrator } from "./smart-skill-orchestrator.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import type { StreamingModelClient } from "./stream.js";
@@ -1236,7 +1237,7 @@ export class AgentRuntimeService {
       results: [],
       skill_result: skillResult,
       saved_paths: savedPaths,
-      requires_confirmation: false,
+      requires_confirmation: skillRunResponseRequiresConfirmation(skillResult),
       current_skill: request.skill_id || undefined
     };
   }
@@ -3399,7 +3400,7 @@ export class AgentRuntimeService {
           results: [],
           skill_result: result,
           saved_paths: savedPaths,
-          requires_confirmation: false,
+          requires_confirmation: skillRunResponseRequiresConfirmation(result),
           current_skill: event.payload.current_skill || skillId
         }
       };
@@ -3545,6 +3546,7 @@ export class AgentRuntimeService {
     const savedPaths: string[] = [];
     const webSearchSources: WebSearchSource[] = [];
     let lastResult: SkillRunResponse | null = null;
+    let confirmationResult: SkillRunResponse | null = null;
     let lastReply = "";
     let priorOutput = String(request.selection || "").trim();
     const durableRun = execution ? this.runCoordinator.getRun(execution.run_id) : null;
@@ -3601,7 +3603,7 @@ export class AgentRuntimeService {
           index: index + 1,
           skill_id: step.skill_id,
           name: step.name,
-          status: "done",
+          status: skillRunResponseRequiresConfirmation(result) ? "waiting_confirmation" : "done",
           reason: step.reason,
           confidence: step.confidence,
           saved_paths: stepSavedPaths,
@@ -3610,6 +3612,10 @@ export class AgentRuntimeService {
 
         priorOutput = resultText || priorOutput;
         lastReply = resultText || (stepSavedPaths.length ? `已写入 ${stepSavedPaths.length} 个文件：\n${stepSavedPaths.join("\n")}` : `${step.name || step.skill_id} 已完成。`);
+        if (skillRunResponseRequiresConfirmation(result)) {
+          confirmationResult = result;
+          break;
+        }
         index++;
       } catch (error) {
         if (isCancellationError(error, options.signal)) {
@@ -3683,7 +3689,7 @@ export class AgentRuntimeService {
       }
     }
 
-    const finalStep = steps.at(-1);
+    const finalStep = steps[Math.max(0, stepRecords.length - 1)] || steps.at(-1);
     const uniqueSavedPaths = uniquePaths(savedPaths);
     const sources = uniqueWebSearchSources(webSearchSources);
     const reply = this.buildSkillPlanReply(lastReply, stepRecords, uniqueSavedPaths);
@@ -3699,7 +3705,7 @@ export class AgentRuntimeService {
         ...(sources.length ? { web_search_sources: sources } : {})
       }
     );
-    const skillResult = this.decorateSkillPlanResult(lastResult, skillPlan, stepRecords, reply, uniqueSavedPaths, sources);
+    const skillResult = this.decorateSkillPlanResult(confirmationResult || lastResult, skillPlan, stepRecords, reply, uniqueSavedPaths, sources);
     return {
       intent: "skill",
       reply,
@@ -3707,7 +3713,7 @@ export class AgentRuntimeService {
       results: [],
       skill_result: skillResult,
       saved_paths: uniqueSavedPaths,
-      requires_confirmation: false,
+      requires_confirmation: skillRunResponseRequiresConfirmation(skillResult),
       web_search_sources: sources,
       current_skill: finalStep?.name || finalStep?.skill_id || "",
       skill_steps: steps,
@@ -3961,7 +3967,7 @@ export class AgentRuntimeService {
       results: [],
       skill_result: result,
       saved_paths: savedPaths,
-      requires_confirmation: false
+      requires_confirmation: skillRunResponseRequiresConfirmation(result)
     };
   }
 
@@ -4351,7 +4357,7 @@ export class AgentRuntimeService {
     conversationId: string,
     payload: ConversationMessageRequest,
     options: AgentRunOptions = {}
-  ): Promise<{ conversation: ConversationDetail; reply: string; saved_path: string; web_search_sources?: import("./web-search.js").WebSearchSource[]; skill_result?: SkillRunResponse }> {
+  ): Promise<{ conversation: ConversationDetail; reply: string; saved_path: string; requires_confirmation: boolean; web_search_sources?: import("./web-search.js").WebSearchSource[]; skill_result?: SkillRunResponse }> {
     throwIfAborted(options.signal);
     await this.validateConversationWriteBackRequest(payload);
     const request = this.conversationPayloadToAgentRequest(conversationId, payload);
@@ -4362,6 +4368,7 @@ export class AgentRuntimeService {
       conversation: agentResponse.conversation!,
       reply: agentResponse.reply,
       saved_path: agentResponse.saved_paths[0] || "",
+      requires_confirmation: agentResponse.requires_confirmation,
       web_search_sources: agentResponse.web_search_sources,
       skill_result: agentResponse.skill_result || undefined
     };
@@ -5210,7 +5217,7 @@ function durableSkillAgentResponse(skillId: string, result: SkillRunResponse): A
     results: [],
     skill_result: result,
     saved_paths: savedPaths,
-    requires_confirmation: false,
+    requires_confirmation: skillRunResponseRequiresConfirmation(result),
     current_skill: skillId
   };
 }

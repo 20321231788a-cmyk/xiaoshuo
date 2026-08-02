@@ -1331,6 +1331,51 @@ describe("agent-runtime chat flow", () => {
     expect(updated.messages[1]?.content).toBe("第一句第二句");
   });
 
+  it("streams and persists reasoning separately when thinking mode is enabled", async () => {
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const conversation = await conversations.createConversation({ title: "reasoning stream" });
+    await conversations.updateModelPreferences(conversation.id, {
+      model_override: "gpt-5-mini",
+      reasoning_enabled: true,
+      reasoning_effort: "medium"
+    });
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "fallback",
+        async *streamDetailedCompletion() {
+          yield { channel: "reasoning" as const, text: "先检查大纲。" };
+          yield { channel: "answer" as const, text: "这是正文回复。" };
+        }
+      }
+    });
+
+    const events: AgentStreamEvent[] = [];
+    for await (const event of runtime.streamAgentRun({
+      conversation_id: conversation.id,
+      content: "继续创作",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "delta", channel: "reasoning", text: "先检查大纲。" }),
+      expect.objectContaining({ type: "delta", channel: "answer", text: "这是正文回复。" })
+    ]));
+    const updated = await conversations.getConversation(conversation.id);
+    expect(updated.messages.at(-1)).toMatchObject({
+      role: "assistant",
+      content: "这是正文回复。",
+      reasoning_content: "先检查大纲。"
+    });
+  });
+
   it("marks partial streamed chat replies as stopped when cancelled", async () => {
     const conversations = new ConversationService({ projectRoot: tempDir });
     const conversation = await conversations.createConversation({ title: "stream cancel" });
@@ -1764,6 +1809,7 @@ describe("agent-runtime chat flow", () => {
     const conversation = await conversations.createConversation({ title: "模型覆盖" });
     await conversations.updateModelPreferences(conversation.id, {
       model_override: "gpt-5-mini",
+      reasoning_enabled: true,
       reasoning_effort: "high"
     });
     const captured: {
@@ -2916,7 +2962,7 @@ describe("agent-runtime chat flow", () => {
     expect(result.conversation?.messages[1]?.content).toBe("自动建会话的技能回复");
   });
 
-  it("orchestrates multiple skills from a complex chat request", async () => {
+  it("pauses multi-skill orchestration when an earlier step requires confirmation", async () => {
     const conversations = new ConversationService({ projectRoot: tempDir });
     const conversation = await conversations.createConversation({ title: "编排会话" });
     const calls: string[] = [];
@@ -2960,12 +3006,12 @@ describe("agent-runtime chat flow", () => {
       attachment_ids: []
     });
 
-    expect(result.skill_result?.data?.skill_steps).toHaveLength(2);
+    expect(result.requires_confirmation).toBe(true);
+    expect(result.skill_result?.data?.skill_steps).toHaveLength(1);
     expect(result.skill_result?.data?.skill_steps).toMatchObject([
-      { skill_id: "lore_extract", status: "done" },
-      { skill_id: "consistency_check", status: "done" }
+      { skill_id: "lore_extract", status: "waiting_confirmation" }
     ]);
-    expect(result.conversation.current_skill).toBe("consistency_check");
+    expect(result.conversation.current_skill).toBe("lore_extract");
     expect(result.conversation.messages.at(-1)?.metadata.skill_plan).toBeTruthy();
     const inlinePlan = result.conversation.messages.at(-1)?.metadata.inline_plan as Record<string, unknown>;
     expect(inlinePlan).toMatchObject({
@@ -2976,8 +3022,8 @@ describe("agent-runtime chat flow", () => {
       step_ids: [expect.stringMatching(/^step_/)]
     });
     expect(runtime.getDurableRun(String(inlinePlan.run_id))?.version).toBe(inlinePlan.run_version);
-    expect(calls.length).toBeGreaterThanOrEqual(2);
-    expect(calls.some((item) => item.includes("连续性审稿人"))).toBe(true);
+    expect(calls).toHaveLength(1);
+    expect(calls.some((item) => item.includes("连续性审稿人"))).toBe(false);
   });
 
   it("persists a pending inline-plan assistant message before a streaming run completes", async () => {
@@ -3103,7 +3149,10 @@ describe("agent-runtime chat flow", () => {
     });
 
     expect(result.intent).toBe("skill");
-    expect(result.skill_result?.data?.skill_steps).toMatchObject([{ skill_id: "custom_polish", status: "done" }]);
+    expect(result.requires_confirmation).toBe(true);
+    expect(result.skill_result?.data?.skill_steps).toMatchObject([
+      { skill_id: "custom_polish", status: "waiting_confirmation" }
+    ]);
     expect(result.reply).toBe("导入技能润色结果");
   });
 
@@ -3270,6 +3319,7 @@ describe("agent-runtime chat flow", () => {
     const result = await runtime.runAgent(request);
 
     expect(result.intent).toBe("skill");
+    expect(result.requires_confirmation).toBe(true);
     expect(result.skill_result?.data).toMatchObject({
       pending_save: false,
       requires_confirmation: true,
@@ -3300,6 +3350,7 @@ describe("agent-runtime chat flow", () => {
     const result = await runtime.runAgent(request);
 
     expect(result.intent).toBe("skill");
+    expect(result.requires_confirmation).toBe(true);
     expect(result.skill_result?.data).toMatchObject({
       pending_save: false,
       requires_confirmation: true,
@@ -3330,6 +3381,7 @@ describe("agent-runtime chat flow", () => {
     const result = await runtime.runAgent(request);
 
     expect(result.intent).toBe("skill");
+    expect(result.requires_confirmation).toBe(true);
     expect(result.skill_result?.data).toMatchObject({
       saved_paths: [],
       requires_confirmation: true,
@@ -3370,8 +3422,7 @@ describe("agent-runtime chat flow", () => {
     ]);
     expect(book?.paths?.lore).toBe(`${book?.dir}/拆书设定提取.txt`);
     expect(book?.paths?.reverse_outline).toBe(`${book?.dir}/反向细纲.txt`);
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "设定集", "拆书设定提取.txt"), "utf8")).toContain("林默");
-    expect(await fs.readFile(path.join(tempDir, "01_大纲", "反向细纲.txt"), "utf8")).toContain("第一章");
+    await expect(fs.readFile(path.join(tempDir, "00_设定集", "设定集", "拆书设定提取.txt"), "utf8")).rejects.toThrow();
     expect(await fs.readFile(path.join(tempDir, book?.dir || "", "拆书设定提取.txt"), "utf8")).toContain("林默");
     expect(await fs.readFile(path.join(tempDir, book?.dir || "", "反向细纲.txt"), "utf8")).toContain("第一章");
   });
@@ -3402,7 +3453,7 @@ describe("agent-runtime chat flow", () => {
     expect(result.intent).toBe("skill");
     expect(book?.dir).toContain("00_设定集/拆书库/");
     expect(result.saved_paths).toEqual([`${book?.dir}/拆书细纲.txt`]);
-    expect(await fs.readFile(path.join(tempDir, "01_大纲", "拆书细纲.txt"), "utf8")).toContain("第001章");
+    await expect(fs.readFile(path.join(tempDir, "01_大纲", "拆书细纲.txt"), "utf8")).rejects.toThrow();
     expect(await fs.readFile(path.join(tempDir, book?.dir || "", "拆书细纲.txt"), "utf8")).toContain("第001章");
   });
 

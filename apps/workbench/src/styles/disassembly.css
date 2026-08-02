@@ -66,6 +66,30 @@
   border-block: 1px solid var(--line);
 }
 
+.disassembly-fusion-preview {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.disassembly-fusion-preview pre {
+  max-height: 260px;
+  margin: 0;
+  padding: 9px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  background: var(--stone-deep);
+  border-radius: 6px;
+}
+
 .extract-panel .disassembly-fusion-books label {
   min-height: 34px;
   display: flex;

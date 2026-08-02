@@ -3,6 +3,7 @@ import { reasoningEffortSchema } from "./config.js";
 
 export const conversationModelPreferencesSchema = z.object({
   model_override: z.string().trim().max(240).optional().default(""),
+  reasoning_enabled: z.boolean().optional().default(false),
   reasoning_effort: reasoningEffortSchema.optional().default("medium")
 });
 
@@ -35,6 +36,7 @@ export const conversationMessageSchema = z
     id: z.string(),
     role: z.enum(["user", "assistant", "system"]),
     content: z.string(),
+    reasoning_content: z.string().optional(),
     created_at: z.string(),
     metadata: z.record(z.unknown())
   })
@@ -51,6 +53,7 @@ export const conversationSummarySchema = z
     message_count: z.number().int(),
     attachment_count: z.number().int(),
     model_override: z.string().trim().max(240).optional().default(""),
+    reasoning_enabled: z.boolean().optional().default(false),
     reasoning_effort: reasoningEffortSchema.optional().default("medium")
   })
   .passthrough();

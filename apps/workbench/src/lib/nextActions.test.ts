@@ -221,7 +221,7 @@ function makeSnapshot(options: {
     },
     skills: [],
     conversations: options.hasConversation
-      ? [{ id: "conv", title: "会话", created_at: "", updated_at: "", current_skill: "", current_agent: "", message_count: 1, attachment_count: 0, model_override: "", reasoning_effort: "medium" }]
+      ? [{ id: "conv", title: "会话", created_at: "", updated_at: "", current_skill: "", current_agent: "", message_count: 1, attachment_count: 0, model_override: "", reasoning_enabled: false, reasoning_effort: "medium" }]
       : [],
     jobs: Array.from({ length: failedJobCount }, (_, index) => ({
       id: `job-${index}`,
