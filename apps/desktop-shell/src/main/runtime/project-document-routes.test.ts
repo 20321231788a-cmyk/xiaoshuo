@@ -259,6 +259,39 @@ describe("handleProjectDocumentRoutes", () => {
     expect(deps.writeJson).toHaveBeenCalledWith(expect.anything(), 200, opened);
   });
 
+  it("registers a newly created project identity before starting its document session", async () => {
+    const context = createContext();
+    const created = { path: "D:\\projects\\New Novel", name: "New Novel" };
+    const projectIdentity = "f745c8a6-21c2-4f33-bf72-66cab8d0eb30";
+    const reconfirm = vi.fn().mockResolvedValue({ projectId: projectIdentity });
+    vi.mocked(context.projectSession.createProject).mockResolvedValue(created);
+    context.projectIdentityRegistry = { reconfirm } as unknown as RuntimeContext["projectIdentityRegistry"];
+    mockGetProjectId.mockResolvedValue(projectIdentity);
+    const deps = createDeps({
+      readJsonBody: vi.fn().mockResolvedValue({
+        path: "D:\\projects",
+        project_name: "New Novel",
+        create_in_parent: true
+      })
+    });
+
+    const handled = await handleProjectDocumentRoutes(
+      { method: "POST" } as IncomingMessage,
+      createResponse(),
+      "/api/projects/create",
+      new URLSearchParams(),
+      context,
+      deps
+    );
+
+    expect(handled).toBe(true);
+    expect(context.projectSession.createProject).toHaveBeenCalledWith("D:\\projects", "New Novel", true);
+    expect(mockGetProjectId).toHaveBeenCalled();
+    expect(reconfirm).toHaveBeenCalledWith(created.path, projectIdentity);
+    expect(deps.startDocumentSession).toHaveBeenCalledWith(context.documentSessions, created.path);
+    expect(deps.writeJson).toHaveBeenCalledWith(expect.anything(), 200, created);
+  });
+
   it("returns 409 when document save detects a stale base version", async () => {
     const deps = createDeps({
       readJsonBody: vi.fn().mockResolvedValue({

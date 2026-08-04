@@ -52,6 +52,26 @@ describe("project-file-resolver", () => {
     expect(result.references[0]?.path).toBe("01_大纲/细纲.txt");
   });
 
+  it("ignores empty starter files inferred from a new project", async () => {
+    await fs.writeFile(path.join(tempDir, "01_大纲", "大纲.txt"), "", "utf8");
+    const result = await resolver.resolve({ text: "参考大纲给我建议" });
+
+    expect(result.references).toEqual([]);
+    expect(result.candidates).toEqual([]);
+    expect(result.ambiguous).toBe(false);
+  });
+
+  it("keeps an explicitly referenced empty file visible to the user", async () => {
+    await fs.writeFile(path.join(tempDir, "01_大纲", "大纲.txt"), "", "utf8");
+    const result = await resolver.resolve({ text: "读取 @01_大纲/大纲.txt" });
+
+    expect(result.references[0]).toMatchObject({
+      path: "01_大纲/大纲.txt",
+      kind: "at_path",
+      chars: 0
+    });
+  });
+
   it("does not resolve negated aliases", async () => {
     const result = await resolver.resolve({ text: "参考大纲但不要细纲" });
 

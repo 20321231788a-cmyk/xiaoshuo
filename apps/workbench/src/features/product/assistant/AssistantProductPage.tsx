@@ -1,13 +1,15 @@
 import {
   BookCheck,
+  Check,
   FileText,
   MessageSquare,
-  MoreHorizontal,
   Paperclip,
+  Pencil,
   Plus,
   Search,
   ShieldCheck,
   Sparkles,
+  Trash2,
   X
 } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
@@ -29,8 +31,8 @@ const CardDrawFeaturePage = lazy(() =>
 export function AssistantProductPage({ controller, onSelectFeature }: { controller: WorkbenchController; onSelectFeature: (feature: UserFeature) => void }) {
   const [mode, setMode] = useState<"chat" | "draw">("chat");
   const [searchQuery, setSearchQuery] = useState("");
-  const [conversationMenuOpen, setConversationMenuOpen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [renamingConversation, setRenamingConversation] = useState(false);
   const [renameDraft, setRenameDraft] = useState("");
   const [automaticBusy, setAutomaticBusy] = useState(false);
   const [automaticMessage, setAutomaticMessage] = useState("");
@@ -91,10 +93,30 @@ export function AssistantProductPage({ controller, onSelectFeature }: { controll
     return { today, yesterday, earlier };
   }, [conversations, searchQuery]);
 
-  function openConversationMenu() {
+  function beginConversationRename() {
     setRenameDraft(conversationDetail?.title || "");
     setConfirmDelete(false);
-    setConversationMenuOpen((value) => !value);
+    setRenamingConversation(true);
+  }
+
+  useEffect(() => {
+    setConfirmDelete(false);
+    setRenamingConversation(false);
+  }, [conversationDetail?.id]);
+
+  async function saveConversationRename() {
+    if (!renameDraft.trim()) return;
+    await controller.updateConversationTitle(renameDraft);
+    setRenamingConversation(false);
+  }
+
+  async function removeConversation() {
+    if (!confirmDelete) {
+      setConfirmDelete(true);
+      return;
+    }
+    const deleted = await controller.deleteConversation();
+    if (deleted) setConfirmDelete(false);
   }
 
   async function toggleAutomaticLore() {
@@ -252,36 +274,54 @@ export function AssistantProductPage({ controller, onSelectFeature }: { controll
           {/* 中栏：对话区 */}
           <main className="chat-workspace">
             <div className="chat-title">
-              <div>
-                <strong>{conversationDetail?.title || "自由会话"}</strong>
+              <div className="chat-title-main">
+                {renamingConversation ? (
+                  <input
+                    autoFocus
+                    value={renameDraft}
+                    onChange={(event) => setRenameDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") void saveConversationRename();
+                      if (event.key === "Escape") setRenamingConversation(false);
+                    }}
+                    aria-label="会话标题"
+                  />
+                ) : (
+                  <strong>{conversationDetail?.title || "自由会话"}</strong>
+                )}
                 <span>自动保存</span>
               </div>
-              <button className="icon-button subtle" type="button" aria-label="会话操作" aria-expanded={conversationMenuOpen} onClick={openConversationMenu}>
-                <MoreHorizontal size={16} />
-              </button>
-              {conversationMenuOpen && (
-                <div className="conversation-menu">
-                  <input value={renameDraft} onChange={(event) => setRenameDraft(event.target.value)} aria-label="会话标题" />
-                  <button type="button" onClick={() => { void controller.updateConversationTitle(renameDraft); setConversationMenuOpen(false); }}>保存标题</button>
-                  <button type="button" onClick={() => { void controller.summarizeConversation(true); setConversationMenuOpen(false); }}>整理会话摘要</button>
-                  <button
-                    type="button"
-                    className="danger"
-                    disabled={!conversationDetail || busy}
-                    onClick={() => {
-                      if (!confirmDelete) {
-                        setConfirmDelete(true);
-                        return;
-                      }
-                      void controller.deleteConversation().then((deleted) => {
-                        if (deleted) setConversationMenuOpen(false);
-                      });
-                    }}
-                  >
-                    {confirmDelete ? "再次点击确认删除" : "删除会话"}
-                  </button>
-                </div>
-              )}
+              <div className="chat-title-actions">
+                {renamingConversation ? (
+                  <>
+                    <button className="icon-button subtle" type="button" title="保存标题" aria-label="保存会话标题" disabled={busy || !renameDraft.trim()} onClick={() => void saveConversationRename()}>
+                      <Check size={15} />
+                    </button>
+                    <button className="icon-button subtle" type="button" title="取消修改" aria-label="取消修改会话标题" disabled={busy} onClick={() => setRenamingConversation(false)}>
+                      <X size={15} />
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button className="icon-button subtle" type="button" title="修改标题" aria-label="修改会话标题" disabled={!conversationDetail || busy} onClick={beginConversationRename}>
+                      <Pencil size={15} />
+                    </button>
+                    <button className="icon-button subtle" type="button" title="整理会话摘要" aria-label="整理会话摘要" disabled={!conversationDetail || busy} onClick={() => void controller.summarizeConversation(true)}>
+                      <FileText size={15} />
+                    </button>
+                    <button
+                      className={`icon-button subtle danger${confirmDelete ? " confirming" : ""}`}
+                      type="button"
+                      title={confirmDelete ? "再次点击确认删除" : "删除会话"}
+                      aria-label={confirmDelete ? "确认删除会话" : "删除会话"}
+                      disabled={!conversationDetail || busy}
+                      onClick={() => void removeConversation()}
+                    >
+                      <Trash2 size={15} />
+                    </button>
+                  </>
+                )}
+              </div>
             </div>
 
             <div className="chat-thread">

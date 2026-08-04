@@ -52,27 +52,13 @@
   padding: 0 14px;
   border-bottom: 1px solid var(--line);
 }
-.chat-title > div:first-child { min-width: 0; display: flex; flex-direction: column; }
+.chat-title-main { min-width: 0; display: flex; flex: 1 1 auto; flex-direction: column; }
 .chat-title strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .chat-title span { margin-top: 2px; color: var(--success); font-size: 12px; }
-.conversation-menu {
-  position: absolute;
-  top: 38px;
-  right: 10px;
-  z-index: var(--aw-z-dropdown);
-  width: 230px;
-  display: grid;
-  gap: 6px;
-  padding: 9px;
-  border: 1px solid var(--line);
-  border-radius: 7px;
-  background: var(--paper);
-  box-shadow: 0 4px 8px oklch(25% .015 285 / .12);
-}
-.conversation-menu input { width: 100%; min-height: 34px; padding: 0 8px; border: 1px solid var(--line); border-radius: 5px; background: var(--paper); }
-.conversation-menu button { min-height: 32px; padding: 0 8px; border: 0; border-radius: 5px; background: var(--stone); color: var(--text); text-align: left; }
-.conversation-menu button:hover:not(:disabled) { background: var(--stone-deep); }
-.conversation-menu button.danger { color: var(--danger); }
+.chat-title-main input { width: min(100%, 360px); min-height: 29px; padding: 0 8px; border: 1px solid var(--line-strong); border-radius: 5px; background: var(--paper); color: var(--ink); }
+.chat-title-actions { flex: none; display: flex; align-items: center; gap: 3px; }
+.chat-title-actions .danger { color: var(--danger); }
+.chat-title-actions .danger.confirming { background: color-mix(in srgb, var(--danger) 12%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 35%, transparent); }
 
 .chat-thread { min-height: 0; overflow-y: auto; padding: 24px 18px 12px; }
 .assistant-thread-inner { width: min(100%, 780px); min-height: 100%; margin: 0 auto; }
@@ -177,6 +163,9 @@
 .library-draft-record p { margin: 3px 0 0; color: var(--muted); font-size: 12px; line-height: 18px; white-space: pre-wrap; }
 .library-draft-actions { justify-content: flex-end; }
 .library-draft-message { margin: 0; line-height: 18px; }
+.library-draft-review.error { border-color: color-mix(in srgb, var(--danger) 42%, var(--line)); }
+.library-draft-review.error .library-draft-header > span,
+.library-draft-message.error { color: var(--danger); }
 .assistant-write-actions { display: flex; flex-wrap: wrap; gap: 7px; }
 .assistant-write-actions .danger { color: var(--danger); }
 .assistant-agent-confirmation { margin: 12px 0; padding: 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--accent-soft); }
@@ -198,6 +187,22 @@
   transition: border-color 180ms ease-out, box-shadow 180ms ease-out;
 }
 .assistant-composer:focus-within { border-color: var(--aw-focus); box-shadow: 0 0 0 2px oklch(63% .08 335 / .16); }
+.assistant-reference-confirm { display: grid; gap: 9px; padding: 10px 11px; border-bottom: 1px solid var(--line); background: var(--stone); }
+.assistant-reference-confirm-head,
+.assistant-reference-actions { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.assistant-reference-confirm-head > div { min-width: 0; display: grid; gap: 2px; }
+.assistant-reference-confirm-head strong { color: var(--ink); font-size: 12px; }
+.assistant-reference-confirm-head span,
+.assistant-reference-warning { margin: 0; color: var(--muted); font-size: 11px; line-height: 17px; }
+.assistant-reference-list { min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; max-height: 96px; overflow-y: auto; }
+.assistant-reference-chip { max-width: 100%; min-height: 28px; display: inline-flex; align-items: center; gap: 5px; padding: 4px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--paper); color: var(--text); font-size: 11px; }
+.assistant-reference-chip > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-reference-chip small { flex: none; color: var(--muted); }
+.assistant-reference-chip.automatic { color: var(--success); }
+.assistant-reference-chip.selectable { cursor: pointer; }
+.assistant-reference-chip.selectable.selected { border-color: var(--accent); background: var(--accent-soft); color: var(--accent); }
+.assistant-reference-chip input { flex: none; margin: 0; }
+.assistant-reference-actions { justify-content: flex-end; flex-wrap: wrap; }
 .assistant-composer textarea {
   width: 100%;
   min-height: 52px;

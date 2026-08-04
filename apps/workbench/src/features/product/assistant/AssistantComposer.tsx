@@ -1,4 +1,4 @@
-import { ArrowUp, FileText, Paperclip, Plus, Square, X } from "lucide-react";
+import { ArrowUp, Check, FileText, Paperclip, Plus, Square, X } from "lucide-react";
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import type { WorkbenchController } from "../../../hooks/useWorkbenchController.js";
 import { AssistantModelControls } from "./AssistantModelControls.js";
@@ -19,6 +19,9 @@ export function AssistantComposer({ controller }: { controller: WorkbenchControl
   const attachments = detail?.attachments || [];
   const contextCount = pinnedContext.length + attachments.length;
   const activeDocument = controller.openDocuments.find((item) => item.path === controller.activeDocumentPath) || null;
+  const pendingReferences = controller.pendingReferenceResolution;
+  const automaticReferenceCount = pendingReferences?.references.length || 0;
+  const selectedReferenceCount = pendingReferences?.selectedPaths.length || 0;
   const actionBusy = controller.conversationBusy || controller.conversationModelPreferenceBusy;
   const sendLocked = actionBusy || controller.uploadingAttachment;
 
@@ -81,6 +84,82 @@ export function AssistantComposer({ controller }: { controller: WorkbenchControl
   return (
     <div className="assistant-composer-wrap">
       <div className="assistant-composer">
+        {pendingReferences && (
+          <section className="assistant-reference-confirm" aria-label="确认参考文件">
+            <div className="assistant-reference-confirm-head">
+              <div>
+                <strong>确认参考文件</strong>
+                <span>
+                  {automaticReferenceCount ? `自动引用 ${automaticReferenceCount} 个` : "没有自动引用"}
+                  {pendingReferences.candidates.length ? `，候选 ${pendingReferences.candidates.length} 个` : ""}
+                </span>
+              </div>
+              <button
+                className="assistant-composer-icon"
+                type="button"
+                title="取消本次发送"
+                aria-label="取消参考文件确认"
+                disabled={controller.sendingMessage || sendLocked}
+                onClick={() => controller.discardPendingReferenceResolution()}
+              >
+                <X size={15} />
+              </button>
+            </div>
+
+            {pendingReferences.references.length > 0 && (
+              <div className="assistant-reference-list" aria-label="自动引用文件">
+                {pendingReferences.references.map((candidate) => (
+                  <span className="assistant-reference-chip automatic" key={candidate.path} title={`${candidate.reason} · ${candidate.path}`}>
+                    <Check size={13} />
+                    <span>{candidate.label || candidate.path}</span>
+                  </span>
+                ))}
+              </div>
+            )}
+
+            <div className="assistant-reference-list" aria-label="候选参考文件">
+              {pendingReferences.candidates.map((candidate) => {
+                const selected = pendingReferences.selectedPaths.includes(candidate.path);
+                return (
+                  <label className={`assistant-reference-chip selectable${selected ? " selected" : ""}`} key={candidate.path} title={`${candidate.reason} · ${candidate.path}`}>
+                    <input
+                      type="checkbox"
+                      checked={selected}
+                      disabled={controller.sendingMessage || sendLocked}
+                      onChange={() => controller.togglePendingReferenceCandidate(candidate.path)}
+                    />
+                    <span>{candidate.label || candidate.path}</span>
+                    <small>{Math.round(candidate.confidence * 100)}%</small>
+                  </label>
+                );
+              })}
+            </div>
+
+            {pendingReferences.warnings.length > 0 && (
+              <p className="assistant-reference-warning">{pendingReferences.warnings.join("；")}</p>
+            )}
+
+            <div className="assistant-reference-actions">
+              <button
+                className="button primary compact"
+                type="button"
+                disabled={controller.sendingMessage || sendLocked || (!automaticReferenceCount && !selectedReferenceCount)}
+                onClick={() => void controller.confirmPendingReferenceResolution()}
+              >
+                {selectedReferenceCount ? `引用 ${automaticReferenceCount + selectedReferenceCount} 个并发送` : "引用自动文件并发送"}
+              </button>
+              <button
+                className="button secondary compact"
+                type="button"
+                disabled={controller.sendingMessage || sendLocked}
+                onClick={() => void controller.sendPendingReferenceResolutionWithoutCandidates()}
+              >
+                不引用候选，直接发送
+              </button>
+            </div>
+          </section>
+        )}
+
         <textarea
           ref={textareaRef}
           aria-label="消息内容"

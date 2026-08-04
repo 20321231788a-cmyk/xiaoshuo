@@ -1,4 +1,4 @@
-import { CheckCircle2, Clock3, Trash2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clock3, RefreshCw, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ProjectLibraryDomain, ProjectLibraryRecord } from "@xiaoshuo/shared";
 import type { WorkbenchController } from "../../../hooks/useWorkbenchController.js";
@@ -52,6 +52,7 @@ async function draftRequest<T>(controller: WorkbenchController, pathname: string
 export function LibraryDraftReview({ controller, domains, onChanged, refreshKey = "", compact = false }: LibraryDraftReviewProps) {
   const [drafts, setDrafts] = useState<ProjectLibraryDraft[]>([]);
   const [message, setMessage] = useState("");
+  const [loadError, setLoadError] = useState("");
   const [busyId, setBusyId] = useState("");
   const onChangedRef = useRef(onChanged);
   const projectPath = controller.snapshot?.currentProject.path || "";
@@ -65,15 +66,17 @@ export function LibraryDraftReview({ controller, domains, onChanged, refreshKey 
     if (!projectPath) {
       setDrafts([]);
       setMessage("");
+      setLoadError("");
       return;
     }
     try {
       const payload = await draftRequest<{ drafts: ProjectLibraryDraft[] }>(controller, "/api/project-library-drafts");
       const allowed = new Set(domainKey.split(",").filter(Boolean));
       setDrafts((payload.drafts || []).filter((draft) => allowed.has(draft.domain)));
-      setMessage("");
+      setLoadError("");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      setDrafts([]);
+      setLoadError(error instanceof Error ? error.message : String(error));
     }
   }, [controller.runtime.apiBase, controller.runtime.fetchFn, domainKey, projectPath]);
 
@@ -84,6 +87,7 @@ export function LibraryDraftReview({ controller, domains, onChanged, refreshKey 
   async function commit(draft: ProjectLibraryDraft) {
     setBusyId(draft.draft_id);
     setMessage("");
+    setLoadError("");
     try {
       await draftRequest(controller, `/api/project-library-drafts/${encodeURIComponent(draft.draft_id)}/commit`, { method: "POST" });
       await load();
@@ -91,7 +95,7 @@ export function LibraryDraftReview({ controller, domains, onChanged, refreshKey 
       await onChangedRef.current?.();
       setMessage(`${domainLabels[draft.domain]}已确认写入，项目上下文已刷新。`);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      setLoadError(error instanceof Error ? error.message : String(error));
     } finally {
       setBusyId("");
     }
@@ -100,18 +104,36 @@ export function LibraryDraftReview({ controller, domains, onChanged, refreshKey 
   async function discard(draft: ProjectLibraryDraft) {
     setBusyId(draft.draft_id);
     setMessage("");
+    setLoadError("");
     try {
       await draftRequest(controller, `/api/project-library-drafts/${encodeURIComponent(draft.draft_id)}`, { method: "DELETE" });
       await load();
       setMessage("待确认草稿已丢弃，项目文件未发生变化。");
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : String(error));
+      setLoadError(error instanceof Error ? error.message : String(error));
     } finally {
       setBusyId("");
     }
   }
 
-  if (!drafts.length && !message) return null;
+  if (!drafts.length && !message && !loadError) return null;
+
+  if (loadError && !drafts.length) {
+    return (
+      <section className={`library-draft-review error${compact ? " compact" : ""}`} aria-label="待确认写入不可用">
+        <header className="library-draft-header">
+          <span><AlertTriangle size={15} /><strong>待确认写入不可用</strong></span>
+          <small>本次未修改项目资料</small>
+        </header>
+        <p className="library-draft-message error" role="alert">{loadError}</p>
+        <div className="library-draft-actions">
+          <button className="button secondary compact" type="button" onClick={() => void load()}>
+            <RefreshCw size={14} />重新检查
+          </button>
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section className={`library-draft-review${compact ? " compact" : ""}`} aria-label="待确认 AI 草稿">

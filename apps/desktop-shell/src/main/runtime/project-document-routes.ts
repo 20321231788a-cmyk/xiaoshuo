@@ -69,6 +69,10 @@ export async function handleProjectDocumentRoutes(
   if (request.method === "POST" && pathname === "/api/projects/create") {
     const payload = projectOpenRequestSchema.parse(await deps.readJsonBody(request));
     const created = await context.projectSession.createProject(payload.path, payload.project_name, payload.create_in_parent);
+    if (context.projectIdentityRegistry) {
+      const projectId = await new ProjectManifestService(created.path).getProjectId();
+      await context.projectIdentityRegistry.reconfirm(created.path, projectId);
+    }
     deps.startDocumentSession(context.documentSessions, created.path);
     deps.writeJson(response, 200, created);
     return true;

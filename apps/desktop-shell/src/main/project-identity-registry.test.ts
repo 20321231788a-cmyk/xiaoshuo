@@ -56,6 +56,33 @@ describe("ProjectIdentityRegistry", () => {
     expectIdentityUnconfirmed(() => restarted.assertWritable(projectPath, projectId));
   });
 
+  it("lets an explicit open or create action claim a replaced path for a new project UUID", async () => {
+    const root = await createRoot();
+    const projectPath = path.join(root, "project");
+    const displacedPath = path.join(root, "displaced");
+    const registryPath = path.join(root, "state", "project-identities.json");
+    await fs.mkdir(projectPath);
+
+    await new ProjectIdentityRegistry(registryPath).confirm(projectPath, projectId);
+    await fs.rename(projectPath, displacedPath);
+    await fs.mkdir(projectPath);
+
+    const restarted = new ProjectIdentityRegistry(registryPath);
+    await expect(restarted.confirm(projectPath, otherProjectId)).rejects.toMatchObject({ code: projectIdentityConflictCode });
+    await expect(restarted.reconfirm(projectPath, otherProjectId)).resolves.toMatchObject({
+      projectId: otherProjectId,
+      reassociated: false
+    });
+    expect((await restarted.snapshot()).projects).toEqual([
+      expect.objectContaining({
+        project_id: otherProjectId,
+        requires_reconfirmation: false,
+        filesystem_identity: expect.objectContaining({ scheme: "stat-dev-ino-v1" })
+      })
+    ]);
+    expect(() => restarted.assertWritable(projectPath, otherProjectId)).not.toThrow();
+  });
+
   it("requires an explicit user re-confirmation before migrating a v1 record", async () => {
     const root = await createRoot();
     const projectPath = path.join(root, "project");

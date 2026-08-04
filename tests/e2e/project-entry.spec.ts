@@ -429,16 +429,38 @@ test("assistant conversation create, rename, read, and delete", async ({ page })
   await page.getByRole("button", { name: "新建对话", exact: true }).click();
   await expect(page.locator(".chat-title strong")).toHaveText("新对话");
 
-  await page.getByRole("button", { name: "会话操作", exact: true }).click();
-  await page.getByLabel("会话标题").fill("E2E 会话标题");
-  await page.getByRole("button", { name: "保存标题", exact: true }).click();
+  await page.getByRole("button", { name: "修改会话标题", exact: true }).click();
+  await page.getByLabel("会话标题", { exact: true }).fill("E2E 会话标题");
+  await page.getByRole("button", { name: "保存会话标题", exact: true }).click();
   await expect(page.locator(".chat-title strong")).toHaveText("E2E 会话标题");
+  await expect(page.getByRole("button", { name: "整理会话摘要", exact: true })).toBeVisible();
 
-  await page.getByRole("button", { name: "会话操作", exact: true }).click();
   await page.getByRole("button", { name: "删除会话", exact: true }).click();
-  await page.getByRole("button", { name: "再次点击确认删除", exact: true }).click();
+  await page.getByRole("button", { name: "确认删除会话", exact: true }).click();
   await expect(page.locator(".chat-title strong")).toHaveText("自由会话");
   await expect.poll(async () => (await runtimeFetch("/api/conversations")).json()).toEqual([]);
+});
+
+test("assistant reference candidates show an actionable confirmation panel", async ({ page }) => {
+  await createWritingProject("e2e-reference-confirm");
+  await configureMockModel();
+  await saveRuntimeDocument("02_设定/人物设定.txt", "林默：谨慎的调查员。");
+  await saveRuntimeDocument("02_设定/主要角色.md", "# 主要角色\n林默与周宁存在立场冲突。");
+  await page.goto(workbenchUrl("/assistant"));
+  await page.getByRole("button", { name: "新建对话", exact: true }).click();
+
+  await page.getByLabel("消息内容").fill("参考角色完善人物关系");
+  await page.getByRole("button", { name: "发送", exact: true }).click();
+
+  const confirmation = page.getByRole("region", { name: "确认参考文件" });
+  await expect(confirmation).toBeVisible();
+  await expect(confirmation.getByRole("checkbox").first()).toBeVisible();
+  await confirmation.getByRole("checkbox").first().check();
+  await confirmation.getByRole("button", { name: /引用 \d+ 个并发送/ }).click();
+
+  const assistantMessage = page.locator('.assistant-message.ai[data-message-role="assistant"]').last();
+  await expect(assistantMessage).toContainText("E2E 模型回复", { timeout: 20_000 });
+  await expect(confirmation).toHaveCount(0);
 });
 
 test("assistant model discovery and reasoning preferences persist per conversation", async ({ page }) => {

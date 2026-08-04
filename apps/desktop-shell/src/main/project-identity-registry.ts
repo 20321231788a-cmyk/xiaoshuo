@@ -92,8 +92,9 @@ export class ProjectIdentityRegistry {
   }
 
   /**
-   * Records the current OS file identity after an intentional project-open
-   * action. This is the only way a pre-v2 registry entry may become writable.
+   * Records the current OS file identity after an intentional project-open or
+   * project-create action. This is the only way a legacy or replaced path may
+   * become writable.
    */
   async reconfirm(projectPath: string, projectId: string): Promise<ProjectIdentityClaim> {
     return this.confirmWithMode(projectPath, projectId, true);
@@ -149,12 +150,20 @@ export class ProjectIdentityRegistry {
     const canonicalPath = await this.canonicalize(projectPath);
     const filesystemIdentity = await this.getFilesystemIdentity(canonicalPath);
     const disk = await this.readDisk();
-    const currentAtPath = disk.projects.find((project) => project.canonical_path === canonicalPath);
+    let currentAtPath = disk.projects.find((project) => project.canonical_path === canonicalPath);
     if (currentAtPath && currentAtPath.project_id !== normalizedProjectId) {
-      throw new ProjectIdentityRegistryError(
-        projectIdentityConflictCode,
-        "项目路径已关联到另一项目 UUID，已拒绝写入"
-      );
+      const replacementConfirmed = allowLegacyReconfirmation
+        && Boolean(currentAtPath.filesystem_identity)
+        && !sameFilesystemIdentity(currentAtPath.filesystem_identity!, filesystemIdentity)
+        && !disk.projects.some((project) => project.project_id === normalizedProjectId);
+      if (!replacementConfirmed) {
+        throw new ProjectIdentityRegistryError(
+          projectIdentityConflictCode,
+          "项目路径已关联到另一项目 UUID，已拒绝写入"
+        );
+      }
+      disk.projects = disk.projects.filter((project) => project !== currentAtPath);
+      currentAtPath = undefined;
     }
     const currentAtFilesystemIdentity = disk.projects.find((project) =>
       project.filesystem_identity && sameFilesystemIdentity(project.filesystem_identity, filesystemIdentity)

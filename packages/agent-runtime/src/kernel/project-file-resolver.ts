@@ -91,12 +91,13 @@ export class ProjectFileResolver {
     }
 
     const hydrated = await this.hydrateAndDedupe(drafts, warnings);
-    const references = hydrated
+    const usefulCandidates = hydrated.filter(isUsefulCandidate);
+    const references = usefulCandidates
       .filter((candidate) => candidate.readable && candidate.confidence >= AUTO_REFERENCE_THRESHOLD)
       .sort(sortCandidates)
       .slice(0, MAX_AUTO_REFERENCES);
     const referencePaths = new Set(references.map((candidate) => candidate.path));
-    const candidates = hydrated
+    const candidates = usefulCandidates
       .filter((candidate) => !referencePaths.has(candidate.path))
       .filter((candidate) => candidate.confidence >= CANDIDATE_THRESHOLD && candidate.confidence < AUTO_REFERENCE_THRESHOLD)
       .sort(sortCandidates)
@@ -488,6 +489,13 @@ function isInsideProject(absolutePath: string, projectRoot: string): boolean {
 
 function sortCandidates(left: ProjectFileReferenceCandidate, right: ProjectFileReferenceCandidate): number {
   return right.confidence - left.confidence || Number(right.readable) - Number(left.readable) || left.path.localeCompare(right.path, "zh-Hans-CN");
+}
+
+function isUsefulCandidate(candidate: ProjectFileReferenceCandidate): boolean {
+  if (["explicit_path", "at_path", "current_document", "selection", "attachment"].includes(candidate.kind)) {
+    return true;
+  }
+  return candidate.readable && candidate.chars > 0;
 }
 
 function clampInt(value: number, min: number, max: number): number {
