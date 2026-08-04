@@ -129,19 +129,19 @@ nightly/main push cancels an older in-progress nightly for the same ref; strict 
 runs use a unique run-ID concurrency group and are not replaced or auto-cancelled by
 later RC dispatches.
 
-## v1.2.0 Small-Scale Formal Exception
+## v1.2.0 and v1.3.0 Small-Scale Formal Exceptions
 
-For the explicitly authorized `v1.2.0` release, the repository uses
+For the explicitly authorized `v1.2.0` and `v1.3.0` releases, the repository uses
 `.github/workflows/release-small-scale.yml`. It runs the ordinary workspace
 acceptance checks, builds the Windows installer from the exact annotated
-`v1.2.0` tag, and publishes a non-prerelease GitHub Release without waiting
+tag, and publishes a non-prerelease GitHub Release without waiting
 for a manually dispatched RC. The release is intentionally limited to small-
 scale use and may contain an unsigned installer; it must not be presented as
 commercially stable or as satisfying the strict RC evidence gates above.
 
-The normal `Release Desktop` workflow is skipped for `v1.2.0` only. All later
-versions continue to require the strict RC/provenance path unless a new,
-explicitly documented exception is approved.
+The normal `Release Desktop` workflow is skipped for `v1.2.0` and `v1.3.0`
+only. All other versions continue to require the strict RC/provenance path
+unless a new, explicitly documented exception is approved.
 
 ## Release Order
 

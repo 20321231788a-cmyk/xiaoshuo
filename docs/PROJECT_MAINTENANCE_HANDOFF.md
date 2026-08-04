@@ -323,7 +323,7 @@ git diff --check
 - 删除备用 API 线路，改为可选的主路线轻量任务模型，保留备用线路原有的摘要、一致性检查和辅助生成能力。
 - 版本和锁文件更新为 `1.3.0`，新增 `docs/releases/v1.3.0.md`，旧 `修改方案.md` 已按要求删除，仅保留当日 `修改计划.md`。
 - 本地发布前验证：131 个 Vitest 文件、967 项测试；3/3 Node 测试；Workbench/Desktop production build；15/15 Browser E2E；Desktop smoke；`git diff --check`。
-- `main` 已推送 `21a957f`。手动 RC 运行 `30906836943` 在受控的“manifest-bound RC evaluations”阶段按设计失败关闭：`evals/rc-dataset-manifest.json` 与 `evals/rc-runner-manifest.json` 尚未提供；依照 `docs/RELEASE_GATES.md`，在获得真实匿名样本与密封留出集授权前不创建 `v1.3.0` 标签或 GitHub Release。
+- `main` 已推送 `21a957f`。手动 RC 运行 `30906836943` 在受控的“manifest-bound RC evaluations”阶段按设计失败关闭：`evals/rc-dataset-manifest.json` 与 `evals/rc-runner-manifest.json` 尚未提供。随后获得明确授权，`v1.3.0` 采用与 `v1.2.0` 相同的小范围正式发布例外；不宣称满足严格 RC 或商业发布门槛。
 
 2026-07-31 1.1.1 项目创建与写作辅助维护：
 
