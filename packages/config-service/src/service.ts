@@ -25,6 +25,12 @@ export type ModelConfig = {
   configured: boolean;
 };
 
+export type TaskModelConfig = ModelConfig & {
+  requested_model: string;
+  effective_model: string;
+  model_source: "task-model" | "current-model-fallback" | "unavailable";
+};
+
 export type EmbeddingConfig = {
   enabled: boolean;
   api_key: string;
@@ -53,11 +59,7 @@ type AiProfile = {
   model: string;
   temp: number;
   top_p: number;
-  secondary_api_key: string;
-  secondary_base_url: string;
-  secondary_model: string;
-  secondary_temp: number;
-  secondary_top_p: number;
+  task_model: string;
   embedding_enabled: boolean;
   embedding_api_key: string;
   embedding_base_url: string;
@@ -75,11 +77,7 @@ const publicConfigKeys = [
   "model",
   "temp",
   "top_p",
-  "secondary_api_key",
-  "secondary_base_url",
-  "secondary_model",
-  "secondary_temp",
-  "secondary_top_p",
+  "task_model",
   "model_thinking_enabled",
   "enable_consistency_revision",
   "consistency_revision_score",
@@ -113,11 +111,7 @@ const aliases: Record<(typeof publicConfigKeys)[number], string[]> = {
   model: ["model", "textModel", "MODEL"],
   temp: ["temp"],
   top_p: ["top_p"],
-  secondary_api_key: ["secondary_api_key"],
-  secondary_base_url: ["secondary_base_url"],
-  secondary_model: ["secondary_model"],
-  secondary_temp: ["secondary_temp"],
-  secondary_top_p: ["secondary_top_p"],
+  task_model: ["task_model", "taskModel"],
   model_thinking_enabled: ["model_thinking_enabled"],
   enable_consistency_revision: ["enable_consistency_revision"],
   consistency_revision_score: ["consistency_revision_score"],
@@ -148,11 +142,7 @@ const profileConfigKeys = [
   "model",
   "temp",
   "top_p",
-  "secondary_api_key",
-  "secondary_base_url",
-  "secondary_model",
-  "secondary_temp",
-  "secondary_top_p",
+  "task_model",
   "embedding_enabled",
   "embedding_api_key",
   "embedding_base_url",
@@ -219,11 +209,7 @@ export function normalizePublicConfig(data: RawConfig): AppConfig {
     model: stringValue(effectiveProfile.model),
     temp: floatValue(effectiveProfile.temp, 0.7),
     top_p: topPValue(effectiveProfile.top_p, 1),
-    secondary_api_key: stringValue(effectiveProfile.secondary_api_key),
-    secondary_base_url: stringValue(effectiveProfile.secondary_base_url),
-    secondary_model: stringValue(effectiveProfile.secondary_model),
-    secondary_temp: floatValue(effectiveProfile.secondary_temp, 0.5),
-    secondary_top_p: topPValue(effectiveProfile.secondary_top_p, 1),
+    task_model: stringValue(effectiveProfile.task_model),
     model_thinking_enabled: true,
     enable_consistency_revision: Boolean(data.enable_consistency_revision ?? true),
     consistency_revision_score: intValue(data.consistency_revision_score, 80),
@@ -255,6 +241,7 @@ export async function loadPublicConfig(options: ConfigServiceOptions = {}): Prom
 export async function savePublicConfig(payload: RawConfig, options: ConfigServiceOptions = {}): Promise<AppConfig> {
   const configPath = resolveConfigPath(options);
   const data = await readRawConfig(options);
+  migrateLegacyTaskModel(data);
   const normalizedPayload = { ...payload };
 
   for (const [canonical, candidates] of Object.entries(aliases)) {
@@ -311,33 +298,15 @@ export async function savePublicConfig(payload: RawConfig, options: ConfigServic
 
   data.ai_config_mode = nextMode;
   materializeActiveProfile(data);
+  stripLegacySecondaryFields(data);
 
   await fs.mkdir(path.dirname(configPath), { recursive: true });
   await fs.writeFile(configPath, `${JSON.stringify(data, null, 4)}\n`, "utf8");
   return normalizePublicConfig(data);
 }
 
-export function loadModelConfigFromRaw(data: RawConfig, slot: "primary" | "secondary" = "primary"): ModelConfig {
+export function loadModelConfigFromRaw(data: RawConfig): ModelConfig {
   const activeProfile = activeAiProfileFromRaw(data);
-  if (slot === "secondary") {
-    const apiKey = stringValue(activeProfile.secondary_api_key || data.secondary_api_key).trim();
-    const model = stringValue(activeProfile.secondary_model || data.secondary_model).trim();
-    const baseUrl = stringValue(activeProfile.secondary_base_url || data.secondary_base_url || data.base_url || DEFAULT_BASE_URL).trim();
-    const temperature = floatValue(activeProfile.secondary_temp ?? data.secondary_temp, floatValue(activeProfile.temp ?? data.temp, 0.5));
-    const topP = topPValue(activeProfile.secondary_top_p ?? data.secondary_top_p, topPValue(activeProfile.top_p ?? data.top_p, 1));
-    if (apiKey && model) {
-      return {
-        api_key: apiKey,
-        base_url: baseUrl,
-        model,
-        temperature,
-        top_p: topP,
-        thinking_enabled: true,
-        configured: true
-      };
-    }
-  }
-
   const primaryApiKey = stringValue(activeProfile.api_key || data.api_key).trim();
   const primaryModel = stringValue(activeProfile.model || data.model).trim();
   return {
@@ -351,8 +320,41 @@ export function loadModelConfigFromRaw(data: RawConfig, slot: "primary" | "secon
   };
 }
 
-export async function loadModelConfig(options: ConfigServiceOptions = {}, slot: "primary" | "secondary" = "primary"): Promise<ModelConfig> {
-  return loadModelConfigFromRaw(await readRawConfig(options), slot);
+export async function loadModelConfig(options: ConfigServiceOptions = {}, _slot: "primary" = "primary"): Promise<ModelConfig> {
+  return loadModelConfigFromRaw(await readRawConfig(options));
+}
+
+export function loadTaskModelConfigFromRaw(
+  data: RawConfig,
+  options: { availableModelIds?: readonly string[] } = {}
+): TaskModelConfig {
+  const primary = loadModelConfigFromRaw(data);
+  const activeProfile = activeAiProfileFromRaw(data);
+  const requestedModel = stringValue(activeProfile.task_model || data.task_model).trim();
+  const catalog = options.availableModelIds?.map((value) => String(value).trim()).filter(Boolean);
+  const selectedIsAvailable = Boolean(requestedModel && (!catalog || catalog.includes(requestedModel)));
+  if (primary.configured && selectedIsAvailable) {
+    return {
+      ...primary,
+      model: requestedModel,
+      requested_model: requestedModel,
+      effective_model: requestedModel,
+      model_source: "task-model"
+    };
+  }
+  return {
+    ...primary,
+    requested_model: requestedModel,
+    effective_model: primary.model,
+    model_source: primary.configured ? "current-model-fallback" : "unavailable"
+  };
+}
+
+export async function loadTaskModelConfig(
+  options: ConfigServiceOptions = {},
+  resolverOptions: { availableModelIds?: readonly string[] } = {}
+): Promise<TaskModelConfig> {
+  return loadTaskModelConfigFromRaw(await readRawConfig(options), resolverOptions);
 }
 
 export function loadEmbeddingConfigFromRaw(data: RawConfig): EmbeddingConfig {
@@ -360,13 +362,7 @@ export function loadEmbeddingConfigFromRaw(data: RawConfig): EmbeddingConfig {
   const explicitKey = stringValue(activeProfile.embedding_api_key || data.embedding_api_key).trim();
   const baseUrl = stringValue(activeProfile.embedding_base_url || data.embedding_base_url || DEFAULT_EMBEDDING_BASE_URL).trim();
   const model = stringValue(activeProfile.embedding_model || data.embedding_model || DEFAULT_EMBEDDING_MODEL).trim();
-  let fallbackKey = "";
-  if (!explicitKey) {
-    if (baseUrl.toLowerCase().includes("volces.com") || model.toLowerCase().includes("doubao")) {
-      fallbackKey = stringValue(activeProfile.secondary_api_key || data.secondary_api_key).trim();
-    }
-    fallbackKey = fallbackKey || stringValue(activeProfile.api_key || data.api_key).trim();
-  }
+  const fallbackKey = !explicitKey ? stringValue(activeProfile.api_key || data.api_key).trim() : "";
   const apiKey = explicitKey || fallbackKey;
   return {
     enabled: Boolean(activeProfile.embedding_enabled ?? data.embedding_enabled ?? false),
@@ -480,11 +476,7 @@ function normalizeProfile(data: RawConfig, options: { defaultBaseUrl: boolean; t
     model: stringValue(data.model),
     temp: floatValue(data.temp, options.tempFallback),
     top_p: topPValue(data.top_p, 1),
-    secondary_api_key: stringValue(data.secondary_api_key),
-    secondary_base_url: stringValue(data.secondary_base_url),
-    secondary_model: stringValue(data.secondary_model),
-    secondary_temp: floatValue(data.secondary_temp, 0.5),
-    secondary_top_p: topPValue(data.secondary_top_p, 1),
+    task_model: stringValue(data.task_model),
     embedding_enabled: Boolean(data.embedding_enabled ?? false),
     embedding_api_key: stringValue(data.embedding_api_key),
     embedding_base_url: stringValue(data.embedding_base_url || (options.defaultBaseUrl ? DEFAULT_EMBEDDING_BASE_URL : "")),
@@ -521,4 +513,41 @@ function hasFlatProfilePayload(payload: RawConfig): boolean {
 
 function isProfileConfigKey(key: string): key is ProfileConfigKey {
   return (profileConfigKeys as readonly string[]).includes(key);
+}
+
+const legacySecondaryKeys = ["secondary_api_key", "secondary_base_url", "secondary_model", "secondary_temp", "secondary_top_p"] as const;
+
+function migrateLegacyTaskModel(data: RawConfig): void {
+  for (const profileName of ["manual_profile", "website_profile"] as const) {
+    const profile = profileRecord(data[profileName]);
+    if (!profile || stringValue(profile.task_model).trim()) {
+      continue;
+    }
+    const legacyModel = stringValue(profile.secondary_model).trim();
+    // The selected primary model is the only locally verifiable member of its active catalog.
+    if (legacyModel && legacyModel === stringValue(profile.model).trim()) {
+      profile.task_model = legacyModel;
+    }
+  }
+  if (!stringValue(data.task_model).trim()) {
+    const legacyModel = stringValue(data.secondary_model).trim();
+    if (legacyModel && legacyModel === stringValue(data.model).trim()) {
+      data.task_model = legacyModel;
+    }
+  }
+}
+
+function stripLegacySecondaryFields(data: RawConfig): void {
+  for (const key of legacySecondaryKeys) {
+    delete data[key];
+  }
+  for (const profileName of ["manual_profile", "website_profile"] as const) {
+    const profile = profileRecord(data[profileName]);
+    if (!profile) {
+      continue;
+    }
+    for (const key of legacySecondaryKeys) {
+      delete profile[key];
+    }
+  }
 }

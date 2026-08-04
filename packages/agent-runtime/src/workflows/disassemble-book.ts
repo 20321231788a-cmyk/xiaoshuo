@@ -15,7 +15,7 @@ import {
   writeDisassembleBookManifest
 } from "./disassemble-library.js";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
-import { throwIfAborted } from "../cancellation.js";
+import { isCancellationError, throwIfAborted } from "../cancellation.js";
 
 const LORE_OUTPUT_SECTIONS = [
   "## 人物设定",
@@ -31,6 +31,8 @@ const REVERSE_OUTLINE_SECTIONS = [
   "## 大事件拆解",
   "## 全书结构总览"
 ];
+
+const DISASSEMBLY_STAGE_TOTAL = 3;
 
 export class DisassembleBookWorkflow implements WorkflowHandler {
   id = "disassemble_book";
@@ -49,10 +51,17 @@ export class DisassembleBookWorkflow implements WorkflowHandler {
     } catch (error) {
       const book = await resolveDisassembleBookForRequest(request, context).catch(() => null);
       if (book && !book.legacy && book.dir) {
+        const message = error instanceof Error ? error.message : String(error);
+        const cancelled = isCancellationError(error, context.signal);
         await writeDisassembleBookManifest({
           ...book,
-          status: "failed",
-          error: error instanceof Error ? error.message : String(error)
+          status: cancelled ? "cancelled" : "failed",
+          error: cancelled ? "" : message,
+          progress: {
+            ...book.progress,
+            stage: cancelled ? "cancelled" : book.progress?.stage || "failed",
+            last_error: cancelled ? "" : message
+          }
         }, context, { writeKey: "book.manifest.failed" }).catch(() => null);
       }
       throw error;
@@ -92,7 +101,8 @@ async function archiveDisassembleSource(request: AgentRunRequest, context: Workf
       title: await inferDisassembleBookTitle(request, source),
       sourceText: source,
       sourcePath: request.current_path || "",
-      origin: request.attachment_ids?.length ? "upload" : request.current_path ? "document" : "input"
+      origin: request.attachment_ids?.length ? "upload" : request.current_path ? "document" : "input",
+      conversationId: request.conversation_id || ""
     },
     context
   );
@@ -122,6 +132,7 @@ async function archiveDisassembleSource(request: AgentRunRequest, context: Workf
 
 async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRunContext): Promise<AgentRunResponse> {
   throwIfAborted(context.signal);
+  reportDisassemblyProgress(context, "preparing", "正在读取并校验拆书原文（0/3）", 0);
   const completed = new Map(
     (context.checkpoint?.listCompletedUnits("disassemble_book") || []).map((checkpoint) => [checkpoint.unit_id, checkpoint.payload])
   );
@@ -136,18 +147,25 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
       throw new Error("拆书需要上传文件、来源文件或直接输入文本");
     }
     book = existingBook && !existingBook.legacy
-      ? await writeDisassembleBookManifest({ ...existingBook, status: "analyzing", error: "" }, context, { writeKey: "book.manifest.analyzing" })
+      ? await writeDisassembleBookManifest({
+        ...existingBook,
+        conversation_id: existingBook.conversation_id || request.conversation_id || "",
+        status: "analyzing",
+        error: "",
+        progress: disassemblyProgress("preparing", 0)
+      }, context, { writeKey: "book.manifest.analyzing" })
       : await createDisassembleBook(
         {
           title: String((request as any).book_title || existingBook?.title || "").trim() || (await inferDisassembleBookTitle(request, source)),
           sourceText: source,
           sourcePath: existingBook?.source_path || request.current_path || "",
-          origin: request.attachment_ids?.length ? "upload" : request.current_path ? "document" : existingBook?.origin || "input"
+          origin: request.attachment_ids?.length ? "upload" : request.current_path ? "document" : existingBook?.origin || "input",
+          conversationId: request.conversation_id || ""
         },
         context
       );
     if (book.status !== "analyzing") {
-      book = await writeDisassembleBookManifest({ ...book, status: "analyzing", error: "" }, context, { writeKey: "book.manifest.analyzing" });
+      book = await writeDisassembleBookManifest({ ...book, status: "analyzing", error: "", progress: disassemblyProgress("preparing", 0) }, context, { writeKey: "book.manifest.analyzing" });
     }
     context.checkpoint?.completeUnit({
       workflow_id: "disassemble_book",
@@ -160,7 +178,9 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
   let lore = restoreDisassembleOutput(completed.get("lore"));
   if (lore) {
     book = lore.book;
+    reportDisassemblyProgress(context, "lore", "已恢复设定提取结果（1/3）", 1);
   } else {
+    reportDisassemblyProgress(context, "lore", "正在提取人物、设定与伏笔（0/3）", 0);
     source = source || await readDisassembleBookText(book, "source", context);
     if (!source.trim()) {
       throw new Error("拆书需要上传文件、来源文件或直接输入文本");
@@ -185,7 +205,8 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
     });
     book = await writeDisassembleBookManifest({
       ...book,
-      paths: { ...book.paths, lore: lorePath }
+      paths: { ...book.paths, lore: lorePath },
+      progress: disassemblyProgress("lore", 1)
     }, context, { writeKey: "book.manifest.lore" });
     lore = { book, path: lorePath, legacy_path: LEGACY_DISASSEMBLE_LORE_PATH };
     context.checkpoint?.completeUnit({
@@ -193,12 +214,15 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
       unit_id: "lore",
       payload: lore
     });
+    reportDisassemblyProgress(context, "lore", "已完成设定提取（1/3）", 1);
   }
 
   let reverseOutline = restoreDisassembleOutput(completed.get("reverse_outline"));
   if (reverseOutline) {
     book = reverseOutline.book;
+    reportDisassemblyProgress(context, "reverse_outline", "已恢复反向细纲结果（2/3）", 2);
   } else {
+    reportDisassemblyProgress(context, "reverse_outline", "正在生成反向细纲与结构节奏（1/3）", 1);
     source = source || await readDisassembleBookText(book, "source", context);
     if (!source.trim()) {
       throw new Error("拆书需要上传文件、来源文件或直接输入文本");
@@ -223,7 +247,8 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
     });
     book = await writeDisassembleBookManifest({
       ...book,
-      paths: { ...book.paths, reverse_outline: reversePath }
+      paths: { ...book.paths, reverse_outline: reversePath },
+      progress: disassemblyProgress("reverse_outline", 2)
     }, context, { writeKey: "book.manifest.reverse_outline" });
     reverseOutline = { book, path: reversePath, legacy_path: LEGACY_REVERSE_OUTLINE_PATH };
     context.checkpoint?.completeUnit({
@@ -231,11 +256,13 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
       unit_id: "reverse_outline",
       payload: reverseOutline
     });
+    reportDisassemblyProgress(context, "reverse_outline", "已完成反向细纲（2/3）", 2);
   }
 
   const lorePath = lore.path;
   const reversePath = reverseOutline.path;
   const reportPath = `${reverseOutline.book.dir}/拆书报告.md`;
+  reportDisassemblyProgress(context, "report", "正在整理拆书报告（2/3）", 2);
   const loreText = await readDisassembleBookText(reverseOutline.book, "lore", context, 80_000);
   const reverseText = await readDisassembleBookText(reverseOutline.book, "reverse_outline", context, 120_000);
   await writeDisassembleBookDocument(
@@ -249,8 +276,10 @@ async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRun
     ...reverseOutline.book,
     status: "ready",
     error: "",
-    paths: { ...reverseOutline.book.paths, report: reportPath }
+    paths: { ...reverseOutline.book.paths, report: reportPath },
+    progress: disassemblyProgress("completed", DISASSEMBLY_STAGE_TOTAL)
   }, context, { writeKey: "book.manifest.ready" });
+  reportDisassemblyProgress(context, "completed", "拆书报告已完成（3/3）", DISASSEMBLY_STAGE_TOTAL);
 
   const savedPaths = [lorePath, reversePath];
   const reply = `已写入 ${savedPaths.length} 个文件：\n${savedPaths.join("\n")}`;
@@ -285,6 +314,29 @@ type DisassembleOutputCheckpoint = {
   path: string;
   legacy_path: string;
 };
+
+function disassemblyProgress(stage: string, completed: number): DisassembleBookManifest["progress"] {
+  return {
+    stage,
+    completed_chapters: completed,
+    total_chapters: DISASSEMBLY_STAGE_TOTAL,
+    last_error: ""
+  };
+}
+
+function reportDisassemblyProgress(
+  context: WorkflowRunContext,
+  stage: string,
+  message: string,
+  completed: number
+): void {
+  context.reportProgress?.({
+    stage,
+    message,
+    completed,
+    total: DISASSEMBLY_STAGE_TOTAL
+  });
+}
 
 function restoreCheckpointBook(value: unknown): DisassembleBookManifest | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -333,6 +385,7 @@ function restoreDisassembleBook(value: unknown): DisassembleBookManifest | null 
     source_path: String(source.source_path || "").trim(),
     source_summary: String(source.source_summary || "").trim(),
     source_hash: String(source.source_hash || "").trim(),
+    conversation_id: String(source.conversation_id || "").trim(),
     chars: Number.isFinite(Number(source.chars)) ? Math.max(0, Math.trunc(Number(source.chars))) : 0,
     status: ["imported", "analyzing", "ready", "failed", "stale"].includes(String(source.status || ""))
       ? source.status as DisassembleBookManifest["status"]

@@ -2,6 +2,7 @@ import { Brain, Check, ChevronUp, RefreshCw, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   normalizeAiModelOption,
+  type AppConfig,
   type AiModelOption,
   type ReasoningEffort
 } from "@xiaoshuo/shared";
@@ -22,6 +23,7 @@ export function AssistantModelControls({ controller }: { controller: WorkbenchCo
   const mode = config?.ai_config_mode === "website" ? "website" : "manual";
   const activeProfile = mode === "website" ? config?.website_profile : config?.manual_profile;
   const defaultModel = String(activeProfile?.model || config?.model || "").trim();
+  const taskModel = String(activeProfile?.task_model || config?.task_model || "").trim();
   const preferences = controller.conversationModelPreferences;
   const selectedModelId = preferences.model_override || defaultModel;
   const locked = controller.sendingMessage || controller.conversationBusy || controller.conversationModelPreferenceBusy;
@@ -57,6 +59,7 @@ export function AssistantModelControls({ controller }: { controller: WorkbenchCo
   });
   const discoveryBusy = mode === "website" ? controller.websiteAiBusy : controller.manualModelDiscoveryBusy;
   const discoveryMessage = mode === "website" ? controller.websiteAiMessage : controller.manualModelDiscoveryMessage;
+  const taskModelAvailable = !taskModel || models.some((model) => model.id === taskModel);
 
   useEffect(() => {
     if (!open) return;
@@ -100,6 +103,21 @@ export function AssistantModelControls({ controller }: { controller: WorkbenchCo
       setQuery("");
     }
   }
+
+  async function selectTaskModel(nextTaskModel: string) {
+    const patch = mode === "website"
+      ? { website_profile: { ...(config?.website_profile || {}), task_model: nextTaskModel } }
+      : { manual_profile: { ...(config?.manual_profile || {}), task_model: nextTaskModel } };
+    await controller.patchAndSaveConfig(
+      patch as Partial<AppConfig>,
+      nextTaskModel ? `轻量任务模型已切换为 ${nextTaskModel}。` : "轻量任务模型已改为跟随当前模型。"
+    );
+  }
+
+  useEffect(() => {
+    if (!open || !taskModel || !models.length || taskModelAvailable) return;
+    void selectTaskModel("");
+  }, [open, taskModel, taskModelAvailable, models.length]);
 
   async function selectEffort(effort: ReasoningEffort) {
     if (!preferences.reasoning_enabled || !supportedEfforts.includes(effort) || locked) return;
@@ -209,6 +227,21 @@ export function AssistantModelControls({ controller }: { controller: WorkbenchCo
               </button>
             ))}
             {!discoveryBusy && !filteredModels.length && <p>没有找到匹配的文本模型。</p>}
+          </div>
+
+          <div className="assistant-task-model-panel">
+            <label>
+              <span><strong>轻量任务模型</strong><small>用于摘要、正文后检和全文一致性审阅</small></span>
+              <select
+                value={taskModelAvailable ? taskModel : ""}
+                disabled={locked || discoveryBusy || !models.length}
+                onChange={(event) => void selectTaskModel(event.target.value)}
+              >
+                <option value="">跟随当前模型（默认）</option>
+                {models.map((model) => <option key={model.id} value={model.id}>{model.name}{model.provider ? ` · ${model.provider}` : ""}</option>)}
+              </select>
+            </label>
+            {!taskModelAvailable && <p>原选择已不在当前主路线的模型列表中，已改为跟随当前模型。</p>}
           </div>
 
           <div className="assistant-reasoning-panel" title={reasoningTitle}>

@@ -5,6 +5,7 @@ export function useProjectController(core: CoreWorkbenchController) {
     runtime: core.runtime,
     status: core.status,
     snapshot: core.snapshot,
+    projectDataRevision: core.projectDataRevision,
     error: core.error,
     activeTab: core.activeTab,
     setActiveTab: core.setActiveTab,

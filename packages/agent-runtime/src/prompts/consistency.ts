@@ -21,8 +21,8 @@ export function buildConsistencyCheckPrompt(input: {
 
 export function parseConsistencyCheckResult(
   raw: unknown,
-  modelLine: "secondary" | "primary-fallback"
-): { score: number; risks: string[]; reason: string; model_line: "secondary" | "primary-fallback" } {
+  modelLine: "task-model" | "current-model-fallback"
+): { score: number; risks: string[]; reason: string; model_line: "task-model" | "current-model-fallback" } {
   const rawText = String(raw || "");
   const parsed = safeJsonObject(rawText);
   return {

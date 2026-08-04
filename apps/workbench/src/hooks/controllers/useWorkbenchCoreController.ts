@@ -16,6 +16,7 @@ import type {
   ConversationMessage,
   ConversationSummary,
   ConversationModelPreferences,
+  ConversationType,
   CurrentProject,
   JobInfo,
   LedgerItem,
@@ -76,6 +77,42 @@ const outlineGenerationSkillIds = new Set(["outline_generate", "detail_outline_g
 const outlineGeneratedPaths = new Set(["01_大纲/大纲.txt", "01_大纲/细纲.txt", "01_大纲/章纲.txt"]);
 const projectReferenceHintPattern = /@|参考|参照|根据|读取|读一下|对照|结合|当前(?:文档|文件)|这篇|这章|章纲|细纲|大纲|人物|角色|世界观|设定|正文|\.txt|\.md|\.jsonl/i;
 
+function workflowProgressLabel(skillId: string): string {
+  if (skillId === "disassemble_book" || skillId === "continue_disassemble") return "拆书任务";
+  if (skillId === "batch_generate") return "批量生成";
+  if (skillId === "body_generate") return "正文续写";
+  if (skillId === "book_fusion") return "融梗任务";
+  if (skillId === "nuwa_style_distill") return "蒸馏任务";
+  return "任务";
+}
+
+function assistantConversations(conversations: ConversationSummary[]): ConversationSummary[] {
+  return conversations.filter((conversation) => conversation.conversation_type === "assistant");
+}
+
+function taskConversationSpecForWorkflow(skillId: string, payload: Partial<SkillRunRequest>, sourcePath: string) {
+  if (skillId === "disassemble_book" || skillId === "continue_disassemble") {
+    const bookTitle = String((payload as any).book_title || "未命名作品").trim();
+    return {
+      type: "disassembly" as const,
+      title: `拆书 · 《${bookTitle}》`,
+      entry: skillId,
+      sourceBookId: String((payload as any).source_book_id || "").trim()
+    };
+  }
+  if (skillId === "body_generate" || skillId === "batch_generate") {
+    const filename = sourcePath.split("/").filter(Boolean).pop() || "当前章节";
+    return { type: "continuation" as const, title: `正文续写 · ${filename}`, entry: skillId, sourceBookId: "" };
+  }
+  if (skillId === "book_fusion") {
+    return { type: "fusion" as const, title: "融梗 · 参考作品", entry: skillId, sourceBookId: "" };
+  }
+  if (skillId === "style_extract" && /(?:^|[\\/])拆书库(?:[\\/]|$)/.test(sourcePath)) {
+    return { type: "disassembly" as const, title: "拆书 · 方法提取", entry: skillId, sourceBookId: "" };
+  }
+  return null;
+}
+
 export type OpenDocumentTab = {
   path: string;
   title: string;
@@ -100,8 +137,9 @@ export type DisassemblyBookSummary = {
   source_path: string;
   source_summary: string;
   source_hash: string;
+  conversation_id: string;
   chars: number;
-  status: "imported" | "analyzing" | "ready" | "failed" | "stale";
+  status: "imported" | "analyzing" | "ready" | "failed" | "cancelled" | "stale";
   analysis_version: number;
   error: string;
   analyzed_at: string;
@@ -119,6 +157,28 @@ export type DisassemblyBookSummary = {
     evidence_index?: string;
   };
 };
+
+export type LongTaskProgress = {
+  task_id: string;
+  conversation_id: string;
+  skill_id: "disassemble_book" | "continue_disassemble" | "batch_generate";
+  status: AgentRunState["status"];
+  stage: string;
+  message: string;
+  completed: number;
+  total: number;
+  current_step_id: string;
+  version: number;
+  error: string;
+  updated_at: string;
+};
+
+const longTaskSkillIds = new Set<LongTaskProgress["skill_id"]>([
+  "disassemble_book",
+  "continue_disassemble",
+  "batch_generate"
+]);
+const terminalLongTaskStatuses = new Set<AgentRunState["status"]>(["completed", "failed", "cancelled"]);
 
 type OpenDocumentOptions = {
   forceReload?: boolean;
@@ -277,8 +337,9 @@ function readDisassemblyBookFromUnknown(value: unknown): DisassemblyBookSummary 
     source_path: String(raw.source_path || ""),
     source_summary: String(raw.source_summary || ""),
     source_hash: String(raw.source_hash || ""),
+    conversation_id: String(raw.conversation_id || ""),
     chars: Number(raw.chars || 0),
-    status: ["imported", "analyzing", "ready", "failed", "stale"].includes(String(raw.status || ""))
+    status: ["imported", "analyzing", "ready", "failed", "cancelled", "stale"].includes(String(raw.status || ""))
       ? raw.status as DisassemblyBookSummary["status"]
       : "imported",
     analysis_version: Number(raw.analysis_version || 1),
@@ -304,6 +365,51 @@ function readDisassemblyBooksFromUnknown(value: unknown): DisassemblyBookSummary
   return Array.isArray(value)
     ? value.map(readDisassemblyBookFromUnknown).filter((item): item is DisassemblyBookSummary => Boolean(item))
     : [];
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function workflowSkillIdFromRun(run: AgentRunState): LongTaskProgress["skill_id"] | "" {
+  const requestSnapshot = recordValue(recordValue(run.goal).request_snapshot);
+  const settings = recordValue(requestSnapshot.settings_snapshot);
+  const request = recordValue(settings.agent_request);
+  const skillId = String(request.skill_id || "").trim();
+  return longTaskSkillIds.has(skillId as LongTaskProgress["skill_id"])
+    ? skillId as LongTaskProgress["skill_id"]
+    : "";
+}
+
+function longTaskProgressFromRun(run: AgentRunState, events: Array<{ event_type?: string; payload?: unknown }>): LongTaskProgress | null {
+  const skillId = workflowSkillIdFromRun(run);
+  if (!skillId) {
+    return null;
+  }
+  const progressEvent = [...events].reverse().find((event) => event.event_type === "workflow.progress");
+  const payload = recordValue(progressEvent?.payload);
+  const error = String(run.error || "").trim();
+  const statusMessage = run.status === "completed"
+    ? "任务已完成"
+    : run.status === "paused"
+      ? "任务已暂停，可继续执行"
+      : run.status === "cancelled"
+        ? "任务已取消"
+        : error || "正在准备任务…";
+  return {
+    task_id: run.run_id,
+    conversation_id: run.conversation_id || "",
+    skill_id: skillId,
+    status: run.status,
+    stage: String(payload.stage || run.status || "queued"),
+    message: String(payload.message || statusMessage),
+    completed: Math.max(0, Number(payload.completed || 0)),
+    total: Math.max(0, Number(payload.total || 0)),
+    current_step_id: run.current_step_id || "",
+    version: run.version,
+    error,
+    updated_at: run.updated_at
+  };
 }
 
 function stringListFromUnknown(value: unknown): string[] {
@@ -401,6 +507,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [error, setError] = useState("");
   const [activeTab, setActiveTab] = useState<WorkbenchTab>("editor");
   const [refreshTick, setRefreshTick] = useState(0);
+  const [projectDataRevision, setProjectDataRevision] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [projectBusy, setProjectBusy] = useState(false);
   const [projectMessage, setProjectMessage] = useState("");
@@ -469,13 +576,17 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [styleDistillationProfile, setStyleDistillationProfile] = useState<StyleDistillationProfile | null>(null);
   const [disassemblyBooks, setDisassemblyBooks] = useState<DisassemblyBookSummary[]>([]);
   const [disassemblyLibraryBusy, setDisassemblyLibraryBusy] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
+  const [longTasks, setLongTasks] = useState<LongTaskProgress[]>([]);
+  const assistantAbortRef = useRef<AbortController | null>(null);
+  const taskAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const longTaskSubscriptionsRef = useRef<Map<string, () => void>>(new Map());
   const activeConversationRunIdRef = useRef("");
   const liveJobIdsRef = useRef<Set<string>>(new Set());
   const selectedJobIdRef = useRef("");
   const lastSyncedProjectRef = useRef<CurrentProject>({ path: "", name: "" });
   const openDocumentsRef = useRef<OpenDocumentTab[]>([]);
   const activeDocumentPathRef = useRef("");
+  const activeDocumentOpenRequestRef = useRef(0);
   const restoredSettingsRef = useRef(false);
   const skipNextSettingsPersistRef = useRef(false);
   const lastConfigSignatureRef = useRef("");
@@ -546,7 +657,23 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }, [messageInput, pendingReferenceResolution]);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(() => () => {
+    assistantAbortRef.current?.abort();
+    for (const controller of taskAbortControllersRef.current.values()) controller.abort();
+    taskAbortControllersRef.current.clear();
+    for (const unsubscribe of longTaskSubscriptionsRef.current.values()) unsubscribe();
+    longTaskSubscriptionsRef.current.clear();
+  }, []);
+
+  useEffect(() => {
+    for (const unsubscribe of longTaskSubscriptionsRef.current.values()) unsubscribe();
+    longTaskSubscriptionsRef.current.clear();
+    if (!snapshot?.currentProject.path) {
+      setLongTasks([]);
+      return;
+    }
+    void refreshLongTasks().catch(() => setLongTasks([]));
+  }, [client, snapshot?.currentProject.path]);
 
   useEffect(() => {
     if (status !== "ready") {
@@ -986,8 +1113,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
 
   async function refreshConversationsList() {
     const conversations = await client.getConversations();
-    setSnapshot((current) => (current ? { ...current, conversations } : current));
-    return conversations;
+    const assistantOnly = assistantConversations(conversations);
+    setSnapshot((current) => (current ? { ...current, conversations: assistantOnly } : current));
+    return assistantOnly;
   }
 
   async function refreshJobsList() {
@@ -1024,8 +1152,10 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   }
 
   function clearProjectScopedState(nextProject: CurrentProject) {
-    abortRef.current?.abort();
-    abortRef.current = null;
+    assistantAbortRef.current?.abort();
+    assistantAbortRef.current = null;
+    for (const controller of taskAbortControllersRef.current.values()) controller.abort();
+    taskAbortControllersRef.current.clear();
     liveJobIdsRef.current.clear();
     setSendingMessage(false);
     setOpenDocuments([]);
@@ -1091,7 +1221,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
             manifestError: null,
             vectorError: null
           };
-    const nextConversations = conversationsResult.status === "fulfilled" ? conversationsResult.value : [];
+    const nextConversations = conversationsResult.status === "fulfilled" ? assistantConversations(conversationsResult.value) : [];
     const nextJobs = jobsResult.status === "fulfilled" ? jobsResult.value : [];
     const resolvedProject = nextChrome.current.path ? nextChrome.current : nextProject;
 
@@ -1325,8 +1455,40 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
     const conversations = await client.getConversations();
     setConversationDetail(detail);
-    setSnapshot((current) => (current ? { ...current, conversations } : current));
+    setSnapshot((current) => (current ? { ...current, conversations: assistantConversations(conversations) } : current));
     return detail.id;
+  }
+
+  async function createTaskConversation(input: {
+    type: Exclude<ConversationType, "assistant">;
+    title: string;
+    skillId?: string;
+    entry: string;
+    sourcePath?: string;
+    sourceBookId?: string;
+    targetPaths?: string[];
+  }): Promise<ConversationDetail> {
+    let detail = await client.createConversation({
+      title: input.title,
+      skill_id: input.skillId || "",
+      conversation_type: input.type,
+      task_metadata: {
+        entry: input.entry,
+        source_path: input.sourcePath || "",
+        source_book_id: input.sourceBookId || "",
+        target_paths: uniquePaths(input.targetPaths || []),
+        created_for: input.title
+      }
+    });
+    const preferences: ConversationModelPreferences = {
+      model_override: "",
+      reasoning_enabled: Boolean(configDraft?.model_thinking_enabled),
+      reasoning_effort: "medium"
+    };
+    if (preferences.reasoning_enabled) {
+      detail = await client.updateConversationModelPreferences(detail.id, preferences);
+    }
+    return detail;
   }
 
   function includedConversationAttachmentIds(detail = conversationDetail): string[] {
@@ -1529,6 +1691,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
             }
           : current
       );
+      setProjectDataRevision((value) => value + 1);
       await syncDesktopProjectSnapshot(currentProject, conversations, jobs);
       setProjectMessage(warnings.length ? `项目视图已部分刷新；${warnings.join("；")}` : "项目视图已刷新");
     } catch (nextError) {
@@ -2479,6 +2642,77 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
+  async function refreshLongTask(runId: string): Promise<LongTaskProgress | null> {
+    const run = await client.getAgentRun(runId);
+    const events = await client.getAgentRunEvents(runId, 0, 1_000).catch(() => ({ events: [] }));
+    const progress = longTaskProgressFromRun(run, events.events);
+    if (!progress) {
+      return null;
+    }
+    setLongTasks((current) => {
+      const next = current.filter((item) => item.task_id !== progress.task_id);
+      return [progress, ...next].sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+    });
+    if (!terminalLongTaskStatuses.has(run.status)) {
+      ensureLongTaskSubscription(run.run_id);
+    }
+    return progress;
+  }
+
+  function ensureLongTaskSubscription(runId: string): void {
+    if (!runId || longTaskSubscriptionsRef.current.has(runId)) {
+      return;
+    }
+    let unsubscribe: (() => void) | null = null;
+    unsubscribe = subscribeConversationPlanRun(
+      runId,
+      (run) => {
+        void refreshLongTask(run.run_id).finally(() => {
+          if (terminalLongTaskStatuses.has(run.status)) {
+            unsubscribe?.();
+            longTaskSubscriptionsRef.current.delete(run.run_id);
+          }
+        });
+      },
+      () => undefined
+    );
+    longTaskSubscriptionsRef.current.set(runId, unsubscribe);
+  }
+
+  async function refreshLongTasks(): Promise<LongTaskProgress[]> {
+    const listing = await client.listAgentRuns({ limit: 100 });
+    const progress = (await Promise.all(
+      listing.runs
+        .filter((run) => Boolean(workflowSkillIdFromRun(run)))
+        .map(async (run) => {
+          const events = await client.getAgentRunEvents(run.run_id, 0, 1_000).catch(() => ({ events: [] }));
+          return longTaskProgressFromRun(run, events.events);
+        })
+    )).filter((item): item is LongTaskProgress => Boolean(item));
+    setLongTasks(progress.sort((left, right) => right.updated_at.localeCompare(left.updated_at)));
+    for (const task of progress) {
+      if (!terminalLongTaskStatuses.has(task.status)) {
+        ensureLongTaskSubscription(task.task_id);
+      }
+    }
+    return progress;
+  }
+
+  async function controlLongTask(
+    taskId: string,
+    action: "pause" | "resume" | "cancel" | "retry"
+  ): Promise<LongTaskProgress | null> {
+    try {
+      const result = await controlConversationPlanRun(taskId, action);
+      const progress = await refreshLongTask(result.run.run_id);
+      setOperationsMessage(result.conflict ? "任务状态已刷新，请根据最新状态再次操作。" : "任务控制指令已发送。");
+      return progress;
+    } catch (error) {
+      setOperationsMessage(describeActionableError(error, "任务控制失败", "请刷新任务状态后重试。"));
+      return null;
+    }
+  }
+
   async function createConversation() {
     setConversationBusy(true);
     setConversationMessage("");
@@ -2489,7 +2723,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       setConversationModelPreferences(defaults);
       const list = await client.getConversations();
       setConversationDetail(detail);
-      setSnapshot((current) => (current ? { ...current, conversations: list } : current));
+      setSnapshot((current) => (current ? { ...current, conversations: assistantConversations(list) } : current));
       setActiveTab("conversations");
     } catch (nextError) {
       setConversationMessage(describeActionableError(nextError, "新建对话失败"));
@@ -2627,7 +2861,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     try {
       await client.deleteConversation(conversationId);
       const list = await client.getConversations();
-      setSnapshot((current) => (current ? { ...current, conversations: list } : current));
+      setSnapshot((current) => (current ? { ...current, conversations: assistantConversations(list) } : current));
       if (conversationDetail?.id === conversationId) {
         if (list[0]?.id) {
           const next = await client.getConversation(list[0].id);
@@ -2763,7 +2997,10 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
-  async function uploadWorkflowAttachment(file: File | null): Promise<ConversationAttachment | null> {
+  async function uploadWorkflowAttachment(
+    file: File | null,
+    options: { conversationId?: string; bookTitle?: string } = {}
+  ): Promise<(ConversationAttachment & { conversation_id: string }) | null> {
     if (!file) {
       return null;
     }
@@ -2771,14 +3008,18 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setUploadingAttachment(true);
     setOperationsMessage("");
     try {
-      const conversationId = await ensureConversationId();
+      const title = options.bookTitle?.trim() || file.name.replace(/\.[^.]+$/, "").trim() || file.name;
+      const conversationId = options.conversationId || (await createTaskConversation({
+        type: "disassembly",
+        title: `拆书 · 《${title}》`,
+        skillId: "disassemble_book",
+        entry: "import_source",
+        sourcePath: file.name,
+        targetPaths: ["00_设定集/拆书库"]
+      })).id;
       const attachment = await client.uploadConversationAttachment(conversationId, file, file.name || "attachment.txt");
-      const detail = await client.getConversation(conversationId);
-      const conversations = await client.getConversations();
-      setConversationDetail(detail);
-      setSnapshot((current) => (current ? { ...current, conversations } : current));
       setOperationsMessage(`已上传拆书文件：${attachment.name}`);
-      return attachment;
+      return { ...attachment, conversation_id: conversationId };
     } catch (nextError) {
       setOperationsMessage(describeActionableError(nextError, "上传拆书文件失败", "请确认文件可读取后重新上传。"));
       return null;
@@ -2802,7 +3043,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         target_words: 2500,
         instruction: "",
         target_path: "",
-        conversation_id: conversationDetail?.id || "",
+        conversation_id: "",
         source_path: "",
         write_result: false,
         attachment_ids: [],
@@ -2819,15 +3060,26 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
-  async function archiveDisassemblySource(attachmentId: string, bookTitle = ""): Promise<DisassemblyBookSummary | null> {
+  async function archiveDisassemblySource(
+    attachmentId: string,
+    bookTitle = "",
+    taskConversationId = ""
+  ): Promise<DisassemblyBookSummary | null> {
     if (!attachmentId) {
       return null;
     }
 
     setOperationsBusy(true);
-    setOperationsMessage("");
+    setOperationsMessage("拆书导入：正在归档原文...");
     try {
-      const conversationId = await ensureConversationId();
+      const conversationId = taskConversationId || (await createTaskConversation({
+        type: "disassembly",
+        title: `拆书 · 《${bookTitle || "未命名作品"}》`,
+        skillId: "disassemble_book",
+        entry: "archive_source",
+        sourceBookId: "",
+        targetPaths: ["00_设定集/拆书库"]
+      })).id;
       const result = await client.runSkill("disassemble_book", {
         text: "",
         chapter: 0,
@@ -2980,6 +3232,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
 
     if (existing && !options.forceReload) {
       if (shouldActivate) {
+        activeDocumentOpenRequestRef.current += 1;
+        activeDocumentPathRef.current = path;
         setActiveDocumentPath(path);
         setActiveTab("editor");
       }
@@ -2995,10 +3249,22 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       return false;
     }
 
+    const previousActivePath = activeDocumentPathRef.current;
+    const activeOpenRequest = shouldActivate ? activeDocumentOpenRequestRef.current + 1 : 0;
+    if (shouldActivate) {
+      activeDocumentOpenRequestRef.current = activeOpenRequest;
+      activeDocumentPathRef.current = "";
+      setActiveDocumentPath("");
+      setActiveTab("editor");
+    }
+
     setDocumentBusy(true);
     setDocumentMessage("");
     try {
       const document = await client.getDocument(path);
+      if (shouldActivate && activeOpenRequest !== activeDocumentOpenRequestRef.current) {
+        return false;
+      }
       setOpenDocuments((current) => {
         const nextTab = {
           path: document.path,
@@ -3018,19 +3284,28 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         return [...current, nextTab];
       });
       if (shouldActivate) {
+        activeDocumentPathRef.current = document.path;
         setActiveDocumentPath(document.path);
         setActiveTab("editor");
       }
       return true;
     } catch (nextError) {
+      if (shouldActivate && activeOpenRequest === activeDocumentOpenRequestRef.current) {
+        activeDocumentPathRef.current = previousActivePath;
+        setActiveDocumentPath(previousActivePath);
+      }
       setDocumentMessage(describeActionableError(nextError, "打开文档失败"));
       return false;
     } finally {
-      setDocumentBusy(false);
+      if (!shouldActivate || activeOpenRequest === activeDocumentOpenRequestRef.current) {
+        setDocumentBusy(false);
+      }
     }
   }
 
   function activateDocument(path: string) {
+    activeDocumentOpenRequestRef.current += 1;
+    activeDocumentPathRef.current = path;
     setActiveDocumentPath(path);
     setActiveTab("editor");
   }
@@ -3062,14 +3337,15 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   }
 
   function updateActiveDocument(content: string) {
-    if (!activeDocumentPath) {
+    const targetPath = activeDocumentPathRef.current;
+    if (!targetPath) {
       return;
     }
 
-    setPendingReloadRequest((current) => (current?.path === activeDocumentPath ? null : current));
+    setPendingReloadRequest((current) => (current?.path === targetPath ? null : current));
     setOpenDocuments((current) =>
       current.map((item) =>
-        item.path === activeDocumentPath
+        item.path === targetPath
           ? {
               ...item,
               content,
@@ -3983,7 +4259,31 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
           operation_id: `${operationId}_resume`,
           expected_version: run.version
         });
-        setConversationMessage("操作已批准并继续执行；完成后会显示真实系统回执。");
+        let unsubscribe: (() => void) | undefined;
+        unsubscribe = subscribeConversationPlanRun(
+          run.run_id,
+          (nextRun) => {
+            if (!terminalLongTaskStatuses.has(nextRun.status)) {
+              return;
+            }
+            unsubscribe?.();
+            void (async () => {
+              if (nextRun.status === "completed") {
+                await refreshProjectWorkspace();
+                await refreshActiveConversation();
+                setConversationMessage("操作已完成，故事大纲、风格与题材、设定资料已刷新。");
+              } else {
+                setConversationMessage(nextRun.status === "cancelled" ? "操作已取消，未写入后续内容。" : `操作执行失败：${nextRun.error || "请查看任务详情后重试。"}`);
+              }
+            })().catch((error) => {
+              setConversationMessage(describeActionableError(error, "刷新写入结果失败", "请点击页面刷新后查看已保存内容。"));
+            });
+          },
+          (error) => {
+            setConversationMessage(describeActionableError(error, "跟踪写入结果失败", "请刷新页面确认写入结果。"));
+          }
+        );
+        setConversationMessage("操作已批准并继续执行；完成后会自动刷新对应页面。");
       } else {
         setConversationMessage("操作已拒绝，未执行对应写入。");
       }
@@ -4074,7 +4374,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     const controller = new AbortController();
     const assistantMessage = makeLocalMessage("assistant", "");
 
-    abortRef.current = controller;
+    assistantAbortRef.current = controller;
     setSendingMessage(true);
     appendLocalMessage(conversationId, "user", trimmed);
     setMessageInput("");
@@ -4152,8 +4452,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         setConversationMessage(describeActionableError(nextError, "发送失败", "请检查模型配置或稍后重试；本次不会自动写入文件。"));
       }
     } finally {
-      if (abortRef.current === controller) {
-        abortRef.current = null;
+      if (assistantAbortRef.current === controller) {
+        assistantAbortRef.current = null;
       }
       setSendingMessage(false);
     }
@@ -4182,7 +4482,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   }
 
   function stopMessage() {
-    const controller = abortRef.current;
+    const controller = assistantAbortRef.current;
     if (!controller) {
       return;
     }
@@ -4219,11 +4519,14 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       return;
     }
 
+    const sourcePath = activeDocument?.path || "";
+    const taskSpec = taskConversationSpecForWorkflow(selectedSkillId, {}, sourcePath);
     await runWorkflowSkill(selectedSkillId, {
       text: activeDocument?.content || "",
-      conversation_id: conversationDetail?.id || "",
-      source_path: activeDocument?.path || "",
-      target_path: activeDocument?.path || "",
+      // 写作、拆书等工作流必须由运行入口创建自己的任务线程，不能继承 AI 助手会话。
+      conversation_id: taskSpec ? "" : conversationDetail?.id || "",
+      source_path: sourcePath,
+      target_path: sourcePath,
       write_result: false,
       attachment_ids: []
     });
@@ -4284,8 +4587,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       return;
     }
 
+    const workflowLabel = workflowProgressLabel(skillId);
     setOperationsBusy(true);
-    setOperationsMessage("");
+    setOperationsMessage(`${workflowLabel}：正在准备任务...`);
     setLatestSkillResult(null);
     let workflowController: AbortController | null = null;
     try {
@@ -4293,6 +4597,24 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       const sourcePath = payload.source_path ?? activeDocument?.path ?? "";
       const autoRevision = Boolean(configDraft?.enable_consistency_revision);
       const scoreThreshold = configDraft?.consistency_revision_score || 80;
+      const requestedConversationId = String(payload.conversation_id || "").trim();
+      const taskSpec = taskConversationSpecForWorkflow(skillId, payload, sourcePath);
+      // 即使调用方显式传入当前普通助手会话，任务也必须新建自己的线程。
+      // 只有传入既有任务线程时才允许复用其会话 ID。
+      let taskConversationId = taskSpec && (!requestedConversationId || requestedConversationId === conversationDetail?.id)
+        ? ""
+        : requestedConversationId;
+      if (taskSpec) {
+        if (!taskConversationId) {
+          const taskConversation = await createTaskConversation({
+            ...taskSpec,
+            skillId,
+            sourcePath,
+            targetPaths: uniquePaths([sourcePath, String(payload.target_path || "")])
+          });
+          taskConversationId = taskConversation.id;
+        }
+      }
       const skillPayload = {
         ...(payload as Record<string, unknown>),
         text: payload.text ?? activeDocument?.content ?? "",
@@ -4301,7 +4623,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         target_words: payload.target_words ?? 2500,
         instruction: payload.instruction ?? "",
         target_path: payload.target_path ?? "",
-        conversation_id: payload.conversation_id ?? conversationDetail?.id ?? "",
+        conversation_id: taskConversationId || (taskSpec ? "" : conversationDetail?.id || ""),
         source_path: sourcePath,
         write_result: payload.write_result ?? false,
         attachment_ids: payload.attachment_ids ?? [],
@@ -4323,8 +4645,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
 
       const controller = new AbortController();
       workflowController = controller;
-      abortRef.current?.abort();
-      abortRef.current = controller;
+      const workflowAbortKey = skillPayload.conversation_id || `${skillId}:${sourcePath}`;
+      taskAbortControllersRef.current.get(workflowAbortKey)?.abort();
+      taskAbortControllersRef.current.set(workflowAbortKey, controller);
       let streamed = "";
       const finalResponseRef: { current: AgentRunResponse | null } = { current: null };
       await client.streamAgentRun({
@@ -4337,12 +4660,23 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         attachment_ids: skillPayload.attachment_ids || [],
         ...skillPayload
       } as any, {
-        onStart: () => {
-          setOperationsMessage("开始生成，正在接收流式输出...");
+        onStart: (event) => {
+          if (event.run_id && longTaskSkillIds.has(skillId as LongTaskProgress["skill_id"])) {
+            void refreshLongTask(event.run_id).catch(() => undefined);
+          }
+          setOperationsMessage(`${workflowLabel}：已启动，正在接收流式输出...`);
         },
         onDelta: (event) => {
+          if (event.stage === "workflow_progress") {
+            setOperationsMessage(`${workflowLabel}：${event.text.trim()}`);
+            return;
+          }
+          if (event.stage === "workflow_start") {
+            setOperationsMessage(`${workflowLabel}：正在启动工作流...`);
+            return;
+          }
           if (event.stage === "humanizer_start") {
-            setOperationsMessage("正在进行去AI味润色...");
+            setOperationsMessage(`${workflowLabel}：正在进行去AI味润色...`);
             return;
           }
           streamed += event.text || "";
@@ -4357,7 +4691,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
               target_paths: event.target_paths || []
             }
           });
-          setOperationsMessage("正在生成...");
+          setOperationsMessage(`${workflowLabel}：正在生成...`);
         },
         onFinal: async (event) => {
           finalResponseRef.current = event.payload;
@@ -4367,7 +4701,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         }
       }, controller.signal);
 
-      abortRef.current = null;
+      taskAbortControllersRef.current.delete(workflowAbortKey);
       const finalResponse = finalResponseRef.current;
       const result = finalResponse?.skill_result || {
         status: "done",
@@ -4385,8 +4719,10 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       setOperationsMessage(describeActionableError(nextError, "执行技能失败", "请确认已打开目标文档、模型配置可用后重试。"));
       return null;
     } finally {
-      if (workflowController && abortRef.current === workflowController) {
-        abortRef.current = null;
+      if (workflowController) {
+        for (const [key, controller] of taskAbortControllersRef.current) {
+          if (controller === workflowController) taskAbortControllersRef.current.delete(key);
+        }
       }
       setOperationsBusy(false);
     }
@@ -4406,9 +4742,18 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setOperationsBusy(true);
     setOperationsMessage("");
     try {
+      const taskConversation = await createTaskConversation({
+        type: "distillation",
+        title: `蒸馏 · 《${options.bookTitle || activeDocument?.title || "未命名作品"}》`,
+        skillId: "nuwa_style_distill",
+        entry: "distill",
+        sourcePath: options.sourcePath ?? activeDocument?.path ?? "",
+        sourceBookId: options.sourceBookId || "",
+        targetPaths: ["00_设定集/.agent/style_distillation/current.json"]
+      });
       const result = await client.runSkill("nuwa_style_distill", {
         text: options.text ?? activeDocument?.content ?? "",
-        conversation_id: conversationDetail?.id || "",
+        conversation_id: taskConversation.id,
         source_path: options.sourcePath ?? activeDocument?.path ?? "",
         target_path: "",
         write_result: true,
@@ -4442,9 +4787,17 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     const nextEnabled = enabled ?? !styleDistillationProfile.enabled;
     setOperationsBusy(true);
     try {
+      const taskConversation = await createTaskConversation({
+        type: "distillation",
+        title: `蒸馏 · 《${styleDistillationProfile.book_title || "当前作品"}》`,
+        skillId: "nuwa_style_distill",
+        entry: "toggle",
+        sourceBookId: styleDistillationProfile.source_book_id || "",
+        targetPaths: ["00_设定集/.agent/style_distillation/current.json"]
+      });
       const result = await client.runSkill("nuwa_style_distill", {
         text: "",
-        conversation_id: conversationDetail?.id || "",
+        conversation_id: taskConversation.id,
         source_path: "",
         target_path: "",
         write_result: false,
@@ -4469,9 +4822,17 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
     setOperationsBusy(true);
     try {
+      const taskConversation = await createTaskConversation({
+        type: "distillation",
+        title: `蒸馏 · 《${styleDistillationProfile.book_title || "当前作品"}》`,
+        skillId: "nuwa_style_distill",
+        entry: "delete",
+        sourceBookId: styleDistillationProfile.source_book_id || "",
+        targetPaths: ["00_设定集/.agent/style_distillation/current.json"]
+      });
       const result = await client.runSkill("nuwa_style_distill", {
         text: "",
-        conversation_id: conversationDetail?.id || "",
+        conversation_id: taskConversation.id,
         source_path: "",
         target_path: "",
         write_result: false,
@@ -4825,6 +5186,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     runtime,
     status,
     snapshot,
+    projectDataRevision,
     error,
     activeTab,
     setActiveTab,
@@ -4967,6 +5329,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     selectedJobDetail,
     operationsBusy,
     operationsMessage,
+    longTasks,
+    refreshLongTasks,
+    controlLongTask,
     latestSkillResult,
     pendingSkillDraft,
     pendingSkillPatchPreview,

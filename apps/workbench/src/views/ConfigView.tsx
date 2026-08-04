@@ -30,10 +30,6 @@ export function ConfigView({
             <Field label="主线路 API Key" value={config.api_key} onChange={(value) => onPatch({ api_key: value })} secret />
             <Field label="授权账号 Key" value={config.license_account_key} onChange={(value) => onPatch({ license_account_key: value })} secret />
             <Field label="主线路 Base URL" value={config.base_url} onChange={(value) => onPatch({ base_url: value })} />
-            <Field label="主线路模型" value={config.model} onChange={(value) => onPatch({ model: value })} />
-            <Field label="副线路 API Key" value={config.secondary_api_key} onChange={(value) => onPatch({ secondary_api_key: value })} secret />
-            <Field label="副线路 Base URL" value={config.secondary_base_url} onChange={(value) => onPatch({ secondary_base_url: value })} />
-            <Field label="副线路模型" value={config.secondary_model} onChange={(value) => onPatch({ secondary_model: value })} />
           </div>
           <div className="toggle-grid">
             <ToggleCard

@@ -11,11 +11,7 @@ describe("normalizeConfigDraft", () => {
       model: "gpt-4.1-mini",
       temp: 9,
       top_p: 9,
-      secondary_api_key: "",
-      secondary_base_url: "",
-      secondary_model: "",
-      secondary_temp: -5,
-      secondary_top_p: -5,
+      task_model: "review-model",
       model_thinking_enabled: false,
       enable_consistency_revision: true,
       consistency_revision_score: 999,
@@ -41,8 +37,7 @@ describe("normalizeConfigDraft", () => {
 
     expect(normalized.temp).toBe(2);
     expect(normalized.top_p).toBe(1);
-    expect(normalized.secondary_temp).toBe(0);
-    expect(normalized.secondary_top_p).toBe(0);
+    expect(normalized.task_model).toBe("review-model");
     expect(normalized.consistency_revision_score).toBe(100);
     expect(normalized.context_limit_chars).toBe(8192);
     expect(normalized.embedding_timeout).toBe(300);
@@ -108,11 +103,7 @@ function makeConfig() {
     model: "",
     temp: 0.7,
     top_p: 1,
-    secondary_api_key: "",
-    secondary_base_url: "",
-    secondary_model: "",
-    secondary_temp: 0.5,
-    secondary_top_p: 1,
+    task_model: "",
     model_thinking_enabled: false,
     enable_consistency_revision: true,
     consistency_revision_score: 80,

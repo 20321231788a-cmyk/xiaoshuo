@@ -12,6 +12,7 @@ import { DurableWorkflowCheckpointStore } from "../kernel/workflow-checkpoint.js
 import { AgentRuntimeService, closeAllAgentRuntimeServices } from "../runtime.js";
 import { PromptSkillRunner } from "../skill-runner.js";
 import { DisassembleBookWorkflow } from "./disassemble-book.js";
+import { readDisassembleBookManifest } from "./disassemble-library.js";
 import type { WorkflowRunContext } from "./types.js";
 
 let tempDir = "";
@@ -119,6 +120,48 @@ describe("DisassembleBookWorkflow", () => {
 
     expect(archived).toContain("超过旧上限标记");
     expect(archived.length).toBeGreaterThan(100_000);
+  });
+
+  it("keeps an interrupted book resumable instead of marking it as failed", async () => {
+    const workflow = new DisassembleBookWorkflow();
+    const archiveContext = createWorkflowContext({ requestCompletion: async () => "unused" });
+    const archived = await workflow.runAgent({
+      conversation_id: "task-conversation",
+      content: "",
+      current_path: "",
+      selection: "第一章内容。\n\n第二章内容。",
+      project_context_hint: "",
+      skill_id: "disassemble_book",
+      attachment_ids: [],
+      action: "archive_source"
+    } as any, archiveContext);
+    const book = archived.skill_result?.data?.book as { id: string; dir: string };
+    const abortController = new AbortController();
+    const cancelledContext: WorkflowRunContext = {
+      ...createWorkflowContext({
+        requestCompletion: async () => {
+          abortController.abort();
+          return "不会被写入";
+        }
+      }),
+      signal: abortController.signal
+    };
+
+    await expect(workflow.runAgent({
+      conversation_id: "task-conversation",
+      content: "请继续拆解",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "disassemble_book",
+      attachment_ids: [],
+      source_book_id: book.id
+    } as any, cancelledContext)).rejects.toMatchObject({ name: "AbortError" });
+
+    const manifest = await readDisassembleBookManifest(book.dir, archiveContext);
+    expect(manifest.status).toBe("cancelled");
+    expect(manifest.error).toBe("");
+    expect(manifest.progress.stage).toBe("cancelled");
   });
 
   it("lists existing disassemble books", async () => {

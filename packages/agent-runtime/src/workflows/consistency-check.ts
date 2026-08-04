@@ -1,4 +1,4 @@
-import { loadModelConfig, readRawConfig, type ModelConfig } from "@xiaoshuo/config-service";
+import { loadTaskModelConfig, type ModelConfig } from "@xiaoshuo/config-service";
 import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
 import type { ChatCompletionMessage } from "@xiaoshuo/model-client";
 import type { AgentRunRequest, AgentRunResponse, ConversationDetail } from "@xiaoshuo/shared";
@@ -132,24 +132,17 @@ function attachGraphAdvisory(
   };
 }
 
-async function loadAssistantModelConfig(context: WorkflowRunContext): Promise<{ config: ModelConfig; line: "secondary" | "primary-fallback" }> {
-  const rawConfig = await readRawConfig(context.config);
-  const hasExplicitSecondary = Boolean(String(rawConfig.secondary_api_key || "").trim() && String(rawConfig.secondary_model || "").trim());
-  if (hasExplicitSecondary) {
-    const secondary = await loadModelConfig(context.config, "secondary");
-    return { config: secondary, line: "secondary" };
+async function loadAssistantModelConfig(
+  context: WorkflowRunContext
+): Promise<{ config: ModelConfig; line: "task-model" | "current-model-fallback" }> {
+  const taskConfig = await loadTaskModelConfig(context.config);
+  if (!taskConfig.configured) {
+    throw new Error("未配置当前主路线 API Key 或模型名。");
   }
-  const primary = await loadModelConfig(context.config, "primary");
-  if (primary.configured) {
-    return {
-      config: {
-        ...primary,
-        temperature: Math.min(primary.temperature, 0.2)
-      },
-      line: "primary-fallback"
-    };
-  }
-  throw new Error("未配置主线路或副线路 API Key / 模型名。");
+  return {
+    config: { ...taskConfig, temperature: Math.min(taskConfig.temperature, 0.2) },
+    line: taskConfig.model_source === "task-model" ? "task-model" : "current-model-fallback"
+  };
 }
 
 async function resolveConsistencyChapterOutline(request: AgentRunRequest, context: WorkflowRunContext): Promise<string> {

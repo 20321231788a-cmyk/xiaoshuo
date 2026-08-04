@@ -105,7 +105,7 @@ describe("ConsistencyCheckWorkflow", () => {
       score: 82,
       risks: ["人物动机略弱"],
       reason: "整体连续性基本成立",
-      model_line: "primary-fallback"
+      model_line: "current-model-fallback"
     });
     expect(result.conversation?.messages.at(-1)?.metadata.intent).toBe("skill");
   });
@@ -212,11 +212,11 @@ describe("ConsistencyCheckWorkflow", () => {
   });
 
   it("falls back safely when model output is not JSON", () => {
-    expect(parseConsistencyCheckResult("not json", "primary-fallback")).toEqual({
+    expect(parseConsistencyCheckResult("not json", "current-model-fallback")).toEqual({
       score: 0,
       risks: [],
       reason: "not json",
-      model_line: "primary-fallback"
+      model_line: "current-model-fallback"
     });
   });
 });

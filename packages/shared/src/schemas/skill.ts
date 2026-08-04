@@ -4,7 +4,7 @@ import { jobInfoSchema } from "./job.js";
 
 export const skillModelPolicySchema = z
   .object({
-    line: z.enum(["primary", "secondary", "auto"]).default("primary"),
+    line: z.enum(["primary", "task-model", "auto"]).default("primary"),
     temperature: z.number().optional(),
     max_input_chars: z.number().optional()
   })

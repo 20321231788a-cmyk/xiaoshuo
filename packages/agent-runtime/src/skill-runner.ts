@@ -1,4 +1,4 @@
-import { loadModelConfig, type ConfigServiceOptions } from "@xiaoshuo/config-service";
+import { loadModelConfig, loadTaskModelConfig, type ConfigServiceOptions, type ModelConfig } from "@xiaoshuo/config-service";
 import { ConversationService } from "@xiaoshuo/conversation-service";
 import { DocumentService } from "@xiaoshuo/document-service";
 import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
@@ -14,6 +14,7 @@ import type { ContextBlock } from "./kernel/context-block.js";
 import { scheduleModelContextBlocks } from "./context-scheduling.js";
 import { ProjectFileResolver } from "./kernel/project-file-resolver.js";
 import { createGeneratedLibraryDraft } from "./library-draft.js";
+import { commitGeneratedStoryPlanning, isStoryPlanningGeneratedSkillId } from "./generated-story-planning.js";
 import { isSectionedGeneratedSkillId, sectionedGeneratedTargetPaths } from "./sectioned-generated-save.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import { streamModelText, StreamingGenerationSession, type StreamingModelClient } from "./stream.js";
@@ -155,7 +156,7 @@ export class PromptSkillRunner {
       return;
     }
 
-    const config = await loadModelConfig(this.config, "primary");
+    const config = await this.resolveSkillModelConfig(skill);
     if (!config.configured) {
       throw new Error("未配置主线路 API Key 或模型名。");
     }
@@ -271,7 +272,7 @@ export class PromptSkillRunner {
 
   private async runPromptSkill(skill: SkillDefinition, payload: SkillRunRequest, options: AgentRunOptions = {}): Promise<string> {
     throwIfAborted(options.signal);
-    const config = await loadModelConfig(this.config, "primary");
+    const config = await this.resolveSkillModelConfig(skill);
     if (!config.configured) {
       throw new Error("未配置主线路 API Key 或模型名。");
     }
@@ -600,6 +601,20 @@ export class PromptSkillRunner {
         });
         savedPath = savedPaths[0] || "";
         data.saved_paths = savedPaths;
+        if (isStoryPlanningGeneratedSkillId(skill.id)) {
+          const structured = await commitGeneratedStoryPlanning({
+            projectRoot: this.projectRoot,
+            skillId: skill.id,
+            content: finalResult,
+            mode: savePlan.mode
+          });
+          data.story_planning = {
+            revision: structured.revision,
+            nodes: structured.nodes,
+            projection_paths: structured.savedPaths,
+            requires_confirmation: false
+          };
+        }
         await this.cache.markCommitted(entry.cache_id, savedPaths, { cleanupContent: true });
       } else {
         const meta = await this.cache.get(entry.cache_id);
@@ -677,6 +692,18 @@ export class PromptSkillRunner {
       normalized.push(relPath);
     }
     return normalized;
+  }
+
+  /**
+   * Imported skills may retain the former secondary-line policy. That policy
+   * now means the selected task model, while an empty selection transparently
+   * falls back to the active main model.
+   */
+  private async resolveSkillModelConfig(skill: SkillDefinition): Promise<ModelConfig> {
+    if (skill.model_policy?.line === "task-model") {
+      return loadTaskModelConfig(this.config);
+    }
+    return loadModelConfig(this.config, "primary");
   }
 
   private async applyDefaultDeslop(skillId: string, value: string, options: AgentRunOptions = {}): Promise<string> {

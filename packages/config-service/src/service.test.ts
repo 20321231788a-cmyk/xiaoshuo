@@ -7,6 +7,7 @@ import {
   DEFAULT_EMBEDDING_MODEL,
   loadEmbeddingConfig,
   loadModelConfig,
+  loadTaskModelConfig,
   loadPublicConfig,
   normalizePublicConfig,
   resolveConfigPath,
@@ -37,8 +38,7 @@ describe("config-service", () => {
       model: "",
       temp: 0.7,
       top_p: 1,
-      secondary_temp: 0.5,
-      secondary_top_p: 1,
+      task_model: "",
       model_thinking_enabled: true,
       enable_consistency_revision: true,
       consistency_revision_score: 80,
@@ -66,8 +66,7 @@ describe("config-service", () => {
     const config = normalizePublicConfig({
       temp: "0.25",
       top_p: "1.4",
-      secondary_temp: "",
-      secondary_top_p: "0.44",
+      task_model: "review-model",
       consistency_revision_score: "93",
       embedding_batch_size: "32",
       vector_context_chars: "12000",
@@ -78,8 +77,7 @@ describe("config-service", () => {
 
     expect(config.temp).toBe(0.25);
     expect(config.top_p).toBe(1);
-    expect(config.secondary_temp).toBe(0.5);
-    expect(config.secondary_top_p).toBe(0.44);
+    expect(config.task_model).toBe("review-model");
     expect(config.consistency_revision_score).toBe(93);
     expect(config.embedding_batch_size).toBe(32);
     expect(config.vector_context_chars).toBe(12000);
@@ -193,7 +191,7 @@ describe("config-service", () => {
     expect(config.model).toBe("");
   });
 
-  it("loads primary and secondary model configs with configured flags", async () => {
+  it("loads current and lightweight task model configs with shared connection settings", async () => {
     const configPath = path.join(tempDir, "studio_config.json");
     await fs.writeFile(
       configPath,
@@ -202,20 +200,17 @@ describe("config-service", () => {
         model: "primary-model",
         temp: 0.2,
         top_p: 0.91,
-        secondary_api_key: "secondary-key",
-        secondary_model: "secondary-model",
-        secondary_temp: 0.4,
-        secondary_top_p: 0.82,
+        task_model: "task-model",
         model_thinking_enabled: true
       }),
       "utf8"
     );
 
-    const primary = await loadModelConfig({ configPath }, "primary");
-    const secondary = await loadModelConfig({ configPath }, "secondary");
+    const primary = await loadModelConfig({ configPath });
+    const task = await loadTaskModelConfig({ configPath });
 
     expect(primary).toMatchObject({ model: "primary-model", temperature: 0.2, top_p: 0.91, configured: true, thinking_enabled: true });
-    expect(secondary).toMatchObject({ model: "secondary-model", temperature: 0.4, top_p: 0.82, configured: true, thinking_enabled: true });
+    expect(task).toMatchObject({ api_key: "primary-key", model: "task-model", temperature: 0.2, top_p: 0.91, configured: true, model_source: "task-model" });
   });
 
   it("keeps runtime thinking enabled even when legacy config disables it", async () => {
@@ -223,20 +218,21 @@ describe("config-service", () => {
     await fs.writeFile(configPath, JSON.stringify({ api_key: "primary-key", model: "primary-model", model_thinking_enabled: false }), "utf8");
 
     const publicConfig = await loadPublicConfig({ configPath });
-    const modelConfig = await loadModelConfig({ configPath }, "primary");
+    const modelConfig = await loadModelConfig({ configPath });
 
     expect(publicConfig.model_thinking_enabled).toBe(true);
     expect(modelConfig.thinking_enabled).toBe(true);
   });
 
-  it("falls back to primary model when secondary is incomplete", async () => {
+  it("falls back to the current model when no lightweight task model is selected", async () => {
     const configPath = path.join(tempDir, "studio_config.json");
-    await fs.writeFile(configPath, JSON.stringify({ api_key: "primary-key", model: "primary-model", secondary_api_key: "secondary-key" }), "utf8");
+    await fs.writeFile(configPath, JSON.stringify({ api_key: "primary-key", model: "primary-model" }), "utf8");
 
-    const secondary = await loadModelConfig({ configPath }, "secondary");
+    const task = await loadTaskModelConfig({ configPath });
 
-    expect(secondary.model).toBe("primary-model");
-    expect(secondary.configured).toBe(true);
+    expect(task.model).toBe("primary-model");
+    expect(task.model_source).toBe("current-model-fallback");
+    expect(task.configured).toBe(true);
   });
 
   it("uses embedding key fallback and clamps batch size", async () => {
@@ -245,7 +241,6 @@ describe("config-service", () => {
       configPath,
       JSON.stringify({
         embedding_enabled: true,
-        secondary_api_key: "secondary-key",
         api_key: "primary-key",
         embedding_batch_size: 999
       }),
@@ -254,9 +249,33 @@ describe("config-service", () => {
 
     const embedding = await loadEmbeddingConfig({ configPath });
 
-    expect(embedding.api_key).toBe("secondary-key");
+    expect(embedding.api_key).toBe("primary-key");
     expect(embedding.batch_size).toBe(128);
     expect(embedding.configured).toBe(true);
+  });
+
+  it("removes old secondary connection settings when saving legacy config", async () => {
+    const configPath = path.join(tempDir, "studio_config.json");
+    await fs.writeFile(
+      configPath,
+      JSON.stringify({
+        api_key: "primary-key",
+        model: "primary-model",
+        secondary_api_key: "old-key",
+        secondary_base_url: "https://old.example.test/v1",
+        secondary_model: "primary-model",
+        secondary_temp: 0.4,
+        secondary_top_p: 0.82
+      }),
+      "utf8"
+    );
+
+    const saved = await savePublicConfig({}, { configPath });
+    const raw = JSON.parse(await fs.readFile(configPath, "utf8")) as Record<string, unknown>;
+
+    expect(saved.task_model).toBe("primary-model");
+    expect(raw.task_model).toBe("primary-model");
+    expect(Object.keys(raw).some((key) => key.startsWith("secondary_"))).toBe(false);
   });
 
   it("resolves explicit env config path first", () => {

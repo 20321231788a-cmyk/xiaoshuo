@@ -182,7 +182,7 @@ export const agentContextBlockTraceSchema = z
 
 export const agentModelCallTraceSchema = z
   .object({
-    line: z.enum(["primary", "secondary", "primary-fallback", "unknown"]).default("unknown"),
+    line: z.enum(["primary", "task-model", "current-model-fallback", "unknown"]).default("unknown"),
     model: z.string().default(""),
     streaming: z.boolean().default(false),
     temperature: z.number().optional(),

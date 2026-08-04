@@ -1,12 +1,15 @@
 import {
   conversationDetailSchema,
+  conversationCreateRequestSchema,
   conversationModelPreferencesSchema,
   type ConversationDetail,
   type ConversationModelPreferences,
   type ConversationMessage,
   type ConversationSummary,
   type PinnedContextItem,
-  type ConversationAttachment
+  type ConversationAttachment,
+  type ConversationTaskMetadata,
+  type ConversationType
 } from "@xiaoshuo/shared";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -27,6 +30,8 @@ export type ConversationCreatePayload = {
   title?: string;
   skill_id?: string;
   agent_name?: string;
+  conversation_type?: ConversationType;
+  task_metadata?: Partial<ConversationTaskMetadata>;
 };
 
 export type AppendMessagePayload = {
@@ -81,14 +86,15 @@ export class ConversationService {
   }
 
   async createConversation(payload: ConversationCreatePayload = {}): Promise<ConversationDetail> {
+    const normalizedPayload = conversationCreateRequestSchema.parse(payload);
     const timestamp = this.now();
     const detail: ConversationDetail = {
       id: this.idFactory(),
-      title: (payload.title || "").trim() || "新对话",
+      title: normalizedPayload.title.trim() || "新对话",
       created_at: timestamp,
       updated_at: timestamp,
-      current_skill: payload.skill_id || "",
-      current_agent: payload.agent_name || "",
+      current_skill: normalizedPayload.skill_id,
+      current_agent: normalizedPayload.agent_name,
       summary: "",
       pinned_context: [],
       attachments: [],
@@ -97,7 +103,9 @@ export class ConversationService {
       attachment_count: 0,
       model_override: "",
       reasoning_enabled: false,
-      reasoning_effort: "medium"
+      reasoning_effort: "medium",
+      conversation_type: normalizedPayload.conversation_type,
+      task_metadata: normalizedPayload.task_metadata
     };
     await this.saveDetail(detail);
     return detail;
@@ -470,7 +478,9 @@ export class ConversationService {
       attachment_count: detail.attachments.length,
       model_override: detail.model_override,
       reasoning_enabled: detail.reasoning_enabled,
-      reasoning_effort: detail.reasoning_effort
+      reasoning_effort: detail.reasoning_effort,
+      conversation_type: detail.conversation_type,
+      task_metadata: detail.task_metadata
     };
   }
 

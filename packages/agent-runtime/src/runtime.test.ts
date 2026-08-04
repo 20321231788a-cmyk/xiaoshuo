@@ -3422,9 +3422,56 @@ describe("agent-runtime chat flow", () => {
     ]);
     expect(book?.paths?.lore).toBe(`${book?.dir}/拆书设定提取.txt`);
     expect(book?.paths?.reverse_outline).toBe(`${book?.dir}/反向细纲.txt`);
+    expect(runtime.listDurableRunEvents(result.run_id || "")).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event_type: "workflow.progress",
+        payload: expect.objectContaining({ skill_id: "disassemble_book", total: 3 })
+      })
+    ]));
     await expect(fs.readFile(path.join(tempDir, "00_设定集", "设定集", "拆书设定提取.txt"), "utf8")).rejects.toThrow();
     expect(await fs.readFile(path.join(tempDir, book?.dir || "", "拆书设定提取.txt"), "utf8")).toContain("林默");
     expect(await fs.readFile(path.join(tempDir, book?.dir || "", "反向细纲.txt"), "utf8")).toContain("第一章");
+  });
+
+  it("streams disassembly stage progress before the final result", async () => {
+    const responses = ["【人物设定】\n林默：主角，出身寒门。", "第一章：林默入宗门。"];
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: { requestCompletion: async () => responses.shift() || "" }
+    });
+    const events: AgentStreamEvent[] = [];
+
+    for await (const event of runtime.streamAgentRun({
+      request_id: "stream-disassembly-progress",
+      conversation_id: "",
+      content: "请拆书",
+      current_path: "",
+      selection: "林默从寒门少年一路成长为宗门天骄。",
+      project_context_hint: "",
+      skill_id: "disassemble_book",
+      attachment_ids: []
+    })) {
+      events.push(event);
+    }
+
+    const progress = events.filter(
+      (event): event is Extract<AgentStreamEvent, { type: "delta" }> => event.type === "delta" && event.stage === "workflow_progress"
+    );
+    expect(progress.map((event) => event.text)).toEqual(expect.arrayContaining([
+      expect.stringContaining("0/3"),
+      expect.stringContaining("1/3"),
+      expect.stringContaining("3/3")
+    ]));
+    const runId = events.find((event): event is Extract<AgentStreamEvent, { type: "start" }> => event.type === "start")?.run_id;
+    expect(runId).toBeTruthy();
+    expect(runtime.listDurableRunEvents(runId || "")).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event_type: "workflow.progress",
+        payload: expect.objectContaining({ skill_id: "disassemble_book", total: 3 })
+      })
+    ]));
+    expect(events.at(-1)?.type).toBe("final");
   });
 
   it("runs continue_disassemble locally and writes 拆书细纲 into a fresh book directory", async () => {
@@ -3737,7 +3784,7 @@ describe("agent-runtime chat flow", () => {
       score: 82,
       risks: ["人物动机略弱", "章纲钩子不够清晰"],
       reason: "整体连续性基本成立",
-      model_line: "primary-fallback"
+      model_line: "current-model-fallback"
     });
     expect(result.reply).toContain('"score": 82');
   });

@@ -7,6 +7,24 @@ export const conversationModelPreferencesSchema = z.object({
   reasoning_effort: reasoningEffortSchema.optional().default("medium")
 });
 
+export const conversationTypeSchema = z.enum([
+  "assistant",
+  "disassembly",
+  "continuation",
+  "distillation",
+  "fusion"
+]);
+
+export const conversationTaskMetadataSchema = z
+  .object({
+    entry: z.string().trim().max(120).optional().default(""),
+    source_path: z.string().trim().max(1000).optional().default(""),
+    source_book_id: z.string().trim().max(240).optional().default(""),
+    target_paths: z.array(z.string().trim().max(1000)).max(40).optional().default([]),
+    created_for: z.string().trim().max(240).optional().default("")
+  })
+  .passthrough();
+
 export const conversationAttachmentSchema = z
   .object({
     id: z.string(),
@@ -54,7 +72,15 @@ export const conversationSummarySchema = z
     attachment_count: z.number().int(),
     model_override: z.string().trim().max(240).optional().default(""),
     reasoning_enabled: z.boolean().optional().default(false),
-    reasoning_effort: reasoningEffortSchema.optional().default("medium")
+    reasoning_effort: reasoningEffortSchema.optional().default("medium"),
+    conversation_type: conversationTypeSchema.optional().default("assistant"),
+    task_metadata: conversationTaskMetadataSchema.optional().default({
+      entry: "",
+      source_path: "",
+      source_book_id: "",
+      target_paths: [],
+      created_for: ""
+    })
   })
   .passthrough();
 
@@ -73,6 +99,22 @@ export type ConversationMessage = z.infer<typeof conversationMessageSchema>;
 export type ConversationSummary = z.infer<typeof conversationSummarySchema>;
 export type ConversationDetail = z.infer<typeof conversationDetailSchema>;
 export type ConversationModelPreferences = z.infer<typeof conversationModelPreferencesSchema>;
+export type ConversationType = z.infer<typeof conversationTypeSchema>;
+export type ConversationTaskMetadata = z.infer<typeof conversationTaskMetadataSchema>;
+
+export const conversationCreateRequestSchema = z.object({
+  title: z.string().optional().default(""),
+  skill_id: z.string().optional().default(""),
+  agent_name: z.string().optional().default(""),
+  conversation_type: conversationTypeSchema.optional().default("assistant"),
+  task_metadata: conversationTaskMetadataSchema.optional().default({
+    entry: "",
+    source_path: "",
+    source_book_id: "",
+    target_paths: [],
+    created_for: ""
+  })
+});
 
 export const conversationMessageRequestSchema = z
   .object({

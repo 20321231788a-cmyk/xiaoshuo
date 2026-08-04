@@ -17,6 +17,13 @@ export type WorkflowDurableExecution = {
   attemptId: string;
 };
 
+export type WorkflowProgress = {
+  stage: string;
+  message: string;
+  completed?: number;
+  total?: number;
+};
+
 export type WorkflowRunContext = {
   projectRoot: string;
   config: ConfigServiceOptions;
@@ -34,6 +41,8 @@ export type WorkflowRunContext = {
   durableExecution?: WorkflowDurableExecution;
   /** Durable file commit path for workflow-owned document writes. */
   commitJournal?: CommitJournalService;
+  /** Ephemeral progress events for the active workflow stream. */
+  reportProgress?: (progress: WorkflowProgress) => void;
 };
 
 export type WorkflowHandler = {

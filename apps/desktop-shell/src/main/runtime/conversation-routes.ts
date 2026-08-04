@@ -1,8 +1,9 @@
 import { ConversationService } from "@xiaoshuo/conversation-service";
-import { loadModelConfig, readRawConfig } from "@xiaoshuo/config-service";
+import { loadTaskModelConfig } from "@xiaoshuo/config-service";
 import { OpenAICompatibleClient } from "@xiaoshuo/model-client";
 import {
   conversationMessageRequestSchema,
+  conversationCreateRequestSchema,
   conversationModelPreferencesSchema,
   type CurrentProject
 } from "@xiaoshuo/shared";
@@ -78,7 +79,7 @@ export async function handleConversationRoutes(
     return true;
   }
   if (!conversationRoute.id && request.method === "POST") {
-    deps.writeJson(response, 200, await service.createConversation(await deps.readJsonBody(request)));
+    deps.writeJson(response, 200, await service.createConversation(conversationCreateRequestSchema.parse(await deps.readJsonBody(request))));
     return true;
   }
   if (conversationRoute.id && !conversationRoute.action && request.method === "GET") {
@@ -195,19 +196,12 @@ export async function handleConversationRoutes(
         return true;
       }
       const configOptions = { rootDir: projectPath, env: process.env };
-      const rawConfig = await readRawConfig(configOptions);
-      const hasExplicitSecondary = Boolean(String(rawConfig.secondary_api_key || "").trim() && String(rawConfig.secondary_model || "").trim());
-      let config = hasExplicitSecondary ? await loadModelConfig(configOptions, "secondary") : await loadModelConfig(configOptions, "primary");
+      let config = await loadTaskModelConfig(configOptions);
       if (!config.configured) {
         deps.writeJson(response, 200, await service.summarizeConversation(conversationRoute.id));
         return true;
       }
-      if (!hasExplicitSecondary) {
-        config = {
-          ...config,
-          temperature: Math.min(config.temperature, 0.2)
-        };
-      }
+      config = { ...config, temperature: Math.min(config.temperature, 0.2) };
       try {
         const detail = await service.getConversation(conversationRoute.id);
         const joined = detail.messages.slice(-18).map((msg) => `${msg.role}: ${msg.content}`).join("\n\n");

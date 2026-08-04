@@ -41,9 +41,13 @@ const arcPhases = [
   ["end", "终点"]
 ] as const;
 
-async function libraryRequest<T>(controller: WorkbenchController, pathname: string, init?: RequestInit): Promise<T> {
-  const fetchFn = controller.runtime.fetchFn || fetch;
-  const response = await fetchFn(new URL(pathname, controller.runtime.apiBase).toString(), {
+async function libraryRequest<T>(
+  apiBase: string,
+  runtimeFetch: WorkbenchController["runtime"]["fetchFn"],
+  pathname: string,
+  init?: RequestInit
+): Promise<T> {
+  const response = await (runtimeFetch || fetch)(new URL(pathname, apiBase).toString(), {
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers || {}) }
   });
@@ -81,6 +85,9 @@ function manualBase(name: string, order: number) {
 }
 
 export function SourcesProductPage({ controller }: { controller: WorkbenchController }) {
+  const projectPath = controller.snapshot?.currentProject.path || "";
+  const apiBase = controller.runtime.apiBase;
+  const runtimeFetch = controller.runtime.fetchFn;
   const [bundle, setBundle] = useState<ProjectLibraryBundle | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("loading");
   const [message, setMessage] = useState("");
@@ -90,26 +97,36 @@ export function SourcesProductPage({ controller }: { controller: WorkbenchContro
   const [editing, setEditing] = useState(false);
 
   const load = useCallback(async () => {
-    if (!controller.snapshot?.currentProject.path) {
+    if (!projectPath) {
       setBundle(null);
       setLoadState("ready");
       return;
     }
     setLoadState("loading");
     try {
-      const next = projectLibraryBundleSchema.parse(await libraryRequest(controller, "/api/project-libraries/lore"));
+      const next = projectLibraryBundleSchema.parse(await libraryRequest(apiBase, runtimeFetch, "/api/project-libraries/lore"));
       setBundle(next);
-      setSelectedId((current) => current || (next.records.filter((r) => r.status === "active" && r.kind === tab)[0]?.id || ""));
       setLoadState("ready");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
       setLoadState("error");
     }
-  }, [controller, controller.snapshot?.currentProject.path, tab]);
+  }, [apiBase, controller.projectDataRevision, projectPath, runtimeFetch]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (!bundle) return;
+    setSelectedId((current) => {
+      const selected = bundle.records.find((record) => record.id === current);
+      if (selected?.status === "active" && selected.kind === tab) {
+        return current;
+      }
+      return bundle.records.find((record) => record.status === "active" && record.kind === tab)?.id || "";
+    });
+  }, [bundle, tab]);
 
   const records = useMemo(() => (bundle?.records || []).filter((r) => r.status === "active"), [bundle]);
   const tabRecords = useMemo(() => {
@@ -134,7 +151,7 @@ export function SourcesProductPage({ controller }: { controller: WorkbenchContro
   async function save() {
     if (!bundle || bundle.status !== "ready") return;
     try {
-      const next = projectLibraryBundleSchema.parse(await libraryRequest(controller, "/api/project-libraries/lore", {
+      const next = projectLibraryBundleSchema.parse(await libraryRequest(apiBase, runtimeFetch, "/api/project-libraries/lore", {
         method: "PUT",
         body: JSON.stringify({ base_revision: bundle.revision, records: bundle.records })
       }));

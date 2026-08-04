@@ -163,13 +163,16 @@ export function AssistantComposer({ controller }: { controller: WorkbenchControl
             </div>
           </div>
 
-          <div className="assistant-composer-actions">
-            <AssistantModelControls controller={controller} />
+          <div className="assistant-composer-status-slot">
             {visibleStatus && (
               <p className="assistant-composer-status" role="status" aria-live="polite" title={visibleStatus}>
                 {visibleStatus}
               </p>
             )}
+          </div>
+
+          <div className="assistant-composer-actions">
+            <AssistantModelControls controller={controller} />
             {controller.sendingMessage ? (
               <button className="assistant-send-button stop" type="button" title="停止生成" aria-label="停止生成" onClick={() => controller.stopMessage()}>
                 <Square size={14} fill="currentColor" />

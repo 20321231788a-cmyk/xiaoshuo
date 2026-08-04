@@ -17,6 +17,7 @@ export class BatchGenerateWorkflow implements WorkflowHandler {
     if (startChapter > endChapter) {
       throw new Error("起始章节不能大于结束章节");
     }
+    const totalChapters = endChapter - startChapter + 1;
     const results: Array<Record<string, unknown>> = [];
     const savedPaths: string[] = [];
     const webSearchSources: WebSearchSource[] = [];
@@ -25,6 +26,13 @@ export class BatchGenerateWorkflow implements WorkflowHandler {
     );
 
     throwIfAborted(context.signal);
+    let completedChapters = 0;
+    context.reportProgress?.({
+      stage: "batch_prepare",
+      message: `正在准备 ${totalChapters} 章的生成任务（${completedChapters}/${totalChapters}）`,
+      completed: completedChapters,
+      total: totalChapters
+    });
     for (let chapter = startChapter; chapter <= endChapter; chapter += 1) {
       throwIfAborted(context.signal);
       const unitId = `chapter:${chapter}`;
@@ -34,8 +42,21 @@ export class BatchGenerateWorkflow implements WorkflowHandler {
         savedPaths.push(...restored.saved_paths);
         webSearchSources.push(...restored.web_search_sources);
         results.push(restored.result);
+        completedChapters += 1;
+        context.reportProgress?.({
+          stage: "batch_resume",
+          message: `已恢复第${chapter}章，继续后续章节（${completedChapters}/${totalChapters}）`,
+          completed: completedChapters,
+          total: totalChapters
+        });
         continue;
       }
+      context.reportProgress?.({
+        stage: "batch_generating",
+        message: `正在生成第${chapter}章（${completedChapters}/${totalChapters}）`,
+        completed: completedChapters,
+        total: totalChapters
+      });
       const originalInstruction = (request.content || "").trim();
       const chapterInstruction = shouldWriteSkillResult(originalInstruction)
         ? `生成第${chapter}章正文并写入文件`
@@ -64,6 +85,13 @@ export class BatchGenerateWorkflow implements WorkflowHandler {
           web_search_sources: result.web_search_sources || [],
           result: chapterResult
         }
+      });
+      completedChapters += 1;
+      context.reportProgress?.({
+        stage: "batch_completed_chapter",
+        message: `已完成第${chapter}章（${completedChapters}/${totalChapters}）`,
+        completed: completedChapters,
+        total: totalChapters
       });
     }
 

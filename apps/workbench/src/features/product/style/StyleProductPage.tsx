@@ -23,9 +23,13 @@ import { EmptyState } from "../shared/SharedStates.js";
 
 type LoadState = "loading" | "ready" | "error";
 
-async function libraryRequest<T>(controller: WorkbenchController, pathname: string, init?: RequestInit): Promise<T> {
-  const fetchFn = controller.runtime.fetchFn || fetch;
-  const response = await fetchFn(new URL(pathname, controller.runtime.apiBase).toString(), {
+async function libraryRequest<T>(
+  apiBase: string,
+  runtimeFetch: WorkbenchController["runtime"]["fetchFn"],
+  pathname: string,
+  init?: RequestInit
+): Promise<T> {
+  const response = await (runtimeFetch || fetch)(new URL(pathname, apiBase).toString(), {
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers || {}) }
   });
@@ -55,6 +59,9 @@ function manualBase(name: string, order: number) {
 }
 
 export function StyleProductPage({ controller }: { controller: WorkbenchController }) {
+  const projectPath = controller.snapshot?.currentProject.path || "";
+  const apiBase = controller.runtime.apiBase;
+  const runtimeFetch = controller.runtime.fetchFn;
   const [style, setStyle] = useState<ProjectLibraryBundle | null>(null);
   const [genre, setGenre] = useState<ProjectLibraryBundle | null>(null);
   const [loadState, setLoadState] = useState<LoadState>("loading");
@@ -62,19 +69,20 @@ export function StyleProductPage({ controller }: { controller: WorkbenchControll
   const [view, setView] = useState<"style" | "genre" | "examples" | "banned">("style");
 
   const [selectedExampleId, setSelectedExampleId] = useState("");
+  const [focusRecordId, setFocusRecordId] = useState("");
   const [historyOpen, setHistoryOpen] = useState(false);
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
   const load = useCallback(async () => {
-    if (!controller.snapshot?.currentProject.path) {
+    if (!projectPath) {
       setLoadState("ready");
       return;
     }
     setLoadState("loading");
     try {
       const [nextStyle, nextGenre] = await Promise.all([
-        libraryRequest(controller, "/api/project-libraries/style").then((payload) => projectLibraryBundleSchema.parse(payload)),
-        libraryRequest(controller, "/api/project-libraries/genre").then((payload) => projectLibraryBundleSchema.parse(payload))
+        libraryRequest(apiBase, runtimeFetch, "/api/project-libraries/style").then((payload) => projectLibraryBundleSchema.parse(payload)),
+        libraryRequest(apiBase, runtimeFetch, "/api/project-libraries/genre").then((payload) => projectLibraryBundleSchema.parse(payload))
       ]);
       setStyle(nextStyle);
       setGenre(nextGenre);
@@ -84,7 +92,7 @@ export function StyleProductPage({ controller }: { controller: WorkbenchControll
       setMessage(error instanceof Error ? error.message : String(error));
       setLoadState("error");
     }
-  }, [controller, controller.snapshot?.currentProject.path]);
+  }, [apiBase, controller.projectDataRevision, projectPath, runtimeFetch]);
 
   useEffect(() => {
     void load();
@@ -106,12 +114,13 @@ export function StyleProductPage({ controller }: { controller: WorkbenchControll
 
   const preferences = styleRecords.filter((record) => record.kind === "language_preference");
   const banned = genreRecords.filter((record) => record.kind === "banned_expression");
+  const addLabel = view === "examples" ? "添加范文" : view === "banned" ? "添加禁用表达" : view === "genre" ? "添加题材规则" : "添加风格规则";
 
   async function saveDomain(domain: ProjectLibraryDomain, source: ProjectLibraryBundle | null) {
     if (!source) return;
     try {
       const next = projectLibraryBundleSchema.parse(
-        await libraryRequest(controller, `/api/project-libraries/${domain}`, {
+        await libraryRequest(apiBase, runtimeFetch, `/api/project-libraries/${domain}`, {
           method: "PUT",
           body: JSON.stringify({ base_revision: source.revision, records: source.records })
         })
@@ -150,6 +159,8 @@ export function StyleProductPage({ controller }: { controller: WorkbenchControll
     } else {
       setGenre(next);
     }
+    setFocusRecordId(record.id);
+    setMessage(`${addLabel}已创建，请在中间编辑后保存。`);
   }
 
   function updateDomainRecord(domain: ProjectLibraryDomain, id: string, values: Record<string, unknown>) {
@@ -242,8 +253,8 @@ export function StyleProductPage({ controller }: { controller: WorkbenchControll
             <Import size={15} />导入规则
           </button>
           <input ref={importInputRef} type="file" accept="application/json,.json" hidden onChange={(event) => { void importRules(event.target.files?.[0]); event.currentTarget.value = ""; }} />
-          <button className="button primary" type="button" onClick={addItem}>
-            <Plus size={15} />添加规则
+          <button className="button primary" type="button" onClick={addItem} disabled={loadState !== "ready"}>
+            <Plus size={15} />{addLabel}
           </button>
         </div>
       </div>
@@ -269,6 +280,26 @@ export function StyleProductPage({ controller }: { controller: WorkbenchControll
 
         {/* 中栏：风格概要与规则列表 */}
         <main className="style-main" style={{ flex: 1, overflowY: "auto" }}>
+          {view === "examples" && (
+            <section className="rule-section" style={{ marginBottom: "20px" }}>
+              <div className="section-title"><h3>范文片段</h3>{message && <small style={{ color: "var(--success)" }}>{message}</small>}</div>
+              {!examples.length && <p style={{ color: "var(--muted)", fontSize: "12px" }}>还没有范文片段。使用右上角“添加范文”创建一条。</p>}
+              {examples.map((example) => (
+                <article key={example.id} className={`rule-row${selectedExample?.id === example.id ? " selected" : ""}`} style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 32px", gap: "10px", padding: "10px", borderBottom: "1px solid var(--line)" }}>
+                  <div style={{ minWidth: 0 }}>
+                    <input autoFocus={focusRecordId === example.id} value={example.name} onFocus={() => setSelectedExampleId(example.id)} onChange={(event) => updateDomainRecord("style", example.id, { name: event.target.value })} placeholder="范文名称" style={{ width: "100%", padding: "5px", fontSize: "12px", border: "1px solid var(--line)", borderRadius: "4px" }} />
+                    <textarea value={example.before || ""} onFocus={() => setSelectedExampleId(example.id)} onChange={(event) => updateDomainRecord("style", example.id, { before: event.target.value })} placeholder="应用前文本" rows={3} style={{ width: "100%", marginTop: "7px", padding: "5px", fontSize: "12px", border: "1px solid var(--line)", borderRadius: "4px", resize: "vertical" }} />
+                    <textarea value={example.after || ""} onFocus={() => setSelectedExampleId(example.id)} onChange={(event) => updateDomainRecord("style", example.id, { after: event.target.value })} placeholder="应用后文本" rows={3} style={{ width: "100%", marginTop: "7px", padding: "5px", fontSize: "12px", border: "1px solid var(--line)", borderRadius: "4px", resize: "vertical" }} />
+                    <input value={example.explanation || ""} onFocus={() => setSelectedExampleId(example.id)} onChange={(event) => updateDomainRecord("style", example.id, { explanation: event.target.value })} placeholder="说明这条范文要传达的写法" style={{ width: "100%", marginTop: "7px", padding: "5px", fontSize: "12px", border: "1px solid var(--line)", borderRadius: "4px" }} />
+                  </div>
+                  <button type="button" className="icon-button subtle" title="删除范文" aria-label={`删除${example.name}`} onClick={() => updateDomainRecord("style", example.id, { status: "archived" })}><X size={14} /></button>
+                </article>
+              ))}
+              <button className="button primary compact" type="button" style={{ marginTop: "15px" }} onClick={() => void saveDomain("style", style)}>保存范文片段</button>
+            </section>
+          )}
+
+          {(view === "style" || view === "genre") && <>
           <section className="style-profile" style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: "15px" }}>
             <div>
               <span className="eyebrow">当前风格</span>
@@ -294,8 +325,9 @@ export function StyleProductPage({ controller }: { controller: WorkbenchControll
             </div>
             {rules.map((rule) => (
               <article className="rule-row" key={rule.id} style={{ display: "flex", gap: "10px", alignItems: "center", padding: "10px", borderBottom: "1px solid var(--line)" }}>
-                <input
-                  value={rule.name}
+                  <input
+                    autoFocus={focusRecordId === rule.id}
+                    value={rule.name}
                   onChange={(e) => updateDomainRecord(view === "style" ? "style" : "genre", rule.id, { name: e.target.value })}
                   style={{ width: "120px", padding: "4px", fontSize: "12px", border: "1px solid var(--line)", borderRadius: "4px" }}
                 />
@@ -375,15 +407,19 @@ export function StyleProductPage({ controller }: { controller: WorkbenchControll
               </div>
             </div>
           )}
+          </>}
 
           {view === "banned" && (
-            <div className="rule-section" style={{ marginTop: "20px" }}>
+            <section className="rule-section" style={{ marginTop: "20px" }}>
               <div className="section-title">
                 <h3>禁用表达列表</h3>
+                {message && <small style={{ color: "var(--success)" }}>{message}</small>}
               </div>
+              {!banned.length && <p style={{ color: "var(--muted)", fontSize: "12px" }}>还没有禁用表达。使用右上角“添加禁用表达”创建一条。</p>}
               {banned.map((item) => (
                 <div key={item.id} style={{ display: "flex", gap: "10px", padding: "6px 0" }}>
                   <input
+                    autoFocus={focusRecordId === item.id}
                     value={item.name}
                     onChange={(e) => updateDomainRecord("genre", item.id, { name: e.target.value })}
                     style={{ flex: 1, padding: "4px", fontSize: "12px", border: "1px solid var(--line)", borderRadius: "4px" }}
@@ -399,7 +435,8 @@ export function StyleProductPage({ controller }: { controller: WorkbenchControll
                   </button>
                 </div>
               ))}
-            </div>
+              <button className="button primary compact" type="button" style={{ marginTop: "15px" }} onClick={() => void saveDomain("genre", genre)}>保存禁用表达</button>
+            </section>
           )}
         </main>
 

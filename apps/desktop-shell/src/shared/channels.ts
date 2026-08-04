@@ -81,6 +81,9 @@ export const ipcChannels = {
   backendStatus: "backend:status",
   backendRestart: "backend:restart",
   runtimeRequest: "runtime:request",
+  runtimeStreamStart: "runtime:stream:start",
+  runtimeStreamCancel: "runtime:stream:cancel",
+  runtimeStreamEvent: "runtime:stream:event",
   appOpenTutorial: "app:open-tutorial",
   appRequestRefresh: "app:request-refresh",
   appRequestRun: "app:request-run",
@@ -158,6 +161,18 @@ export const runtimeResponseSchema = z.object({
   headers: z.record(z.string()),
   body: z.instanceof(Uint8Array).nullable()
 });
+
+export const runtimeStreamRequestSchema = runtimeRequestSchema.extend({
+  request_id: z.string().trim().min(1).max(120)
+});
+
+export const runtimeStreamStartResponseSchema = runtimeResponseSchema.omit({ body: true });
+
+export const runtimeStreamEventSchema = z.discriminatedUnion("type", [
+  z.object({ request_id: z.string().trim().min(1), type: z.literal("chunk"), body: z.instanceof(Uint8Array) }),
+  z.object({ request_id: z.string().trim().min(1), type: z.literal("end") }),
+  z.object({ request_id: z.string().trim().min(1), type: z.literal("error"), error: z.string().default("桌面流式请求失败") })
+]);
 
 export const desktopShellCapabilitiesSchema = z.object({
   terminal: z.object({
@@ -454,6 +469,9 @@ export type IpcChannel = (typeof ipcChannels)[keyof typeof ipcChannels];
 export type BackendStatus = z.infer<typeof backendStatusSchema>;
 export type RuntimeRequest = z.input<typeof runtimeRequestSchema>;
 export type RuntimeResponse = z.infer<typeof runtimeResponseSchema>;
+export type RuntimeStreamRequest = z.input<typeof runtimeStreamRequestSchema>;
+export type RuntimeStreamStartResponse = z.infer<typeof runtimeStreamStartResponseSchema>;
+export type RuntimeStreamEvent = z.infer<typeof runtimeStreamEventSchema>;
 export type DesktopShellCapabilities = z.infer<typeof desktopShellCapabilitiesSchema>;
 export type DesktopProjectPickerResponse = z.infer<typeof desktopProjectPickerResponseSchema>;
 export type DesktopProjectExportRequest = z.input<typeof desktopProjectExportRequestSchema>;
@@ -491,6 +509,11 @@ export type XiaoShuoDesktopApi = {
   backendStatus: () => Promise<BackendStatus>;
   restartBackend: () => Promise<BackendStatus>;
   runtimeRequest: (request: RuntimeRequest) => Promise<RuntimeResponse>;
+  runtimeStream: {
+    start: (request: RuntimeStreamRequest) => Promise<RuntimeStreamStartResponse>;
+    cancel: (requestId: string) => void;
+    onEvent: (callback: (event: RuntimeStreamEvent) => void) => () => void;
+  };
   onOpenTutorial: (callback: () => void) => () => void;
   onRequestRefresh: (callback: () => void) => () => void;
   onRequestRun: (callback: () => void) => () => void;

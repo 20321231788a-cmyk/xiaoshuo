@@ -57,7 +57,8 @@ import {
   novelTypedActionRequestSchema,
   novelUserGestureActionSchema,
   novelWorkspaceProjectSchema,
-  runtimeRequestSchema
+  runtimeRequestSchema,
+  runtimeStreamRequestSchema
 } from "../shared/channels.js";
 
 const runtimeState: RuntimeServerState = {};
@@ -66,6 +67,7 @@ const novelUserGestureAuthorizations = new NovelUserGestureAuthorizationStore();
 let novelAgentControlService: NovelAgentControlService | null = null;
 let quitCleanupComplete = false;
 let quitCleanupStarted = false;
+const runtimeStreamControllers = new Map<string, AbortController>();
 const appIconPath = path.join(app.getAppPath(), "assets", "quill.ico");
 const appDisplayTitle = `ArcWriter ${app.getVersion()}`;
 const updateService = new UpdateService({
@@ -304,6 +306,8 @@ function registerIpc(): void {
     return { ready: true, url: runtimeUrl, pid: undefined };
   });
   ipcMain.handle(ipcChannels.runtimeRequest, async (event, request) => proxyRuntimeRequest(event, request));
+  ipcMain.handle(ipcChannels.runtimeStreamStart, async (event, request) => startRuntimeStream(event, request));
+  ipcMain.on(ipcChannels.runtimeStreamCancel, (event, requestId) => cancelRuntimeStream(event, requestId));
 
   ipcMain.handle(ipcChannels.shellCapabilities, () => getShellCapabilities());
   ipcMain.handle(ipcChannels.shellPickProjectDirectory, async () => {
@@ -531,6 +535,114 @@ async function proxyRuntimeRequest(event: IpcMainInvokeEvent, request: unknown) 
     headers: responseHeaders,
     body
   };
+}
+
+async function startRuntimeStream(event: IpcMainInvokeEvent, request: unknown) {
+  if (!isTrustedRuntimeRenderer(event)) {
+    throw new Error("拒绝非受信任渲染进程访问本地运行时");
+  }
+  const payload = runtimeStreamRequestSchema.parse(request);
+  const target = new URL(payload.url);
+  if (target.origin !== runtimeUrl) {
+    throw new Error("桌面运行时代理仅允许访问本地 ArcWriter API");
+  }
+  if (!runtimeState.sessionToken) {
+    throw new Error("本地运行时尚未就绪");
+  }
+
+  const headers = new Headers(payload.headers);
+  headers.delete("authorization");
+  headers.delete("host");
+  headers.set("Authorization", `Bearer ${runtimeState.sessionToken}`);
+  const key = runtimeStreamKey(event.sender.id, payload.request_id);
+  runtimeStreamControllers.get(key)?.abort();
+  const controller = new AbortController();
+  runtimeStreamControllers.set(key, controller);
+
+  let response: Response;
+  try {
+    response = await fetch(target, {
+      method: payload.method,
+      headers,
+      body: payload.body ?? undefined,
+      signal: controller.signal
+    });
+  } catch (error) {
+    runtimeStreamControllers.delete(key);
+    throw error;
+  }
+
+  const responseHeaders: Record<string, string> = {};
+  response.headers.forEach((value, name) => {
+    responseHeaders[name] = value;
+  });
+  if (!response.body) {
+    runtimeStreamControllers.delete(key);
+    queueMicrotask(() => sendRuntimeStreamEvent(event, { request_id: payload.request_id, type: "end" }));
+  } else {
+    void forwardRuntimeStream(event, payload.request_id, response.body, controller, key);
+  }
+  return {
+    status: response.status,
+    statusText: response.statusText,
+    headers: responseHeaders
+  };
+}
+
+function cancelRuntimeStream(event: IpcMainEvent, requestId: unknown): void {
+  if (!isTrustedRuntimeRenderer(event) || typeof requestId !== "string") {
+    return;
+  }
+  runtimeStreamControllers.get(runtimeStreamKey(event.sender.id, requestId))?.abort();
+}
+
+async function forwardRuntimeStream(
+  event: IpcMainInvokeEvent,
+  requestId: string,
+  body: ReadableStream<Uint8Array>,
+  controller: AbortController,
+  key: string
+): Promise<void> {
+  const reader = body.getReader();
+  try {
+    while (!controller.signal.aborted) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      if (value?.byteLength) {
+        sendRuntimeStreamEvent(event, { request_id: requestId, type: "chunk", body: new Uint8Array(value) });
+      }
+    }
+    sendRuntimeStreamEvent(event, { request_id: requestId, type: "end" });
+  } catch (error) {
+    if (controller.signal.aborted) {
+      sendRuntimeStreamEvent(event, { request_id: requestId, type: "end" });
+    } else {
+      sendRuntimeStreamEvent(event, {
+        request_id: requestId,
+        type: "error",
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  } finally {
+    runtimeStreamControllers.delete(key);
+    try {
+      reader.releaseLock();
+    } catch {
+      // The request stream has already been closed or cancelled.
+    }
+  }
+}
+
+function sendRuntimeStreamEvent(event: IpcMainInvokeEvent, payload: { request_id: string; type: "chunk"; body: Uint8Array } | { request_id: string; type: "end" } | { request_id: string; type: "error"; error: string }): void {
+  if (!event.sender.isDestroyed()) {
+    event.sender.send(ipcChannels.runtimeStreamEvent, payload);
+  }
+}
+
+function runtimeStreamKey(senderId: number, requestId: string): string {
+  return `${senderId}:${requestId}`;
 }
 
 function isTrustedRuntimeRenderer(event: IpcMainEvent | IpcMainInvokeEvent): boolean {

@@ -93,7 +93,7 @@ import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import type { StreamingModelClient } from "./stream.js";
 import { createAgentTraceRecorder, type AgentTraceRecorder } from "./agent-trace.js";
 import { getWorkflowHandler, isWorkflowSkillId } from "./workflows/registry.js";
-import type { WorkflowRunContext } from "./workflows/types.js";
+import type { WorkflowProgress, WorkflowRunContext } from "./workflows/types.js";
 import { isCancellationError, throwIfAborted, type AgentRunOptions } from "./cancellation.js";
 import {
   RunCoordinator,
@@ -126,6 +126,7 @@ import { GovernedMemoryProjectionService } from "./governed-memory-projection-se
 import { EvaluatorRegistry } from "./evaluator-registry.js";
 import { FeedbackLearner, type ArtifactFeedback } from "./feedback-learner.js";
 import { createGeneratedLibraryDraft } from "./library-draft.js";
+import { commitGeneratedStoryPlanning, isStoryPlanningGeneratedSkillId } from "./generated-story-planning.js";
 import {
   buildSectionedGeneratedSavePlan,
   isSectionedGeneratedSkillId,
@@ -273,6 +274,22 @@ export class AgentRuntimeService {
         options: any = {}
       ) {
         yield* originalStreamCompletion(
+          config,
+          messages,
+          temperature,
+          self.withDurableModelBudget(config, messages, options)
+        );
+      };
+    }
+    if (modelClient.streamDetailedCompletion) {
+      const originalStreamDetailedCompletion = modelClient.streamDetailedCompletion.bind(modelClient);
+      modelClient.streamDetailedCompletion = async function*(
+        config: any,
+        messages: any,
+        temperature?: number,
+        options: any = {}
+      ) {
+        yield* originalStreamDetailedCompletion(
           config,
           messages,
           temperature,
@@ -1401,7 +1418,7 @@ export class AgentRuntimeService {
     if (
       requestedSkillId
       && requestedSkillId !== cachedSkillId
-      && (Boolean(cachedSkillId) || isSectionedGeneratedSkillId(requestedSkillId))
+      && (Boolean(cachedSkillId) || isSectionedGeneratedSkillId(requestedSkillId) || isStoryPlanningGeneratedSkillId(requestedSkillId))
     ) {
       throw codedRuntimeError(
         "GENERATED_CACHE_SKILL_MISMATCH",
@@ -1625,13 +1642,21 @@ export class AgentRuntimeService {
         this.runCoordinator.completeRun(execution, generatedCacheCommitResponse(cacheId, savedPaths));
         syntheticRunCompleted = true;
       }
+      if (isStoryPlanningGeneratedSkillId(effectiveSkillId)) {
+        await commitGeneratedStoryPlanning({
+          projectRoot: this.projectRoot,
+          skillId: effectiveSkillId,
+          content: cachedContent,
+          mode: commitMode
+        });
+      }
       const committed = ownsExecution
         ? await this.cache.markCommitted(cacheId, savedPaths, {
             cleanupContent: input.cleanup_content ?? true,
             commitRunId: execution.run_id,
             commitRequestId,
             commitJournalIds: journalIds
-          })
+        })
         : await this.cache.get(cacheId);
       return {
         run_id: execution.run_id,
@@ -2448,7 +2473,8 @@ export class AgentRuntimeService {
   private buildWorkflowContext(
     trace?: AgentTraceRecorder,
     options: AgentRunOptions = {},
-    execution?: DurableRunExecution
+    execution?: DurableRunExecution,
+    reportProgress?: (progress: WorkflowProgress) => void
   ): WorkflowRunContext {
     return {
       projectRoot: this.documents.projectRoot,
@@ -2476,7 +2502,8 @@ export class AgentRuntimeService {
             stepId: execution.step_id,
             attemptId: execution.attempt_id
           })
-        : undefined
+        : undefined,
+      reportProgress
     };
   }
 
@@ -3428,7 +3455,58 @@ export class AgentRuntimeService {
       stage: "workflow_start",
       skill_id: skillId
     };
-    const payload = await this.runLocalWorkflowSkill(skillId, request, trace, options, execution);
+    const progressQueue: WorkflowProgress[] = [];
+    let wakeProgress: (() => void) | null = null;
+    let settled = false;
+    const outcome: { payload: AgentRunResponse | null; failure: unknown } = { payload: null, failure: null };
+    const reportProgress = (progress: WorkflowProgress) => {
+      progressQueue.push(progress);
+      const wake = wakeProgress;
+      wakeProgress = null;
+      wake?.();
+    };
+    const workflow = this.runLocalWorkflowSkill(skillId, request, trace, options, execution, reportProgress)
+      .then((result) => {
+        outcome.payload = result;
+      })
+      .catch((error) => {
+        outcome.failure = error;
+      })
+      .finally(() => {
+        settled = true;
+        const wake = wakeProgress;
+        wakeProgress = null;
+        wake?.();
+      });
+
+    while (!settled || progressQueue.length) {
+      if (!progressQueue.length) {
+        await new Promise<void>((resolve) => {
+          if (settled || progressQueue.length) {
+            resolve();
+            return;
+          }
+          wakeProgress = resolve;
+        });
+      }
+      while (progressQueue.length) {
+        const progress = progressQueue.shift()!;
+        yield {
+          type: "delta",
+          text: progress.message,
+          stage: "workflow_progress",
+          skill_id: skillId
+        };
+      }
+    }
+    await workflow;
+    if (outcome.failure) {
+      throw outcome.failure;
+    }
+    const payload = outcome.payload;
+    if (!payload) {
+      throw new Error("工作流未返回结果");
+    }
     throwIfAborted(options.signal);
     const resultText = this.extractStreamPreviewText(payload);
     if (resultText.trim()) {
@@ -3976,11 +4054,20 @@ export class AgentRuntimeService {
     request: AgentRunRequest,
     trace?: AgentTraceRecorder,
     options: AgentRunOptions = {},
-    execution?: DurableRunExecution
+    execution?: DurableRunExecution,
+    reportProgress?: (progress: WorkflowProgress) => void
   ): Promise<AgentRunResponse> {
     throwIfAborted(options.signal);
     request = { ...request, skill_id: skillId };
-    const context = this.buildWorkflowContext(trace, options, execution);
+    const persistProgress = execution || reportProgress
+      ? (progress: WorkflowProgress) => {
+          if (execution) {
+            this.runCoordinator.recordWorkflowProgress(execution, { ...progress, skill_id: skillId });
+          }
+          reportProgress?.(progress);
+        }
+      : undefined;
+    const context = this.buildWorkflowContext(trace, options, execution, persistProgress);
     const handler = getWorkflowHandler(skillId);
     if (handler) {
       return handler.runAgent(request, context);

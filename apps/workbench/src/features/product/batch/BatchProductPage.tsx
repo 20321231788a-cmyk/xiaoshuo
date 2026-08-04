@@ -1,9 +1,12 @@
 import {
   Check,
   History,
+  Pause,
   Play,
+  RotateCcw,
   ShieldCheck,
-  SquarePen
+  SquarePen,
+  X
 } from "lucide-react";
 import type { TreeNode } from "@xiaoshuo/shared";
 import { lazy, Suspense, useMemo, useState } from "react";
@@ -46,6 +49,8 @@ export function BatchProductPage({ controller }: { controller: WorkbenchControll
     () => buildBatchChapterRows(controller.snapshot?.projectChrome.tree || [], start, end),
     [controller.snapshot?.projectChrome.tree, start, end]
   );
+  const batchTask = controller.longTasks.find((task) => task.skill_id === "batch_generate") || null;
+  const operationProgress = batchTask ? taskProgressValue(batchTask.completed, batchTask.total, batchTask.status) : progressValue(controller.operationsMessage, controller.operationsBusy);
 
   return (
     <div className="page-scroll" style={{ padding: "20px", display: "flex", flexDirection: "column", height: "100%" }}>
@@ -216,9 +221,27 @@ export function BatchProductPage({ controller }: { controller: WorkbenchControll
             </div>
           </div>
 
-          <button className="button primary" style={{ width: "100%", minHeight: "36px" }} type="button" onClick={startBatch} disabled={controller.operationsBusy || !controller.snapshot?.currentProject.path}>
+          <button className="button primary" style={{ width: "100%", minHeight: "36px" }} type="button" onClick={startBatch} disabled={Boolean(batchTask && !isTerminalTask(batchTask.status)) || controller.operationsBusy || !controller.snapshot?.currentProject.path}>
             <Play size={14} /> 开始生成 {chaptersCount} 章
           </button>
+
+          {(batchTask || controller.operationsBusy || controller.operationsMessage) && (
+            <section
+              aria-live="polite"
+              style={{ marginTop: "12px", padding: "10px", border: "1px solid var(--line)", borderRadius: "6px", background: "var(--stone-deep)" }}
+            >
+              <strong style={{ display: "block", fontSize: "12px", marginBottom: "7px" }}>
+                {batchTask ? taskStatusLabel(batchTask.status) : controller.operationsBusy ? "批量生成进行中" : "批量生成状态"}
+              </strong>
+              <progress aria-label="批量生成进度" max={100} value={operationProgress} style={{ width: "100%" }} />
+              <p role="status" style={{ margin: "7px 0 0", fontSize: "12px", color: "var(--muted)" }}>
+                {batchTask?.message || controller.operationsMessage || "正在创建批量生成任务..."}
+              </p>
+              {batchTask && (
+                <TaskControls task={batchTask} onControl={(action) => void controller.controlLongTask(batchTask.task_id, action)} />
+              )}
+            </section>
+          )}
 
           <p style={{ fontSize: "12px", color: "var(--muted)", textAlign: "center", marginTop: "8px" }}>
             开始后您随时可以到后台任务中暂停或取消。
@@ -226,6 +249,55 @@ export function BatchProductPage({ controller }: { controller: WorkbenchControll
         </aside>
       </div>
       )}
+    </div>
+  );
+}
+
+function progressValue(message: string, busy: boolean): number | undefined {
+  const match = /(\d+)\s*\/\s*(\d+)/.exec(message);
+  const completed = Number(match?.[1] || 0);
+  const total = Number(match?.[2] || 0);
+  if (total > 0 && completed >= 0) {
+    return Math.min(100, Math.round((completed / total) * 100));
+  }
+  return busy ? undefined : 100;
+}
+
+function taskProgressValue(completed: number, total: number, status: string): number | undefined {
+  if (total > 0) return Math.min(100, Math.round((completed / total) * 100));
+  return isTerminalTask(status) ? 100 : undefined;
+}
+
+function isTerminalTask(status: string): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
+function taskStatusLabel(status: string): string {
+  if (status === "paused") return "批量生成已暂停";
+  if (status === "failed") return "批量生成失败";
+  if (status === "cancelled") return "批量生成已取消";
+  if (status === "completed") return "批量生成已完成";
+  return "批量生成进行中";
+}
+
+function TaskControls({
+  task,
+  onControl
+}: {
+  task: { status: string; current_step_id: string };
+  onControl: (action: "pause" | "resume" | "cancel" | "retry") => void;
+}) {
+  if (task.status === "completed" || task.status === "cancelled") return null;
+  return (
+    <div style={{ display: "flex", gap: "6px", marginTop: "8px" }}>
+      {task.status === "paused" ? (
+        <button className="button secondary compact" type="button" onClick={() => onControl("resume")}><Play size={13} />继续</button>
+      ) : task.status === "failed" ? (
+        <button className="button secondary compact" type="button" onClick={() => onControl("retry")}><RotateCcw size={13} />重试</button>
+      ) : (
+        <button className="button secondary compact" type="button" onClick={() => onControl("pause")}><Pause size={13} />暂停</button>
+      )}
+      {task.status !== "failed" && <button className="button secondary compact" type="button" onClick={() => onControl("cancel")}><X size={13} />取消</button>}
     </div>
   );
 }

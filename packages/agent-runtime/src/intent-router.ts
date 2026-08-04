@@ -1,7 +1,7 @@
 import type { AgentIntent, SkillDefinition } from "@xiaoshuo/shared";
 
 const GENERATION_VERBS =
-  "生成|帮我写|写|创作|起草|创建|建立|扩展|扩写|扩成|展开|细化|转成|拆成|拆为|拆分|规划|整理|完善|补全|制定|输出|生成一下|写一下|做一下|弄一下|来一段|来一版|续写|接着写|继续写";
+  "生成|帮我写|写|创作|起草|创建|建立|更新|扩展|扩写|扩成|展开|细化|转成|拆成|拆为|拆分|规划|整理|完善|补全|制定|输出|生成一下|写一下|做一下|弄一下|来一段|来一版|续写|接着写|继续写";
 const BODY_GENERATION_VERBS = "生成|帮我写|写|创作|起草|输出|生成一下|写一下|来一段|来一版|续写|接着写|继续写";
 const CHAPTER_OUTLINE_TERMS = "章纲|章节大纲|章节纲要|分章大纲|分章纲要|章节规划|单章大纲";
 const DETAIL_OUTLINE_TERMS = "细纲|详纲|详细大纲";
@@ -107,14 +107,14 @@ const BUILTIN_SKILL_ROUTES: SkillRoute[] = [
   },
   {
     skillId: "genre_generate",
-    pattern: /(生成|创建|建立|配置|设置|设定|补全|完善|写).{0,24}(题材库|题材规则|题材素材|战斗模板|违禁词)|题材库.{0,24}(生成|创建|建立|配置|设置|设定|补全|完善|配置好)/
+    pattern: /(生成|创建|建立|更新|配置|设置|设定|补全|完善|写).{0,24}(题材库|题材规则|题材素材|战斗模板|违禁词)|题材库.{0,24}(生成|创建|建立|更新|配置|设置|设定|补全|完善|配置好)/
   },
   {
     skillId: "outline_generate",
     pattern: new RegExp(`(${GENERATION_VERBS}).{0,32}(${OUTLINE_TERMS})|灵感.{0,12}(大纲|扩展|扩写|扩成)|脑洞.{0,12}(大纲|扩展|扩写|扩成)`)
   },
-  { skillId: "lore_extract", pattern: /(提取|抽取|同步|自动提取|整理|归纳).{0,24}(设定|人设|人物|世界观|体系|地图|道具)|整理人设|提取人设/ },
-  { skillId: "style_extract", pattern: /(提取|抽取|分析|总结|整理).{0,24}(风格|文风|写法|样文风格)|风格提取|文风分析/ },
+  { skillId: "lore_extract", pattern: /(提取|抽取|同步|自动提取|整理|归纳|更新|补全|完善).{0,24}(设定|人设|人物|世界观|体系|地图|道具)|整理人设|提取人设/ },
+  { skillId: "style_extract", pattern: /(提取|抽取|分析|总结|整理|更新|补全|完善).{0,24}(风格|风格库|文风|写法|样文风格)|风格提取|文风分析/ },
   { skillId: "consistency_check", pattern: /一致性|冲突|检查冲突|审稿|设定矛盾|前后矛盾|连续性检查/ },
   { skillId: "scan_pits", pattern: /伏笔|坑点|线索|填坑|埋坑/ }
 ];
@@ -577,7 +577,7 @@ function detectRouteSignals(text: string): RouteSignals {
   const detailOutline = new RegExp(DETAIL_OUTLINE_TERMS).test(normalized);
   const outlineMention = new RegExp(OUTLINE_TERMS).test(normalized) || chapterOutline || detailOutline;
   const outlinePlanning =
-    (outlineMention && /(生成|写|扩展|扩写|扩成|展开|细化|规划|拆分|制定|整理|完善|补全|转成)/.test(normalized)) ||
+    (outlineMention && /(生成|写|更新|扩展|扩写|扩成|展开|细化|规划|拆分|制定|整理|完善|补全|转成)/.test(normalized)) ||
     /(灵感|脑洞).{0,16}(大纲|梗概|总纲|扩成|扩展|扩写)/.test(normalized);
   const bodyWriting =
     /(来一段正文|一段正文|写成文|写一章)/.test(normalized) ||
@@ -591,8 +591,8 @@ function detectRouteSignals(text: string): RouteSignals {
       normalized
     ) && !outlinePlanning;
   const polish = /(润色|润一下|润一润|精修|修文|优化表达|打磨|去\s*AI\s*味|去AI味|去味|太AI|改写)/i.test(normalized);
-  const styleExtract = /(提取|抽取|分析|总结|整理).{0,24}(风格|文风|写法|样文风格)|风格提取|文风分析/.test(normalized);
-  const loreExtract = /(提取|抽取|同步|自动提取|整理|归纳).{0,24}(设定|人设|人物|世界观|体系|地图|道具)|整理人设|提取人设/.test(normalized);
+  const styleExtract = /(提取|抽取|分析|总结|整理|更新|补全|完善).{0,24}(风格|风格库|文风|写法|样文风格)|风格提取|文风分析/.test(normalized);
+  const loreExtract = /(提取|抽取|同步|自动提取|整理|归纳|更新|补全|完善).{0,24}(设定|人设|人物|世界观|体系|地图|道具)|整理人设|提取人设/.test(normalized);
   const pitScan = /(扫描|提取|抽取|整理|梳理|追踪).{0,24}(伏笔|坑点|线索)|伏笔|坑点|线索|填坑|埋坑/.test(normalized);
   const extract = styleExtract || loreExtract || pitScan || /提取|抽取|extract/i.test(normalized);
   const consistency = /一致性|冲突|检查冲突|审稿|设定矛盾|前后矛盾|连续性检查|矛盾检查/.test(normalized);

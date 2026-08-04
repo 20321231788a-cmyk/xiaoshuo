@@ -96,11 +96,13 @@ export function SettingsFeaturePage({ controller, section, onNavigate, onOpenVec
     if (["embedding_enabled", "embedding_api_key", "embedding_base_url", "embedding_model"].some((key) => key in patch)) {
       controller.resetEmbeddingTestResult();
     }
-    controller.patchConfig({ manual_profile: { ...manualProfile, ...patch } });
+    const resetTaskModel = ("api_key" in patch || "base_url" in patch) && Boolean(manualProfile.task_model);
+    controller.patchConfig({ manual_profile: { ...manualProfile, ...patch, ...(resetTaskModel ? { task_model: "" } : {}) } });
   }
 
   function patchWebsiteProfile(patch: Partial<WebsiteAiConfigProfile>) {
-    controller.patchConfig({ website_profile: { ...websiteProfile, ...patch } });
+    const resetTaskModel = ("api_key" in patch || "base_url" in patch) && Boolean(websiteProfile.task_model);
+    controller.patchConfig({ website_profile: { ...websiteProfile, ...patch, ...(resetTaskModel ? { task_model: "" } : {}) } });
   }
 
   function openWebsiteDialog(kind: "redeem" | "recharge") {
@@ -712,11 +714,7 @@ function normalizeUiAiProfile(profile: Partial<AiConfigProfile> | null | undefin
     model: profile?.model || "",
     temp: profile?.temp ?? 0.7,
     top_p: profile?.top_p ?? 1,
-    secondary_api_key: profile?.secondary_api_key || "",
-    secondary_base_url: profile?.secondary_base_url || "",
-    secondary_model: profile?.secondary_model || "",
-    secondary_temp: profile?.secondary_temp ?? 0.5,
-    secondary_top_p: profile?.secondary_top_p ?? 1,
+    task_model: profile?.task_model || "",
     embedding_enabled: Boolean(profile?.embedding_enabled),
     embedding_api_key: profile?.embedding_api_key || "",
     embedding_base_url: profile?.embedding_base_url || "",
@@ -970,19 +968,6 @@ function ManualAiSettings({
         </div>
       </section>}
 
-      {panel === "model" && <section className="xw-settings-section">
-        <div className="xw-settings-section-head">
-          <strong>备用线路</strong>
-          <span>可用于备用接口或轻量任务，模型仍由 AI 助手统一选择</span>
-        </div>
-        <div className="xw-settings-grid">
-          <SecretSettingRow label="副 API Key" value={profile.secondary_api_key || ""} visible={showSecrets} onChange={(value) => onProfileChange({ secondary_api_key: value })} />
-          <TextSettingRow label="副 Base URL" value={profile.secondary_base_url || ""} placeholder="留空沿用主 Base URL" onChange={(value) => onProfileChange({ secondary_base_url: value })} />
-          <SliderSettingRow label="temperature" value={profile.secondary_temp ?? 0.5} min={0} max={2} step={0.01} onChange={(value) => onProfileChange({ secondary_temp: value })} />
-          <SliderSettingRow label="top_p" value={profile.secondary_top_p ?? 1} min={0} max={1} step={0.01} onChange={(value) => onProfileChange({ secondary_top_p: value })} />
-        </div>
-      </section>}
-
       {panel === "retrieval" && <section className="xw-settings-section">
         <div className="xw-settings-section-head with-action">
           <div>
@@ -1097,43 +1082,6 @@ function SelectSettingRow({
           </option>
         ))}
       </select>
-    </label>
-  );
-}
-
-function ManualModelSettingRow({
-  value,
-  models,
-  busy,
-  message,
-  onChange,
-  onRefresh
-}: {
-  value: string;
-  models: Array<{ id: string; name: string; provider: string }>;
-  busy: boolean;
-  message: string;
-  onChange: (value: string) => void;
-  onRefresh: () => void;
-}) {
-  return (
-    <label className="xw-setting-field xw-manual-model-field">
-      <span>模型</span>
-      <span className="xw-setting-input-action">
-        <input
-          value={value}
-          list="arcwriter-manual-models"
-          placeholder="输入或选择模型"
-          onChange={(event) => onChange(event.target.value)}
-        />
-        <button type="button" title="刷新可用模型" aria-label="刷新可用模型" disabled={busy} onClick={onRefresh}>
-          <RefreshCw size={14} className={busy ? "spin" : ""} />
-        </button>
-      </span>
-      <datalist id="arcwriter-manual-models">
-        {models.map((model) => <option key={model.id} value={model.id}>{model.name}{model.provider ? ` · ${model.provider}` : ""}</option>)}
-      </datalist>
-      {message && <small title={message}>{message}</small>}
     </label>
   );
 }

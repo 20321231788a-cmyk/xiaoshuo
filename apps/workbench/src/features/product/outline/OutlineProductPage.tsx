@@ -23,9 +23,13 @@ import { EmptyState } from "../shared/SharedStates.js";
 
 type LoadState = "loading" | "ready" | "error";
 
-async function request<T>(controller: WorkbenchController, pathname: string, init?: RequestInit): Promise<T> {
-  const fetchFn = controller.runtime.fetchFn || fetch;
-  const response = await fetchFn(new URL(pathname, controller.runtime.apiBase), {
+async function request<T>(
+  apiBase: string,
+  runtimeFetch: WorkbenchController["runtime"]["fetchFn"],
+  pathname: string,
+  init?: RequestInit
+): Promise<T> {
+  const response = await (runtimeFetch || fetch)(new URL(pathname, apiBase), {
     ...init,
     headers: { "Content-Type": "application/json", ...(init?.headers || {}) }
   });
@@ -44,28 +48,36 @@ function stamp(): string {
 }
 
 function useStoryPlanning(controller: WorkbenchController) {
+  const projectPath = controller.snapshot?.currentProject.path || "";
+  const apiBase = controller.runtime.apiBase;
+  const runtimeFetch = controller.runtime.fetchFn;
   const [bundle, setBundle] = useState<StoryPlanningBundle | null>(null);
   const [state, setState] = useState<LoadState>("loading");
   const [message, setMessage] = useState("");
 
   const refresh = useCallback(async () => {
+    if (!projectPath) {
+      setBundle(null);
+      setState("ready");
+      return;
+    }
     setState("loading");
     setMessage("");
     try {
-      setBundle(await request<StoryPlanningBundle>(controller, "/api/story-planning"));
+      setBundle(await request<StoryPlanningBundle>(apiBase, runtimeFetch, "/api/story-planning"));
       setState("ready");
     } catch (error) {
       setState("error");
       setMessage(error instanceof Error ? error.message : String(error));
     }
-  }, [controller]);
+  }, [apiBase, controller.projectDataRevision, projectPath, runtimeFetch]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
 
   async function migrate() {
-    const next = await request<StoryPlanningBundle>(controller, "/api/story-planning/migrate", {
+    const next = await request<StoryPlanningBundle>(apiBase, runtimeFetch, "/api/story-planning/migrate", {
       method: "POST",
       body: "{}"
     });
@@ -75,7 +87,7 @@ function useStoryPlanning(controller: WorkbenchController) {
 
   async function save(outline: StoryOutlineNode[]) {
     if (!bundle) return;
-    const next = await request<StoryPlanningBundle>(controller, "/api/story-planning", {
+    const next = await request<StoryPlanningBundle>(apiBase, runtimeFetch, "/api/story-planning", {
       method: "PUT",
       body: JSON.stringify({ base_revision: bundle.revision, outline, timeline: bundle.timeline })
     });
@@ -88,7 +100,7 @@ function useStoryPlanning(controller: WorkbenchController) {
 
 export function OutlineProductPage({ controller }: { controller: WorkbenchController }) {
   const planning = useStoryPlanning(controller);
-  const [activeTab, setActiveTab] = useState<"main" | "character" | "chapter">("main");
+  const [activeTab, setActiveTab] = useState<"main" | "character" | "chapter" | "volume">("main");
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [inlineEditingId, setInlineEditingId] = useState<string | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<string | null>(null);
@@ -97,25 +109,39 @@ export function OutlineProductPage({ controller }: { controller: WorkbenchContro
   const [editTitle, setEditTitle] = useState("");
   const [editSummary, setEditSummary] = useState("");
   const [editChapters, setEditChapters] = useState("");
+  const [editParentVolumeId, setEditParentVolumeId] = useState("");
+  const [editVolumeChapterIds, setEditVolumeChapterIds] = useState<string[]>([]);
 
   const bundle = planning.bundle;
 
   // 选中节点变化时同步状态
   const selectedNode = bundle?.outline.find((item) => item.id === selectedNodeId) || bundle?.outline[0] || null;
-  const visibleOutline = (bundle?.outline || []).filter((item) => activeTab === "main" ? item.kind === "main_arc" || item.kind === "volume" || item.kind === "beat" : activeTab === "character" ? item.kind === "character_arc" : item.kind === "chapter");
+  const visibleOutline = (bundle?.outline || []).filter((item) => activeTab === "main"
+    ? item.kind === "main_arc" || item.kind === "beat"
+    : activeTab === "character"
+      ? item.kind === "character_arc"
+      : activeTab === "chapter"
+        ? item.kind === "chapter"
+        : item.kind === "volume");
   const volumeNodes = (bundle?.outline || []).filter((item) => item.kind === "volume");
   useEffect(() => {
     if (selectedNode) {
       setEditTitle(selectedNode.title);
       setEditSummary(selectedNode.summary || "");
       setEditChapters(selectedNode.chapter_paths.join(", ") || "");
+      setEditParentVolumeId(selectedNode.kind === "chapter" ? selectedNode.parent_id || "" : "");
+      setEditVolumeChapterIds(selectedNode.kind === "volume"
+        ? (bundle?.outline || []).filter((item) => item.kind === "chapter" && item.parent_id === selectedNode.id).map((item) => item.id)
+        : []);
       setSelectedNodeId(selectedNode.id);
     } else {
       setEditTitle("");
       setEditSummary("");
       setEditChapters("");
+      setEditParentVolumeId("");
+      setEditVolumeChapterIds([]);
     }
-  }, [selectedNode?.id]);
+  }, [bundle?.outline, selectedNode?.id]);
 
   if (planning.state === "loading") {
     return <div style={{ padding: "20px", fontSize: "12px", color: "var(--muted)" }}>正在读取故事大纲…</div>;
@@ -151,9 +177,9 @@ export function OutlineProductPage({ controller }: { controller: WorkbenchContro
     const now = stamp();
     const newBeat: StoryOutlineNode = {
       id: newId(),
-      kind: activeTab === "main" ? "main_arc" : activeTab === "character" ? "character_arc" : "chapter",
-      title: "新大纲事件",
-      summary: "大纲事件的描述...",
+      kind: activeTab === "main" ? "main_arc" : activeTab === "character" ? "character_arc" : activeTab === "chapter" ? "chapter" : "volume",
+      title: activeTab === "volume" ? "新分卷" : "新大纲事件",
+      summary: activeTab === "volume" ? "本卷目标、冲突与章节范围..." : "大纲事件的描述...",
       order: bundle.outline.length,
       parent_id: null,
       chapter_paths: [],
@@ -167,6 +193,27 @@ export function OutlineProductPage({ controller }: { controller: WorkbenchContro
     setSelectedNodeId(newBeat.id);
   }
 
+  async function handleAddVolume() {
+    if (!bundle) return;
+    const now = stamp();
+    const volume: StoryOutlineNode = {
+      id: newId(),
+      kind: "volume",
+      title: "新分卷",
+      summary: "本卷目标、冲突与章节范围...",
+      order: bundle.outline.length,
+      parent_id: null,
+      chapter_paths: [],
+      entity_ids: [],
+      status: "planned",
+      created_at: now,
+      updated_at: now
+    };
+    await planning.save([...bundle.outline, volume]);
+    setActiveTab("volume");
+    setSelectedNodeId(volume.id);
+  }
+
   // 保存当前节点的编辑
   async function handleSaveEdit() {
     if (!bundle || !selectedNodeId) return;
@@ -177,8 +224,17 @@ export function OutlineProductPage({ controller }: { controller: WorkbenchContro
           title: editTitle,
           summary: editSummary,
           chapter_paths: editChapters.split(/[,，]/).map(x => x.trim()).filter(Boolean),
+          parent_id: selectedNode?.kind === "chapter" ? editParentVolumeId || null : item.parent_id,
           updated_at: stamp()
         };
+      }
+      if (selectedNode?.kind === "volume" && item.kind === "chapter") {
+        if (editVolumeChapterIds.includes(item.id)) {
+          return { ...item, parent_id: selectedNodeId, updated_at: stamp() };
+        }
+        if (item.parent_id === selectedNodeId) {
+          return { ...item, parent_id: null, updated_at: stamp() };
+        }
       }
       return item;
     });
@@ -191,6 +247,10 @@ export function OutlineProductPage({ controller }: { controller: WorkbenchContro
     setEditTitle(item.title);
     setEditSummary(item.summary || "");
     setEditChapters(item.chapter_paths.join(", "));
+    setEditParentVolumeId(item.kind === "chapter" ? item.parent_id || "" : "");
+    setEditVolumeChapterIds(item.kind === "volume"
+      ? bundle?.outline.filter((node) => node.kind === "chapter" && node.parent_id === item.id).map((node) => node.id) || []
+      : []);
     setInlineEditingId(item.id);
     setDeleteConfirmId(null);
   }
@@ -201,7 +261,11 @@ export function OutlineProductPage({ controller }: { controller: WorkbenchContro
       setDeleteConfirmId(id);
       return;
     }
-    const nextOutline = bundle.outline.filter((item) => item.id !== id).map((item, index) => ({ ...item, order: index }));
+    const now = stamp();
+    const nextOutline = bundle.outline
+      .filter((item) => item.id !== id)
+      // 删除分卷只解除章节归属，章节本身和已有内容都会保留。
+      .map((item) => item.parent_id === id ? { ...item, parent_id: null, updated_at: now } : item);
     await planning.save(nextOutline);
     setDeleteConfirmId(null);
     setInlineEditingId(null);
@@ -211,23 +275,44 @@ export function OutlineProductPage({ controller }: { controller: WorkbenchContro
   // 改变顺序
   async function handleMove(direction: "up" | "down", id: string) {
     if (!bundle) return;
-    const index = bundle.outline.findIndex(item => item.id === id);
+    const index = visibleOutline.findIndex(item => item.id === id);
     if (index === -1) return;
     const nextIndex = direction === "up" ? index - 1 : index + 1;
-    if (nextIndex < 0 || nextIndex >= bundle.outline.length) return;
+    if (nextIndex < 0 || nextIndex >= visibleOutline.length) return;
 
-    const list = [...bundle.outline];
-    const temp = list[index]!;
-    list[index] = list[nextIndex]!;
-    list[nextIndex] = temp;
-
-    // 重排 order
-    const updatedList = list.map((item, idx) => ({
-      ...item,
-      order: idx
+    const current = visibleOutline[index]!;
+    const adjacent = visibleOutline[nextIndex]!;
+    const now = stamp();
+    await planning.save(bundle.outline.map((item) => {
+      if (item.id === current.id) return { ...item, order: adjacent.order, updated_at: now };
+      if (item.id === adjacent.id) return { ...item, order: current.order, updated_at: now };
+      return item;
     }));
+  }
 
-    await planning.save(updatedList);
+  function selectTab(tab: "main" | "character" | "chapter" | "volume") {
+    setActiveTab(tab);
+    const next = (bundle?.outline || []).find((item) => tab === "main"
+      ? item.kind === "main_arc" || item.kind === "beat"
+      : tab === "character"
+        ? item.kind === "character_arc"
+        : tab === "chapter"
+        ? item.kind === "chapter"
+          : item.kind === "volume");
+    const selectedMatchesTab = (bundle?.outline || []).some((item) => item.id === selectedNodeId && (tab === "main"
+      ? item.kind === "main_arc" || item.kind === "beat"
+      : tab === "character"
+        ? item.kind === "character_arc"
+        : tab === "chapter"
+          ? item.kind === "chapter"
+          : item.kind === "volume"));
+    if (next && !selectedMatchesTab) setSelectedNodeId(next.id);
+  }
+
+  function toggleVolumeChapter(chapterId: string) {
+    setEditVolumeChapterIds((current) => current.includes(chapterId)
+      ? current.filter((id) => id !== chapterId)
+      : [...current, chapterId]);
   }
 
   return (
@@ -239,12 +324,13 @@ export function OutlineProductPage({ controller }: { controller: WorkbenchContro
         </div>
         <div className="content-actions">
           <div className="segment">
-            <button className={activeTab === "main" ? "active" : ""} type="button" onClick={() => setActiveTab("main")}>主线</button>
-            <button className={activeTab === "character" ? "active" : ""} type="button" onClick={() => setActiveTab("character")}>人物线</button>
-            <button className={activeTab === "chapter" ? "active" : ""} type="button" onClick={() => setActiveTab("chapter")}>章节</button>
+            <button className={activeTab === "main" ? "active" : ""} type="button" onClick={() => selectTab("main")}>主线</button>
+            <button className={activeTab === "character" ? "active" : ""} type="button" onClick={() => selectTab("character")}>人物线</button>
+            <button className={activeTab === "chapter" ? "active" : ""} type="button" onClick={() => selectTab("chapter")}>章节</button>
+            <button className={activeTab === "volume" ? "active" : ""} type="button" onClick={() => selectTab("volume")}>分卷</button>
           </div>
           <button className="button secondary" type="button" onClick={() => void controller.runWorkflowSkill("outline_generate", { text: bundle.outline.map((item) => `${item.title}：${item.summary}`).join("\n"), instruction: "完善当前故事大纲，保留既有事件与章节关联，结果先进入预览。", write_result: false })} disabled={controller.operationsBusy}><RefreshCw size={15} />AI 完善大纲</button>
-          <button className="button primary" type="button" onClick={handleAddBeat}><Plus size={15} />添加情节点</button>
+          <button className="button primary" type="button" onClick={handleAddBeat}><Plus size={15} />{activeTab === "volume" ? "添加分卷" : "添加情节点"}</button>
         </div>
       </div>
 
@@ -252,18 +338,21 @@ export function OutlineProductPage({ controller }: { controller: WorkbenchContro
         {/* 左栏：故事结构导航 */}
         <aside className="outline-nav">
           <span className="subhead">故事结构</span>
-          <button type="button" className={activeTab === "main" ? "active" : ""} onClick={() => setActiveTab("main")}>
+          <button type="button" className={activeTab === "main" ? "active" : ""} onClick={() => selectTab("main")}>
             <Network size={15} />主线大纲
           </button>
-          <button type="button" className={activeTab === "character" ? "active" : ""} onClick={() => setActiveTab("character")}>
+          <button type="button" className={activeTab === "character" ? "active" : ""} onClick={() => selectTab("character")}>
             <Users size={15} />人物线
           </button>
-          <button type="button" className={activeTab === "chapter" ? "active" : ""} onClick={() => setActiveTab("chapter")}>
+          <button type="button" className={activeTab === "chapter" ? "active" : ""} onClick={() => selectTab("chapter")}>
             <Pin size={15} />章节规划
           </button>
           <span className="subhead gap">分卷</span>
-          {volumeNodes.map((volume) => <button key={volume.id} type="button" className={selectedNodeId === volume.id ? "active-soft" : ""} onClick={() => setSelectedNodeId(volume.id)}><BookOpen size={15} />{volume.title}</button>)}
-          {!volumeNodes.length && <small className="outline-nav-empty">尚未建立分卷</small>}
+          <button type="button" onClick={() => void handleAddVolume()}>
+            <Plus size={15} />新建分卷
+          </button>
+          {volumeNodes.map((volume) => <button key={volume.id} type="button" className={selectedNodeId === volume.id ? "active-soft" : ""} onClick={() => { setActiveTab("volume"); setSelectedNodeId(volume.id); }}><BookOpen size={15} />{volume.title}</button>)}
+          {!volumeNodes.length && <small className="outline-nav-empty">尚未建立分卷，可点击上方新建。</small>}
         </aside>
 
         {/* 中栏：情节点列表 */}
@@ -389,6 +478,32 @@ export function OutlineProductPage({ controller }: { controller: WorkbenchContro
                     style={{ width: "100%", padding: "6px", borderRadius: "4px", border: "1px solid var(--line)" }}
                   />
                 </label>
+                {selectedNode.kind === "chapter" ? (
+                  <label style={{ display: "block" }}>
+                    <span className="field-label">所属分卷</span>
+                    <select
+                      value={editParentVolumeId}
+                      onChange={(event) => setEditParentVolumeId(event.target.value)}
+                      style={{ width: "100%", padding: "6px", borderRadius: "4px", border: "1px solid var(--line)" }}
+                    >
+                      <option value="">暂不归入分卷</option>
+                      {volumeNodes.map((volume) => <option key={volume.id} value={volume.id}>{volume.title}</option>)}
+                    </select>
+                  </label>
+                ) : null}
+                {selectedNode.kind === "volume" ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                    <span className="field-label">本卷包含的章节节点</span>
+                    {(bundle.outline || []).filter((item) => item.kind === "chapter").length ? (
+                      (bundle.outline || []).filter((item) => item.kind === "chapter").map((chapter) => (
+                        <label key={chapter.id} style={{ display: "flex", alignItems: "center", gap: "7px", fontSize: "12px" }}>
+                          <input type="checkbox" checked={editVolumeChapterIds.includes(chapter.id)} onChange={() => toggleVolumeChapter(chapter.id)} />
+                          <span>{chapter.title}</span>
+                        </label>
+                      ))
+                    ) : <small style={{ color: "var(--muted)" }}>尚无章节节点，可先在“章节”中添加后再归入本卷。</small>}
+                  </div>
+                ) : null}
 
                 <div className="detail-divider" style={{ borderTop: "1px solid var(--line)", margin: "10px 0" }} />
 

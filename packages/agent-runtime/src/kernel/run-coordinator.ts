@@ -855,6 +855,34 @@ export class RunCoordinator {
     return this.store.listEvents(runId, { after, limit });
   }
 
+  /** Stores workflow checkpoints so a renderer can recover progress by run ID. */
+  recordWorkflowProgress(
+    execution: Pick<DurableRunExecution, "run_id" | "step_id" | "attempt_id">,
+    progress: { stage: string; message: string; completed?: number; total?: number; skill_id?: string }
+  ): StoredAgentRunEvent {
+    const active = this.requireActive(execution.run_id, execution.attempt_id);
+    const run = this.requireRun(execution.run_id);
+    if (active.control === "pause" || run.pause_requested_at) {
+      throw Object.assign(new Error("任务已在安全检查点暂停"), { code: "RUN_PAUSE_CHECKPOINT" });
+    }
+    if (active.control === "cancel" || run.cancel_requested_at || active.signal.aborted) {
+      throw active.signal.reason instanceof Error
+        ? active.signal.reason
+        : Object.assign(new Error("任务已取消"), { code: "RUN_CANCELLED" });
+    }
+    return this.store.appendEventInTransaction(execution.run_id, {
+      event_type: "workflow.progress",
+      step_id: execution.step_id,
+      payload: {
+        stage: String(progress.stage || "working"),
+        message: String(progress.message || "正在处理…"),
+        completed: Math.max(0, Math.trunc(progress.completed || 0)),
+        total: Math.max(0, Math.trunc(progress.total || 0)),
+        skill_id: String(progress.skill_id || "")
+      }
+    });
+  }
+
   listCommitJournal(runId?: string) {
     return this.store.listCommitJournal(runId);
   }

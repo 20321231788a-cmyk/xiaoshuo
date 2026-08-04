@@ -3,7 +3,8 @@ import { z } from "zod";
 import {
   OpenAICompatibleClient,
   type ChatCompletionMessage,
-  type ModelRequestOptions
+  type ModelRequestOptions,
+  type ModelStreamChunk
 } from "./openai-compatible.js";
 import { ModelRetryPolicy } from "./retry-policy.js";
 import { StructuredOutputManager } from "./structured-output.js";
@@ -22,6 +23,7 @@ export type GatewayRequestOptions = {
   disableRateLimiter?: boolean;
   maxOutputTokens?: number;
   captureUsage?: boolean;
+  reasoningEffort?: ModelRequestOptions["reasoningEffort"];
   dispatchLifecycle?: ModelRequestOptions["dispatchLifecycle"];
 };
 
@@ -289,6 +291,88 @@ ${rawText}`;
     }
   }
 
+  async *streamDetailedText(
+    config: ModelConfig,
+    messages: ChatCompletionMessage[],
+    options: GatewayRequestOptions
+  ): AsyncGenerator<ModelStreamChunk> {
+    const attemptId = `model_attempt_${Math.random().toString(36).slice(2, 10)}`;
+    const breaker = this.getBreaker(config.model);
+    const limiter = this.getLimiter(config.model);
+
+    if (!breaker.canExecute()) {
+      if (options.fallbackConfigs && options.fallbackConfigs.length > 0) {
+        const fallback = options.fallbackConfigs[0]!;
+        const nextFallbacks = options.fallbackConfigs.slice(1);
+        yield* this.streamDetailedText(fallback, messages, { ...options, fallbackConfigs: nextFallbacks });
+        return;
+      }
+      throw new Error(`模型熔断器已开启，快速失败: ${config.model}`);
+    }
+
+    if (!options.disableRateLimiter) {
+      await limiter.acquire(options.signal);
+    }
+    this.verifyPrivacyBoundary(config, options.dataClassification);
+
+    if (this.onBeforeRequestCallback) {
+      this.onBeforeRequestCallback({
+        attemptId,
+        runId: options.runId,
+        stepId: options.stepId,
+        attemptIdFromOption: options.attemptId,
+        provider: config.base_url || "unknown",
+        model: config.model,
+        purpose: options.purpose,
+        messages
+      });
+    }
+
+    let started = false;
+    let chunksCount = 0;
+    const startedAt = Date.now();
+
+    try {
+      for await (const chunk of this.client.streamDetailedCompletion(config, messages, config.temperature, requestOptions(options))) {
+        started = true;
+        chunksCount++;
+        yield chunk;
+      }
+      breaker.recordSuccess();
+
+      if (this.onMetricsCallback) {
+        const usage: ModelUsage = {
+          promptTokens: messages.reduce((sum, message) => sum + message.content.length, 0) / 2,
+          completionTokens: chunksCount * 1.5,
+          totalTokens: (messages.reduce((sum, message) => sum + message.content.length, 0) / 2) + (chunksCount * 1.5)
+        };
+        this.onMetricsCallback({
+          modelAttemptId: attemptId,
+          provider: config.base_url || "unknown",
+          model: config.model,
+          purpose: options.purpose,
+          usage,
+          durationMs: Date.now() - startedAt,
+          retryCount: 0,
+          fallbackUsed: false,
+          costUSD: estimateCost(config.model, usage)
+        });
+      }
+    } catch (error) {
+      breaker.recordFailure();
+      if (started) {
+        throw error;
+      }
+      if (options.fallbackConfigs && options.fallbackConfigs.length > 0) {
+        const fallback = options.fallbackConfigs[0]!;
+        const nextFallbacks = options.fallbackConfigs.slice(1);
+        yield* this.streamDetailedText(fallback, messages, { ...options, fallbackConfigs: nextFallbacks });
+        return;
+      }
+      throw error;
+    }
+  }
+
   async requestCompletion(
     config: ModelConfig,
     messages: ChatCompletionMessage[],
@@ -313,6 +397,19 @@ ${rawText}`;
       activeConfig.temperature = temperature;
     }
     yield* this.streamText(activeConfig, messages, { purpose: options.purpose ?? "chat", ...options });
+  }
+
+  async *streamDetailedCompletion(
+    config: ModelConfig,
+    messages: ChatCompletionMessage[],
+    temperature?: number,
+    options: Partial<GatewayRequestOptions> = {}
+  ): AsyncGenerator<ModelStreamChunk> {
+    const activeConfig = { ...config };
+    if (temperature !== undefined) {
+      activeConfig.temperature = temperature;
+    }
+    yield* this.streamDetailedText(activeConfig, messages, { purpose: options.purpose ?? "chat", ...options });
   }
 
   private async executeRequest(
@@ -402,6 +499,7 @@ ${rawText}`;
 function requestOptions(options: GatewayRequestOptions): ModelRequestOptions {
   return {
     signal: options.signal,
+    reasoningEffort: options.reasoningEffort,
     maxOutputTokens: options.maxOutputTokens,
     captureUsage: options.captureUsage,
     dispatchLifecycle: options.dispatchLifecycle

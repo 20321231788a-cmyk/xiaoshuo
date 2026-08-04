@@ -1,4 +1,4 @@
-import { loadModelConfig, loadWebSearchConfig, readRawConfig, type ModelConfig } from "@xiaoshuo/config-service";
+import { loadModelConfig, loadTaskModelConfig, loadWebSearchConfig, type ModelConfig } from "@xiaoshuo/config-service";
 import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
 import type { ChatCompletionMessage } from "@xiaoshuo/model-client";
 import type { AgentRunRequest, AgentRunResponse } from "@xiaoshuo/shared";
@@ -342,8 +342,8 @@ async function runConsistencyCheckForText(
     score: clampScore(Number(parsed.score || 0)),
     risks: Array.isArray(parsed.risks) ? parsed.risks.map((item) => String(item)).slice(0, 12) : [],
     reason:
-      assistantConfig.line === "primary-fallback"
-        ? `副线路未配置，已由主线路辅助代理完成评分。${String(parsed.reason || String(raw || "").slice(0, 1000))}`
+      assistantConfig.line === "current-model-fallback"
+        ? `未选择轻量任务模型，已使用当前模型完成评分。${String(parsed.reason || String(raw || "").slice(0, 1000))}`
         : String(parsed.reason || String(raw || "").slice(0, 1000)),
     ...(graph.error ? { graph_error: graph.error } : {})
   };
@@ -442,24 +442,17 @@ function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.map((item) => String(item || "").trim()).filter(Boolean))];
 }
 
-async function loadAssistantModelConfig(context: WorkflowRunContext): Promise<{ config: ModelConfig; line: "secondary" | "primary-fallback" }> {
-  const rawConfig = await readRawConfig(context.config);
-  const hasExplicitSecondary = Boolean(String(rawConfig.secondary_api_key || "").trim() && String(rawConfig.secondary_model || "").trim());
-  if (hasExplicitSecondary) {
-    const secondary = await loadModelConfig(context.config, "secondary");
-    return { config: secondary, line: "secondary" };
+async function loadAssistantModelConfig(
+  context: WorkflowRunContext
+): Promise<{ config: ModelConfig; line: "task-model" | "current-model-fallback" }> {
+  const taskConfig = await loadTaskModelConfig(context.config);
+  if (!taskConfig.configured) {
+    throw new Error("未配置当前主路线 API Key 或模型名。");
   }
-  const primary = await loadModelConfig(context.config, "primary");
-  if (primary.configured) {
-    return {
-      config: {
-        ...primary,
-        temperature: Math.min(primary.temperature, 0.2)
-      },
-      line: "primary-fallback"
-    };
-  }
-  throw new Error("未配置主线路或副线路 API Key / 模型名。");
+  return {
+    config: { ...taskConfig, temperature: Math.min(taskConfig.temperature, 0.2) },
+    line: taskConfig.model_source === "task-model" ? "task-model" : "current-model-fallback"
+  };
 }
 
 async function runBodyChapterRevision(

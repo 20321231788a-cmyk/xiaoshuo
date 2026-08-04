@@ -1,5 +1,5 @@
 import { ConversationService } from "@xiaoshuo/conversation-service";
-import { DocumentService } from "@xiaoshuo/document-service";
+import { DocumentService, ProjectLibraryService, StoryPlanningService } from "@xiaoshuo/document-service";
 import { ProjectManifestService } from "@xiaoshuo/project-manifest";
 import type {
   AgentPlanResponse,
@@ -10,7 +10,10 @@ import type {
   AgentStreamEvent,
   ConversationDetail,
   ConversationMessage,
-  OperationResult
+  OperationResult,
+  ProjectLibraryDomain,
+  ProjectLibraryRecord,
+  StoryOutlineNode
 } from "@xiaoshuo/shared";
 import { agentPlanResponseSchema } from "@xiaoshuo/shared";
 import { createHash, randomUUID } from "node:crypto";
@@ -28,6 +31,7 @@ import type {
   ExecutionCasResult,
   StoredAgentConfirmation
 } from "./kernel/execution-store-port.js";
+import { recordsFromGeneratedSections } from "./library-draft.js";
 
 type FileOperationRunnerOptions = {
   planner: AgentPlanner;
@@ -57,6 +61,7 @@ export type DurableFileOperationContext = {
 
 export class AgentFileOperationRunner {
   private readonly planner: AgentPlanner;
+  private readonly projectRoot: string;
   private readonly documents: DocumentService;
   private readonly conversations: ConversationService;
   private readonly manifest: ProjectManifestService;
@@ -65,6 +70,7 @@ export class AgentFileOperationRunner {
 
   constructor(options: FileOperationRunnerOptions) {
     this.planner = options.planner;
+    this.projectRoot = options.projectRoot;
     this.documents = new DocumentService({ projectRoot: options.projectRoot });
     this.conversations = new ConversationService({ projectRoot: options.projectRoot });
     this.manifest = new ProjectManifestService(options.projectRoot);
@@ -474,7 +480,10 @@ export class AgentFileOperationRunner {
       [/细纲/, "01_大纲/细纲.txt"],
       [/章纲/, "01_大纲/章纲.txt"],
       [/正文/, "02_正文/正文.txt"],
-      [/大纲/, "01_大纲/大纲.txt"]
+      [/大纲/, "01_大纲/大纲.txt"],
+      [/(?:写作风格|风格库|文风|范文|禁用表达)/, "00_设定集/风格库/AI更新.txt"],
+      [/(?:题材库|题材规则|题材素材|战斗模板|违禁词)/, "00_设定集/题材库/AI更新.txt"],
+      [/(?:设定资料|设定集|人物设定|世界观|人设|体系设定|地图设定|道具设定)/, "00_设定集/设定集/AI更新.txt"]
     ];
     for (const [pattern, target] of targets) {
       if (pattern.test(text)) {
@@ -513,9 +522,10 @@ export class AgentFileOperationRunner {
 
   private extractInlineSaveContent(text: string): string {
     const stripped = String(text || "").trim();
+    const targetName = "大纲|细纲|章纲|正文|设定资料|设定集|人物设定|世界观|人设|体系设定|地图设定|道具设定|写作风格|风格库|文风|范文|禁用表达|题材库|题材规则|题材素材|战斗模板|违禁词";
     const patterns = [
-      /(?:保存|存到|写入|写进|写到|追加|同步到|落到|写回|覆盖|替换|改写).{0,12}(?:大纲|细纲|章纲|正文)\s*[:：]\s*(.+)/s,
-      /(?:大纲|细纲|章纲|正文).{0,8}(?:保存|写入|追加|覆盖|替换)\s*[:：]\s*(.+)/s
+      new RegExp(`(?:保存|存到|写入|写进|写到|追加|同步到|落到|写回|覆盖|替换|改写).{0,12}(?:${targetName})\\s*[:：]\\s*(.+)`, "s"),
+      new RegExp(`(?:${targetName}).{0,8}(?:保存|写入|追加|覆盖|替换)\\s*[:：]\\s*(.+)`, "s")
     ];
     for (const pattern of patterns) {
       const match = stripped.match(pattern);
@@ -781,7 +791,8 @@ export class AgentFileOperationRunner {
     summary: string,
     durable?: DurableFileOperationContext
   ): Promise<OperationResult[]> {
-    const prepared = await this.prepareWritableOperations(operations);
+    const writableOperations = operations.filter((operation) => durable || !this.isStructuredDirectSaveOperation(operation));
+    const prepared = await this.prepareWritableOperations(writableOperations);
     await this.assertArtifactQuality?.(prepared.map((entry) => ({
       content: entry.content,
       targetPath: entry.operation.path,
@@ -791,17 +802,25 @@ export class AgentFileOperationRunner {
     const results: OperationResult[] = [];
     for (const operation of operations) {
       try {
+        const structuredResult = await this.tryExecuteStructuredDirectSave(operation, durable);
+        if (structuredResult) {
+          results.push(...structuredResult);
+          continue;
+        }
         if (["create_file", "append_text", "replace_text"].includes(operation.action)) {
           const content = prepared.find((entry) => entry.operation === operation)?.content;
           if (content === undefined) {
             throw new Error("保存内容预检丢失");
           }
           await this.saveContent(operation.path, content, operation.action, summary, durable);
+          const structuredSync = durable && this.isStructuredDirectSaveOperation(operation)
+            ? await this.tryExecuteStructuredDirectSave(operation)
+            : null;
           results.push({
             action: operation.action,
             path: operation.path,
             ok: true,
-            message: "完成"
+            message: structuredSync?.[0]?.message ? `完成；${structuredSync[0].message}` : "完成"
           });
         } else {
           const res = await this.documents.executeOperations([operation], { source: "agent", summary });
@@ -824,10 +843,209 @@ export class AgentFileOperationRunner {
     summary: string,
     durable?: DurableFileOperationContext
   ): Promise<OperationResult[]> {
+    const structuredResult = await this.tryExecuteStructuredDirectSave(operation, durable);
+    if (structuredResult) {
+      return structuredResult;
+    }
     const content = await this.resolveOperationContent(operation);
     await this.assertArtifactQuality?.([{ content, targetPath: operation.path, artifactType: "project_document" }]);
     await this.saveContent(operation.path, content, operation.action, summary, durable);
-    return [{ action: operation.action, path: operation.path, ok: true, message: "完成" }];
+    const structuredSync = durable && this.isStructuredDirectSaveOperation(operation)
+      ? await this.tryExecuteStructuredDirectSave(operation)
+      : null;
+    return [{
+      action: operation.action,
+      path: operation.path,
+      ok: true,
+      message: structuredSync?.[0]?.message ? `完成；${structuredSync[0].message}` : "完成"
+    }];
+  }
+
+  /**
+   * The product pages read structured planning/library masters.  A generic file
+   * operation aimed at one of their legacy projection paths must therefore
+   * update the master through its service, rather than create a detached text
+   * file that only looks like a successful save.
+   */
+  private async tryExecuteStructuredDirectSave(
+    operation: FileOperation,
+    durable?: DurableFileOperationContext
+  ): Promise<OperationResult[] | null> {
+    if (!this.isStructuredDirectSaveOperation(operation)) {
+      return null;
+    }
+    if (durable) {
+      return null;
+    }
+    if (!(["create_file", "append_text", "replace_text"] as string[]).includes(operation.action)) {
+      return null;
+    }
+    const sourceText = this.structuredDirectSaveSource(operation);
+    if (!sourceText.trim()) {
+      throw new Error("结构化资料保存内容为空，已阻止提交。" );
+    }
+    const overwrite = operation.action === "replace_text";
+    if (operation.path === "01_大纲/大纲.txt") {
+      const saved = await this.saveStructuredStoryPlanning(sourceText, overwrite);
+      return [{
+        action: operation.action,
+        path: "00_设定集/.agent/story-planning.jsonl",
+        ok: true,
+        message: `故事大纲已更新（修订 ${saved.revision}）`
+      }];
+    }
+
+    const domain = this.structuredLibraryDomainForPath(operation.path);
+    if (!domain) {
+      return null;
+    }
+    const saved = await this.saveStructuredLibrary(domain, sourceText, overwrite);
+    return [{
+      action: operation.action,
+      path: `00_设定集/.agent/libraries/${domain}.v1.jsonl`,
+      ok: true,
+      message: `${this.libraryDomainLabel(domain)}已更新（${saved.records.length} 条，修订 ${saved.revision}）`
+    }];
+  }
+
+  private isStructuredDirectSaveTarget(targetPath: string): boolean {
+    return targetPath === "01_大纲/大纲.txt" || Boolean(this.structuredLibraryDomainForPath(targetPath));
+  }
+
+  private isStructuredDirectSaveOperation(operation: FileOperation): boolean {
+    return this.isStructuredDirectSaveTarget(operation.path) && /^根据用户保存指令/.test(operation.reason || "");
+  }
+
+  private structuredLibraryDomainForPath(targetPath: string): ProjectLibraryDomain | "" {
+    if (/^00_设定集\/风格库\/(?:AI更新\.txt|写作风格\.txt|风格示例\.txt|参考素材\.txt)$/.test(targetPath)) {
+      return "style";
+    }
+    if (/^00_设定集\/题材库\/(?:AI更新\.txt|题材规则\.txt|题材素材\.txt|战斗模板\.txt|违禁词\.txt)$/.test(targetPath)) {
+      return "genre";
+    }
+    if (/^00_设定集\/设定集\/(?:AI更新\.txt|人物设定\.txt|体系设定\.txt|地图设定\.txt|道具设定\.txt)$/.test(targetPath)) {
+      return "lore";
+    }
+    return "";
+  }
+
+  private structuredDirectSaveSource(operation: FileOperation): string {
+    if (operation.action === "replace_text") {
+      return String(operation.new_text || "").trim();
+    }
+    return String(operation.text || "").trim();
+  }
+
+  private async saveStructuredStoryPlanning(sourceText: string, overwrite: boolean) {
+    const planning = new StoryPlanningService({ projectRoot: this.projectRoot });
+    let current = await planning.get();
+    if (current.status === "migration_required") {
+      current = await planning.migrate();
+    }
+    if (current.status === "projection_drift") {
+      throw new Error("故事大纲兼容文本已被外部修改，请先在故事大纲页迁移或重建后再保存。" );
+    }
+    const now = new Date().toISOString();
+    const outline: StoryOutlineNode[] = overwrite ? [] : current.outline;
+    outline.push({
+      id: randomUUID().replace(/-/g, ""),
+      kind: "main_arc",
+      title: this.structuredOutlineTitle(sourceText),
+      summary: sourceText.trim(),
+      order: outline.length ? Math.max(...outline.map((item) => item.order)) + 1 : 0,
+      parent_id: null,
+      chapter_paths: [],
+      entity_ids: [],
+      status: "planned",
+      created_at: now,
+      updated_at: now
+    });
+    return planning.save({
+      baseRevision: current.revision,
+      outline,
+      timeline: current.timeline
+    });
+  }
+
+  private structuredOutlineTitle(sourceText: string): string {
+    const firstLine = sourceText
+      .split(/\r?\n/)
+      .map((line) => line.replace(/^\s*(?:#{1,6}|[-*•]|\d+[.、])\s*/, "").trim())
+      .find(Boolean) || "";
+    const candidate = firstLine.replace(/[：:].*$/, "").trim();
+    return (candidate || "AI 新增故事大纲").slice(0, 180);
+  }
+
+  private async saveStructuredLibrary(domain: ProjectLibraryDomain, sourceText: string, overwrite: boolean) {
+    const libraries = new ProjectLibraryService({ projectRoot: this.projectRoot });
+    let current = await libraries.get(domain);
+    if (current.status === "migration_required") {
+      current = (await libraries.migrate([domain]))[0]!;
+    }
+    if (current.status === "projection_drift") {
+      throw new Error(`${this.libraryDomainLabel(domain)}兼容文本已被外部修改，请先在对应页面迁移或重建后再保存。`);
+    }
+    const additions = this.directLibraryRecords(domain, sourceText, current.records.length);
+    if (!additions.length) {
+      throw new Error(`无法从内容中整理出可写入的${this.libraryDomainLabel(domain)}记录。`);
+    }
+    const records = [
+      ...(overwrite ? [] : current.records.filter((record) => record.status === "active")),
+      ...additions
+    ];
+    return libraries.save(domain, {
+      baseRevision: current.revision,
+      records,
+      source: "agent_direct_structured_save",
+      summary: `AI 直接更新${this.libraryDomainLabel(domain)}`
+    });
+  }
+
+  private directLibraryRecords(domain: ProjectLibraryDomain, sourceText: string, startOrder: number): ProjectLibraryRecord[] {
+    const skillId = domain === "lore" ? "lore_extract" : domain === "style" ? "style_extract" : "genre_generate";
+    const generated = recordsFromGeneratedSections(skillId, sourceText, "append");
+    const records = generated.length ? generated : domain === "lore" ? [this.fallbackLoreRecord(sourceText, startOrder)] : [];
+    return records.map((record, index) => ({
+      ...record,
+      id: randomUUID().replace(/-/g, ""),
+      order: startOrder + index,
+      origin: "agent_draft",
+      needs_review: false,
+      notes: "由 AI 指令写入，已通过本轮确认。"
+    }));
+  }
+
+  private fallbackLoreRecord(sourceText: string, order: number): ProjectLibraryRecord {
+    const now = new Date().toISOString();
+    return {
+      id: randomUUID().replace(/-/g, ""),
+      kind: "world_rule",
+      name: this.structuredOutlineTitle(sourceText),
+      summary: sourceText.trim(),
+      tags: [],
+      order,
+      status: "active",
+      origin: "agent_draft",
+      created_at: now,
+      updated_at: now,
+      needs_review: false,
+      notes: "由 AI 指令写入，已通过本轮确认。",
+      role: "",
+      aliases: [],
+      age: "",
+      identity: "",
+      goal: "",
+      fear: "",
+      traits: [],
+      appearance: "",
+      speech_style: "",
+      constraints: []
+    };
+  }
+
+  private libraryDomainLabel(domain: ProjectLibraryDomain): string {
+    if (domain === "lore") return "设定资料";
+    return domain === "style" ? "写作风格" : "题材规则";
   }
 
   private async prepareWritableOperations(operations: FileOperation[]): Promise<Array<{ operation: FileOperation; content: string }>> {

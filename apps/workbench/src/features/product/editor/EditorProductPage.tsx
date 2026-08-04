@@ -50,6 +50,7 @@ export function EditorProductPage({
   const [sidebarInput, setSidebarInput] = useState("");
   const [sidebarSending, setSidebarSending] = useState(false);
   const [sidebarStatus, setSidebarStatus] = useState("");
+  const [sidebarComposeMode, setSidebarComposeMode] = useState<"chat" | "continuation">("chat");
 
   const snapshot = controller.snapshot;
   const activeDocument = controller.openDocuments.find((item) => item.path === controller.activeDocumentPath) || null;
@@ -66,6 +67,7 @@ export function EditorProductPage({
     setSidebarMessages([]);
     setSidebarInput("");
     setSidebarStatus("");
+    setSidebarComposeMode("chat");
   }, [snapshot?.currentProject.path]);
 
   // 过滤树，只保留正文部分卷与章，去除设定、JSON、开发哈希与.agent文件
@@ -90,19 +92,43 @@ export function EditorProductPage({
     return configured.id;
   }
 
+  async function createContinuationConversation(): Promise<string> {
+    const chapterTitle = activeDocument?.title || "当前章节";
+    const detail = await sidebarClient.createConversation({
+      title: `正文续写 · ${chapterTitle}`,
+      conversation_type: "continuation",
+      task_metadata: {
+        entry: "editor_sidebar",
+        source_path: activeDocument?.path || "",
+        target_paths: activeDocument?.path ? [activeDocument.path] : [],
+        created_for: `正文续写 · ${chapterTitle}`
+      }
+    });
+    const preferences = controller.conversationModelPreferences;
+    const configured = await sidebarClient.updateConversationModelPreferences(detail.id, {
+      model_override: "",
+      reasoning_enabled: preferences.reasoning_enabled,
+      reasoning_effort: preferences.reasoning_effort
+    });
+    return configured.id;
+  }
+
   async function send() {
     const prompt = sidebarInput.trim();
     if (!prompt || sidebarSending) return;
+    const isContinuation = sidebarComposeMode === "continuation" || /(?:续写|扩写)(?:当前|这|本)?(?:段落|章节|正文)?/.test(prompt);
     setSidebarSending(true);
-    setSidebarStatus("正在生成...");
+    setSidebarStatus(isContinuation ? "正在新建续写任务..." : "正在生成...");
     const abortController = new AbortController();
     sidebarAbortRef.current = abortController;
     try {
-      const conversationId = await ensureSidebarConversation();
+      const conversationId = isContinuation ? await createContinuationConversation() : await ensureSidebarConversation();
       const userMessage = localSidebarMessage("user", prompt);
       const assistantMessage = localSidebarMessage("assistant", "");
-      setSidebarMessages((current) => [...current, userMessage, assistantMessage]);
+      setSidebarMessages((current) => isContinuation ? [userMessage, assistantMessage] : [...current, userMessage, assistantMessage]);
       setSidebarInput("");
+      setSidebarComposeMode("chat");
+      setSidebarStatus(isContinuation ? "续写任务正在生成..." : "正在生成...");
       let answer = "";
       let reasoning = "";
       await sidebarClient.streamConversationMessage(conversationId, {
@@ -139,17 +165,18 @@ export function EditorProductPage({
   }
 
   // 快捷发送
-  function handleShortcut(prompt: string) {
+  function handleShortcut(prompt: string, mode: "chat" | "continuation" = "chat") {
     setSidebarInput(prompt);
+    setSidebarComposeMode(mode);
   }
 
   function expandCurrentParagraph() {
     if (!activeDocument) return;
     const cursor = editorRef.current?.selectionStart ?? activeDocument.content.length;
     const paragraph = currentParagraph(activeDocument.content, cursor);
-    setSidebarInput(paragraph
+    handleShortcut(paragraph
       ? `请扩写下面这个当前段落，保持事实、人物口吻和叙事视角不变，增加动作、感官与情绪细节：\n\n${paragraph}`
-      : "请扩写当前段落，保持事实、人物口吻和叙事视角不变，增加动作、感官与情绪细节。");
+      : "请扩写当前段落，保持事实、人物口吻和叙事视角不变，增加动作、感官与情绪细节。", "continuation");
   }
 
   function insertWritingMark(mark: WritingMark) {
@@ -293,7 +320,7 @@ export function EditorProductPage({
           </div>
           <div className="editor-meta">
             {controller.documentBusy ? (
-              <span className="saved" style={{ color: "var(--accent)" }}>正在保存...</span>
+              <span className="saved" style={{ color: "var(--accent)" }}>正在处理中...</span>
             ) : activeDocument?.dirty ? (
               <span className="saved" style={{ color: "var(--warning)" }}><CircleAlert size={13} />未保存</span>
             ) : activeDocument?.stale ? (
@@ -317,7 +344,7 @@ export function EditorProductPage({
 
         <div className="punctuation-toolbar" role="toolbar" aria-label="常用中文标点">
           {writingMarks.map((mark) => (
-            <button key={mark.label} type="button" title={mark.label} aria-label={mark.label} onClick={() => insertWritingMark(mark)} disabled={!activeDocument}>
+            <button key={mark.label} type="button" title={mark.label} aria-label={mark.label} onClick={() => insertWritingMark(mark)} disabled={!activeDocument || controller.documentBusy}>
               {mark.preview}
             </button>
           ))}
@@ -342,6 +369,11 @@ export function EditorProductPage({
               </section>
             )}
           </div>
+        ) : controller.documentBusy && !activeDocument ? (
+          <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: "10px" }} aria-live="polite">
+            <FileText size={40} style={{ color: "var(--muted)" }} />
+            <p style={{ fontSize: "12px", color: "var(--muted)" }}>正在读取章节...</p>
+          </div>
         ) : activeDocument ? (
           <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
             <article className="manuscript" style={{ flex: 1 }}>
@@ -362,6 +394,7 @@ export function EditorProductPage({
                 }}
                 value={activeDocument.content}
                 onChange={handleDocumentChange}
+                disabled={controller.documentBusy}
                 onCompositionStart={() => { compositionStartLengthRef.current = countCharacters(activeDocument.content); }}
                 onCompositionEnd={(event) => {
                   const startLength = compositionStartLengthRef.current;
@@ -425,7 +458,7 @@ export function EditorProductPage({
 
             <div className="suggestion-block" style={{ marginTop: "15px" }}>
               <span>快捷操作</span>
-              <button type="button" onClick={() => handleShortcut("续写当前段落，保持现有叙事视角和文风。")}>
+              <button type="button" onClick={() => handleShortcut("续写当前段落，保持现有叙事视角和文风。", "continuation")}>
                 <WandSparkles size={14} /> 续写当前段落
               </button>
               <button type="button" onClick={expandCurrentParagraph}>

@@ -7,13 +7,16 @@ import {
   FolderOpen,
   Info,
   MoreHorizontal,
+  Pause,
   Plus,
   RefreshCw,
+  RotateCcw,
   Search,
   SlidersHorizontal,
   Sparkles,
   Upload,
-  Wand2
+  Wand2,
+  X
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { StoryPlanningBundle } from "@xiaoshuo/shared";
@@ -38,6 +41,16 @@ function isReadyForFusion(book: DisassemblyBookSummary): boolean {
 function primaryBookPath(book: DisassemblyBookSummary | null): string {
   if (!book) return "";
   return book.paths.source || book.paths.detail_outline || book.paths.reverse_outline || book.paths.lore || book.source_path || "";
+}
+
+function progressValue(message: string, busy: boolean): number | undefined {
+  const match = /(\d+)\s*\/\s*(\d+)/.exec(message);
+  const completed = Number(match?.[1] || 0);
+  const total = Number(match?.[2] || 0);
+  if (total > 0 && completed >= 0) {
+    return Math.min(100, Math.round((completed / total) * 100));
+  }
+  return busy ? undefined : 100;
 }
 
 export function DisassemblyProductPage({
@@ -75,10 +88,10 @@ export function DisassemblyProductPage({
   async function handleUploadBook(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (file) {
-      const attachment = await controller.uploadWorkflowAttachment(file);
+      const title = file.name.replace(/\.[^.]+$/, "").trim() || file.name;
+      const attachment = await controller.uploadWorkflowAttachment(file, { bookTitle: title });
       if (attachment) {
-        const title = file.name.replace(/\.[^.]+$/, "").trim() || file.name;
-        const book = await controller.archiveDisassemblySource(attachment.id, title);
+        const book = await controller.archiveDisassemblySource(attachment.id, title, attachment.conversation_id);
         if (book) {
           disassemblyUi.onSelectBook(book.id);
         }
@@ -92,6 +105,7 @@ export function DisassemblyProductPage({
     await controller.runWorkflowSkill("disassemble_book", {
       text: "",
       source_path: selectedBook.paths.source || "",
+      conversation_id: selectedBook.conversation_id || "",
       source_book_id: selectedBook.id,
       book_title: selectedBook.title,
       instruction: "一键拆解全书结构与黄金开篇节奏",
@@ -207,6 +221,15 @@ export function DisassemblyProductPage({
 
   // 过滤书库
   const filteredBooks = books.filter((b) => b.title.toLowerCase().includes(searchQuery.toLowerCase()));
+  const disassemblyTask = selectedBook
+    ? controller.longTasks.find((task) => (
+      (task.skill_id === "disassemble_book" || task.skill_id === "continue_disassemble")
+      && task.conversation_id === selectedBook.conversation_id
+    )) || null
+    : null;
+  const operationProgress = disassemblyTask
+    ? taskProgressValue(disassemblyTask.completed, disassemblyTask.total, disassemblyTask.status)
+    : progressValue(controller.operationsMessage, controller.operationsBusy);
 
   return (
     <div className="page-scroll" style={{ padding: "20px", display: "flex", flexDirection: "column", height: "100%" }}>
@@ -220,11 +243,39 @@ export function DisassemblyProductPage({
             <Upload size={15} /> 导入文本
             <input type="file" onChange={handleUploadBook} style={{ display: "none" }} />
           </label>
-          <button className="button primary" type="button" onClick={() => void runDisassemble()} disabled={!selectedBook || controller.operationsBusy}>
+          <button className="button primary" type="button" onClick={() => void runDisassemble()} disabled={!selectedBook || Boolean(disassemblyTask && !isTerminalTask(disassemblyTask.status)) || controller.operationsBusy}>
             <Sparkles size={15} /> 一键拆解
           </button>
         </div>
       </div>
+
+      {(disassemblyTask || controller.operationsBusy || controller.operationsMessage) && (
+        <section
+          aria-live="polite"
+          style={{
+            display: "grid",
+            gridTemplateColumns: "auto minmax(120px, 1fr)",
+            alignItems: "center",
+            gap: "10px",
+            padding: "9px 12px",
+            marginBottom: "12px",
+            border: "1px solid var(--line)",
+            borderRadius: "6px",
+            background: "var(--stone-deep)"
+          }}
+        >
+          <strong style={{ fontSize: "13px" }}>{disassemblyTask ? taskStatusLabel(disassemblyTask.status) : controller.operationsBusy ? "拆书进行中" : "拆书任务状态"}</strong>
+          <progress aria-label="拆书进度" max={100} value={operationProgress} style={{ width: "100%" }} />
+          <p role="status" style={{ gridColumn: "1 / -1", margin: 0, fontSize: "12px", color: "var(--muted)" }}>
+            {disassemblyTask?.message || controller.operationsMessage || `正在准备《${selectedBook?.title || "参考作品"}》的拆解任务...`}
+          </p>
+          {disassemblyTask && (
+            <div style={{ gridColumn: "1 / -1" }}>
+              <TaskControls task={disassemblyTask} onControl={(action) => void controller.controlLongTask(disassemblyTask.task_id, action)} />
+            </div>
+          )}
+        </section>
+      )}
 
       <div className="disassembly-layout" style={{ flex: 1, minHeight: 0 }}>
         {/* 左栏：参考书库 */}
@@ -454,9 +505,6 @@ export function DisassemblyProductPage({
           <button className="button primary" style={{ width: "100%", minHeight: "32px", marginTop: "20px" }} type="button" onClick={generateMigrationPreview} disabled={!selectedBook || !selectedMethods.length || controller.operationsBusy}>
             <ArrowLeftRight size={14} /> 生成迁移预览
           </button>
-          {controller.operationsMessage && (
-            <p className="disassembly-action-status" role="status">{controller.operationsMessage}</p>
-          )}
         </aside>
       </div>
     </div>
@@ -467,8 +515,48 @@ function bookStatusLabel(book: DisassemblyBookSummary): string {
   if (book.status === "ready") return "拆解完成";
   if (book.status === "analyzing") return "正在拆解";
   if (book.status === "failed") return book.error ? `拆解失败：${book.error}` : "拆解失败";
+  if (book.status === "cancelled") return "拆解已取消，可继续拆解";
   if (book.status === "stale") return "结果待重新拆解";
   return "已导入，等待拆解";
+}
+
+function taskProgressValue(completed: number, total: number, status: string): number | undefined {
+  if (total > 0) return Math.min(100, Math.round((completed / total) * 100));
+  return isTerminalTask(status) ? 100 : undefined;
+}
+
+function isTerminalTask(status: string): boolean {
+  return status === "completed" || status === "failed" || status === "cancelled";
+}
+
+function taskStatusLabel(status: string): string {
+  if (status === "paused") return "拆书任务已暂停";
+  if (status === "failed") return "拆书任务失败";
+  if (status === "cancelled") return "拆书任务已取消";
+  if (status === "completed") return "拆书任务已完成";
+  return "拆书进行中";
+}
+
+function TaskControls({
+  task,
+  onControl
+}: {
+  task: { status: string };
+  onControl: (action: "pause" | "resume" | "cancel" | "retry") => void;
+}) {
+  if (task.status === "completed" || task.status === "cancelled") return null;
+  return (
+    <div style={{ display: "flex", gap: "6px" }}>
+      {task.status === "paused" ? (
+        <button className="button secondary compact" type="button" onClick={() => onControl("resume")}><Sparkles size={13} />继续</button>
+      ) : task.status === "failed" ? (
+        <button className="button secondary compact" type="button" onClick={() => onControl("retry")}><RotateCcw size={13} />重试</button>
+      ) : (
+        <button className="button secondary compact" type="button" onClick={() => onControl("pause")}><Pause size={13} />暂停</button>
+      )}
+      {task.status !== "failed" && <button className="button secondary compact" type="button" onClick={() => onControl("cancel")}><X size={13} />取消</button>}
+    </div>
+  );
 }
 
 async function planningRequest<T>(controller: WorkbenchController, pathname: string, init?: RequestInit): Promise<T> {

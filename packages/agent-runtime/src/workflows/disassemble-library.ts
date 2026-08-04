@@ -11,7 +11,7 @@ export const LEGACY_DISASSEMBLE_DETAIL_PATH = "01_大纲/拆书细纲.txt";
 export const BOOK_MANIFEST_PATH = "manifest.jsonl";
 export const DISASSEMBLE_SOURCE_IMPORT_CHARS = 50_000_000;
 
-export type DisassembleBookStatus = "imported" | "analyzing" | "ready" | "failed" | "stale";
+export type DisassembleBookStatus = "imported" | "analyzing" | "ready" | "failed" | "cancelled" | "stale";
 
 export type DisassembleBookManifest = {
   schema_version: number;
@@ -25,6 +25,7 @@ export type DisassembleBookManifest = {
   source_path: string;
   source_summary: string;
   source_hash: string;
+  conversation_id: string;
   chars: number;
   status: DisassembleBookStatus;
   analysis_version: number;
@@ -47,7 +48,7 @@ export type DisassembleBookManifest = {
 export type DisassembleBookWithLegacy = DisassembleBookManifest & { legacy?: boolean };
 
 export async function createDisassembleBook(
-  input: { title: string; sourceText: string; sourcePath: string; origin: string; workflowId?: string },
+  input: { title: string; sourceText: string; sourcePath: string; origin: string; conversationId?: string; workflowId?: string },
   context: WorkflowRunContext
 ): Promise<DisassembleBookManifest> {
   const createdAt = new Date().toISOString();
@@ -65,6 +66,7 @@ export async function createDisassembleBook(
     source_path: input.sourcePath || "",
     source_summary: summarizeSource(input.sourceText),
     source_hash: createHash("sha256").update(input.sourceText, "utf8").digest("hex"),
+    conversation_id: String(input.conversationId || "").trim(),
     chars: input.sourceText.length,
     status: "imported",
     analysis_version: 1,
@@ -208,6 +210,7 @@ export async function readDisassembleBookManifest(bookDir: string, context: Work
     source_path: parsed.source_path || "",
     source_summary: parsed.source_summary || "",
     source_hash: parsed.source_hash || "",
+    conversation_id: String(parsed.conversation_id || "").trim(),
     chars: Number(parsed.chars || 0),
     status: normalizeBookStatus(parsed),
     analysis_version: Number(parsed.analysis_version || 1),
@@ -240,6 +243,7 @@ export async function readLegacyDisassembleBookManifest(context: WorkflowRunCont
     source_path: "",
     source_summary: summarizeSource([lore, reverseOutline, detailOutline].filter(Boolean).join("\n")),
     source_hash: "",
+    conversation_id: "",
     chars: [lore, reverseOutline, detailOutline].join("\n").length,
     status: lore && reverseOutline ? "ready" : "stale",
     analysis_version: 0,
@@ -476,7 +480,7 @@ function buildChapterIndex(text: string): string {
 }
 
 function normalizeBookStatus(parsed: Partial<DisassembleBookManifest>): DisassembleBookStatus {
-  if (["imported", "analyzing", "ready", "failed", "stale"].includes(String(parsed.status || ""))) {
+  if (["imported", "analyzing", "ready", "failed", "cancelled", "stale"].includes(String(parsed.status || ""))) {
     return parsed.status as DisassembleBookStatus;
   }
   const paths = parsed.paths || {};

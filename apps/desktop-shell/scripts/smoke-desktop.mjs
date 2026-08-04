@@ -153,8 +153,10 @@ async function startMockModelServer() {
     }
     const rawBody = Buffer.concat(chunks).toString("utf8");
     let content = "TS本地技能生成结果";
+    let stream = false;
     try {
       const payload = JSON.parse(rawBody);
+      stream = Boolean(payload.stream);
       const promptText = Array.isArray(payload.messages)
         ? payload.messages.map((item) => String(item?.content || "")).join("\n")
         : "";
@@ -165,6 +167,36 @@ async function startMockModelServer() {
       }
     } catch {
       // keep default content
+    }
+
+    if (stream) {
+      response.writeHead(200, {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive"
+      });
+      response.write(`data: ${JSON.stringify({
+        id: "chatcmpl-smoke-stream",
+        object: "chat.completion.chunk",
+        choices: [{ index: 0, delta: { reasoning_content: "先梳理上下文。" }, finish_reason: null }]
+      })}\n\n`);
+      await delay(20);
+      const parts = content.match(/.{1,4}/gu) || [content];
+      for (const part of parts) {
+        response.write(`data: ${JSON.stringify({
+          id: "chatcmpl-smoke-stream",
+          object: "chat.completion.chunk",
+          choices: [{ index: 0, delta: { content: part }, finish_reason: null }]
+        })}\n\n`);
+        await delay(20);
+      }
+      response.write(`data: ${JSON.stringify({
+        id: "chatcmpl-smoke-stream",
+        object: "chat.completion.chunk",
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
+      })}\n\n`);
+      response.end("data: [DONE]\n\n");
+      return;
     }
 
     response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
@@ -251,6 +283,20 @@ async function cleanupSmokeResources() {
   previousStudioConfigEnv = undefined;
   previousRuntimePortEnv = undefined;
   smokeRuntimePort = "";
+  await cleanupSmokeProjects();
+}
+
+async function cleanupSmokeProjects() {
+  const sandboxRoot = path.join(rootDir, "sandbox-projects");
+  let entries = [];
+  try {
+    entries = await fs.readdir(sandboxRoot, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  await Promise.all(entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith("smoke-project-"))
+    .map((entry) => fs.rm(path.join(sandboxRoot, entry.name), { recursive: true, force: true })));
 }
 
 async function expectMissing(targetPath, message) {
@@ -675,6 +721,15 @@ try {
       );
     }
 
+    const reasoningPreferences = await fetch(`${backendStatus.url}/api/conversations/${smokeConv.id}/model-preferences`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model_override: "", reasoning_enabled: true, reasoning_effort: "medium" })
+    }).then((response) => response.json());
+    if (!reasoningPreferences.reasoning_enabled) {
+      throw new Error("TS runtime did not enable reasoning for the stream smoke conversation");
+    }
+
     const conversationMessageStreamResponse = await fetch(`${backendStatus.url}/api/conversations/${smokeConv.id}/messages`, {
       method: "POST",
       headers: {
@@ -695,11 +750,116 @@ try {
       throw new Error(await conversationMessageStreamResponse.text());
     }
     const conversationMessageEvents = await readNdjson(conversationMessageStreamResponse);
-    if (conversationMessageEvents.map((event) => event.type).join(",") !== "start,delta,final") {
+    if (conversationMessageEvents[0]?.type !== "start" || conversationMessageEvents.at(-1)?.type !== "final") {
       throw new Error("TS runtime conversation-message route did not emit the expected NDJSON sequence");
     }
-    if (conversationMessageEvents[2]?.payload?.conversation?.id !== smokeConv.id) {
+    const streamedConversationReply = conversationMessageEvents
+      .filter((event) => event.type === "delta" && event.channel === "answer")
+      .map((event) => event.text)
+      .join("");
+    const streamedConversationReasoning = conversationMessageEvents
+      .filter((event) => event.type === "delta" && event.channel === "reasoning")
+      .map((event) => event.text)
+      .join("");
+    if (streamedConversationReply !== "TS本地聊天回复" || conversationMessageEvents.filter((event) => event.type === "delta").length < 2) {
+      throw new Error("TS runtime conversation-message route did not preserve multi-part model output");
+    }
+    if (streamedConversationReasoning !== "先梳理上下文。") {
+      throw new Error(`TS runtime conversation-message route did not preserve the reasoning stream channel: ${JSON.stringify(conversationMessageEvents)}`);
+    }
+    if (conversationMessageEvents.at(-1)?.payload?.conversation?.id !== smokeConv.id) {
       throw new Error("TS runtime conversation-message stream final payload did not include the expected conversation");
+    }
+
+    // This must use the preload stream bridge rather than the Node-side
+    // authenticated fetch wrapper, which intentionally buffers regular IPC replies.
+    const desktopStream = await page.evaluate(async ({ runtimeUrl, conversationId, attachmentId }) => {
+      const requestId = `desktop-stream-${crypto.randomUUID()}`;
+      const startedAt = performance.now();
+      return new Promise((resolve, reject) => {
+        const decoder = new TextDecoder();
+        const chunks = [];
+        let firstChunkAt = -1;
+        const stop = window.xiaoshuoDesktop.runtimeStream.onEvent((event) => {
+          if (event.request_id !== requestId) return;
+          if (event.type === "chunk") {
+            if (firstChunkAt < 0) firstChunkAt = performance.now() - startedAt;
+            chunks.push(decoder.decode(event.body, { stream: true }));
+            return;
+          }
+          if (event.type === "error") {
+            clearTimeout(timeout);
+            stop();
+            reject(new Error(event.error));
+            return;
+          }
+          if (event.type === "end") {
+            clearTimeout(timeout);
+            stop();
+            chunks.push(decoder.decode());
+            resolve({ text: chunks.join(""), firstChunkAt, endAt: performance.now() - startedAt });
+          }
+        });
+        const timeout = window.setTimeout(() => {
+          window.xiaoshuoDesktop.runtimeStream.cancel(requestId);
+          stop();
+          reject(new Error("Desktop runtime stream timed out"));
+        }, 15_000);
+        void window.xiaoshuoDesktop.runtimeStream.start({
+          request_id: requestId,
+          url: `${runtimeUrl}/api/conversations/${conversationId}/messages`,
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/x-ndjson"
+          },
+          body: new TextEncoder().encode(JSON.stringify({
+            content: "请通过桌面 IPC 分段回复",
+            skill_id: "",
+            agent_name: "smoke-agent",
+            write_target: "",
+            insert_mode: "none",
+            runtime_context: "桌面流式测试",
+            attachment_ids: [attachmentId]
+          }))
+        }).then((response) => {
+          if (response.status >= 400) {
+            clearTimeout(timeout);
+            stop();
+            reject(new Error(`Desktop runtime stream returned ${response.status}`));
+          }
+        }).catch((error) => {
+          clearTimeout(timeout);
+          stop();
+          reject(error);
+        });
+      });
+    }, { runtimeUrl: backendStatus.url, conversationId: smokeConv.id, attachmentId: uploadedAttachment.id });
+    const desktopStreamEvents = String(desktopStream.text || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const desktopStreamReply = desktopStreamEvents
+      .filter((event) => event.type === "delta" && event.channel === "answer")
+      .map((event) => event.text)
+      .join("");
+    const desktopStreamReasoning = desktopStreamEvents
+      .filter((event) => event.type === "delta" && event.channel === "reasoning")
+      .map((event) => event.text)
+      .join("");
+    if (desktopStreamReply !== "TS本地聊天回复" || desktopStreamEvents.filter((event) => event.type === "delta").length < 2) {
+      throw new Error("Desktop preload stream bridge did not forward each model delta");
+    }
+    if (desktopStreamReasoning !== "先梳理上下文。") {
+      throw new Error("Desktop preload stream bridge did not forward the reasoning channel");
+    }
+    if (!(desktopStream.firstChunkAt >= 0 && desktopStream.firstChunkAt < desktopStream.endAt)) {
+      throw new Error("Desktop preload stream bridge delivered its first chunk only after the stream ended");
+    }
+    const persistedReasoningConversation = await fetch(`${backendStatus.url}/api/conversations/${smokeConv.id}`).then((response) => response.json());
+    if (persistedReasoningConversation.messages?.at(-1)?.reasoning_content !== "先梳理上下文。") {
+      throw new Error("Desktop reasoning stream was not persisted with the assistant message");
     }
 
     const agentRunConv = await fetch(`${backendStatus.url}/api/conversations`, {
@@ -754,16 +914,20 @@ try {
       throw new Error(await streamResponse.text());
     }
     const streamEvents = await readNdjson(streamResponse);
-    if (streamEvents.map((event) => event.type).join(",") !== "start,delta,final") {
+    if (streamEvents[0]?.type !== "start" || streamEvents.at(-1)?.type !== "final") {
       throw new Error("TS runtime agent-run-stream route did not emit the expected NDJSON sequence");
     }
     if (streamEvents[0]?.intent !== "chat" || streamEvents[0]?.conversation_id !== agentRunConv.id) {
       throw new Error("TS runtime agent-run-stream route did not emit the expected start event");
     }
-    if (streamEvents[1]?.text !== "TS本地聊天回复") {
-      throw new Error("TS runtime agent-run-stream route did not emit the expected fallback delta");
+    const streamedAgentReply = streamEvents
+      .filter((event) => event.type === "delta" && event.channel === "answer")
+      .map((event) => event.text)
+      .join("");
+    if (streamedAgentReply !== "TS本地聊天回复" || streamEvents.filter((event) => event.type === "delta").length < 2) {
+      throw new Error("TS runtime agent-run-stream route did not emit the expected multi-part delta");
     }
-    if (streamEvents[2]?.payload?.intent !== "chat" || streamEvents[2]?.payload?.reply !== "TS本地聊天回复") {
+    if (streamEvents.at(-1)?.payload?.intent !== "chat" || streamEvents.at(-1)?.payload?.reply !== "TS本地聊天回复") {
       throw new Error("TS runtime agent-run-stream route did not emit the expected final payload");
     }
 

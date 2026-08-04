@@ -416,13 +416,27 @@ export function createApiClient(options: ApiClientOptions) {
       requestContract("conversation", {
         pathParams: { conversation_id: conversationId }
       }),
-    createConversation: (payload: { title?: string; skill_id?: string; agent_name?: string } = {}) =>
+    createConversation: (payload: {
+      title?: string;
+      skill_id?: string;
+      agent_name?: string;
+      conversation_type?: "assistant" | "disassembly" | "continuation" | "distillation" | "fusion";
+      task_metadata?: {
+        entry?: string;
+        source_path?: string;
+        source_book_id?: string;
+        target_paths?: string[];
+        created_for?: string;
+      };
+    } = {}) =>
       requestWithSchema("/api/conversations", conversationDetailSchema, {
         method: "POST",
         body: JSON.stringify({
           title: payload.title ?? "",
           skill_id: payload.skill_id ?? "",
-          agent_name: payload.agent_name ?? ""
+          agent_name: payload.agent_name ?? "",
+          conversation_type: payload.conversation_type ?? "assistant",
+          task_metadata: payload.task_metadata ?? {}
         })
       }),
     updateConversationTitle: (conversationId: string, title: string) =>
@@ -854,7 +868,7 @@ export function createApiClient(options: ApiClientOptions) {
     streamAgentRun: async (payload: AgentRunRequest, handlers: AgentStreamHandlers, signal?: AbortSignal) => {
       const response = await fetchFn(buildApiUrl(options.baseUrl, "/api/agent/run-stream"), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
         body: JSON.stringify(payload),
         signal
       });

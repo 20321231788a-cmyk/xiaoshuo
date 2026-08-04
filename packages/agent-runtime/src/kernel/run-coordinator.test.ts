@@ -52,6 +52,45 @@ describe("RunCoordinator", () => {
     ]);
   });
 
+  it("persists workflow progress checkpoints under the durable run id", () => {
+    const coordinator = createCoordinator("runtime-progress");
+    const execution = coordinator.beginRun(request({ request_id: "request-progress" }), { stepType: "workflow" });
+
+    coordinator.recordWorkflowProgress(execution, {
+      stage: "generating",
+      message: "正在生成第 2/3 章",
+      completed: 1,
+      total: 3,
+      skill_id: "batch_generate"
+    });
+
+    expect(coordinator.listEvents(execution.run_id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event_type: "workflow.progress",
+        step_id: execution.step_id,
+        payload: {
+          stage: "generating",
+          message: "正在生成第 2/3 章",
+          completed: 1,
+          total: 3,
+          skill_id: "batch_generate"
+        }
+      })
+    ]));
+  });
+
+  it("turns a pause request into a safe workflow checkpoint", () => {
+    const coordinator = createCoordinator("runtime-progress-pause");
+    const execution = coordinator.beginRun(request({ request_id: "request-progress-pause" }), { stepType: "workflow" });
+
+    coordinator.requestPause(execution.run_id, "pause-progress", coordinator.getRun(execution.run_id)!.version);
+    expect(() => coordinator.recordWorkflowProgress(execution, {
+      stage: "next_unit",
+      message: "准备下一个单元"
+    })).toThrow(expect.objectContaining({ code: "RUN_PAUSE_CHECKPOINT" }));
+    expect(coordinator.failRun(execution, new Error("Pause checkpoint reached"))).toMatchObject({ status: "paused" });
+  });
+
   it("binds durable runs to a memory revision and pauses only stale active runs", () => {
     const coordinator = createCoordinator("runtime-memory-revision");
     const stale = coordinator.beginRun(request({ request_id: "memory-stale" }), { baseMemoryRevision: 2 });

@@ -47,6 +47,9 @@ import {
   novelWorkspaceProjectSchema,
   runtimeRequestSchema,
   runtimeResponseSchema,
+  runtimeStreamEventSchema,
+  runtimeStreamRequestSchema,
+  runtimeStreamStartResponseSchema,
   desktopUpdateStatusSchema,
   terminalDataEventSchema,
   terminalExitEventSchema,
@@ -81,6 +84,22 @@ const desktopApi: XiaoShuoDesktopApi = {
   restartBackend: async () => backendStatusSchema.parse(await ipcRenderer.invoke(ipcChannels.backendRestart)),
   runtimeRequest: async (request) =>
     runtimeResponseSchema.parse(await ipcRenderer.invoke(ipcChannels.runtimeRequest, runtimeRequestSchema.parse(request))),
+  runtimeStream: {
+    start: async (request) =>
+      runtimeStreamStartResponseSchema.parse(
+        await ipcRenderer.invoke(ipcChannels.runtimeStreamStart, runtimeStreamRequestSchema.parse(request))
+      ),
+    cancel: (requestId) => {
+      ipcRenderer.send(ipcChannels.runtimeStreamCancel, requestId);
+    },
+    onEvent: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => {
+        callback(runtimeStreamEventSchema.parse(payload));
+      };
+      ipcRenderer.on(ipcChannels.runtimeStreamEvent, listener);
+      return () => ipcRenderer.off(ipcChannels.runtimeStreamEvent, listener);
+    }
+  },
   onOpenTutorial: (callback) => {
     const listener = () => {
       callback();

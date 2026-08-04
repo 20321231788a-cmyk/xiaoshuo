@@ -71,6 +71,60 @@ describe("prompt-skill-runner", () => {
     expect(content).toBe("新的大纲结果");
   });
 
+  it("uses the selected task model for skills migrated from the former secondary route", async () => {
+    await fs.mkdir(path.join(tempDir, "00_设定集", ".agent", "skills"), { recursive: true });
+    await fs.writeFile(
+      path.join(tempDir, "00_设定集", ".agent", "skills", "imported.json"),
+      JSON.stringify([{
+        id: "legacy_secondary_skill",
+        name: "旧备用任务",
+        description: "验证任务模型迁移",
+        input_mode: "text",
+        handler_type: "prompt",
+        prompt: "只回复测试结果。",
+        model_policy: { line: "task-model" },
+        writable: false
+      }]),
+      "utf8"
+    );
+    await fs.writeFile(configPath, JSON.stringify({
+      api_key: "main-key",
+      base_url: "https://main.example/v1",
+      model: "main-model",
+      task_model: "light-model"
+    }), "utf8");
+    const usedConfigs: Array<{ api_key: string; base_url: string; model: string }> = [];
+    const runner = new PromptSkillRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (config) => {
+          usedConfigs.push(config);
+          return "任务完成";
+        }
+      }
+    });
+
+    await runner.runSkill("legacy_secondary_skill", {
+      text: "测试输入",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: false,
+      attachment_ids: []
+    });
+
+    expect(usedConfigs).toContainEqual(expect.objectContaining({
+      api_key: "main-key",
+      base_url: "https://main.example/v1",
+      model: "light-model"
+    }));
+  });
+
   it("writes the generated result directly when write_result=true", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,

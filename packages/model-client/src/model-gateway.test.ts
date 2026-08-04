@@ -83,4 +83,33 @@ describe("ModelGateway", () => {
     ).rejects.toThrow("模型熔断器已开启，快速失败");
     expect(mockClient.requestCompletion).not.toHaveBeenCalled();
   });
+
+  it("preserves reasoning stream chunks and forwards reasoning effort", async () => {
+    const seenOptions: unknown[] = [];
+    const mockClient = {
+      requestCompletion: vi.fn(),
+      async *streamDetailedCompletion(_config: ModelConfig, _messages: unknown[], _temperature: number, options: unknown) {
+        seenOptions.push(options);
+        yield { channel: "reasoning" as const, text: "先梳理剧情。" };
+        yield { channel: "answer" as const, text: "这是回复。" };
+      }
+    };
+    const gateway = new ModelGateway(mockClient as any);
+    const chunks = [];
+
+    for await (const chunk of gateway.streamDetailedCompletion(
+      localConfig,
+      [{ role: "user", content: "继续创作" }],
+      undefined,
+      { disableRateLimiter: true, reasoningEffort: "high" }
+    )) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { channel: "reasoning", text: "先梳理剧情。" },
+      { channel: "answer", text: "这是回复。" }
+    ]);
+    expect(seenOptions).toEqual([expect.objectContaining({ reasoningEffort: "high" })]);
+  });
 });

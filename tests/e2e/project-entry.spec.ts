@@ -386,7 +386,7 @@ test("shell has no page-level horizontal overflow at supported desktop widths", 
   }
 });
 
-test("AI settings remain complete and reachable in a short desktop window", async ({ page }) => {
+test("AI settings keep the primary route reachable in a short desktop window", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 720 });
   await page.goto(workbenchUrl("/settings/ai"));
 
@@ -416,8 +416,9 @@ test("AI settings remain complete and reachable in a short desktop window", asyn
   expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth + 1);
   expect(dimensions.overflowY).toBe("auto");
 
-  await panel.evaluate((element) => { element.scrollTop = element.scrollHeight; });
-  await expect(panel.locator(".xw-settings-section-head > strong").filter({ hasText: "备用线路" })).toBeVisible();
+  await panel.evaluate((element) => { element.scrollTop = 0; });
+  await expect(panel.locator(".xw-settings-section-head > strong").filter({ hasText: "主线路" })).toBeVisible();
+  await expect(panel.getByText("备用线路", { exact: true })).toHaveCount(0);
   await expect(sectionTabs).toBeVisible();
   await expect(actions).toBeVisible();
 });
@@ -469,13 +470,19 @@ test("assistant model discovery and reasoning preferences persist per conversati
   await expect(reasoningPanel.getByRole("button", { name: "中", exact: true })).toBeDisabled();
   await expect(reasoningPanel.getByRole("button", { name: "高", exact: true })).toHaveAttribute("aria-pressed", "true");
 
+  const taskModelSelect = page.locator(".assistant-task-model-panel select");
+  await expect(taskModelSelect).toBeVisible();
+  await taskModelSelect.selectOption("gpt-5-mini");
+  await expect(taskModelSelect).toHaveValue("gpt-5-mini");
+
   await page.reload();
   await expect(trigger).toContainText("DeepSeek Reasoner · 高");
+  await trigger.click();
+  await expect(page.locator(".assistant-task-model-panel select")).toHaveValue("gpt-5-mini");
   const conversations = await (await runtimeFetch("/api/conversations")).json() as Array<{ model_override: string; reasoning_effort: string }>;
   expect(conversations[0]).toMatchObject({ model_override: "deepseek-reasoner", reasoning_effort: "high" });
 
   await page.setViewportSize({ width: 1024, height: 720 });
-  await trigger.click();
   await expect(page.locator(".assistant-reasoning-panel")).toBeVisible();
   await expect(page.locator(".assistant-model-list")).not.toContainText("text-embedding-3-small");
 });
@@ -654,7 +661,9 @@ test("editor punctuation, typing speed, save-all, and conflict recovery", async 
 
   await chapterPanel.getByRole("button", { name: "E2E冲突", exact: true }).click();
   const conflictEditor = page.locator(".manuscript textarea");
+  await expect(conflictEditor).toHaveValue("磁盘初稿");
   await conflictEditor.fill("本地修改稿");
+  await expect(conflictEditor).toHaveValue("本地修改稿");
   await saveRuntimeDocument("02_正文/E2E冲突.txt", "后台磁盘新版");
   await page.locator(".editor-meta").getByRole("button", { name: "保存", exact: true }).click();
   await expect(page.getByRole("heading", { name: "正文在另一处被修改", exact: true })).toBeVisible();
