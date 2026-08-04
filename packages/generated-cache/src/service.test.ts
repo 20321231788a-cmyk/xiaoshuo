@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { GeneratedCacheService } from "./service.js";
 
 let tempDir = "";
@@ -191,6 +191,32 @@ describe("generated-cache-service", () => {
     expect(first.cache_id).toBe(cacheId);
     expect(replay.cache_id).toBe(cacheId);
     expect(await service.readContent(cacheId)).toBe("确定性缓存内容");
+  });
+
+  it("retries a transient Windows metadata rename failure", async () => {
+    const service = new GeneratedCacheService({ projectRoot: tempDir });
+    const cache = await service.create({ source: "chat", target_paths: ["02_正文/第一章.txt"] });
+    const originalRename = fs.rename.bind(fs);
+    let transientFailures = 2;
+    const renameSpy = vi.spyOn(fs, "rename").mockImplementation(async (oldPath, newPath) => {
+      if (String(newPath).endsWith("metadata.json") && transientFailures > 0) {
+        transientFailures -= 1;
+        throw Object.assign(new Error("simulated Windows file lock"), { code: "EPERM" });
+      }
+      return originalRename(oldPath, newPath);
+    });
+
+    try {
+      await service.markCommitted(cache.cache_id, ["02_正文/第一章.txt"]);
+    } finally {
+      renameSpy.mockRestore();
+    }
+
+    expect(transientFailures).toBe(0);
+    expect(await service.get(cache.cache_id)).toMatchObject({
+      status: "committed",
+      saved_paths: ["02_正文/第一章.txt"]
+    });
   });
 
   it("orders prepared target commits by normalized path", async () => {

@@ -612,8 +612,29 @@ async function atomicWrite(targetPath: string, text: string): Promise<void> {
   await fs.mkdir(dir, { recursive: true });
   const tmpName = `.${path.basename(targetPath)}.${randomUUID().replace(/-/g, "")}.tmp`;
   const tmpPath = path.join(dir, tmpName);
-  await fs.writeFile(tmpPath, text || "", "utf8");
-  await fs.rename(tmpPath, targetPath);
+  try {
+    await fs.writeFile(tmpPath, text || "", "utf8");
+    for (let attempt = 0; attempt < 6; attempt++) {
+      try {
+        await fs.rename(tmpPath, targetPath);
+        return;
+      } catch (error) {
+        if (!isTransientRenameError(error) || attempt === 5) {
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+      }
+    }
+  } finally {
+    await fs.rm(tmpPath, { force: true }).catch(() => undefined);
+  }
+}
+
+function isTransientRenameError(error: unknown): boolean {
+  const code = error && typeof error === "object" && "code" in error
+    ? String((error as { code?: unknown }).code || "")
+    : "";
+  return code === "EPERM" || code === "EBUSY" || code === "EACCES";
 }
 
 function formatTimestamp(date: Date): string {
