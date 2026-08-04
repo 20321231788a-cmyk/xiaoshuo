@@ -5,6 +5,7 @@ on:
     tags:
       - "v1.2.0"
       - "v1.3.0"
+      - "v1.3.1"
 
 permissions:
   contents: write
@@ -47,7 +48,7 @@ jobs:
           $tagObject = gh api "/repos/$env:GITHUB_REPOSITORY/git/tags/$($tagRef.object.sha)" | ConvertFrom-Json
           if ($LASTEXITCODE -ne 0 -or $tagObject.object.type -ne 'commit') { throw 'Annotated release tag target is invalid' }
           $version = [string](Get-Content apps/desktop-shell/package.json -Raw | ConvertFrom-Json).version
-          $allowedVersions = @('1.2.0', '1.3.0')
+          $allowedVersions = @('1.2.0', '1.3.0', '1.3.1')
           if ($version -notin $allowedVersions -or $env:GITHUB_REF_NAME -ne "v$version") {
             throw "Expected an authorized small-scale version, found tag $env:GITHUB_REF_NAME and package version $version"
           }
