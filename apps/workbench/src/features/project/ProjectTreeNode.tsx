@@ -8,6 +8,7 @@ export function ProjectTreeNode({
   node,
   activePath,
   busy,
+  directFileOperations = false,
   onOpenDocument,
   onCreateFile,
   onDeleteFile
@@ -15,6 +16,7 @@ export function ProjectTreeNode({
   node: TreeNode;
   activePath: string;
   busy: boolean;
+  directFileOperations?: boolean;
   onOpenDocument: (path: string) => void | Promise<void>;
   onCreateFile: (directoryPath: string, fileName: string) => Promise<boolean>;
   onDeleteFile: (path: string) => Promise<boolean>;
@@ -62,7 +64,7 @@ export function ProjectTreeNode({
     if (!isFile) {
       return;
     }
-    if (!deleteConfirm) {
+    if (!directFileOperations && !deleteConfirm) {
       setDeleteConfirm(true);
       return;
     }
@@ -129,7 +131,7 @@ export function ProjectTreeNode({
           {isFile && (
             <button type="button" className="xw-danger-button compact" onClick={confirmDeleteFile} disabled={busy}>
               <Trash2 size={13} />
-              <span>{deleteConfirm ? "确认删除" : "删除文件"}</span>
+              <span>{directFileOperations ? "移入回收站" : deleteConfirm ? "确认删除" : "删除文件"}</span>
             </button>
           )}
         </div>
@@ -142,6 +144,7 @@ export function ProjectTreeNode({
               node={child}
               activePath={activePath}
               busy={busy}
+              directFileOperations={directFileOperations}
               onOpenDocument={onOpenDocument}
               onCreateFile={onCreateFile}
               onDeleteFile={onDeleteFile}

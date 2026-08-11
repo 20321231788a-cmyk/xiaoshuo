@@ -1,15 +1,22 @@
-import { createApiClient } from "@xiaoshuo/api-client";
+import { ApiError, createApiClient } from "@xiaoshuo/api-client";
 import type {
   AppConfig,
+  AiConfigProfile,
+  AiModelOption,
+  AgentConfirmation,
   AgentRunResponse,
+  AgentRunState,
   CardDrawRequest,
   CardDrawResult,
   CardDrawSelectRequest,
+  CloudProjectListResponse,
   CloudProjectSlot,
   ConversationDetail,
   ConversationAttachment,
   ConversationMessage,
   ConversationSummary,
+  ConversationModelPreferences,
+  ConversationType,
   CurrentProject,
   JobInfo,
   LedgerItem,
@@ -31,6 +38,7 @@ import type {
   VectorIndexStatus,
   VectorTestRequest,
   WebsiteAiApplyRequest,
+  WebsiteImageConfigRequest,
   WebsiteAiDashboard,
   WebsiteAiRechargeOrder
 } from "@xiaoshuo/shared";
@@ -57,17 +65,59 @@ import {
   skillRequiresActiveDocument,
   summarizeJobResult,
   summarizeOperationResults,
-  type PendingGeneratedSave
+  type PendingGeneratedSave,
+  type PendingLibraryDraftGroup,
+  type PendingReviewItem
 } from "../../lib/workflow.js";
 
 type LoadStatus = "loading" | "ready" | "error";
 
+export type AgentConfirmationExecutionState = {
+  status: "pending" | "executing" | "completed" | "failed" | "rejected";
+  message: string;
+};
+
 export type WorkbenchTab = "overview" | "project" | "editor" | "config" | "conversations" | "operations" | "terminal";
 
 const workbenchTabs = new Set<WorkbenchTab>(["overview", "project", "editor", "config", "conversations", "operations", "terminal"]);
-const outlineGenerationSkillIds = new Set(["outline_generate", "detail_outline_generate", "chapter_outline_generate"]);
-const outlineGeneratedPaths = new Set(["01_大纲/大纲.txt", "01_大纲/细纲.txt", "01_大纲/章纲.txt"]);
 const projectReferenceHintPattern = /@|参考|参照|根据|读取|读一下|对照|结合|当前(?:文档|文件)|这篇|这章|章纲|细纲|大纲|人物|角色|世界观|设定|正文|\.txt|\.md|\.jsonl/i;
+
+function workflowProgressLabel(skillId: string): string {
+  if (skillId === "disassemble_book" || skillId === "continue_disassemble") return "拆书任务";
+  if (skillId === "batch_generate") return "批量生成";
+  if (skillId === "body_generate") return "正文续写";
+  if (skillId === "book_fusion") return "融梗任务";
+  if (skillId === "nuwa_style_distill") return "蒸馏任务";
+  if (skillId === "style_genre_generate") return "风格题材库";
+  return "任务";
+}
+
+function assistantConversations(conversations: ConversationSummary[]): ConversationSummary[] {
+  return conversations.filter((conversation) => conversation.conversation_type === "assistant");
+}
+
+function taskConversationSpecForWorkflow(skillId: string, payload: Partial<SkillRunRequest>, sourcePath: string) {
+  if (skillId === "disassemble_book" || skillId === "continue_disassemble") {
+    const bookTitle = String((payload as any).book_title || "未命名作品").trim();
+    return {
+      type: "disassembly" as const,
+      title: `拆书 · 《${bookTitle}》`,
+      entry: skillId,
+      sourceBookId: String((payload as any).source_book_id || "").trim()
+    };
+  }
+  if (skillId === "body_generate" || skillId === "batch_generate") {
+    const filename = sourcePath.split("/").filter(Boolean).pop() || "当前章节";
+    return { type: "continuation" as const, title: `正文续写 · ${filename}`, entry: skillId, sourceBookId: "" };
+  }
+  if (skillId === "book_fusion") {
+    return { type: "fusion" as const, title: "融梗 · 参考作品", entry: skillId, sourceBookId: "" };
+  }
+  if (skillId === "style_extract" && /(?:^|[\\/])拆书库(?:[\\/]|$)/.test(sourcePath)) {
+    return { type: "disassembly" as const, title: "拆书 · 方法提取", entry: skillId, sourceBookId: "" };
+  }
+  return null;
+}
 
 export type OpenDocumentTab = {
   path: string;
@@ -82,6 +132,8 @@ export type OpenDocumentTab = {
 };
 
 export type DisassemblyBookSummary = {
+  schema_version: number;
+  template_version: string;
   id: string;
   title: string;
   dir: string;
@@ -90,15 +142,50 @@ export type DisassemblyBookSummary = {
   origin: string;
   source_path: string;
   source_summary: string;
+  source_hash: string;
+  conversation_id: string;
   chars: number;
+  status: "imported" | "analyzing" | "ready" | "failed" | "cancelled" | "stale";
+  analysis_version: number;
+  error: string;
+  analyzed_at: string;
+  source: { path: string; hash: string; chars: number; chapter_count: number; import_complete: boolean };
+  progress: { stage: string; completed_chapters: number; total_chapters: number; last_error: string; completed_batches?: number; total_batches?: number; message?: string };
+  coverage: { first_chapter: number; last_chapter: number; analyzed_chapters: number[]; missing_chapters: number[] };
+  analysis_scope?: { mode: "prefix_chars"; requested_chars: number; actual_chars: number; source_chars: number; first_chapter: number; last_chapter: number; truncated: boolean };
   legacy?: boolean;
   paths: {
     source?: string;
     lore?: string;
     reverse_outline?: string;
     detail_outline?: string;
+    report?: string;
+    chapter_index?: string;
+    evidence_index?: string;
   };
 };
+
+export type LongTaskProgress = {
+  task_id: string;
+  conversation_id: string;
+  skill_id: "disassemble_book" | "continue_disassemble" | "batch_generate";
+  status: AgentRunState["status"];
+  stage: string;
+  message: string;
+  completed: number;
+  total: number;
+  current_step_id: string;
+  version: number;
+  error: string;
+  updated_at: string;
+};
+
+const longTaskSkillIds = new Set<LongTaskProgress["skill_id"]>([
+  "disassemble_book",
+  "continue_disassemble",
+  "batch_generate"
+]);
+const terminalLongTaskStatuses = new Set<AgentRunState["status"]>(["completed", "failed", "cancelled"]);
 
 type OpenDocumentOptions = {
   forceReload?: boolean;
@@ -222,6 +309,11 @@ function readStyleDistillationProfileFromResult(result: SkillRunResponse | null)
     source_summary: String(raw.source_summary || ""),
     source_path: String(raw.source_path || ""),
     source_hash: String(raw.source_hash || ""),
+    source_book_id: String(raw.source_book_id || ""),
+    source_report_path: String(raw.source_report_path || ""),
+    evidence_spans: Array.isArray(raw.evidence_spans) ? raw.evidence_spans as StyleDistillationProfile["evidence_spans"] : [],
+    evidence_version: Number(raw.evidence_version || 1),
+    status: raw.status === "stale" || raw.status === "orphaned" ? raw.status : "active",
     distilled_at: String(raw.distilled_at || ""),
     enabled: Boolean(raw.enabled),
     profile_text: profileText
@@ -239,7 +331,10 @@ function readDisassemblyBookFromUnknown(value: unknown): DisassemblyBookSummary 
     return null;
   }
   const paths = raw.paths && typeof raw.paths === "object" && !Array.isArray(raw.paths) ? raw.paths : {};
+  const source = raw.source && typeof raw.source === "object" && !Array.isArray(raw.source) ? raw.source as DisassemblyBookSummary["source"] : { path: String(raw.source_path || ""), hash: String(raw.source_hash || ""), chars: Number(raw.chars || 0), chapter_count: 0, import_complete: Boolean(paths.source) };
   return {
+    schema_version: Number(raw.schema_version || 1),
+    template_version: String(raw.template_version || "1"),
     id,
     title,
     dir: String(raw.dir || ""),
@@ -248,13 +343,30 @@ function readDisassemblyBookFromUnknown(value: unknown): DisassemblyBookSummary 
     origin: String(raw.origin || ""),
     source_path: String(raw.source_path || ""),
     source_summary: String(raw.source_summary || ""),
+    source_hash: String(raw.source_hash || ""),
+    conversation_id: String(raw.conversation_id || ""),
     chars: Number(raw.chars || 0),
+    status: ["imported", "analyzing", "ready", "failed", "cancelled", "stale"].includes(String(raw.status || ""))
+      ? raw.status as DisassemblyBookSummary["status"]
+      : "imported",
+    analysis_version: Number(raw.analysis_version || 1),
+    error: String(raw.error || ""),
+    analyzed_at: String(raw.analyzed_at || ""),
+    source,
+    progress: raw.progress && typeof raw.progress === "object" && !Array.isArray(raw.progress) ? raw.progress as DisassemblyBookSummary["progress"] : { stage: String(raw.status || "imported"), completed_chapters: 0, total_chapters: 0, last_error: String(raw.error || "") },
+    coverage: raw.coverage && typeof raw.coverage === "object" && !Array.isArray(raw.coverage) ? raw.coverage as DisassemblyBookSummary["coverage"] : { first_chapter: 0, last_chapter: 0, analyzed_chapters: [], missing_chapters: [] },
+    analysis_scope: raw.analysis_scope && typeof raw.analysis_scope === "object" && !Array.isArray(raw.analysis_scope)
+      ? raw.analysis_scope as DisassemblyBookSummary["analysis_scope"]
+      : undefined,
     legacy: Boolean(raw.legacy),
     paths: {
       source: String(paths.source || ""),
       lore: String(paths.lore || ""),
       reverse_outline: String(paths.reverse_outline || ""),
-      detail_outline: String(paths.detail_outline || "")
+      detail_outline: String(paths.detail_outline || ""),
+      report: String(paths.report || ""),
+      chapter_index: String(paths.chapter_index || ""),
+      evidence_index: String(paths.evidence_index || "")
     }
   };
 }
@@ -265,15 +377,71 @@ function readDisassemblyBooksFromUnknown(value: unknown): DisassemblyBookSummary
     : [];
 }
 
-function stringListFromUnknown(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
-function isOutlineGenerationResult(input: { skillId?: string; targetPath?: string; targetPaths?: string[] }): boolean {
-  if (input.skillId && outlineGenerationSkillIds.has(input.skillId)) {
-    return true;
+function executionTraceFromRunEvents(events: Array<{ event_type?: string; payload?: unknown }>): Array<{ stage: string; message: string }> {
+  const trace: Array<{ stage: string; message: string }> = [];
+  const seen = new Set<string>();
+  for (const event of events) {
+    const payload = recordValue(event.payload);
+    if (event.event_type !== "workflow.progress") continue;
+    const message = String(payload.message || "").trim();
+    if (!message) continue;
+    const step = { stage: String(payload.stage || "working"), message };
+    const key = `${step.stage}:${step.message}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      trace.push(step);
+    }
   }
-  return [input.targetPath || "", ...(input.targetPaths || [])].some((item) => outlineGeneratedPaths.has(item));
+  return trace.slice(-80);
+}
+
+function workflowSkillIdFromRun(run: AgentRunState): LongTaskProgress["skill_id"] | "" {
+  const requestSnapshot = recordValue(recordValue(run.goal).request_snapshot);
+  const settings = recordValue(requestSnapshot.settings_snapshot);
+  const request = recordValue(settings.agent_request);
+  const skillId = String(request.skill_id || "").trim();
+  return longTaskSkillIds.has(skillId as LongTaskProgress["skill_id"])
+    ? skillId as LongTaskProgress["skill_id"]
+    : "";
+}
+
+function longTaskProgressFromRun(run: AgentRunState, events: Array<{ event_type?: string; payload?: unknown }>): LongTaskProgress | null {
+  const skillId = workflowSkillIdFromRun(run);
+  if (!skillId) {
+    return null;
+  }
+  const progressEvent = [...events].reverse().find((event) => event.event_type === "workflow.progress");
+  const payload = recordValue(progressEvent?.payload);
+  const error = String(run.error || "").trim();
+  const statusMessage = run.status === "completed"
+    ? "任务已完成"
+    : run.status === "paused"
+      ? "任务已暂停，可继续执行"
+      : run.status === "cancelled"
+        ? "任务已取消"
+        : error || "正在准备任务…";
+  return {
+    task_id: run.run_id,
+    conversation_id: run.conversation_id || "",
+    skill_id: skillId,
+    status: run.status,
+    stage: String(payload.stage || run.status || "queued"),
+    message: String(payload.message || statusMessage),
+    completed: Math.max(0, Number(payload.completed || 0)),
+    total: Math.max(0, Number(payload.total || 0)),
+    current_step_id: run.current_step_id || "",
+    version: run.version,
+    error,
+    updated_at: run.updated_at
+  };
+}
+
+function stringListFromUnknown(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0) : [];
 }
 
 function configSignature(config: AppConfig): string {
@@ -360,9 +528,11 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [error, setError] = useState("");
   const [activeTab, setActiveTab] = useState<WorkbenchTab>("editor");
   const [refreshTick, setRefreshTick] = useState(0);
+  const [projectDataRevision, setProjectDataRevision] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [projectBusy, setProjectBusy] = useState(false);
   const [projectMessage, setProjectMessage] = useState("");
+  const [recentProjectRemovingPath, setRecentProjectRemovingPath] = useState("");
   const [vectorSearchBusy, setVectorSearchBusy] = useState(false);
   const [vectorSearchMessage, setVectorSearchMessage] = useState("");
   const [vectorSearchResults, setVectorSearchResults] = useState<VectorSearchHit[]>([]);
@@ -381,8 +551,13 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [websiteAiRechargeBusy, setWebsiteAiRechargeBusy] = useState(false);
   const [websiteAiRechargeMessage, setWebsiteAiRechargeMessage] = useState("");
   const [websiteAiRechargeOrder, setWebsiteAiRechargeOrder] = useState<WebsiteAiRechargeOrder | null>(null);
+  const [manualModelCatalog, setManualModelCatalog] = useState<AiModelOption[]>([]);
+  const [manualModelDiscoveryBusy, setManualModelDiscoveryBusy] = useState(false);
+  const [manualModelDiscoveryMessage, setManualModelDiscoveryMessage] = useState("");
   const [cloudProjectSlots, setCloudProjectSlots] = useState<CloudProjectSlot[]>([]);
+  const [cloudProjectSummary, setCloudProjectSummary] = useState<CloudProjectListResponse | null>(null);
   const [cloudProjectBusy, setCloudProjectBusy] = useState(false);
+  const [cloudProjectActivePath, setCloudProjectActivePath] = useState("");
   const [cloudProjectMessage, setCloudProjectMessage] = useState("");
   const [conversationDetail, setConversationDetail] = useState<ConversationDetail | null>(null);
   const [conversationBusy, setConversationBusy] = useState(false);
@@ -390,6 +565,12 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [messageInput, setMessageInput] = useState("");
   const [sendingMessage, setSendingMessage] = useState(false);
+  const [conversationModelPreferences, setConversationModelPreferences] = useState<ConversationModelPreferences>({
+    model_override: "",
+    reasoning_enabled: false,
+    reasoning_effort: "medium"
+  });
+  const [conversationModelPreferenceBusy, setConversationModelPreferenceBusy] = useState(false);
   const [pendingReferenceResolution, setPendingReferenceResolution] = useState<PendingReferenceResolution | null>(null);
   const [openDocuments, setOpenDocuments] = useState<OpenDocumentTab[]>([]);
   const [activeDocumentPath, setActiveDocumentPath] = useState("");
@@ -410,22 +591,42 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [pendingSkillPatchPreview, setPendingSkillPatchPreview] = useState<PendingSkillPatchPreview | null>(null);
   const [selectedSkillVersions, setSelectedSkillVersions] = useState<SkillVersionEntry[]>([]);
   const [latestCardDrawResult, setLatestCardDrawResult] = useState<CardDrawResult | null>(null);
-  const [pendingGeneratedSave, setPendingGeneratedSave] = useState<PendingGeneratedSave | null>(null);
+  const [pendingGeneratedSaves, setPendingGeneratedSaves] = useState<PendingGeneratedSave[]>([]);
+  const [pendingLibraryDraftGroups, setPendingLibraryDraftGroups] = useState<PendingLibraryDraftGroup[]>([]);
+  const pendingGeneratedSave = pendingGeneratedSaves.at(-1) || null;
+  const pendingReviews: PendingReviewItem[] = [
+    ...pendingGeneratedSaves.map((pending) => ({ kind: "generated_file" as const, id: pending.cacheId, pending })),
+    ...pendingLibraryDraftGroups.map((pending) => ({ kind: "library_group" as const, id: pending.groupId, pending }))
+  ].sort((left, right) => String(right.pending.createdAt || "").localeCompare(String(left.pending.createdAt || "")));
+  const [pendingAgentConfirmations, setPendingAgentConfirmations] = useState<AgentConfirmation[]>([]);
+  const [pendingAgentConfirmationBusy, setPendingAgentConfirmationBusy] = useState("");
+  const [agentConfirmationExecution, setAgentConfirmationExecution] = useState<Record<string, AgentConfirmationExecutionState>>({});
   const [styleDistillationProfile, setStyleDistillationProfile] = useState<StyleDistillationProfile | null>(null);
   const [disassemblyBooks, setDisassemblyBooks] = useState<DisassemblyBookSummary[]>([]);
   const [disassemblyLibraryBusy, setDisassemblyLibraryBusy] = useState(false);
-  const abortRef = useRef<AbortController | null>(null);
+  const [longTasks, setLongTasks] = useState<LongTaskProgress[]>([]);
+  const assistantAbortRef = useRef<AbortController | null>(null);
+  const taskAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const longTaskSubscriptionsRef = useRef<Map<string, () => void>>(new Map());
+  const activeConversationRunIdRef = useRef("");
   const liveJobIdsRef = useRef<Set<string>>(new Set());
   const selectedJobIdRef = useRef("");
   const lastSyncedProjectRef = useRef<CurrentProject>({ path: "", name: "" });
   const openDocumentsRef = useRef<OpenDocumentTab[]>([]);
   const activeDocumentPathRef = useRef("");
+  const activeDocumentOpenRequestRef = useRef(0);
   const restoredSettingsRef = useRef(false);
   const skipNextSettingsPersistRef = useRef(false);
   const lastConfigSignatureRef = useRef("");
   const configDraftDirtyRef = useRef(false);
   const websiteAiRefreshKeyRef = useRef("");
-  const client = useMemo(() => createApiClient({ baseUrl: runtime.apiBase }), [runtime.apiBase]);
+  const manualModelRefreshKeyRef = useRef("");
+  const conversationModelPreferencesRef = useRef<ConversationModelPreferences>({
+    model_override: "",
+    reasoning_enabled: false,
+    reasoning_effort: "medium"
+  });
+  const client = useMemo(() => createApiClient({ baseUrl: runtime.apiBase, fetchFn: runtime.fetchFn }), [runtime.apiBase, runtime.fetchFn]);
 
   useEffect(() => {
     let cancelled = false;
@@ -475,12 +676,82 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   }, [selectedJobId]);
 
   useEffect(() => {
+    conversationModelPreferencesRef.current = conversationModelPreferences;
+  }, [conversationModelPreferences]);
+
+  useEffect(() => {
     if (pendingReferenceResolution && messageInput.trim() !== pendingReferenceResolution.content) {
       setPendingReferenceResolution(null);
     }
   }, [messageInput, pendingReferenceResolution]);
 
-  useEffect(() => () => abortRef.current?.abort(), []);
+  useEffect(() => () => {
+    assistantAbortRef.current?.abort();
+    for (const controller of taskAbortControllersRef.current.values()) controller.abort();
+    taskAbortControllersRef.current.clear();
+    for (const unsubscribe of longTaskSubscriptionsRef.current.values()) unsubscribe();
+    longTaskSubscriptionsRef.current.clear();
+  }, []);
+
+  useEffect(() => {
+    for (const unsubscribe of longTaskSubscriptionsRef.current.values()) unsubscribe();
+    longTaskSubscriptionsRef.current.clear();
+    if (!snapshot?.currentProject.path) {
+      setLongTasks([]);
+      return;
+    }
+    void refreshLongTasks().catch(() => setLongTasks([]));
+  }, [client, snapshot?.currentProject.path]);
+
+  useEffect(() => {
+    const projectPath = snapshot?.currentProject.path || "";
+    if (!projectPath) {
+      setPendingGeneratedSaves([]);
+      setPendingLibraryDraftGroups([]);
+      return;
+    }
+    let cancelled = false;
+    const cacheRows = (snapshot?.localState?.generated_caches || []).filter((cache) => cache.project_path === projectPath && cache.status === "pending");
+    void Promise.all(cacheRows.map(async (cache) => {
+      try {
+        const detail = await client.getGeneratedCache(cache.cache_id);
+        if (detail.meta.status !== "pending") return null;
+        const targetPaths = detail.meta.target_paths.length ? detail.meta.target_paths : cache.target_paths;
+        const targetPath = targetPaths[0] || cache.target_path;
+        if (!targetPath) return null;
+        return {
+          skillId: detail.meta.skill_id || cache.skill_id,
+          content: detail.content,
+          cacheId: detail.meta.cache_id,
+          cachePath: detail.meta.cache_path || cache.cache_path || "",
+          cacheChars: detail.meta.chars || cache.cache_chars || detail.content.length,
+          targetPath,
+          targetPaths: targetPaths.length ? targetPaths : [targetPath],
+          chapter: 0,
+          defaultMode: detail.meta.mode || cache.mode || "replace",
+          source: cache.source,
+          savePlan: detail.meta.save_plan,
+          conversationId: cache.conversation_id || detail.meta.conversation_id || undefined,
+          messageId: cache.message_id,
+          runId: cache.run_id || detail.meta.commit_run_id || undefined,
+          createdAt: cache.created_at
+        } satisfies PendingGeneratedSave;
+      } catch {
+        return null;
+      }
+    })).then((items) => {
+      if (cancelled) return;
+      setPendingGeneratedSaves((current) => {
+        const next = new Map(current.map((item) => [item.cacheId, item]));
+        for (const item of items) if (item) next.set(item.cacheId, item);
+        return [...next.values()].sort((left, right) => String(left.createdAt || "").localeCompare(String(right.createdAt || "")));
+      });
+    });
+    void refreshPendingLibraryDraftGroups();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, snapshot?.currentProject.path, snapshot?.localState?.synced_at]);
 
   useEffect(() => {
     if (status !== "ready") {
@@ -542,6 +813,25 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     configDraft?.website_profile?.embedding_model,
     configDraft?.website_profile?.license_account_key,
     configDraft?.website_profile?.model,
+    status
+  ]);
+
+  useEffect(() => {
+    const manualProfile = configDraft?.manual_profile;
+    const baseUrl = String(manualProfile?.base_url || "").trim();
+    if (status !== "ready" || configDraft?.ai_config_mode !== "manual" || !baseUrl) {
+      return;
+    }
+    const refreshKey = `${baseUrl}:${manualProfile?.api_key || ""}`;
+    if (manualModelRefreshKeyRef.current === refreshKey) {
+      return;
+    }
+    manualModelRefreshKeyRef.current = refreshKey;
+    void refreshManualModelCatalog(manualProfile, { silent: true });
+  }, [
+    configDraft?.ai_config_mode,
+    configDraft?.manual_profile?.api_key,
+    configDraft?.manual_profile?.base_url,
     status
   ]);
 
@@ -650,6 +940,17 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
 
     setConversationDetail(null);
   }, [conversationDetail, snapshot]);
+
+  useEffect(() => {
+    if (!conversationDetail) {
+      return;
+    }
+    setConversationModelPreferences({
+      model_override: conversationDetail.model_override || "",
+      reasoning_enabled: Boolean(conversationDetail.reasoning_enabled),
+      reasoning_effort: conversationDetail.reasoning_effort || "medium"
+    });
+  }, [conversationDetail?.id, conversationDetail?.model_override, conversationDetail?.reasoning_enabled, conversationDetail?.reasoning_effort]);
 
   useEffect(() => {
     if (!snapshot?.skills.length || selectedSkillId) {
@@ -788,11 +1089,135 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         status,
         mode,
         cache_path: pendingSave.cachePath,
-        cache_chars: pendingSave.cacheChars || pendingSave.content.length
+        cache_chars: pendingSave.cacheChars || pendingSave.content.length,
+        conversation_id: pendingSave.conversationId,
+        message_id: pendingSave.messageId,
+        run_id: pendingSave.runId
       });
       setSnapshot((current) => (current ? { ...current, localState } : current));
     } catch {
       // This is metadata only; generated save/discard must not depend on the local cache index.
+    }
+  }
+
+  function upsertPendingGeneratedSave(pendingSave: PendingGeneratedSave): void {
+    const identity = pendingSave.cacheId || `${pendingSave.targetPath}:${pendingSave.createdAt || ""}`;
+    setPendingGeneratedSaves((current) => {
+      const next = [...current.filter((item) => (item.cacheId || `${item.targetPath}:${item.createdAt || ""}`) !== identity), pendingSave];
+      return next.sort((left, right) => String(left.createdAt || "").localeCompare(String(right.createdAt || "")));
+    });
+  }
+
+  function removePendingGeneratedSave(cacheId: string): void {
+    setPendingGeneratedSaves((current) => current.filter((item) => item.cacheId !== cacheId));
+  }
+
+  function setPendingGeneratedSaveError(cacheId: string, error: string): void {
+    setPendingGeneratedSaves((current) => current.map((item) => item.cacheId === cacheId ? { ...item, error } : item));
+  }
+
+  function pendingSaveByCacheId(cacheId = ""): PendingGeneratedSave | null {
+    if (!cacheId) return pendingGeneratedSave;
+    return pendingGeneratedSaves.find((item) => item.cacheId === cacheId) || null;
+  }
+
+  function pendingLibraryDraftGroupFromUnknown(value: unknown): PendingLibraryDraftGroup | null {
+    const raw = recordValue(value);
+    const groupId = String(raw.group_id || raw.groupId || "").trim();
+    if (!groupId) return null;
+    const domains = stringListFromUnknown(raw.domains).filter((domain): domain is PendingLibraryDraftGroup["domains"][number] => domain === "lore" || domain === "style" || domain === "genre");
+    return {
+      groupId,
+      mode: raw.commit_mode === "merge" || raw.mode === "merge" ? "merge" : "replace",
+      domains,
+      draftIds: stringListFromUnknown(raw.draft_ids || raw.draftIds),
+      source: String(raw.source || ""),
+      conversationId: String(raw.conversation_id || raw.conversationId || "") || undefined,
+      messageId: String(raw.message_id || raw.messageId || "") || undefined,
+      runId: String(raw.run_id || raw.runId || "") || undefined,
+      createdAt: String(raw.created_at || raw.createdAt || "") || undefined,
+      error: String(raw.error || "") || undefined
+    };
+  }
+
+  async function libraryDraftGroupRequest<T>(pathname: string, init?: RequestInit): Promise<T> {
+    const fetchFn = runtime.fetchFn || fetch;
+    const response = await fetchFn(new URL(pathname, runtime.apiBase).toString(), {
+      ...init,
+      headers: { "Content-Type": "application/json", ...(init?.headers || {}) }
+    });
+    const text = await response.text();
+    const payload = text ? JSON.parse(text) : {};
+    if (!response.ok) throw new Error(String(payload.detail || response.statusText || "待确认资料草稿请求失败"));
+    return payload as T;
+  }
+
+  async function refreshPendingLibraryDraftGroups(): Promise<void> {
+    if (!snapshot?.currentProject.path) {
+      setPendingLibraryDraftGroups([]);
+      return;
+    }
+    try {
+      const payload = await libraryDraftGroupRequest<{ groups?: unknown[] }>("/api/project-library-draft-groups");
+      setPendingLibraryDraftGroups((payload.groups || []).flatMap((item) => {
+        const group = pendingLibraryDraftGroupFromUnknown(item);
+        return group ? [group] : [];
+      }));
+    } catch {
+      // The old runtime does not expose draft groups. Existing single-library reviews remain available in their pages.
+    }
+  }
+
+  async function setLibraryDraftGroupOrigin(groupId: string, origin: Pick<PendingLibraryDraftGroup, "conversationId" | "messageId" | "runId">): Promise<void> {
+    if (!groupId) return;
+    await libraryDraftGroupRequest(`/api/project-library-draft-groups/${encodeURIComponent(groupId)}/origin`, {
+      method: "PUT",
+      body: JSON.stringify({ conversation_id: origin.conversationId || "", message_id: origin.messageId || "", run_id: origin.runId || "" })
+    });
+  }
+
+  function setPendingLibraryDraftGroupError(groupId: string, error: string): void {
+    setPendingLibraryDraftGroups((current) => current.map((group) => group.groupId === groupId ? { ...group, error } : group));
+  }
+
+  async function commitPendingLibraryDraftGroup(groupId: string): Promise<void> {
+    const group = pendingLibraryDraftGroups.find((item) => item.groupId === groupId);
+    if (!group) return;
+    setOperationsBusy(true);
+    try {
+      const result = await libraryDraftGroupRequest<{ bundles?: Array<{ projection_paths?: string[] }> }>(`/api/project-library-draft-groups/${encodeURIComponent(groupId)}/commit`, { method: "POST" });
+      setPendingLibraryDraftGroups((current) => current.filter((item) => item.groupId !== groupId));
+      const paths = (result.bundles || []).flatMap((bundle) => bundle.projection_paths || []);
+      await syncChangedPaths(paths, { openFirst: false });
+      await refreshProjectWorkspace();
+      const message = `已${group.mode === "replace" ? "替换" : "合并"}${group.domains.length > 1 ? "风格与题材库" : "资料库"}，项目上下文已刷新。`;
+      setOperationsMessage(message);
+      setConversationMessage(message);
+    } catch (error) {
+      const message = describeActionableError(error, "确认资料草稿失败", "草稿仍保留，可以刷新预览后重试。");
+      setPendingLibraryDraftGroupError(groupId, message);
+      setConversationMessage(message);
+    } finally {
+      setOperationsBusy(false);
+    }
+  }
+
+  async function discardPendingLibraryDraftGroup(groupId: string): Promise<void> {
+    const group = pendingLibraryDraftGroups.find((item) => item.groupId === groupId);
+    if (!group) return;
+    setOperationsBusy(true);
+    try {
+      await libraryDraftGroupRequest(`/api/project-library-draft-groups/${encodeURIComponent(groupId)}`, { method: "DELETE" });
+      setPendingLibraryDraftGroups((current) => current.filter((item) => item.groupId !== groupId));
+      const message = "已丢弃资料草稿，项目文件未发生变化。";
+      setOperationsMessage(message);
+      setConversationMessage(message);
+    } catch (error) {
+      const message = describeActionableError(error, "丢弃资料草稿失败", "草稿仍保留，可稍后重试。");
+      setPendingLibraryDraftGroupError(groupId, message);
+      setConversationMessage(message);
+    } finally {
+      setOperationsBusy(false);
     }
   }
 
@@ -849,7 +1274,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       current_skill: detail.current_skill,
       current_agent: detail.current_agent,
       message_count: detail.message_count,
-      attachment_count: detail.attachment_count
+      attachment_count: detail.attachment_count,
+      model_override: detail.model_override,
+      reasoning_effort: detail.reasoning_effort
     }));
   }
 
@@ -888,8 +1315,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
 
   async function refreshConversationsList() {
     const conversations = await client.getConversations();
-    setSnapshot((current) => (current ? { ...current, conversations } : current));
-    return conversations;
+    const assistantOnly = assistantConversations(conversations);
+    setSnapshot((current) => (current ? { ...current, conversations: assistantOnly } : current));
+    return assistantOnly;
   }
 
   async function refreshJobsList() {
@@ -926,8 +1354,10 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   }
 
   function clearProjectScopedState(nextProject: CurrentProject) {
-    abortRef.current?.abort();
-    abortRef.current = null;
+    assistantAbortRef.current?.abort();
+    assistantAbortRef.current = null;
+    for (const controller of taskAbortControllersRef.current.values()) controller.abort();
+    taskAbortControllersRef.current.clear();
     liveJobIdsRef.current.clear();
     setSendingMessage(false);
     setOpenDocuments([]);
@@ -948,7 +1378,11 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setConversationMessage("");
     setMessageInput("");
     setPendingReferenceResolution(null);
-    setPendingGeneratedSave(null);
+    setPendingGeneratedSaves([]);
+    setPendingLibraryDraftGroups([]);
+    setPendingAgentConfirmations([]);
+    setPendingAgentConfirmationBusy("");
+    setAgentConfirmationExecution({});
     setLatestSkillResult(null);
     setPendingSkillPatchPreview(null);
     setSelectedSkillVersions([]);
@@ -963,7 +1397,11 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     });
   }
 
-  async function finalizeProjectSwitch(nextProject: CurrentProject, successMessage: string) {
+  async function finalizeProjectSwitch(
+    nextProject: CurrentProject,
+    successMessage: string,
+    options: { landing?: "project" | "assistant" } = {}
+  ) {
     clearProjectScopedState(nextProject);
     await recordDesktopProject(nextProject);
     setProjectPathInput(nextProject.path);
@@ -987,7 +1425,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
             manifestError: null,
             vectorError: null
           };
-    const nextConversations = conversationsResult.status === "fulfilled" ? conversationsResult.value : [];
+    const nextConversations = conversationsResult.status === "fulfilled" ? assistantConversations(conversationsResult.value) : [];
     const nextJobs = jobsResult.status === "fulfilled" ? jobsResult.value : [];
     const resolvedProject = nextChrome.current.path ? nextChrome.current : nextProject;
 
@@ -1006,6 +1444,12 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         : current
     );
     await syncDesktopProjectSnapshot(resolvedProject, nextConversations, nextJobs);
+
+    if (options.landing === "assistant") {
+      setActiveTab("conversations");
+      setProjectMessage(`${successMessage}，已进入 AI 助手。`);
+      return;
+    }
 
     const warnings: string[] = [];
     if (projectChromeResult.status === "rejected") {
@@ -1208,61 +1652,76 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       return conversationDetail.id;
     }
 
-    const detail = await client.createConversation();
+    let detail = await client.createConversation();
+    const preferences = conversationModelPreferencesRef.current;
+    if (preferences.model_override || preferences.reasoning_enabled || preferences.reasoning_effort !== "medium") {
+      detail = await client.updateConversationModelPreferences(detail.id, preferences);
+    }
     const conversations = await client.getConversations();
     setConversationDetail(detail);
-    setSnapshot((current) => (current ? { ...current, conversations } : current));
+    setSnapshot((current) => (current ? { ...current, conversations: assistantConversations(conversations) } : current));
     return detail.id;
+  }
+
+  async function createTaskConversation(input: {
+    type: Exclude<ConversationType, "assistant">;
+    title: string;
+    skillId?: string;
+    entry: string;
+    sourcePath?: string;
+    sourceBookId?: string;
+    targetPaths?: string[];
+  }): Promise<ConversationDetail> {
+    let detail = await client.createConversation({
+      title: input.title,
+      skill_id: input.skillId || "",
+      conversation_type: input.type,
+      task_metadata: {
+        entry: input.entry,
+        source_path: input.sourcePath || "",
+        source_book_id: input.sourceBookId || "",
+        target_paths: uniquePaths(input.targetPaths || []),
+        created_for: input.title
+      }
+    });
+    const preferences: ConversationModelPreferences = {
+      model_override: "",
+      reasoning_enabled: Boolean(configDraft?.model_thinking_enabled),
+      reasoning_effort: "medium"
+    };
+    if (preferences.reasoning_enabled) {
+      detail = await client.updateConversationModelPreferences(detail.id, preferences);
+    }
+    return detail;
   }
 
   function includedConversationAttachmentIds(detail = conversationDetail): string[] {
     return detail?.attachments.map((attachment) => attachment.id) || [];
   }
 
-  async function autoExtractLoreFromGeneratedOutline(input: {
-    skillId?: string;
-    content?: string;
-    targetPath?: string;
-    targetPaths?: string[];
-    sourcePath?: string;
-  }): Promise<string> {
-    if (!configDraft?.auto_lore_extract_enabled || !isOutlineGenerationResult(input)) {
-      return "";
-    }
-
-    const text = String(input.content || "").trim();
-    if (!text) {
-      return "";
-    }
-
-    try {
-      const result = await client.runSkill("lore_extract", {
-        text,
-        conversation_id: conversationDetail?.id || "",
-        source_path: input.sourcePath || input.targetPath || input.targetPaths?.[0] || "",
-        target_path: "",
-        instruction: "自动提取设定：只提取这段新生成大纲、细纲或章纲中明确出现的人物、体系、地图、道具设定，并与现有设定合并，避免臆造。",
-        write_result: true,
-        attachment_ids: []
-      });
-      const savedPaths = skillSavedPaths(result);
-      if (savedPaths.length) {
-        await syncChangedPaths(savedPaths, { openFirst: false });
-        return `；已自动提取设定并写入 ${savedPaths.length} 个设定文件`;
-      }
-      return "；自动提取设定完成，但未发现可写入的设定段落";
-    } catch (nextError) {
-      return `；自动提取设定失败：${nextError instanceof Error ? nextError.message : "未知错误"}`;
-    }
-  }
-
-  async function handleAgentRunPayload(_conversationId: string, reply: string, payload: AgentRunResponse) {
-    const pendingSave = pendingSaveFromSkill(payload.skill_result, "chat");
+  async function handleAgentRunPayload(conversationId: string, reply: string, payload: AgentRunResponse) {
+    const rawPendingSave = pendingSaveFromSkill(payload.skill_result, "chat");
     const skillResultData = payload.skill_result?.data || {};
-    const completionMessage = pendingSave
+    const libraryDraftGroup = pendingLibraryDraftGroupFromUnknown(skillResultData.library_draft_group);
+    const libraryDraft = skillResultData.library_draft && typeof skillResultData.library_draft === "object" && !Array.isArray(skillResultData.library_draft)
+      ? skillResultData.library_draft as Record<string, unknown>
+      : null;
+    const libraryDraftDomain = String(libraryDraft?.domain || "");
+    const libraryDraftLabel = libraryDraftDomain === "lore"
+      ? "设定资料"
+      : libraryDraftDomain === "style"
+        ? "写作风格"
+        : libraryDraftDomain === "genre"
+          ? "题材规则"
+          : "项目资料";
+    const completionMessage = rawPendingSave
       ? "生成完成，等待选择写入方式"
+      : libraryDraftGroup
+        ? "风格与题材草稿已生成，等待整体确认写入；确认前不会修改项目文件"
+      : libraryDraft
+        ? `${libraryDraftLabel}草稿已生成，请在下方预览后确认写入或丢弃；确认前不会修改项目文件`
       : payload.requires_confirmation
-        ? "已生成待确认的操作预览，下一步把确认执行接进新工作台"
+        ? "已生成待确认的操作预览，请检查内容后再执行写入"
         : payload.results.length
           ? "智能体已完成文件改动"
           : payload.skill_result?.status === "job_created"
@@ -1272,6 +1731,31 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     if (payload.conversation) {
       setConversationDetail(payload.conversation);
       await refreshConversationsList();
+    }
+
+    const persistedConversation = payload.conversation;
+    const ownerConversationId = persistedConversation?.id || conversationId;
+    const ownerMessageId = [...(persistedConversation?.messages || [])].reverse().find((message) => message.role === "assistant")?.id || "";
+    const pendingSave = rawPendingSave
+      ? {
+          ...rawPendingSave,
+          conversationId: ownerConversationId || undefined,
+          messageId: ownerMessageId || undefined,
+          runId: payload.run_id || undefined,
+          createdAt: new Date().toISOString()
+        }
+      : null;
+
+    if (payload.requires_confirmation && payload.run_id) {
+      try {
+        const confirmations = await client.getAgentRunConfirmations(payload.run_id);
+        setPendingAgentConfirmations(confirmations.filter((item) => item.status === "pending"));
+      } catch (nextError) {
+        setPendingAgentConfirmations([]);
+        setConversationMessage(`已生成待确认操作，但读取确认详情失败：${nextError instanceof Error ? nextError.message : "未知错误"}`);
+      }
+    } else if (!payload.requires_confirmation) {
+      setPendingAgentConfirmations([]);
     }
 
     if (payload.skill_result) {
@@ -1299,33 +1783,30 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
 
     if (pendingSave) {
-      setPendingGeneratedSave(pendingSave);
+      upsertPendingGeneratedSave(pendingSave);
       void trackDesktopGeneratedCache(pendingSave, "pending");
       publishPendingSaveMessage(pendingSave, completionMessage);
-      const autoLoreMessage = await autoExtractLoreFromGeneratedOutline({
-        skillId: pendingSave.skillId,
-        content: pendingSave.content,
-        targetPath: pendingSave.targetPath,
-        targetPaths: pendingSave.targetPaths
-      });
-      if (autoLoreMessage) {
-        publishPendingSaveMessage(pendingSave, `${completionMessage}${autoLoreMessage}`);
-      }
       return;
+    }
+
+    if (libraryDraftGroup) {
+      const ownedGroup = {
+        ...libraryDraftGroup,
+        conversationId: ownerConversationId || libraryDraftGroup.conversationId,
+        messageId: ownerMessageId || libraryDraftGroup.messageId,
+        runId: payload.run_id || libraryDraftGroup.runId,
+        createdAt: libraryDraftGroup.createdAt || new Date().toISOString()
+      };
+      setPendingLibraryDraftGroups((current) => [...current.filter((item) => item.groupId !== ownedGroup.groupId), ownedGroup]);
+      void setLibraryDraftGroupOrigin(ownedGroup.groupId, ownedGroup).then(() => refreshPendingLibraryDraftGroups()).catch(() => undefined);
     }
 
     if (payload.saved_paths.length) {
       await syncChangedPaths(payload.saved_paths, { openFirst: true });
     }
 
-    const autoLoreMessage = await autoExtractLoreFromGeneratedOutline({
-      skillId: String(skillResultData.skill_id || ""),
-      content: String(skillResultData.result || payload.skill_result?.result || payload.reply || reply || ""),
-      targetPath: String(skillResultData.target_path || payload.saved_paths[0] || ""),
-      targetPaths: uniquePaths([...stringListFromUnknown(skillResultData.target_paths), ...payload.saved_paths])
-    });
-
-    setConversationMessage(`${completionMessage}${autoLoreMessage}`);
+    const postprocessWarning = String(skillResultData.postprocess_warning || "").trim();
+    setConversationMessage(postprocessWarning ? `${completionMessage}；大纲结构整理待重试：${postprocessWarning}` : completionMessage);
   }
 
   async function refreshAll() {
@@ -1397,6 +1878,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
             }
           : current
       );
+      setProjectDataRevision((value) => value + 1);
       await syncDesktopProjectSnapshot(currentProject, conversations, jobs);
       setProjectMessage(warnings.length ? `项目视图已部分刷新；${warnings.join("；")}` : "项目视图已刷新");
     } catch (nextError) {
@@ -1419,14 +1901,16 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
-  async function performCreateProject(parentPath: string, projectName: string) {
+  async function performCreateProject(parentPath: string, projectName: string): Promise<"created" | "failed"> {
     setProjectBusy(true);
     setProjectMessage("");
     try {
       const created = await client.createProject(parentPath, projectName);
-      await finalizeProjectSwitch(created, "新项目已创建并打开");
+      await finalizeProjectSwitch(created, "新项目已创建并打开", { landing: "assistant" });
+      return "created";
     } catch (nextError) {
       setProjectMessage(describeActionableError(nextError, "创建项目失败", "请确认父目录存在并且允许写入。"));
+      return "failed";
     } finally {
       setProjectBusy(false);
     }
@@ -1440,7 +1924,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     return describeUnsavedWorkbenchState({
       dirtyDocumentCount: openDocumentsRef.current.filter((item) => item.dirty).length,
       hasConversationDraft: messageInput.trim().length > 0,
-      hasPendingGeneratedSave: Boolean(pendingGeneratedSave)
+      hasPendingGeneratedSave: pendingGeneratedSaves.length + pendingLibraryDraftGroups.length > 0
     });
   }
 
@@ -1476,16 +1960,16 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     await performOpenProject(targetPath);
   }
 
-  async function createProjectFromInput(pathOverride?: string) {
+  async function createProjectFromInput(pathOverride?: string): Promise<"created" | "queued" | "failed"> {
     const parentPath = (pathOverride ?? projectPathInput).trim();
     const projectName = projectNameInput.trim();
     if (!parentPath) {
       setProjectMessage("先填一个父目录，再创建项目。");
-      return;
+      return "failed";
     }
     if (!projectName) {
       setProjectMessage("给新项目起个名字吧。");
-      return;
+      return "failed";
     }
 
     const unsavedState = getUnsavedWorkbenchState();
@@ -1497,15 +1981,60 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         title: "当前有未保存草稿，确认要新建并切换项目吗？",
         detail: `${unsavedState.detail} 继续后会在 ${parentPath} 下创建 ${projectName}。`
       });
-      return;
+      return "queued";
     }
 
-    await performCreateProject(parentPath, projectName);
+    return performCreateProject(parentPath, projectName);
+  }
+
+  async function pickAndCreateProject(projectNameInput: string): Promise<"created" | "queued" | "cancelled" | "failed"> {
+    const projectName = projectNameInput.trim().slice(0, 80);
+    if (!projectName) {
+      setProjectMessage("给新小说起个名字吧。");
+      return "failed";
+    }
+
+    setProjectBusy(true);
+    setProjectMessage("请选择保存新小说的父目录。");
+    try {
+      const picked =
+        runtime.isDesktopShell && window.xiaoshuoDesktop?.pickProjectDirectory
+          ? await window.xiaoshuoDesktop.pickProjectDirectory()
+          : await client.pickProject();
+      if (!picked.path) {
+        setProjectMessage("已取消创建，新小说尚未写入磁盘。");
+        return "cancelled";
+      }
+
+      setProjectPathInput(picked.path);
+      const unsavedState = getUnsavedWorkbenchState();
+      if (unsavedState.hasUnsavedState) {
+        queueProjectSwitch({
+          mode: "create",
+          parentPath: picked.path,
+          projectName,
+          title: "当前有未保存内容，确认要新建并切换项目吗？",
+          detail: `${unsavedState.detail} 继续后会在 ${picked.path} 下创建 ${projectName}。`
+        });
+        return "queued";
+      }
+
+      return await performCreateProject(picked.path, projectName);
+    } catch (nextError) {
+      setProjectMessage(describeActionableError(nextError, "选择目录失败", "请重新选择一个可访问的目录。"));
+      return "failed";
+    } finally {
+      setProjectBusy(false);
+    }
   }
 
   async function pickAndOpenProject(mode: "open" | "create") {
+    if (mode === "create") {
+      await pickAndCreateProject(projectNameInput);
+      return;
+    }
     setProjectBusy(true);
-    setProjectMessage(mode === "create" ? "请选择一个父目录，用来生成新项目。" : "请选择要打开的项目目录。");
+    setProjectMessage("请选择要打开的项目目录。");
     try {
       const picked =
         runtime.isDesktopShell && window.xiaoshuoDesktop?.pickProjectDirectory
@@ -1517,17 +2046,35 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       }
 
       setProjectPathInput(picked.path);
-      if (mode === "create") {
-        await createProjectFromInput(picked.path);
-      } else {
-        await openProjectFromInput(picked.path);
-      }
+      await openProjectFromInput(picked.path);
     } catch (nextError) {
       setProjectMessage(
-        describeActionableError(nextError, mode === "create" ? "选择目录失败" : "选择项目失败", "请重新选择一个可访问的目录。")
+        describeActionableError(nextError, "选择项目失败", "请重新选择一个可访问的目录。")
       );
     } finally {
       setProjectBusy(false);
+    }
+  }
+
+  async function removeRecentProject(projectPath: string): Promise<boolean> {
+    const path = projectPath.trim();
+    if (!path || !runtime.isDesktopShell || !window.xiaoshuoDesktop?.localState?.removeRecentProject) {
+      setProjectMessage("最近项目管理需要桌面版。");
+      return false;
+    }
+
+    setRecentProjectRemovingPath(path);
+    setProjectMessage("");
+    try {
+      const localState = await window.xiaoshuoDesktop.localState.removeRecentProject({ path });
+      setSnapshot((current) => (current ? { ...current, localState } : current));
+      setProjectMessage("已从最近项目中移除，本地小说文件和云端副本均未删除。");
+      return true;
+    } catch (nextError) {
+      setProjectMessage(describeActionableError(nextError, "移除最近项目失败", "请稍后重试，本地小说文件没有变化。"));
+      return false;
+    } finally {
+      setRecentProjectRemovingPath("");
     }
   }
 
@@ -1610,6 +2157,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     try {
       const result = await window.xiaoshuoDesktop.cloudProjects.list();
       setCloudProjectSlots(result.slots);
+      setCloudProjectSummary(result);
       if (!options.silent) {
         setCloudProjectMessage(result.slots.length ? "云项目已刷新。" : "当前账号还没有云项目。");
       }
@@ -1619,6 +2167,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         setCloudProjectMessage(describeActionableError(nextError, "刷新云项目失败", "请确认已登录网站账号并且网络可用。"));
       }
       setCloudProjectSlots([]);
+      setCloudProjectSummary(null);
       return [];
     } finally {
       if (!options.silent) {
@@ -1628,83 +2177,102 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   }
 
   useEffect(() => {
-    if (!snapshot?.currentProject.path) {
-      setCloudProjectSlots([]);
-      return;
-    }
     void refreshCloudProjects({ silent: true });
   }, [snapshot?.currentProject.path, runtime.isDesktopShell]);
 
-  async function uploadCurrentProjectToCloud(slotId: number) {
+  async function uploadProjectToCloud(targetProject: CurrentProject, slotId: number, syncMode: "manual" | "auto" = "manual") {
     const currentProject = snapshot?.currentProject;
     if (!runtime.isDesktopShell || !window.xiaoshuoDesktop?.cloudProjects) {
       setCloudProjectMessage("云项目需要桌面版。");
       return;
     }
-    if (!currentProject?.path) {
+    if (!targetProject.path) {
       setCloudProjectMessage("先打开一个项目，再上传。");
-      return;
+      return null;
     }
-    if (hasDirtyOpenDocuments()) {
+    if (targetProject.path === currentProject?.path && hasDirtyOpenDocuments()) {
       setCloudProjectMessage("当前有未保存文档，请先保存后再上传项目。");
-      return;
+      return null;
     }
 
     setCloudProjectBusy(true);
+    setCloudProjectActivePath(targetProject.path);
     setCloudProjectMessage(`正在上传到云项目槽位 ${slotId}...`);
     try {
       const result = await window.xiaoshuoDesktop.cloudProjects.upload({
         slot_id: slotId,
-        project_path: currentProject.path,
-        project_name: currentProject.name
+        project_path: targetProject.path,
+        project_name: targetProject.name,
+        sync_mode: syncMode
       });
       await refreshCloudProjects({ silent: true });
-      setCloudProjectMessage(`已上传到槽位 ${result.slot.slot_id}：${result.slot.project_name || currentProject.name}`);
+      setCloudProjectMessage(result.unchanged ? "云端已是最新版本，没有产生上传流量。" : `已同步到云端：${result.slot.project_name || targetProject.name}`);
+      return result;
     } catch (nextError) {
-      setCloudProjectMessage(describeActionableError(nextError, "上传云项目失败", "请确认项目小于 20MB、网站账号已登录且网络可用。"));
+      setCloudProjectMessage(describeActionableError(nextError, "同步云项目失败", "请确认核心数据不超过 30MB、网站账号已登录且网络可用。"));
+      return null;
     } finally {
       setCloudProjectBusy(false);
+      setCloudProjectActivePath("");
     }
   }
 
-  async function syncCloudProjectToCurrent(slot: CloudProjectSlot) {
+  async function uploadCurrentProjectToCloud(slotId: number) {
     const currentProject = snapshot?.currentProject;
+    if (!currentProject?.path) {
+      setCloudProjectMessage("先打开一个项目，再上传。");
+      return null;
+    }
+    return uploadProjectToCloud(currentProject, slotId, "manual");
+  }
+
+  async function restoreCloudProject(slot: CloudProjectSlot, targetProject?: CurrentProject) {
+    const currentProject = snapshot?.currentProject;
+    const restoreTarget = targetProject?.path ? targetProject : currentProject;
     if (!runtime.isDesktopShell || !window.xiaoshuoDesktop?.cloudProjects) {
       setCloudProjectMessage("云项目需要桌面版。");
       return;
     }
-    if (!currentProject?.path) {
-      setCloudProjectMessage("先打开一个本地项目，再同步云项目。");
+    if (!restoreTarget?.path) {
+      setCloudProjectMessage("请先选择一个本地项目目录，再恢复云端内容。");
       return;
     }
-    const unsavedState = getUnsavedWorkbenchState();
+    const unsavedState = restoreTarget.path === currentProject?.path ? getUnsavedWorkbenchState() : { hasUnsavedState: false, summary: "" };
     if (unsavedState.hasUnsavedState) {
       setCloudProjectMessage(`同步前请先处理未保存内容：${unsavedState.summary}。`);
       return;
     }
-    if (!window.confirm(`确认用云项目“${slot.project_name || `槽位 ${slot.slot_id}`}”覆盖当前项目吗？软件会先自动备份当前项目。`)) {
+    if (!window.confirm(`确认将云端“${slot.project_name || `槽位 ${slot.slot_id}`}”的核心文件恢复到“${restoreTarget.name || "所选项目"}”吗？软件会先备份本地项目，其他文件不会删除。`)) {
       return;
     }
 
     setCloudProjectBusy(true);
+    setCloudProjectActivePath(restoreTarget.path);
     setCloudProjectMessage("正在备份当前项目并同步云项目...");
     try {
       const result = await window.xiaoshuoDesktop.cloudProjects.downloadToProject({
         id: slot.id,
-        project_path: currentProject.path,
-        project_name: currentProject.name
+        project_path: restoreTarget.path,
+        project_name: restoreTarget.name
       });
-      setOpenDocuments([]);
-      setActiveDocumentPath("");
-      setPendingGeneratedSave(null);
-      await refreshProjectWorkspace();
+      if (restoreTarget.path === currentProject?.path) {
+        setOpenDocuments([]);
+        setActiveDocumentPath("");
+        setPendingGeneratedSaves([]);
+        await refreshProjectWorkspace();
+      }
       await refreshCloudProjects({ silent: true });
-      setCloudProjectMessage(`云项目已同步到当前项目。备份：${result.backup_path}`);
+      setCloudProjectMessage(`已恢复 ${result.restored_files} 个核心文件，并保留同步前备份。`);
     } catch (nextError) {
       setCloudProjectMessage(describeActionableError(nextError, "同步云项目失败", "已尽量保留同步前备份，请根据提示路径检查。"));
     } finally {
       setCloudProjectBusy(false);
+      setCloudProjectActivePath("");
     }
+  }
+
+  async function syncCloudProjectToCurrent(slot: CloudProjectSlot) {
+    return restoreCloudProject(slot);
   }
 
   async function deleteCloudProject(slot: CloudProjectSlot) {
@@ -1868,15 +2436,21 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
+  function resetEmbeddingTestResult() {
+    if (!embeddingTestBusy) {
+      setEmbeddingTestMessage("");
+    }
+  }
+
   function patchConfig(patch: Partial<AppConfig>) {
     configDraftDirtyRef.current = true;
     setConfigDraft((current) => (current ? normalizeConfigDraft({ ...current, ...patch }) : current));
   }
 
-  async function patchAndSaveConfig(patch: Partial<AppConfig>, message = "设置已保存。") {
+  async function patchAndSaveConfig(patch: Partial<AppConfig>, message = "设置已保存。"): Promise<boolean> {
     const baseConfig = configDraft;
     if (!baseConfig) {
-      return;
+      return false;
     }
     const nextConfig = normalizeConfigDraft({ ...baseConfig, ...patch });
     setConfigDraft(nextConfig);
@@ -1889,10 +2463,16 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       lastConfigSignatureRef.current = configSignature(normalizedConfig);
       configDraftDirtyRef.current = false;
       setSnapshot((current) => (current ? { ...current, config: normalizedConfig } : current));
+      if (normalizedConfig.ai_config_mode === "manual") {
+        void refreshManualModelCatalog(normalizedConfig.manual_profile, { silent: true, force: true });
+      }
       setConfigMessage(message);
+      return true;
     } catch (nextError) {
-      configDraftDirtyRef.current = true;
+      setConfigDraft(baseConfig);
+      configDraftDirtyRef.current = configSignature(baseConfig) !== lastConfigSignatureRef.current;
       setConfigMessage(describeActionableError(nextError, "配置保存失败", "请检查联网搜索配置后重试。"));
+      return false;
     } finally {
       setConfigBusy(false);
     }
@@ -1930,6 +2510,46 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
+  async function refreshManualModelCatalog(
+    profile: Partial<AiConfigProfile> | undefined = configDraft?.manual_profile,
+    options: { silent?: boolean; force?: boolean } = {}
+  ): Promise<AiModelOption[]> {
+    const baseUrl = String(profile?.base_url || "").trim();
+    if (!baseUrl) {
+      setManualModelCatalog([]);
+      setManualModelDiscoveryMessage("请先在设置中填写手动 API 地址。");
+      return [];
+    }
+    if (!options.silent) {
+      setManualModelDiscoveryBusy(true);
+      setManualModelDiscoveryMessage("");
+    }
+    if (options.force) {
+      manualModelRefreshKeyRef.current = "";
+    }
+    try {
+      const result = await client.discoverManualModels({
+        base_url: baseUrl,
+        api_key: String(profile?.api_key || ""),
+        force: options.force === true
+      });
+      setManualModelCatalog(result.models);
+      setManualModelDiscoveryMessage(result.cached ? "已读取最近发现的模型列表。" : `已发现 ${result.models.length} 个文本模型。`);
+      return result.models;
+    } catch (nextError) {
+      setManualModelDiscoveryMessage(describeActionableError(
+        nextError,
+        "模型列表刷新失败",
+        "已保存的默认模型仍可继续使用，请检查接口是否提供 /models。"
+      ));
+      return [];
+    } finally {
+      if (!options.silent) {
+        setManualModelDiscoveryBusy(false);
+      }
+    }
+  }
+
   async function loginWebsiteAi(email: string, password: string) {
     setWebsiteAiBusy(true);
     setWebsiteAiMessage("");
@@ -1948,7 +2568,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
-  async function applyWebsiteAiConfig(payload: WebsiteAiApplyRequest) {
+  async function applyWebsiteAiConfig(payload: WebsiteAiApplyRequest): Promise<boolean> {
     setWebsiteAiBusy(true);
     setWebsiteAiMessage("");
     try {
@@ -1959,8 +2579,27 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       }
       await syncLicenseStatus();
       setWebsiteAiMessage(dashboard.message || "网站模型配置已应用。");
+      return true;
     } catch (nextError) {
       setWebsiteAiMessage(describeActionableError(nextError, "应用网站配置失败", "请先登录网站账号并选择可用模型。"));
+      return false;
+    } finally {
+      setWebsiteAiBusy(false);
+    }
+  }
+
+  async function applyWebsiteImageConfig(payload: WebsiteImageConfigRequest): Promise<boolean> {
+    setWebsiteAiBusy(true);
+    setWebsiteAiMessage("");
+    try {
+      const dashboard = await client.applyWebsiteImageConfig(payload);
+      setWebsiteAiDashboard(dashboard);
+      if (dashboard.config) applySyncedConfig(dashboard.config);
+      setWebsiteAiMessage(dashboard.message || "网站生图模型已保存。");
+      return true;
+    } catch (nextError) {
+      setWebsiteAiMessage(describeActionableError(nextError, "生图模型保存失败", "请先登录网站账号并选择可用的生图模型。"));
+      return false;
     } finally {
       setWebsiteAiBusy(false);
     }
@@ -2061,6 +2700,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       lastConfigSignatureRef.current = configSignature(normalizedConfig);
       configDraftDirtyRef.current = false;
       setSnapshot((current) => (current ? { ...current, config: saved, license } : current));
+      if (normalizedConfig.ai_config_mode === "manual") {
+        void refreshManualModelCatalog(normalizedConfig.manual_profile, { silent: true, force: true });
+      }
       setConfigMessage(license.licensed ? "配置已保存，授权状态已刷新" : `配置已保存；${license.message || "当前未授权"}`);
     } catch (nextError) {
       setConfigMessage(describeActionableError(nextError, "配置保存失败", "请检查必填配置后重新保存。"));
@@ -2106,6 +2748,12 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     try {
       const detail = await client.getConversation(conversationId);
       setConversationDetail(detail);
+      void hydrateConversationExecutionTrace(detail);
+      setConversationModelPreferences({
+        model_override: detail.model_override || "",
+        reasoning_enabled: Boolean(detail.reasoning_enabled),
+        reasoning_effort: detail.reasoning_effort || "medium"
+      });
       if (options.activateTab ?? true) {
         setActiveTab("conversations");
       }
@@ -2116,20 +2764,271 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
+  async function hydrateConversationExecutionTrace(detail: ConversationDetail) {
+    const targets = detail.messages.flatMap((message, index) => {
+      const runId = String(recordValue(recordValue(message.metadata).inline_plan).run_id || "").trim();
+      return runId ? [{ index, runId }] : [];
+    });
+    if (!targets.length) return;
+    const traces = await Promise.all(targets.map(async (target) => ({
+      ...target,
+      trace: executionTraceFromRunEvents((await client.getAgentRunEvents(target.runId, 0, 1_000).catch(() => ({ events: [] }))).events)
+    })));
+    if (!traces.some((item) => item.trace.length)) return;
+    setConversationDetail((current) => {
+      if (!current || current.id !== detail.id) return current;
+      const messages = current.messages.map((message, index) => {
+        const trace = traces.find((item) => item.index === index)?.trace;
+        return trace?.length ? { ...message, metadata: { ...message.metadata, execution_trace: trace } } : message;
+      });
+      return { ...current, messages };
+    });
+  }
+
+  async function getConversationPlanRun(runId: string): Promise<AgentRunState> {
+    return client.getAgentRun(runId);
+  }
+
+  function subscribeConversationPlanRun(
+    runId: string,
+    onRun: (run: AgentRunState) => void,
+    onError?: (error: unknown) => void
+  ): () => void {
+    const controller = new AbortController();
+    let refreshing = false;
+    const refresh = async () => {
+      if (controller.signal.aborted || refreshing) {
+        return;
+      }
+      refreshing = true;
+      try {
+        onRun(await client.getAgentRun(runId));
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          onError?.(error);
+        }
+      } finally {
+        refreshing = false;
+      }
+    };
+    void refresh();
+    // The journal stream remains the fast path. A bounded polling fallback
+    // covers renderer reloads and transport completion while a cooperative
+    // pause is still waiting for its durable checkpoint.
+    const refreshTimer = window.setInterval(() => void refresh(), 1_000);
+    void client.streamAgentRunEvents(runId, { onEvent: refresh, onGap: refresh, onEnd: refresh }, 0, controller.signal).catch((error) => {
+      if (!controller.signal.aborted) {
+        onError?.(error);
+      }
+    });
+    return () => {
+      window.clearInterval(refreshTimer);
+      controller.abort();
+    };
+  }
+
+  async function controlConversationPlanRun(
+    runId: string,
+    action: "pause" | "resume" | "cancel" | "retry",
+    stepId = ""
+  ): Promise<{ run: AgentRunState; conflict: boolean }> {
+    const latest = await client.getAgentRun(runId);
+    const payload = { operation_id: `op_inline_${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Date.now()}`, expected_version: latest.version };
+    try {
+      const run = action === "pause"
+        ? await client.pauseAgentRun(runId, payload)
+        : action === "resume"
+          ? await client.resumeAgentRun(runId, payload)
+          : action === "cancel"
+            ? await client.cancelAgentRun(runId, payload)
+            : await client.retryAgentRunStep(runId, stepId || latest.current_step_id, payload);
+      return { run, conflict: false };
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 409) {
+        return { run: await client.getAgentRun(runId), conflict: true };
+      }
+      throw error;
+    }
+  }
+
+  async function refreshLongTask(runId: string): Promise<LongTaskProgress | null> {
+    const run = await client.getAgentRun(runId);
+    const events = await client.getAgentRunEvents(runId, 0, 1_000).catch(() => ({ events: [] }));
+    const progress = longTaskProgressFromRun(run, events.events);
+    if (!progress) {
+      return null;
+    }
+    setLongTasks((current) => {
+      const next = current.filter((item) => item.task_id !== progress.task_id);
+      return [progress, ...next].sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+    });
+    if (!terminalLongTaskStatuses.has(run.status)) {
+      ensureLongTaskSubscription(run.run_id);
+    }
+    return progress;
+  }
+
+  function ensureLongTaskSubscription(runId: string): void {
+    if (!runId || longTaskSubscriptionsRef.current.has(runId)) {
+      return;
+    }
+    let unsubscribe: (() => void) | null = null;
+    unsubscribe = subscribeConversationPlanRun(
+      runId,
+      (run) => {
+        void refreshLongTask(run.run_id).finally(() => {
+          if (terminalLongTaskStatuses.has(run.status)) {
+            unsubscribe?.();
+            longTaskSubscriptionsRef.current.delete(run.run_id);
+          }
+        });
+      },
+      () => undefined
+    );
+    longTaskSubscriptionsRef.current.set(runId, unsubscribe);
+  }
+
+  async function refreshLongTasks(): Promise<LongTaskProgress[]> {
+    const listing = await client.listAgentRuns({ limit: 100 });
+    const progress = (await Promise.all(
+      listing.runs
+        .filter((run) => Boolean(workflowSkillIdFromRun(run)))
+        .map(async (run) => {
+          const events = await client.getAgentRunEvents(run.run_id, 0, 1_000).catch(() => ({ events: [] }));
+          return longTaskProgressFromRun(run, events.events);
+        })
+    )).filter((item): item is LongTaskProgress => Boolean(item));
+    setLongTasks(progress.sort((left, right) => right.updated_at.localeCompare(left.updated_at)));
+    for (const task of progress) {
+      if (!terminalLongTaskStatuses.has(task.status)) {
+        ensureLongTaskSubscription(task.task_id);
+      }
+    }
+    return progress;
+  }
+
+  async function controlLongTask(
+    taskId: string,
+    action: "pause" | "resume" | "cancel" | "retry"
+  ): Promise<LongTaskProgress | null> {
+    try {
+      const result = await controlConversationPlanRun(taskId, action);
+      const progress = await refreshLongTask(result.run.run_id);
+      setOperationsMessage(result.conflict ? "任务状态已刷新，请根据最新状态再次操作。" : "任务控制指令已发送。");
+      return progress;
+    } catch (error) {
+      setOperationsMessage(describeActionableError(error, "任务控制失败", "请刷新任务状态后重试。"));
+      return null;
+    }
+  }
+
   async function createConversation() {
     setConversationBusy(true);
     setConversationMessage("");
     try {
       const detail = await client.createConversation();
+      const defaults: ConversationModelPreferences = { model_override: "", reasoning_enabled: false, reasoning_effort: "medium" };
+      conversationModelPreferencesRef.current = defaults;
+      setConversationModelPreferences(defaults);
       const list = await client.getConversations();
       setConversationDetail(detail);
-      setSnapshot((current) => (current ? { ...current, conversations: list } : current));
+      setSnapshot((current) => (current ? { ...current, conversations: assistantConversations(list) } : current));
       setActiveTab("conversations");
     } catch (nextError) {
       setConversationMessage(describeActionableError(nextError, "新建对话失败"));
     } finally {
       setConversationBusy(false);
     }
+  }
+
+  async function updateConversationModelPreferences(
+    nextPreferences: ConversationModelPreferences
+  ): Promise<boolean> {
+    if (sendingMessage || conversationBusy || conversationModelPreferenceBusy) {
+      return false;
+    }
+    const normalized: ConversationModelPreferences = {
+      model_override: nextPreferences.model_override.trim(),
+      reasoning_enabled: Boolean(nextPreferences.reasoning_enabled),
+      reasoning_effort: nextPreferences.reasoning_effort
+    };
+    const previous = conversationModelPreferencesRef.current;
+    conversationModelPreferencesRef.current = normalized;
+    setConversationModelPreferences(normalized);
+
+    const conversationId = conversationDetail?.id || "";
+    if (!conversationId) {
+      setConversationMessage("模型偏好将在首次发送时保存到新会话。");
+      return true;
+    }
+
+    setConversationModelPreferenceBusy(true);
+    setConversationDetail((current) => current?.id === conversationId ? { ...current, ...normalized } : current);
+    patchConversationSummary(conversationId, (item) => ({ ...item, ...normalized }));
+    setConversationMessage("");
+    try {
+      const detail = await client.updateConversationModelPreferences(conversationId, normalized);
+      setConversationDetail((current) => current?.id === conversationId ? detail : current);
+      patchConversationSummary(conversationId, (item) => ({
+        ...item,
+        model_override: detail.model_override,
+        reasoning_enabled: detail.reasoning_enabled,
+        reasoning_effort: detail.reasoning_effort,
+        updated_at: detail.updated_at
+      }));
+      setConversationMessage(normalized.model_override ? "本会话模型偏好已保存。" : "本会话已恢复跟随默认模型。");
+      return true;
+    } catch (nextError) {
+      conversationModelPreferencesRef.current = previous;
+      setConversationModelPreferences(previous);
+      setConversationDetail((current) => current?.id === conversationId ? { ...current, ...previous } : current);
+      patchConversationSummary(conversationId, (item) => ({ ...item, ...previous }));
+      setConversationMessage(describeActionableError(nextError, "模型偏好保存失败", "已恢复为保存前的选择，请重试。"));
+      return false;
+    } finally {
+      setConversationModelPreferenceBusy(false);
+    }
+  }
+
+  async function updateConversationModelAndDefault(
+    modelId: string,
+    nextPreferences: ConversationModelPreferences
+  ): Promise<boolean> {
+    const normalizedModel = modelId.trim();
+    const baseConfig = configDraft;
+    if (!normalizedModel || !baseConfig) {
+      setConversationMessage("模型选择失败：没有可保存的模型或配置。");
+      return false;
+    }
+    const previous = conversationModelPreferencesRef.current;
+    const conversationSaved = await updateConversationModelPreferences({
+      ...nextPreferences,
+      model_override: normalizedModel
+    });
+    if (!conversationSaved) return false;
+
+    const mode = baseConfig.ai_config_mode === "website" ? "website" : "manual";
+    const globalSaved = mode === "website"
+      ? await applyWebsiteAiConfig({
+          model: normalizedModel,
+          embedding_model: baseConfig.website_profile?.embedding_model || "",
+          temp: baseConfig.website_profile?.temp ?? baseConfig.temp ?? 0.7,
+          top_p: baseConfig.website_profile?.top_p ?? baseConfig.top_p ?? 1
+        })
+      : await patchAndSaveConfig({
+          manual_profile: normalizeConfigDraft({
+            ...baseConfig,
+            manual_profile: { ...baseConfig.manual_profile, model: normalizedModel } as AiConfigProfile
+          }).manual_profile!
+        }, "");
+
+    if (!globalSaved) {
+      await updateConversationModelPreferences(previous);
+      setConversationMessage("模型未设为全局默认，已恢复保存前的会话选择。请检查连接或登录状态后重试。");
+      return false;
+    }
+    setConversationMessage("已设为当前会话模型和全局默认。其他 AI 功能将使用这个模型。");
+    return true;
   }
 
   async function updateConversationTitle(title: string, conversationId = conversationDetail?.id || "") {
@@ -2162,6 +3061,34 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
+  async function deleteConversation(conversationId = conversationDetail?.id || "") {
+    if (!conversationId) {
+      return false;
+    }
+    setConversationBusy(true);
+    setConversationMessage("");
+    try {
+      await client.deleteConversation(conversationId);
+      const list = await client.getConversations();
+      setSnapshot((current) => (current ? { ...current, conversations: assistantConversations(list) } : current));
+      if (conversationDetail?.id === conversationId) {
+        if (list[0]?.id) {
+          const next = await client.getConversation(list[0].id);
+          setConversationDetail(next);
+        } else {
+          setConversationDetail(null);
+        }
+      }
+      setConversationMessage("会话已删除。");
+      return true;
+    } catch (nextError) {
+      setConversationMessage(describeActionableError(nextError, "删除会话失败", "请刷新会话列表后重试。"));
+      return false;
+    } finally {
+      setConversationBusy(false);
+    }
+  }
+
   async function summarizeConversation(useModel = false) {
     if (!conversationDetail?.id) {
       return;
@@ -2181,15 +3108,16 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   }
 
   async function pinCurrentDocumentToConversation() {
-    if (!conversationDetail?.id || !activeDocumentPathRef.current) {
-      setConversationMessage("请先选择会话并打开一个文档。");
+    if (!activeDocumentPathRef.current) {
+      setConversationMessage("请先打开一个文档。");
       return;
     }
 
     setConversationBusy(true);
     setConversationMessage("");
     try {
-      const detail = await client.pinConversationContext(conversationDetail.id, {
+      const conversationId = await ensureConversationId();
+      const detail = await client.pinConversationContext(conversationId, {
         kind: "document",
         path: activeDocumentPathRef.current
       });
@@ -2278,7 +3206,10 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
-  async function uploadWorkflowAttachment(file: File | null): Promise<ConversationAttachment | null> {
+  async function uploadWorkflowAttachment(
+    file: File | null,
+    options: { conversationId?: string; bookTitle?: string } = {}
+  ): Promise<(ConversationAttachment & { conversation_id: string }) | null> {
     if (!file) {
       return null;
     }
@@ -2286,14 +3217,18 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setUploadingAttachment(true);
     setOperationsMessage("");
     try {
-      const conversationId = await ensureConversationId();
+      const title = options.bookTitle?.trim() || file.name.replace(/\.[^.]+$/, "").trim() || file.name;
+      const conversationId = options.conversationId || (await createTaskConversation({
+        type: "disassembly",
+        title: `拆书 · 《${title}》`,
+        skillId: "disassemble_book",
+        entry: "import_source",
+        sourcePath: file.name,
+        targetPaths: ["00_设定集/拆书库"]
+      })).id;
       const attachment = await client.uploadConversationAttachment(conversationId, file, file.name || "attachment.txt");
-      const detail = await client.getConversation(conversationId);
-      const conversations = await client.getConversations();
-      setConversationDetail(detail);
-      setSnapshot((current) => (current ? { ...current, conversations } : current));
       setOperationsMessage(`已上传拆书文件：${attachment.name}`);
-      return attachment;
+      return { ...attachment, conversation_id: conversationId };
     } catch (nextError) {
       setOperationsMessage(describeActionableError(nextError, "上传拆书文件失败", "请确认文件可读取后重新上传。"));
       return null;
@@ -2317,7 +3252,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         target_words: 2500,
         instruction: "",
         target_path: "",
-        conversation_id: conversationDetail?.id || "",
+        conversation_id: "",
         source_path: "",
         write_result: false,
         attachment_ids: [],
@@ -2334,15 +3269,26 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
-  async function archiveDisassemblySource(attachmentId: string, bookTitle = ""): Promise<DisassemblyBookSummary | null> {
+  async function archiveDisassemblySource(
+    attachmentId: string,
+    bookTitle = "",
+    taskConversationId = ""
+  ): Promise<DisassemblyBookSummary | null> {
     if (!attachmentId) {
       return null;
     }
 
     setOperationsBusy(true);
-    setOperationsMessage("");
+    setOperationsMessage("拆书导入：正在归档原文...");
     try {
-      const conversationId = await ensureConversationId();
+      const conversationId = taskConversationId || (await createTaskConversation({
+        type: "disassembly",
+        title: `拆书 · 《${bookTitle || "未命名作品"}》`,
+        skillId: "disassemble_book",
+        entry: "archive_source",
+        sourceBookId: "",
+        targetPaths: ["00_设定集/拆书库"]
+      })).id;
       const result = await client.runSkill("disassemble_book", {
         text: "",
         chapter: 0,
@@ -2495,6 +3441,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
 
     if (existing && !options.forceReload) {
       if (shouldActivate) {
+        activeDocumentOpenRequestRef.current += 1;
+        activeDocumentPathRef.current = path;
         setActiveDocumentPath(path);
         setActiveTab("editor");
       }
@@ -2510,10 +3458,22 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       return false;
     }
 
+    const previousActivePath = activeDocumentPathRef.current;
+    const activeOpenRequest = shouldActivate ? activeDocumentOpenRequestRef.current + 1 : 0;
+    if (shouldActivate) {
+      activeDocumentOpenRequestRef.current = activeOpenRequest;
+      activeDocumentPathRef.current = "";
+      setActiveDocumentPath("");
+      setActiveTab("editor");
+    }
+
     setDocumentBusy(true);
     setDocumentMessage("");
     try {
       const document = await client.getDocument(path);
+      if (shouldActivate && activeOpenRequest !== activeDocumentOpenRequestRef.current) {
+        return false;
+      }
       setOpenDocuments((current) => {
         const nextTab = {
           path: document.path,
@@ -2533,19 +3493,28 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         return [...current, nextTab];
       });
       if (shouldActivate) {
+        activeDocumentPathRef.current = document.path;
         setActiveDocumentPath(document.path);
         setActiveTab("editor");
       }
       return true;
     } catch (nextError) {
+      if (shouldActivate && activeOpenRequest === activeDocumentOpenRequestRef.current) {
+        activeDocumentPathRef.current = previousActivePath;
+        setActiveDocumentPath(previousActivePath);
+      }
       setDocumentMessage(describeActionableError(nextError, "打开文档失败"));
       return false;
     } finally {
-      setDocumentBusy(false);
+      if (!shouldActivate || activeOpenRequest === activeDocumentOpenRequestRef.current) {
+        setDocumentBusy(false);
+      }
     }
   }
 
   function activateDocument(path: string) {
+    activeDocumentOpenRequestRef.current += 1;
+    activeDocumentPathRef.current = path;
     setActiveDocumentPath(path);
     setActiveTab("editor");
   }
@@ -2577,14 +3546,15 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   }
 
   function updateActiveDocument(content: string) {
-    if (!activeDocumentPath) {
+    const targetPath = activeDocumentPathRef.current;
+    if (!targetPath) {
       return;
     }
 
-    setPendingReloadRequest((current) => (current?.path === activeDocumentPath ? null : current));
+    setPendingReloadRequest((current) => (current?.path === targetPath ? null : current));
     setOpenDocuments((current) =>
       current.map((item) =>
-        item.path === activeDocumentPath
+        item.path === targetPath
           ? {
               ...item,
               content,
@@ -2668,11 +3638,11 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setDocumentMessage(`已从磁盘重新载入 ${request.path}，本地未保存草稿已丢弃。`);
   }
 
-  async function saveActiveDocument(options: { force?: boolean; path?: string } = {}) {
+  async function saveActiveDocument(options: { force?: boolean; path?: string } = {}): Promise<"saved" | "conflict" | "failed" | "missing"> {
     const targetPath = options.path || activeDocumentPathRef.current;
     const activeDocument = openDocumentsRef.current.find((item) => item.path === targetPath);
     if (!activeDocument) {
-      return;
+      return "missing";
     }
 
     if (activeDocument.stale && !options.force) {
@@ -2683,7 +3653,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       });
       setDocumentMessage(`${activeDocument.path} 磁盘已有后台更新，普通保存已暂停。请读取最新版或确认覆盖。`);
       setActiveTab("editor");
-      return;
+      return "conflict";
     }
 
     setDocumentBusy(true);
@@ -2706,6 +3676,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       setPendingSaveConflictRequest((current) => (current?.path === saved.path ? null : current));
       await refreshProjectChrome();
       setDocumentMessage(options.force ? `已确认覆盖并保存 ${saved.path}` : `已保存 ${saved.path}`);
+      return "saved";
     } catch (nextError) {
       if (isSaveConflictError(nextError)) {
         setPendingSaveConflictRequest({
@@ -2716,13 +3687,60 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         setOpenDocuments((current) => current.map((item) => (item.path === activeDocument.path ? { ...item, saving: false, stale: true } : item)));
         setDocumentMessage(`${activeDocument.path} 磁盘已有新版，已暂停保存以避免覆盖。`);
         setActiveTab("editor");
-        return;
+        return "conflict";
       }
       setDocumentMessage(describeActionableError(nextError, "保存文档失败", "请确认目标文档仍存在，然后重试保存。"));
       setOpenDocuments((current) => current.map((item) => (item.path === activeDocument.path ? { ...item, saving: false } : item)));
+      return "failed";
     } finally {
       setDocumentBusy(false);
     }
+  }
+
+  async function saveActiveDocumentCopy(): Promise<string> {
+    const active = getActiveDocument();
+    if (!active) {
+      setDocumentMessage("请先打开要另存的文档。");
+      return "";
+    }
+    const extensionMatch = /^(.*?)(\.[^./\\]+)?$/.exec(active.path);
+    const stamp = new Date().toISOString().replace(/[:T]/g, "-").replace(/\.\d{3}Z$/, "");
+    const targetPath = `${extensionMatch?.[1] || active.path}-副本-${stamp}${extensionMatch?.[2] || ""}`;
+    setDocumentBusy(true);
+    try {
+      const saved = await client.saveDocument(targetPath, active.content);
+      await refreshProjectChrome();
+      await openDocument(saved.path, { forceReload: true, discardDirty: true, activate: true });
+      setPendingSaveConflictRequest(null);
+      setDocumentMessage(`已另存为副本：${saved.path}`);
+      return saved.path;
+    } catch (nextError) {
+      setDocumentMessage(describeActionableError(nextError, "另存副本失败", "请确认项目目录可写后重试。"));
+      return "";
+    } finally {
+      setDocumentBusy(false);
+    }
+  }
+
+  async function saveAllDocuments() {
+    const dirtyPaths = openDocumentsRef.current.filter((item) => item.dirty).map((item) => item.path);
+    if (!dirtyPaths.length) {
+      setDocumentMessage("没有需要保存的文档。");
+      return;
+    }
+
+    let savedCount = 0;
+    for (const path of dirtyPaths) {
+      const result = await saveActiveDocument({ path });
+      if (result !== "saved") {
+        if (savedCount > 0) {
+          setDocumentMessage(`已保存 ${savedCount} 个文档；${path} 尚未保存，请先处理当前错误或冲突。`);
+        }
+        return;
+      }
+      savedCount += 1;
+    }
+    setDocumentMessage(`已保存全部 ${savedCount} 个文档。`);
   }
 
   function cancelSaveConflict() {
@@ -3001,11 +4019,12 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setOperationsMessage("");
     try {
       if (selectedSkillDetail.builtin) {
-        const skill = await client.toggleSkill(selectedSkillDetail.id, true);
+        const disabled = !selectedSkillDetail.disabled;
+        const skill = await client.toggleSkill(selectedSkillDetail.id, disabled);
         const skills = await refreshSkillCatalog();
         setSelectedSkillDetail(skill);
         setSelectedSkillId(skill.id);
-        setOperationsMessage(`默认技能已禁用：${skill.name}。AI 会自动尝试调用相近的可用技能。`);
+        setOperationsMessage(disabled ? `默认技能已禁用：${skill.name}。AI 会自动尝试调用相近的可用技能。` : `默认技能已恢复：${skill.name}`);
         if (!skills.some((item) => item.id === skill.id)) {
           setSelectedSkillId("");
           setSelectedSkillDetail(null);
@@ -3025,6 +4044,25 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       setOperationsMessage(result.deleted ? "已删除导入技能。" : "技能已处理。");
     } catch (nextError) {
       setOperationsMessage(describeActionableError(nextError, "处理技能失败"));
+    } finally {
+      setOperationsBusy(false);
+    }
+  }
+
+  async function setSkillEnabled(skillId: string, enabled: boolean): Promise<boolean> {
+    const id = skillId.trim();
+    if (!id) return false;
+    setOperationsBusy(true);
+    setOperationsMessage("");
+    try {
+      const skill = await client.toggleSkill(id, !enabled);
+      await refreshSkillCatalog();
+      if (selectedSkillId === id || selectedSkillDetail?.id === id) setSelectedSkillDetail(skill);
+      setOperationsMessage(`${skill.name}已${enabled ? "启用" : "禁用"}。`);
+      return true;
+    } catch (nextError) {
+      setOperationsMessage(describeActionableError(nextError, `${enabled ? "启用" : "禁用"}技能失败`));
+      return false;
     } finally {
       setOperationsBusy(false);
     }
@@ -3408,14 +4446,134 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setConversationMessage("已取消本次引用确认。");
   }
 
+  async function resolvePendingAgentConfirmation(confirmation: AgentConfirmation, action: "approve" | "reject") {
+    if (pendingAgentConfirmationBusy) {
+      return;
+    }
+    const operationId = `op_assistant_confirmation_${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Date.now()}`;
+    setPendingAgentConfirmationBusy(confirmation.confirmation_id);
+    setAgentConfirmationExecution((current) => ({
+      ...current,
+      [confirmation.confirmation_id]: {
+        status: action === "approve" ? "executing" : "rejected",
+        message: action === "approve" ? "已确认，正在处理…" : "正在拒绝此操作…"
+      }
+    }));
+    try {
+      const payload = {
+        operation_id: operationId,
+        expected_version: confirmation.version,
+        expected_scope_fingerprint: confirmation.scope_fingerprint || ""
+      };
+      const resolved = action === "approve"
+        ? await client.approveAgentConfirmation(confirmation.confirmation_id, payload)
+        : await client.rejectAgentConfirmation(confirmation.confirmation_id, payload);
+
+      if (action === "approve" && resolved.status === "approved") {
+        const run = await client.getAgentRun(confirmation.run_id);
+        await client.resumeAgentRun(run.run_id, {
+          operation_id: `${operationId}_resume`,
+          expected_version: run.version
+        });
+        setAgentConfirmationExecution((current) => ({
+          ...current,
+          [confirmation.confirmation_id]: { status: "executing", message: "正在将已确认的文件移入项目回收站…" }
+        }));
+        let unsubscribe: (() => void) | undefined;
+        unsubscribe = subscribeConversationPlanRun(
+          run.run_id,
+          (nextRun) => {
+            if (!terminalLongTaskStatuses.has(nextRun.status)) {
+              return;
+            }
+            unsubscribe?.();
+            void (async () => {
+              if (nextRun.status === "completed") {
+                await refreshProjectWorkspace();
+                await refreshActiveConversation();
+                setAgentConfirmationExecution((current) => ({
+                  ...current,
+                  [confirmation.confirmation_id]: { status: "completed", message: "操作已完成，可在项目时间线恢复已归档文件。" }
+                }));
+                setConversationMessage("操作已完成，项目文件已刷新。");
+              } else {
+                const message = nextRun.status === "cancelled"
+                  ? "操作已取消，未移入回收站。"
+                  : `操作执行失败：${nextRun.error || "文件保持原样，请重新检查后再确认。"}`;
+                setAgentConfirmationExecution((current) => ({
+                  ...current,
+                  [confirmation.confirmation_id]: {
+                    status: "failed",
+                    message: nextRun.status === "cancelled" ? "操作已取消，文件没有移动。" : (nextRun.error || "操作失败，文件保持原样。")
+                  }
+                }));
+                setConversationMessage(message);
+              }
+            })().catch((error) => {
+              setConversationMessage(describeActionableError(error, "刷新写入结果失败", "请点击页面刷新后查看已保存内容。"));
+            });
+          },
+          (error) => {
+            setConversationMessage(describeActionableError(error, "跟踪写入结果失败", "请刷新页面确认写入结果。"));
+          }
+        );
+        setConversationMessage("操作已确认，正在继续执行。");
+      } else {
+        setConversationMessage("操作已拒绝，未执行对应写入。");
+        setAgentConfirmationExecution((current) => ({
+          ...current,
+          [confirmation.confirmation_id]: { status: "rejected", message: "已拒绝，项目文件未改变。" }
+        }));
+      }
+      if (action === "reject") {
+        setPendingAgentConfirmations((current) => current.filter((item) => item.confirmation_id !== resolved.confirmation_id));
+      }
+    } catch (nextError) {
+      const message = describeActionableError(nextError, action === "approve" ? "批准操作失败" : "拒绝操作失败");
+      setConversationMessage(message);
+      setAgentConfirmationExecution((current) => ({
+        ...current,
+        [confirmation.confirmation_id]: { status: "failed", message }
+      }));
+    } finally {
+      setPendingAgentConfirmationBusy("");
+    }
+  }
+
   async function sendConversationPrompt(content: string, options: SendConversationOptions = {}) {
     const trimmed = content.trim();
     if (!trimmed || sendingMessage) {
       return;
     }
 
-    if (pendingGeneratedSave) {
-      publishPendingSaveMessage(pendingGeneratedSave, "还有待写入的生成结果，请先保存或丢弃后再发送新请求。");
+    const normalizedConfirmation = trimmed.replace(/\s+/g, "");
+    if (
+      pendingGeneratedSaves.length === 1 && pendingGeneratedSave &&
+      /^(确认|确认保存|确认写入)$/.test(normalizedConfirmation)
+    ) {
+      setMessageInput("");
+      await savePendingGenerated(pendingGeneratedSave.defaultMode || "replace");
+      return;
+    }
+
+    if (pendingGeneratedSaves.length > 1 && /^(确认|确认保存|确认写入)$/.test(normalizedConfirmation)) {
+      setConversationMessage("当前有多个待确认生成结果，请在对应预览卡片中选择具体内容后再确认。");
+      return;
+    }
+
+    const actionableAgentConfirmations = pendingAgentConfirmations.filter((item) => {
+      const status = agentConfirmationExecution[item.confirmation_id]?.status || "pending";
+      return status === "pending";
+    });
+    const pendingAgentConfirmation = actionableAgentConfirmations.length === 1 ? actionableAgentConfirmations[0] : null;
+    if (pendingAgentConfirmation && /^(确认|确认保存|确认写入)$/.test(normalizedConfirmation)) {
+      setMessageInput("");
+      await resolvePendingAgentConfirmation(pendingAgentConfirmation, "approve");
+      return;
+    }
+
+    if (actionableAgentConfirmations.length > 0) {
+      setConversationMessage("当前有多个待确认操作，请在确认卡片中选择具体操作后再继续。");
       return;
     }
 
@@ -3465,12 +4623,43 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     const controller = new AbortController();
     const assistantMessage = makeLocalMessage("assistant", "");
 
-    abortRef.current = controller;
+    assistantAbortRef.current = controller;
     setSendingMessage(true);
     appendLocalMessage(conversationId, "user", trimmed);
     setMessageInput("");
 
     let streamedText = "";
+    let streamedReasoning = "";
+    let streamedAssistantMetadata: Record<string, unknown> = {};
+    const executionTrace: Array<{ stage: string; message: string }> = [];
+    let streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    const flushStream = () => {
+      if (streamFlushTimer) {
+        clearTimeout(streamFlushTimer);
+        streamFlushTimer = null;
+      }
+      upsertLocalMessage(conversationId, {
+        ...assistantMessage,
+        content: streamedText,
+        reasoning_content: streamedReasoning,
+        metadata: streamedAssistantMetadata
+      });
+    };
+    const scheduleStreamFlush = () => {
+      if (streamFlushTimer) {
+        return;
+      }
+      streamFlushTimer = setTimeout(flushStream, 40);
+    };
+    const recordExecutionStep = (stage: string, message: string) => {
+      const normalized = String(message || "").trim();
+      if (!normalized) return;
+      const previous = executionTrace.at(-1);
+      if (previous?.stage === stage && previous.message === normalized) return;
+      executionTrace.push({ stage, message: normalized });
+      streamedAssistantMetadata = { ...streamedAssistantMetadata, execution_trace: executionTrace.slice(-80) };
+      scheduleStreamFlush();
+    };
     try {
       await client.streamConversationMessage(
         conversationId,
@@ -3492,40 +4681,75 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
             const currentSkill = event.current_skill || event.skill_id || "";
             updateActiveConversationSkill(conversationId, event.skill_id || "", "");
             setConversationMessage(currentSkill ? `正在调用技能：${currentSkill}` : "正在判断当前技能...");
+            streamedAssistantMetadata = { ...streamedAssistantMetadata, intent: currentSkill ? "skill" : "chat" };
+            if (event.inline_plan) {
+              activeConversationRunIdRef.current = event.inline_plan.run_id;
+              streamedAssistantMetadata = {
+                ...streamedAssistantMetadata,
+                inline_plan: event.inline_plan,
+                skill_plan: event.skill_plan,
+                skill_steps: event.skill_steps || []
+              };
+            }
+            recordExecutionStep("created", currentSkill ? `已识别任务，准备调用：${currentSkill}` : "已创建任务，正在判断请求类型。");
           },
           onDelta: (event) => {
+            if (event.stage === "workflow_start" || event.stage === "workflow_progress") {
+              recordExecutionStep(event.stage === "workflow_start" ? "starting" : "working", event.text || (event.stage === "workflow_start" ? "正在启动任务…" : "正在处理…"));
+              setConversationMessage(String(event.text || "正在执行任务…").trim());
+              return;
+            }
             if (event.stage === "humanizer_start") {
+              recordExecutionStep("polishing", "正在进行去AI味润色…");
               setConversationMessage("正在进行去AI味润色...");
               return;
             }
             if (!event.text) {
               return;
             }
+            if (event.channel === "reasoning") {
+              streamedReasoning += event.text;
+              scheduleStreamFlush();
+              return;
+            }
             streamedText += event.text;
-            upsertLocalMessage(conversationId, { ...assistantMessage, content: streamedText });
+            scheduleStreamFlush();
           },
           onFinal: async (event) => {
+            activeConversationRunIdRef.current = "";
+            flushStream();
             const reply = resolveAssistantReply(event.payload, streamedText);
+            recordExecutionStep("completed", "任务已完成。");
             if (reply.trim()) {
-              upsertLocalMessage(conversationId, { ...assistantMessage, content: reply });
+              upsertLocalMessage(conversationId, { ...assistantMessage, content: reply, reasoning_content: streamedReasoning, metadata: streamedAssistantMetadata });
             }
             await handleAgentRunPayload(conversationId, reply, event.payload);
           },
           onError: async (event) => {
+            activeConversationRunIdRef.current = "";
             throw new Error(event.message || "发送失败");
           }
         },
         controller.signal
       );
     } catch (nextError) {
+      flushStream();
       if (controller.signal.aborted) {
+        recordExecutionStep("cancelled", "已请求停止任务。");
         setConversationMessage(describeStoppedConversationResponse(streamedText));
       } else {
+        recordExecutionStep("failed", `任务未完成：${nextError instanceof Error ? nextError.message : "未知错误"}`);
         setConversationMessage(describeActionableError(nextError, "发送失败", "请检查模型配置或稍后重试；本次不会自动写入文件。"));
       }
+      const persisted = await client.getConversation(conversationId).catch(() => null);
+      if (persisted) setConversationDetail(persisted);
     } finally {
-      if (abortRef.current === controller) {
-        abortRef.current = null;
+      if (streamFlushTimer) {
+        clearTimeout(streamFlushTimer);
+        streamFlushTimer = null;
+      }
+      if (assistantAbortRef.current === controller) {
+        assistantAbortRef.current = null;
       }
       setSendingMessage(false);
     }
@@ -3554,21 +4778,26 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   }
 
   function stopMessage() {
-    if (!abortRef.current) {
+    const controller = assistantAbortRef.current;
+    if (!controller) {
       return;
     }
 
     setConversationMessage("正在停止响应...");
-    abortRef.current.abort();
+    controller.abort();
+    const runId = activeConversationRunIdRef.current;
+    activeConversationRunIdRef.current = "";
+    if (runId) {
+      void controlConversationPlanRun(runId, "cancel").then(() => {
+        setConversationMessage("已请求取消当前运行。");
+      }).catch((error) => {
+        setConversationMessage(describeActionableError(error, "取消运行失败", "请在执行计划卡中重试取消。"));
+      });
+    }
   }
 
   async function invokeSelectedSkill() {
     if (!selectedSkillId) {
-      return;
-    }
-
-    if (pendingGeneratedSave) {
-      publishPendingSaveMessage(pendingGeneratedSave, "还有待写入的生成结果，请先保存或丢弃后再执行新技能。");
       return;
     }
 
@@ -3581,11 +4810,14 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       return;
     }
 
+    const sourcePath = activeDocument?.path || "";
+    const taskSpec = taskConversationSpecForWorkflow(selectedSkillId, {}, sourcePath);
     await runWorkflowSkill(selectedSkillId, {
       text: activeDocument?.content || "",
-      conversation_id: conversationDetail?.id || "",
-      source_path: activeDocument?.path || "",
-      target_path: activeDocument?.path || "",
+      // 写作、拆书等工作流必须由运行入口创建自己的任务线程，不能继承 AI 助手会话。
+      conversation_id: taskSpec ? "" : conversationDetail?.id || "",
+      source_path: sourcePath,
+      target_path: sourcePath,
       write_result: false,
       attachment_ids: []
     });
@@ -3612,75 +4844,72 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       await refreshDisassemblyLibrary();
     }
 
-    const pendingSave = pendingSaveFromSkill(result, "skill");
-    if (pendingSave) {
-      setPendingGeneratedSave(pendingSave);
+    const rawPendingSave = pendingSaveFromSkill(result, "skill");
+    if (rawPendingSave) {
+      const pendingSave: PendingGeneratedSave = {
+        ...rawPendingSave,
+        conversationId: conversationDetail?.id || undefined,
+        createdAt: new Date().toISOString()
+      };
+      upsertPendingGeneratedSave(pendingSave);
       void trackDesktopGeneratedCache(pendingSave, "pending");
       publishPendingSaveMessage(pendingSave, "技能已生成内容，等待选择写入方式");
-      const autoLoreMessage = await autoExtractLoreFromGeneratedOutline({
-        skillId: pendingSave.skillId,
-        content: pendingSave.content,
-        targetPath: pendingSave.targetPath,
-        targetPaths: pendingSave.targetPaths,
-        sourcePath
-      });
-      if (autoLoreMessage) {
-        publishPendingSaveMessage(pendingSave, `技能已生成内容，等待选择写入方式${autoLoreMessage}`);
-      }
       return;
     }
 
     const savedPaths = skillSavedPaths(result);
     if (savedPaths.length) {
       await syncChangedPaths(savedPaths, { openFirst: true });
-      const autoLoreMessage = await autoExtractLoreFromGeneratedOutline({
-        skillId: String(result.data?.skill_id || skillId),
-        content: String(result.data?.result || result.result || ""),
-        targetPath: String(result.data?.target_path || savedPaths[0] || ""),
-        targetPaths: uniquePaths([...stringListFromUnknown(result.data?.target_paths), ...savedPaths]),
-        sourcePath
-      });
-      setOperationsMessage(`技能已写入 ${savedPaths[0]}${autoLoreMessage}`);
+      const postprocessWarning = String(result.data?.postprocess_warning || "").trim();
+      setOperationsMessage(postprocessWarning ? `技能已写入 ${savedPaths[0]}；大纲结构整理待重试：${postprocessWarning}` : `技能已写入 ${savedPaths[0]}`);
       return;
     }
 
-    const autoLoreMessage = await autoExtractLoreFromGeneratedOutline({
-      skillId: String(result.data?.skill_id || skillId),
-      content: String(result.data?.result || result.result || ""),
-      targetPath: String(result.data?.target_path || ""),
-      targetPaths: stringListFromUnknown(result.data?.target_paths),
-      sourcePath
-    });
-    setOperationsMessage(result.result.trim() ? `技能执行完成，结果已显示在下方预览。${autoLoreMessage}` : `技能执行完成${autoLoreMessage}`);
+    setOperationsMessage(result.result.trim() ? "技能执行完成，结果已显示在下方预览。" : "技能执行完成");
   }
 
   async function runWorkflowSkill(skillId: string, payload: Partial<SkillRunRequest> = {}) {
     if (!skillId) {
       return;
     }
-    if (pendingGeneratedSave) {
-      publishPendingSaveMessage(pendingGeneratedSave, "还有待写入的生成结果，请先保存或丢弃后再执行新技能。");
-      return;
-    }
-
+    const workflowLabel = workflowProgressLabel(skillId);
     setOperationsBusy(true);
-    setOperationsMessage("");
+    setOperationsMessage(`${workflowLabel}：正在准备任务...`);
     setLatestSkillResult(null);
     let workflowController: AbortController | null = null;
+    let startedLongTaskRunId = "";
     try {
       const activeDocument = getActiveDocument();
       const sourcePath = payload.source_path ?? activeDocument?.path ?? "";
       const autoRevision = Boolean(configDraft?.enable_consistency_revision);
       const scoreThreshold = configDraft?.consistency_revision_score || 80;
+      const requestedConversationId = String(payload.conversation_id || "").trim();
+      const taskSpec = taskConversationSpecForWorkflow(skillId, payload, sourcePath);
+      // 即使调用方显式传入当前普通助手会话，任务也必须新建自己的线程。
+      // 只有传入既有任务线程时才允许复用其会话 ID。
+      let taskConversationId = taskSpec && (!requestedConversationId || requestedConversationId === conversationDetail?.id)
+        ? ""
+        : requestedConversationId;
+      if (taskSpec) {
+        if (!taskConversationId) {
+          const taskConversation = await createTaskConversation({
+            ...taskSpec,
+            skillId,
+            sourcePath,
+            targetPaths: uniquePaths([sourcePath, String(payload.target_path || "")])
+          });
+          taskConversationId = taskConversation.id;
+        }
+      }
       const skillPayload = {
         ...(payload as Record<string, unknown>),
         text: payload.text ?? activeDocument?.content ?? "",
-        chapter: payload.chapter ?? 0,
-        end_chapter: payload.end_chapter ?? 0,
+        chapter: payload.chapter && payload.chapter > 0 ? payload.chapter : undefined,
+        end_chapter: payload.end_chapter && payload.end_chapter > 0 ? payload.end_chapter : undefined,
         target_words: payload.target_words ?? 2500,
         instruction: payload.instruction ?? "",
         target_path: payload.target_path ?? "",
-        conversation_id: payload.conversation_id ?? conversationDetail?.id ?? "",
+        conversation_id: taskConversationId || (taskSpec ? "" : conversationDetail?.id || ""),
         source_path: sourcePath,
         write_result: payload.write_result ?? false,
         attachment_ids: payload.attachment_ids ?? [],
@@ -3702,8 +4931,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
 
       const controller = new AbortController();
       workflowController = controller;
-      abortRef.current?.abort();
-      abortRef.current = controller;
+      const workflowAbortKey = skillPayload.conversation_id || `${skillId}:${sourcePath}`;
+      taskAbortControllersRef.current.get(workflowAbortKey)?.abort();
+      taskAbortControllersRef.current.set(workflowAbortKey, controller);
       let streamed = "";
       const finalResponseRef: { current: AgentRunResponse | null } = { current: null };
       await client.streamAgentRun({
@@ -3716,12 +4946,24 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         attachment_ids: skillPayload.attachment_ids || [],
         ...skillPayload
       } as any, {
-        onStart: () => {
-          setOperationsMessage("开始生成，正在接收流式输出...");
+        onStart: (event) => {
+          if (event.run_id && longTaskSkillIds.has(skillId as LongTaskProgress["skill_id"])) {
+            startedLongTaskRunId = event.run_id;
+            void refreshLongTask(event.run_id).catch(() => undefined);
+          }
+          setOperationsMessage(`${workflowLabel}：已启动，正在接收流式输出...`);
         },
         onDelta: (event) => {
+          if (event.stage === "workflow_progress") {
+            setOperationsMessage(`${workflowLabel}：${event.text.trim()}`);
+            return;
+          }
+          if (event.stage === "workflow_start") {
+            setOperationsMessage(`${workflowLabel}：正在启动工作流...`);
+            return;
+          }
           if (event.stage === "humanizer_start") {
-            setOperationsMessage("正在进行去AI味润色...");
+            setOperationsMessage(`${workflowLabel}：正在进行去AI味润色...`);
             return;
           }
           streamed += event.text || "";
@@ -3736,7 +4978,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
               target_paths: event.target_paths || []
             }
           });
-          setOperationsMessage("正在生成...");
+          setOperationsMessage(`${workflowLabel}：正在生成...`);
         },
         onFinal: async (event) => {
           finalResponseRef.current = event.payload;
@@ -3746,7 +4988,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         }
       }, controller.signal);
 
-      abortRef.current = null;
+      taskAbortControllersRef.current.delete(workflowAbortKey);
       const finalResponse = finalResponseRef.current;
       const result = finalResponse?.skill_result || {
         status: "done",
@@ -3759,21 +5001,28 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         }
       };
       await handleSkillRunResult(result, skillId, sourcePath);
+      return result;
     } catch (nextError) {
+      if (startedLongTaskRunId) {
+        const durableTask = await refreshLongTask(startedLongTaskRunId).catch(() => null);
+        if (durableTask && !terminalLongTaskStatuses.has(durableTask.status)) {
+          setOperationsMessage(`${workflowLabel}：前台连接已断开，任务正在后台继续，可在任务进度中查看。`);
+          return null;
+        }
+      }
       setOperationsMessage(describeActionableError(nextError, "执行技能失败", "请确认已打开目标文档、模型配置可用后重试。"));
+      return null;
     } finally {
-      if (workflowController && abortRef.current === workflowController) {
-        abortRef.current = null;
+      if (workflowController) {
+        for (const [key, controller] of taskAbortControllersRef.current) {
+          if (controller === workflowController) taskAbortControllersRef.current.delete(key);
+        }
       }
       setOperationsBusy(false);
     }
   }
 
   async function runNuwaStyleDistillation(options: { replace?: boolean; text?: string; sourcePath?: string; bookTitle?: string; sourceBookId?: string } = {}) {
-    if (pendingGeneratedSave) {
-      publishPendingSaveMessage(pendingGeneratedSave, "还有待写入的生成结果，请先保存或丢弃后再执行蒸馏。");
-      return;
-    }
     if (styleDistillationProfile && !options.replace) {
       setOperationsMessage("当前项目已经有蒸馏书籍。请在拆书面板确认替换后再执行。");
       return;
@@ -3783,9 +5032,18 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     setOperationsBusy(true);
     setOperationsMessage("");
     try {
+      const taskConversation = await createTaskConversation({
+        type: "distillation",
+        title: `蒸馏 · 《${options.bookTitle || activeDocument?.title || "未命名作品"}》`,
+        skillId: "nuwa_style_distill",
+        entry: "distill",
+        sourcePath: options.sourcePath ?? activeDocument?.path ?? "",
+        sourceBookId: options.sourceBookId || "",
+        targetPaths: ["00_设定集/.agent/style_distillation/current.json"]
+      });
       const result = await client.runSkill("nuwa_style_distill", {
         text: options.text ?? activeDocument?.content ?? "",
-        conversation_id: conversationDetail?.id || "",
+        conversation_id: taskConversation.id,
         source_path: options.sourcePath ?? activeDocument?.path ?? "",
         target_path: "",
         write_result: true,
@@ -3799,7 +5057,11 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       const profile = readStyleDistillationProfileFromResult(result);
       setStyleDistillationProfile(profile);
       await refreshProjectChrome().catch(() => null);
-      setOperationsMessage(profile ? `已蒸馏：${profile.book_title}，并已启用为生成文风。` : result.result || "蒸馏完成。");
+      setOperationsMessage(profile
+        ? (result.data?.requires_confirmation
+          ? `已蒸馏：${profile.book_title}。风格库草稿已生成，等待确认；当前档案仅作为本次试用文风。`
+          : `已蒸馏：${profile.book_title}，并已启用为生成文风。`)
+        : result.result || "蒸馏完成。");
     } catch (nextError) {
       setOperationsMessage(describeActionableError(nextError, "执行蒸馏失败", "请确认已打开拆书原文、拆书产物存在，且模型配置可用。"));
     } finally {
@@ -3815,9 +5077,17 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     const nextEnabled = enabled ?? !styleDistillationProfile.enabled;
     setOperationsBusy(true);
     try {
+      const taskConversation = await createTaskConversation({
+        type: "distillation",
+        title: `蒸馏 · 《${styleDistillationProfile.book_title || "当前作品"}》`,
+        skillId: "nuwa_style_distill",
+        entry: "toggle",
+        sourceBookId: styleDistillationProfile.source_book_id || "",
+        targetPaths: ["00_设定集/.agent/style_distillation/current.json"]
+      });
       const result = await client.runSkill("nuwa_style_distill", {
         text: "",
-        conversation_id: conversationDetail?.id || "",
+        conversation_id: taskConversation.id,
         source_path: "",
         target_path: "",
         write_result: false,
@@ -3842,9 +5112,17 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
     setOperationsBusy(true);
     try {
+      const taskConversation = await createTaskConversation({
+        type: "distillation",
+        title: `蒸馏 · 《${styleDistillationProfile.book_title || "当前作品"}》`,
+        skillId: "nuwa_style_distill",
+        entry: "delete",
+        sourceBookId: styleDistillationProfile.source_book_id || "",
+        targetPaths: ["00_设定集/.agent/style_distillation/current.json"]
+      });
       const result = await client.runSkill("nuwa_style_distill", {
         text: "",
-        conversation_id: conversationDetail?.id || "",
+        conversation_id: taskConversation.id,
         source_path: "",
         target_path: "",
         write_result: false,
@@ -3861,12 +5139,11 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
-  async function savePendingGenerated(mode: "replace" | "append") {
-    if (!pendingGeneratedSave) {
+  async function savePendingGenerated(mode: "replace" | "append", cacheId = "", expectedTargetHashes?: Record<string, string>) {
+    const currentPending = pendingSaveByCacheId(cacheId);
+    if (!currentPending) {
       return;
     }
-
-    const currentPending = pendingGeneratedSave;
 
     if (currentPending.source === "skill") {
       setOperationsBusy(true);
@@ -3883,20 +5160,32 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         target_path: currentPending.targetPath,
         target_paths: currentPending.targetPaths,
         chapter: currentPending.chapter,
-        save_plan: currentPending.savePlan
+        save_plan: currentPending.savePlan,
+        expected_target_hashes: expectedTargetHashes
       });
 
-      setPendingGeneratedSave(null);
+      removePendingGeneratedSave(currentPending.cacheId);
       await syncChangedPaths(result.saved_paths, { openFirst: true });
       await trackDesktopGeneratedCache(currentPending, "saved", mode);
+      const postprocess = result as Record<string, unknown>;
+      const libraryDraft = recordValue(postprocess.library_draft);
+      const draftRecords = Number(libraryDraft.records || 0);
+      const postprocessWarning = String(postprocess.postprocess_warning || "").trim();
+      const postprocessMessage = draftRecords > 0
+        ? `；已自动提取 ${draftRecords} 条设定，等待确认`
+        : postprocessWarning
+          ? `；大纲已保存，结构整理待重试：${postprocessWarning}`
+          : "";
       publishPendingSaveMessage(
         currentPending,
-        describeSavedGeneratedResult(currentPending, mode, result.saved_paths)
+        `${describeSavedGeneratedResult(currentPending, mode, result.saved_paths)}${postprocessMessage}`
       );
     } catch (nextError) {
+      const message = describeActionableError(nextError, "保存生成结果失败", "请确认目标文档仍存在；生成结果仍保留在待写入状态。");
+      setPendingGeneratedSaveError(currentPending.cacheId, message);
       publishPendingSaveMessage(
         currentPending,
-        describeActionableError(nextError, "保存生成结果失败", "请确认目标文档仍存在；生成结果仍保留在待写入状态。")
+        message
       );
     } finally {
       setConversationBusy(false);
@@ -3904,12 +5193,11 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
-  async function discardPendingGenerated() {
-    if (!pendingGeneratedSave) {
+  async function discardPendingGenerated(cacheId = "") {
+    const currentPending = pendingSaveByCacheId(cacheId);
+    if (!currentPending) {
       return;
     }
-
-    const currentPending = pendingGeneratedSave;
 
     if (currentPending.source === "skill") {
       setOperationsBusy(true);
@@ -3922,12 +5210,14 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         await client.discardGeneratedCache(currentPending.cacheId);
       }
       await trackDesktopGeneratedCache(currentPending, "discarded");
-      setPendingGeneratedSave(null);
+      removePendingGeneratedSave(currentPending.cacheId);
       publishPendingSaveMessage(currentPending, "已丢弃生成结果，没有写入文件。");
     } catch (nextError) {
+      const message = describeActionableError(nextError, "删除生成缓存失败", "生成结果仍保留，可稍后重试丢弃或直接保存。");
+      setPendingGeneratedSaveError(currentPending.cacheId, message);
       publishPendingSaveMessage(
         currentPending,
-        describeActionableError(nextError, "删除生成缓存失败", "生成结果仍保留，可稍后重试丢弃或直接保存。")
+        message
       );
     } finally {
       setConversationBusy(false);
@@ -3935,12 +5225,11 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
-  async function savePendingGeneratedAsDraft() {
-    if (!pendingGeneratedSave) {
+  async function savePendingGeneratedAsDraft(cacheId = "") {
+    const currentPending = pendingSaveByCacheId(cacheId);
+    if (!currentPending) {
       return;
     }
-
-    const currentPending = pendingGeneratedSave;
     if (currentPending.source === "skill") {
       setOperationsBusy(true);
     } else {
@@ -3971,14 +5260,17 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       if (currentPending.cacheId) {
         await client.discardGeneratedCache(currentPending.cacheId).catch(() => {});
       }
-      setPendingGeneratedSave(null);
+      removePendingGeneratedSave(currentPending.cacheId);
       await syncChangedPaths(result.saved_paths.length ? result.saved_paths : [draftPath], { openFirst: true });
+      setActiveTab("editor");
       await trackDesktopGeneratedCache(currentPending, "saved", "replace");
       publishPendingSaveMessage(currentPending, `已另存为草稿：${draftPath}，原目标文件没有改动。`);
     } catch (nextError) {
+      const message = describeActionableError(nextError, "另存草稿失败", "生成结果仍保留在待写入状态。");
+      setPendingGeneratedSaveError(currentPending.cacheId, message);
       publishPendingSaveMessage(
         currentPending,
-        describeActionableError(nextError, "另存草稿失败", "生成结果仍保留在待写入状态。")
+        message
       );
     } finally {
       setConversationBusy(false);
@@ -3986,12 +5278,11 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
-  async function copyPendingGeneratedContent() {
-    if (!pendingGeneratedSave) {
+  async function copyPendingGeneratedContent(cacheId = "") {
+    const currentPending = pendingSaveByCacheId(cacheId);
+    if (!currentPending) {
       return;
     }
-
-    const currentPending = pendingGeneratedSave;
     try {
       let content = currentPending.content;
       if (!content.trim() && currentPending.cacheId) {
@@ -4005,21 +5296,16 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       await navigator.clipboard.writeText(content);
       publishPendingSaveMessage(currentPending, `已复制生成内容，共 ${content.length} 字。`);
     } catch (nextError) {
+      const message = describeActionableError(nextError, "复制生成内容失败", "可以先另存为草稿或恢复缓存后再重试。");
+      setPendingGeneratedSaveError(currentPending.cacheId, message);
       publishPendingSaveMessage(
         currentPending,
-        describeActionableError(nextError, "复制生成内容失败", "可以先另存为草稿或恢复缓存后再重试。")
+        message
       );
     }
   }
 
   async function restoreGeneratedCache(cache: LocalStateGeneratedCache) {
-    if (pendingGeneratedSave) {
-      const message = "还有待写入的生成结果，请先保存或丢弃后再恢复其他缓存。";
-      setOperationsMessage(message);
-      setConversationMessage(message);
-      return;
-    }
-
     setOperationsBusy(true);
     try {
       const detail = await client.getGeneratedCache(cache.cache_id);
@@ -4034,7 +5320,10 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
           status: detail.meta.status === "discarded" ? "discarded" : "saved",
           mode: detail.meta.mode,
           cache_path: detail.meta.cache_path || cache.cache_path,
-          cache_chars: detail.meta.chars || cache.cache_chars
+          cache_chars: detail.meta.chars || cache.cache_chars,
+          conversation_id: cache.conversation_id || detail.meta.conversation_id || undefined,
+          message_id: cache.message_id,
+          run_id: cache.run_id || detail.meta.commit_run_id || undefined
         }).then((localState) => setSnapshot((current) => (current ? { ...current, localState } : current)));
         setOperationsMessage("生成缓存已经处理，已同步本地记录。");
         return;
@@ -4058,10 +5347,14 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         chapter: 0,
         defaultMode: detail.meta.mode || cache.mode || "replace",
         source: cache.source,
-        savePlan: detail.meta.save_plan
+        savePlan: detail.meta.save_plan,
+        conversationId: cache.conversation_id || detail.meta.conversation_id || undefined,
+        messageId: cache.message_id,
+        runId: cache.run_id || detail.meta.commit_run_id || undefined,
+        createdAt: cache.created_at
       };
 
-      setPendingGeneratedSave(restored);
+      upsertPendingGeneratedSave(restored);
       publishPendingSaveMessage(restored, "已恢复生成结果，请确认内容和写入方式。");
       setActiveTab(restored.source === "chat" ? "conversations" : "operations");
     } catch (nextError) {
@@ -4192,6 +5485,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     runtime,
     status,
     snapshot,
+    projectDataRevision,
     error,
     activeTab,
     setActiveTab,
@@ -4199,6 +5493,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     refreshAll,
     projectBusy,
     projectMessage,
+    recentProjectRemovingPath,
     vectorSearchBusy,
     vectorSearchMessage,
     vectorSearchResults,
@@ -4209,7 +5504,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     refreshProjectWorkspace,
     openProjectFromInput,
     createProjectFromInput,
+    pickAndCreateProject,
     pickAndOpenProject,
+    removeRecentProject,
     exportCurrentProject,
     importProjectArchive,
     renameCurrentProject,
@@ -4221,6 +5518,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     patchAndSaveConfig,
     saveConfig,
     testEmbeddingConnection,
+    resetEmbeddingTestResult,
     refreshLicense,
     configMessage,
     configBusy,
@@ -4234,16 +5532,25 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     websiteAiRechargeBusy,
     websiteAiRechargeMessage,
     websiteAiRechargeOrder,
+    manualModelCatalog,
+    manualModelDiscoveryBusy,
+    manualModelDiscoveryMessage,
+    refreshManualModelCatalog,
     cloudProjectSlots,
+    cloudProjectSummary,
     cloudProjectBusy,
+    cloudProjectActivePath,
     cloudProjectMessage,
     refreshCloudProjects,
     uploadCurrentProjectToCloud,
+    uploadProjectToCloud,
+    restoreCloudProject,
     syncCloudProjectToCurrent,
     deleteCloudProject,
     loginWebsiteAi,
     refreshWebsiteAiDashboard,
     applyWebsiteAiConfig,
+    applyWebsiteImageConfig,
     redeemWebsiteAiCode,
     createWebsiteAiRechargeOrder,
     refreshWebsiteAiRechargeOrder,
@@ -4258,9 +5565,17 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     messageInput,
     setMessageInput,
     sendingMessage,
+    conversationModelPreferences,
+    conversationModelPreferenceBusy,
+    updateConversationModelPreferences,
+    updateConversationModelAndDefault,
     pendingReferenceResolution,
     loadConversation,
+    getConversationPlanRun,
+    subscribeConversationPlanRun,
+    controlConversationPlanRun,
     createConversation,
+    deleteConversation,
     updateConversationTitle,
     summarizeConversation,
     pinCurrentDocumentToConversation,
@@ -4305,18 +5620,29 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     confirmProjectSwitch,
     updateActiveDocument,
     saveActiveDocument,
+    saveActiveDocumentCopy,
+    saveAllDocuments,
     selectedSkillId,
     selectedSkillDetail,
     selectedJobId,
     selectedJobDetail,
     operationsBusy,
     operationsMessage,
+    longTasks,
+    refreshLongTasks,
+    controlLongTask,
     latestSkillResult,
     pendingSkillDraft,
     pendingSkillPatchPreview,
     selectedSkillVersions,
     latestCardDrawResult,
     pendingGeneratedSave,
+    pendingGeneratedSaves,
+    pendingLibraryDraftGroups,
+    pendingReviews,
+    pendingAgentConfirmations,
+    pendingAgentConfirmationBusy,
+    agentConfirmationExecution,
     styleDistillationProfile,
     selectSkill,
     refreshSkillCatalog,
@@ -4337,6 +5663,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     discardPendingSkillDraft,
     openSkillFolder,
     deleteOrDisableSelectedSkill,
+    setSkillEnabled,
     restoreSelectedBuiltinSkill,
     updateSkillDescription,
     cloneSelectedSkill,
@@ -4350,6 +5677,10 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     deleteNuwaStyleDistillation,
     savePendingGenerated,
     savePendingGeneratedAsDraft,
+    commitPendingLibraryDraftGroup,
+    discardPendingLibraryDraftGroup,
+    refreshPendingLibraryDraftGroups,
+    resolvePendingAgentConfirmation,
     copyPendingGeneratedContent,
     discardPendingGenerated,
     restoreGeneratedCache,

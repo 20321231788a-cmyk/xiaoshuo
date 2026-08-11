@@ -5,6 +5,7 @@ import type {
   LocalStateGeneratedCache,
   LocalStateProject,
   LocalStateRecordProjectRequest,
+  LocalStateRemoveRecentProjectRequest,
   LocalStateSnapshot,
   LocalStateSyncProjectRequest,
   LocalStateTrackGeneratedCacheRequest
@@ -17,6 +18,7 @@ import {
   desktopWorkbenchSettingsSchema,
   localStatePatchSettingsRequestSchema,
   localStateRecordProjectRequestSchema,
+  localStateRemoveRecentProjectRequestSchema,
   localStateSyncProjectRequestSchema,
   localStateTrackGeneratedCacheRequestSchema
 } from "../shared/channels.js";
@@ -45,6 +47,9 @@ type GeneratedCacheRow = {
   mode?: "replace" | "append";
   cache_path?: string;
   cache_chars: number;
+  conversation_id?: string;
+  message_id?: string;
+  run_id?: string;
   created_at: string;
   updated_at: string;
 };
@@ -210,6 +215,9 @@ async function openDatabase(): Promise<LocalDatabase> {
       mode TEXT,
       cache_path TEXT,
       cache_chars INTEGER NOT NULL DEFAULT 0,
+      conversation_id TEXT,
+      message_id TEXT,
+      run_id TEXT,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
@@ -221,6 +229,9 @@ async function openDatabase(): Promise<LocalDatabase> {
   ensureColumn(db, "recent_projects", "conversation_count", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "recent_projects", "job_count", "INTEGER NOT NULL DEFAULT 0");
   ensureColumn(db, "recent_projects", "last_synced_at", "TEXT");
+  ensureColumn(db, "generated_cache_metadata", "conversation_id", "TEXT");
+  ensureColumn(db, "generated_cache_metadata", "message_id", "TEXT");
+  ensureColumn(db, "generated_cache_metadata", "run_id", "TEXT");
   return db;
 }
 
@@ -326,6 +337,9 @@ function normalizeGeneratedCacheRows(rows: unknown[]): LocalStateGeneratedCache[
       mode: row.mode === "replace" || row.mode === "append" ? row.mode : undefined,
       cache_path: row.cache_path || undefined,
       cache_chars: Number(row.cache_chars || 0),
+      conversation_id: row.conversation_id || undefined,
+      message_id: row.message_id || undefined,
+      run_id: row.run_id || undefined,
       created_at: row.created_at,
       updated_at: row.updated_at
     }));
@@ -337,7 +351,7 @@ async function listGeneratedCaches(): Promise<LocalStateGeneratedCache[]> {
     database
       .prepare(
         `
-          SELECT cache_id, project_path, skill_id, source, target_path, target_paths_json, status, mode, cache_path, cache_chars, created_at, updated_at
+          SELECT cache_id, project_path, skill_id, source, target_path, target_paths_json, status, mode, cache_path, cache_chars, conversation_id, message_id, run_id, created_at, updated_at
           FROM generated_cache_metadata
           ORDER BY updated_at DESC
           LIMIT 30
@@ -375,6 +389,13 @@ export async function recordRecentProject(request: LocalStateRecordProjectReques
     )
     .run(project.path, project.name, project.opened_at || new Date().toISOString());
 
+  return getLocalStateSnapshot();
+}
+
+export async function removeRecentProject(request: LocalStateRemoveRecentProjectRequest): Promise<LocalStateSnapshot> {
+  const project = localStateRemoveRecentProjectRequestSchema.parse(request);
+  const database = await openDatabase();
+  database.prepare("DELETE FROM recent_projects WHERE path = ?").run(project.path);
   return getLocalStateSnapshot();
 }
 
@@ -420,9 +441,9 @@ export async function trackGeneratedCacheMetadata(request: LocalStateTrackGenera
     .prepare(
       `
         INSERT INTO generated_cache_metadata (
-          cache_id, project_path, skill_id, source, target_path, target_paths_json, status, mode, cache_path, cache_chars, created_at, updated_at
+          cache_id, project_path, skill_id, source, target_path, target_paths_json, status, mode, cache_path, cache_chars, conversation_id, message_id, run_id, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(cache_id) DO UPDATE SET
           project_path = excluded.project_path,
           skill_id = excluded.skill_id,
@@ -433,6 +454,9 @@ export async function trackGeneratedCacheMetadata(request: LocalStateTrackGenera
           mode = excluded.mode,
           cache_path = excluded.cache_path,
           cache_chars = excluded.cache_chars,
+          conversation_id = excluded.conversation_id,
+          message_id = excluded.message_id,
+          run_id = excluded.run_id,
           updated_at = excluded.updated_at
       `
     )
@@ -447,6 +471,9 @@ export async function trackGeneratedCacheMetadata(request: LocalStateTrackGenera
       cache.mode || null,
       cache.cache_path || null,
       cache.cache_chars,
+      cache.conversation_id || null,
+      cache.message_id || null,
+      cache.run_id || null,
       createdAt,
       updatedAt
     );

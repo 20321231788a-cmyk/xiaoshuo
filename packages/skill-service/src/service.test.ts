@@ -69,7 +69,7 @@ describe("skill-service", () => {
         "context_requirements: [project_state, style]",
         "linked_targets: [\"02_正文/manifest.txt\"]",
         "tools: [web_search]",
-        "model_policy: {\"line\":\"secondary\",\"temperature\":0.2,\"max_input_chars\":12000}",
+        "model_policy: {\"line\":\"task-model\",\"temperature\":0.2,\"max_input_chars\":12000}",
         "save_policy: {\"default_mode\":\"append\",\"auto_commit\":true,\"requires_confirmation\":false}",
         "eval_cases: [routing-cases.jsonl]",
         "---",
@@ -91,7 +91,7 @@ describe("skill-service", () => {
       tools: ["web_search"],
       eval_cases: ["routing-cases.jsonl"]
     });
-    expect(skill.manifest?.model_policy).toMatchObject({ line: "secondary", temperature: 0.2, max_input_chars: 12000 });
+    expect(skill.manifest?.model_policy).toMatchObject({ line: "task-model", temperature: 0.2, max_input_chars: 12000 });
     expect(skill.manifest?.save_policy).toMatchObject({ default_mode: "append", auto_commit: true, requires_confirmation: false });
   });
 

@@ -8,7 +8,7 @@ vi.mock("@xiaoshuo/config-service", () => ({
   savePublicConfig: vi.fn()
 }));
 
-import { loadPublicConfig } from "@xiaoshuo/config-service";
+import { loadPublicConfig, savePublicConfig } from "@xiaoshuo/config-service";
 
 function createContext(): RuntimeContext {
   return {
@@ -47,7 +47,10 @@ function dashboardPayload() {
     providers: [
       {
         name: "provider",
-        models: [{ name: "deepseek-chat", category: "text", enabled: true }]
+        models: [
+          { name: "deepseek-chat", category: "text", enabled: true },
+          { name: "gpt-image-2", category: "image", enabled: true, supports_image_edit: true, supported_sizes: ["768x1024"] }
+        ]
       }
     ],
     maxConcurrency: 300,
@@ -154,5 +157,82 @@ describe("handleWebsiteAiRoutes", () => {
         message: "兑换成功"
       })
     );
+  });
+
+  it("clears stale website embedding configuration when no vector model is selected", async () => {
+    const writeJson = vi.fn();
+    const readJsonBody = vi.fn().mockResolvedValue({ model: "deepseek-chat", embedding_model: "", temp: 0.7, top_p: 1 });
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(okJson(dashboardPayload()))
+      .mockResolvedValueOnce(okJson({ purchaseUrl: "" }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.mocked(loadPublicConfig).mockResolvedValue({
+      ai_config_mode: "website",
+      website_profile: {
+        api_key: "license-token",
+        license_account_key: "license-token",
+        model: "deepseek-chat",
+        embedding_enabled: true,
+        embedding_api_key: "stale-key",
+        embedding_base_url: "https://stale.example.test/v1",
+        embedding_model: "stale-embedding"
+      }
+    } as unknown as Awaited<ReturnType<typeof loadPublicConfig>>);
+    vi.mocked(savePublicConfig).mockResolvedValue({
+      ai_config_mode: "website",
+      website_profile: { api_key: "license-token", model: "deepseek-chat", embedding_enabled: false, embedding_model: "" }
+    } as unknown as Awaited<ReturnType<typeof savePublicConfig>>);
+
+    const handled = await handleWebsiteAiRoutes(
+      createRequest("POST"),
+      createResponse(),
+      "/api/website-ai/apply",
+      createContext(),
+      { readJsonBody, writeJson }
+    );
+
+    expect(handled).toBe(true);
+    expect(savePublicConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        website_profile: expect.objectContaining({
+          embedding_enabled: false,
+          embedding_api_key: "",
+          embedding_base_url: "",
+          embedding_model: ""
+        })
+      }),
+      { rootDir: "D:\\xiaoshuo\\ts-migration" }
+    );
+  });
+
+  it("saves the website image model without switching manual text mode", async () => {
+    const writeJson = vi.fn();
+    const readJsonBody = vi.fn().mockResolvedValue({ image_model: "gpt-image-2" });
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(okJson(dashboardPayload()))
+      .mockResolvedValueOnce(okJson({ purchaseUrl: "" }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.mocked(loadPublicConfig).mockResolvedValue({
+      ai_config_mode: "manual",
+      manual_profile: { api_key: "manual-key", model: "manual-model" },
+      website_profile: { api_key: "site-token", license_account_key: "site-token", image_model: "" }
+    } as unknown as Awaited<ReturnType<typeof loadPublicConfig>>);
+    vi.mocked(savePublicConfig).mockResolvedValue({
+      ai_config_mode: "manual",
+      manual_profile: { api_key: "manual-key", model: "manual-model" },
+      website_profile: { api_key: "site-token", license_account_key: "site-token", image_model: "gpt-image-2" }
+    } as unknown as Awaited<ReturnType<typeof savePublicConfig>>);
+
+    await handleWebsiteAiRoutes(createRequest("PUT"), createResponse(), "/api/website-ai/image-config", createContext(), { readJsonBody, writeJson });
+
+    expect(savePublicConfig).toHaveBeenCalledWith(expect.objectContaining({
+      ai_config_mode: "manual",
+      website_profile: expect.objectContaining({ image_model: "gpt-image-2" })
+    }), { rootDir: "D:\\xiaoshuo\\ts-migration" });
+    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 200, expect.objectContaining({
+      image_models: [expect.objectContaining({ id: "gpt-image-2", capabilities: expect.objectContaining({ image_generation: true, image_edit: true }) })],
+      selected_image_model: "gpt-image-2"
+    }));
   });
 });

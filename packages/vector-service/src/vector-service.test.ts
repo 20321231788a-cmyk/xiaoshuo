@@ -312,5 +312,31 @@ describe("vector-service", () => {
         globalThis.fetch = originalFetch;
       }
     });
+
+    it("rebuilds keyword search without network calls when embedding is disabled", async () => {
+      fs.writeFileSync(path.join(tempDir, "02_正文", "第一章.txt"), "雨夜里，主角发现旧船票背后的秘密。", "utf8");
+      fs.writeFileSync(path.join(tempDir, "studio_config.json"), JSON.stringify({
+        embedding_enabled: false,
+        embedding_api_key: "configured-but-disabled",
+        embedding_base_url: "https://embedding.example.test/v1",
+        embedding_model: "embedding-model"
+      }), "utf8");
+      const originalFetch = globalThis.fetch;
+      const mockFetch = vi.fn();
+      globalThis.fetch = mockFetch as typeof fetch;
+      try {
+        const rebuilt = await index!.rebuild();
+        expect(rebuilt.chunks).toBe(1);
+        expect(rebuilt.embedded_chunks).toBe(0);
+        expect(mockFetch).not.toHaveBeenCalled();
+
+        const hits = await index!.search("旧船票");
+        expect(hits).toHaveLength(1);
+        expect(hits[0]!.text).toContain("旧船票");
+        expect(mockFetch).not.toHaveBeenCalled();
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    });
   });
 });

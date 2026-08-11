@@ -6,7 +6,9 @@ import { fileURLToPath } from "node:url";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const rootDir = path.resolve(scriptDir, "..", "..");
 const desktopDir = path.join(rootDir, "apps", "desktop-shell");
-const runtimeHealthUrl = "http://127.0.0.1:18453/api/health";
+const runtimePort = process.env.XIAOSHUO_E2E_RUNTIME_PORT || "18453";
+const previewPort = process.env.XIAOSHUO_E2E_PREVIEW_PORT || "4180";
+const runtimeHealthUrl = `http://127.0.0.1:${runtimePort}/api/health`;
 
 function runBackground(command, args, options = {}) {
   return spawn(command, args, {
@@ -42,12 +44,15 @@ if (await isUrlReady(runtimeHealthUrl)) {
   process.exit(0);
 }
 
-const child = runBackground(process.execPath, [path.join(desktopDir, "dist", "e2e-runtime.js")], {
+const child = runBackground(process.execPath, [path.join(desktopDir, "dist", "e2e-runtime.js"), "--agent-execution-v2=on", "--agent-inline-plan-ui=on"], {
   cwd: desktopDir,
   env: {
     ...process.env,
     XIAOSHUO_E2E_RUNTIME: "1",
-    XIAOSHUO_E2E_BYPASS_LICENSE: "1"
+    XIAOSHUO_RUNTIME_PORT: runtimePort,
+    XIAOSHUO_E2E_SESSION_TOKEN: "arcwriter-e2e-runtime-token",
+    XIAOSHUO_E2E_BYPASS_LICENSE: "1",
+    XIAOSHUO_RENDERER_URL: `http://127.0.0.1:${previewPort}`
   },
   stdio: "inherit"
 });

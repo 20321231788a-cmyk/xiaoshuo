@@ -1,5 +1,5 @@
 import type { AgentRunRequest } from "@xiaoshuo/shared";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { WorkflowRunContext } from "./types.js";
@@ -9,9 +9,13 @@ export const LEGACY_DISASSEMBLE_LORE_PATH = "00_设定集/设定集/拆书设定
 export const LEGACY_REVERSE_OUTLINE_PATH = "01_大纲/反向细纲.txt";
 export const LEGACY_DISASSEMBLE_DETAIL_PATH = "01_大纲/拆书细纲.txt";
 export const BOOK_MANIFEST_PATH = "manifest.jsonl";
-export const DISASSEMBLE_SOURCE_IMPORT_CHARS = 200_000;
+export const DISASSEMBLE_SOURCE_IMPORT_CHARS = 50_000_000;
+
+export type DisassembleBookStatus = "imported" | "analyzing" | "ready" | "failed" | "cancelled" | "stale";
 
 export type DisassembleBookManifest = {
+  schema_version: number;
+  template_version: string;
   id: string;
   title: string;
   dir: string;
@@ -20,25 +24,51 @@ export type DisassembleBookManifest = {
   origin: string;
   source_path: string;
   source_summary: string;
+  source_hash: string;
+  conversation_id: string;
   chars: number;
+  status: DisassembleBookStatus;
+  analysis_version: number;
+  /** Fingerprint of the source, range and batch layout used by checkpoints. */
+  analysis_fingerprint?: string;
+  analysis_batch_chars?: number;
+  error: string;
+  analyzed_at: string;
+  source: { path: string; hash: string; chars: number; chapter_count: number; import_complete: boolean };
+  progress: { stage: string; completed_chapters: number; total_chapters: number; last_error: string; completed_batches?: number; total_batches?: number; message?: string };
+  coverage: { first_chapter: number; last_chapter: number; analyzed_chapters: number[]; missing_chapters: number[] };
+  analysis_scope?: {
+    mode: "prefix_chars";
+    requested_chars: number;
+    actual_chars: number;
+    source_chars: number;
+    first_chapter: number;
+    last_chapter: number;
+    truncated: boolean;
+  };
   paths: {
     source?: string;
     lore?: string;
     reverse_outline?: string;
     detail_outline?: string;
+    report?: string;
+    chapter_index?: string;
+    evidence_index?: string;
   };
 };
 
 export type DisassembleBookWithLegacy = DisassembleBookManifest & { legacy?: boolean };
 
 export async function createDisassembleBook(
-  input: { title: string; sourceText: string; sourcePath: string; origin: string },
+  input: { title: string; sourceText: string; sourcePath: string; origin: string; conversationId?: string; workflowId?: string },
   context: WorkflowRunContext
 ): Promise<DisassembleBookManifest> {
   const createdAt = new Date().toISOString();
   const bookId = `${sanitizeBookId(input.title)}-${formatBookTimestamp(new Date())}-${randomUUID().replace(/-/g, "").slice(0, 8)}`;
   const dir = `${DISASSEMBLE_LIBRARY_DIR}/${bookId}`;
   const manifest: DisassembleBookManifest = {
+    schema_version: 2,
+    template_version: "1",
     id: bookId,
     title: input.title || "当前拆书书籍",
     dir,
@@ -47,34 +77,95 @@ export async function createDisassembleBook(
     origin: input.origin,
     source_path: input.sourcePath || "",
     source_summary: summarizeSource(input.sourceText),
+    source_hash: createHash("sha256").update(input.sourceText, "utf8").digest("hex"),
+    conversation_id: String(input.conversationId || "").trim(),
     chars: input.sourceText.length,
+    status: "imported",
+    analysis_version: 2,
+    error: "",
+    analyzed_at: "",
+    source: { path: input.sourcePath || `${dir}/原文.txt`, hash: createHash("sha256").update(input.sourceText, "utf8").digest("hex"), chars: input.sourceText.length, chapter_count: countChapters(input.sourceText), import_complete: true },
+    progress: { stage: "imported", completed_chapters: 0, total_chapters: countChapters(input.sourceText), last_error: "" },
+    coverage: { first_chapter: 0, last_chapter: 0, analyzed_chapters: [], missing_chapters: [] },
     paths: {
-      source: input.sourceText.trim() ? `${dir}/原文.txt` : ""
+      source: input.sourceText.trim() ? `${dir}/原文.txt` : "",
+      chapter_index: input.sourceText.trim() ? `${dir}/章节索引.jsonl` : ""
     }
   };
   if (input.sourceText.trim()) {
-    await context.documents.saveDocument(`${dir}/原文.txt`, input.sourceText, {
-      source: "skill",
-      summary: `拆书原文：${manifest.title}`
+    await writeDisassembleBookDocument(`${dir}/原文.txt`, input.sourceText, `拆书原文：${manifest.title}`, context, {
+      workflowId: input.workflowId || "disassemble_book",
+      writeKey: "book.source"
+    });
+    await writeDisassembleBookDocument(`${dir}/章节索引.jsonl`, buildChapterIndex(input.sourceText), `拆书章节索引：${manifest.title}`, context, {
+      workflowId: input.workflowId || "disassemble_book",
+      writeKey: "book.chapter_index"
     });
   }
-  await writeDisassembleBookManifest(manifest, context);
+  await writeDisassembleBookManifest(manifest, context, {
+    workflowId: input.workflowId || "disassemble_book",
+    writeKey: "book.manifest.initial"
+  });
   return manifest;
 }
 
 export async function writeDisassembleBookManifest(
   book: DisassembleBookManifest,
-  context: WorkflowRunContext
+  context: WorkflowRunContext,
+  options: DisassembleBookWriteOptions = {}
 ): Promise<DisassembleBookManifest> {
   const next: DisassembleBookManifest = {
     ...book,
     updated_at: new Date().toISOString()
   };
-  await context.documents.saveDocument(`${next.dir}/${BOOK_MANIFEST_PATH}`, `${JSON.stringify(next)}\n`, {
-    source: "skill",
-    summary: `拆书书籍 manifest：${next.title}`
+  await writeDisassembleBookDocument(`${next.dir}/${BOOK_MANIFEST_PATH}`, `${JSON.stringify(next)}\n`, `拆书书籍 manifest：${next.title}`, context, {
+    workflowId: options.workflowId || "disassemble_book",
+    writeKey: options.writeKey || "book.manifest"
   });
   return next;
+}
+
+export type DisassembleBookWriteOptions = {
+  workflowId?: string;
+  /** Stable per-run operation key: recovery replays the same write, later writes remain distinct. */
+  writeKey?: string;
+};
+
+export async function writeDisassembleBookDocument(
+  targetPath: string,
+  content: string,
+  summary: string,
+  context: WorkflowRunContext,
+  options: DisassembleBookWriteOptions = {}
+): Promise<void> {
+  const workflowId = String(options.workflowId || "disassemble_book").trim() || "disassemble_book";
+  const writeKey = String(options.writeKey || targetPath).trim() || targetPath;
+  const durable = context.durableExecution;
+  if (!durable || !context.commitJournal) {
+    await context.documents.saveDocument(targetPath, content, { source: "skill", summary });
+    return;
+  }
+
+  await context.commitJournal.write({
+    runId: durable.runId,
+    stepId: durable.stepId,
+    attemptId: durable.attemptId,
+    action: `workflow.${workflowId}.${writeKey}`,
+    targetPath,
+    content,
+    idempotencyKey: createHash("sha256")
+      .update(JSON.stringify({
+        kind: "workflow_document_write",
+        workflow_id: workflowId,
+        write_key: writeKey,
+        run_id: durable.runId,
+        step_id: durable.stepId,
+        target_path: targetPath
+      }), "utf8")
+      .digest("hex"),
+    source: "skill",
+    summary
+  });
 }
 
 export async function listDisassembleBooks(
@@ -120,6 +211,8 @@ export async function readDisassembleBookManifest(bookDir: string, context: Work
     throw new Error("拆书 manifest 不完整");
   }
   return {
+    schema_version: Number(parsed.schema_version || 1),
+    template_version: String(parsed.template_version || "1"),
     id: parsed.id,
     title: parsed.title,
     dir: parsed.dir || bookDir,
@@ -128,8 +221,33 @@ export async function readDisassembleBookManifest(bookDir: string, context: Work
     origin: parsed.origin || "unknown",
     source_path: parsed.source_path || "",
     source_summary: parsed.source_summary || "",
+    source_hash: parsed.source_hash || "",
+    conversation_id: String(parsed.conversation_id || "").trim(),
     chars: Number(parsed.chars || 0),
+    status: normalizeBookStatus(parsed),
+    analysis_version: Number(parsed.analysis_version || 1),
+    error: parsed.error || "",
+    analyzed_at: parsed.analyzed_at || "",
+    source: parsed.source || { path: parsed.source_path || "", hash: parsed.source_hash || "", chars: Number(parsed.chars || 0), chapter_count: 0, import_complete: Boolean(parsed.paths?.source) },
+    progress: parsed.progress || { stage: parsed.status || "imported", completed_chapters: 0, total_chapters: 0, last_error: parsed.error || "" },
+    coverage: parsed.coverage || { first_chapter: 0, last_chapter: 0, analyzed_chapters: [], missing_chapters: [] },
+    analysis_scope: normalizeAnalysisScope(parsed.analysis_scope),
     paths: parsed.paths || {}
+  };
+}
+
+function normalizeAnalysisScope(value: unknown): DisassembleBookManifest["analysis_scope"] | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const source = value as Record<string, unknown>;
+  if (source.mode !== "prefix_chars") return undefined;
+  return {
+    mode: "prefix_chars",
+    requested_chars: Math.max(0, Math.trunc(Number(source.requested_chars || 0))),
+    actual_chars: Math.max(0, Math.trunc(Number(source.actual_chars || 0))),
+    source_chars: Math.max(0, Math.trunc(Number(source.source_chars || 0))),
+    first_chapter: Math.max(0, Math.trunc(Number(source.first_chapter || 0))),
+    last_chapter: Math.max(0, Math.trunc(Number(source.last_chapter || 0))),
+    truncated: Boolean(source.truncated)
   };
 }
 
@@ -142,6 +260,8 @@ export async function readLegacyDisassembleBookManifest(context: WorkflowRunCont
   }
   const title = "历史拆书产物";
   return {
+    schema_version: 1,
+    template_version: "legacy",
     id: "legacy",
     title,
     dir: "",
@@ -150,7 +270,16 @@ export async function readLegacyDisassembleBookManifest(context: WorkflowRunCont
     origin: "legacy",
     source_path: "",
     source_summary: summarizeSource([lore, reverseOutline, detailOutline].filter(Boolean).join("\n")),
+    source_hash: "",
+    conversation_id: "",
     chars: [lore, reverseOutline, detailOutline].join("\n").length,
+    status: lore && reverseOutline ? "ready" : "stale",
+    analysis_version: 0,
+    error: "",
+    analyzed_at: new Date().toISOString(),
+    source: { path: "", hash: "", chars: [lore, reverseOutline, detailOutline].join("\n").length, chapter_count: 0, import_complete: false },
+    progress: { stage: "legacy", completed_chapters: 0, total_chapters: 0, last_error: "" },
+    coverage: { first_chapter: 0, last_chapter: 0, analyzed_chapters: [], missing_chapters: [] },
     paths: {
       lore: lore ? LEGACY_DISASSEMBLE_LORE_PATH : "",
       reverse_outline: reverseOutline ? LEGACY_REVERSE_OUTLINE_PATH : "",
@@ -178,23 +307,24 @@ export async function resolveDisassembleBookForRequest(request: AgentRunRequest,
     }
   }
 
-  const books = await listDisassembleBooks(context, { includeLegacy: true });
-  return books[0] || null;
+  return null;
 }
 
 export async function readDisassembleBookText(
   book: DisassembleBookWithLegacy,
-  kind: "source" | "lore" | "reverse_outline" | "detail_outline",
+  kind: "source" | "lore" | "reverse_outline" | "detail_outline" | "report",
   context: WorkflowRunContext,
-  limit = 24_000
+  limit = kind === "source" ? undefined : 24_000
 ): Promise<string> {
   const legacyPath =
     kind === "lore"
       ? LEGACY_DISASSEMBLE_LORE_PATH
       : kind === "reverse_outline"
         ? LEGACY_REVERSE_OUTLINE_PATH
-        : kind === "detail_outline"
+      : kind === "detail_outline"
           ? LEGACY_DISASSEMBLE_DETAIL_PATH
+          : kind === "report"
+            ? ""
           : "";
   if (book.legacy || book.id === "legacy") {
     return readLegacyText(legacyPath, context, limit);
@@ -205,12 +335,26 @@ export async function readDisassembleBookText(
       : kind === "lore"
         ? book.paths.lore || `${book.dir}/拆书设定提取.txt`
         : kind === "reverse_outline"
-          ? book.paths.reverse_outline || `${book.dir}/反向细纲.txt`
-          : book.paths.detail_outline || `${book.dir}/拆书细纲.txt`;
+        ? book.paths.reverse_outline || `${book.dir}/反向细纲.txt`
+          : kind === "detail_outline"
+            ? book.paths.detail_outline || `${book.dir}/拆书细纲.txt`
+            : book.paths.report || `${book.dir}/拆书报告.md`;
   return readLegacyText(relPath, context, limit);
 }
 
-export async function readLegacyText(relativePath: string, context: WorkflowRunContext, limit = 24_000): Promise<string> {
+export function sampleWholeBookSource(text: string, maxChars = 60_000): string {
+  const source = String(text || "").trim();
+  if (source.length <= maxChars) return source;
+  const labels = ["开篇样本", "前段样本", "中段样本", "后段样本", "结尾样本"];
+  const chunkSize = Math.max(2_000, Math.floor((maxChars - 600) / labels.length));
+  return labels.map((label, index) => {
+    const ratio = index / (labels.length - 1);
+    const start = Math.max(0, Math.min(source.length - chunkSize, Math.floor((source.length - chunkSize) * ratio)));
+    return `【${label} · 原文位置 ${start + 1}-${Math.min(source.length, start + chunkSize)} / ${source.length}】\n${source.slice(start, start + chunkSize)}`;
+  }).join("\n\n");
+}
+
+export async function readLegacyText(relativePath: string, context: WorkflowRunContext, limit?: number): Promise<string> {
   if (!relativePath) {
     return "";
   }
@@ -256,6 +400,9 @@ export async function resolveWorkflowSourceText(request: AgentRunRequest, contex
     const text = attachments
       .map(([attachment, body]) => {
         const content = String(body || "").trim();
+        if (attachment.size > content.length && attachment.size > DISASSEMBLE_SOURCE_IMPORT_CHARS) {
+          throw new Error(`附件《${attachment.name}》超过拆书支持上限，未导入完整原文`);
+        }
         return content ? `【${attachment.name}】\n${content}` : "";
       })
       .filter(Boolean)
@@ -267,7 +414,7 @@ export async function resolveWorkflowSourceText(request: AgentRunRequest, contex
   }
   const sourcePath = resolveDisassembleSourcePath(request);
   if (sourcePath) {
-    return readLegacyText(sourcePath, context, DISASSEMBLE_SOURCE_IMPORT_CHARS);
+    return readLegacyText(sourcePath, context);
   }
   return "";
 }
@@ -341,4 +488,29 @@ function sanitizeBookId(value: string): string {
     .replace(/^_+|_+$/g, "")
     .slice(0, 42);
   return sanitized || "book";
+}
+
+function countChapters(text: string): number {
+  return String(text || "").match(/(?:^|\n)\s*(?:第\s*\d+\s*章|Chapter\s+\d+)/gi)?.length || 0;
+}
+
+function buildChapterIndex(text: string): string {
+  const source = String(text || "");
+  const matches = [...source.matchAll(/(?:^|\n)\s*(第\s*(\d+)\s*章[^\n]*)/gi)];
+  if (!matches.length) {
+    return `${JSON.stringify({ index_type: "paragraph_window", start: 0, end: source.length, label: "全文" })}\n`;
+  }
+  return matches.map((match, index) => {
+    const start = match.index || 0;
+    const end = index + 1 < matches.length ? (matches[index + 1]?.index || source.length) : source.length;
+    return JSON.stringify({ index_type: "chapter", chapter: Number(match[2] || index + 1), title: String(match[1] || "").trim(), start, end });
+  }).join("\n") + "\n";
+}
+
+function normalizeBookStatus(parsed: Partial<DisassembleBookManifest>): DisassembleBookStatus {
+  if (["imported", "analyzing", "ready", "failed", "cancelled", "stale"].includes(String(parsed.status || ""))) {
+    return parsed.status as DisassembleBookStatus;
+  }
+  const paths = parsed.paths || {};
+  return paths.report || (paths.lore && paths.reverse_outline) ? "ready" : "imported";
 }

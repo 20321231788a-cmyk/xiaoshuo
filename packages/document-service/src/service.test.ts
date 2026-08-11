@@ -1,10 +1,11 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { DocumentSaveConflictError, DocumentService } from "./service.js";
 
 let tempDir = "";
+const externalRoots: string[] = [];
 
 beforeEach(async () => {
   tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "xiaoshuo-document-service-"));
@@ -18,9 +19,11 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  vi.restoreAllMocks();
   if (tempDir) {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
+  await Promise.all(externalRoots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })));
 });
 
 describe("document-service", () => {
@@ -47,6 +50,139 @@ describe("document-service", () => {
     const service = new DocumentService({ projectRoot: tempDir });
 
     await expect(service.readDocument("../secret.txt")).rejects.toThrow("非法项目路径");
+  });
+
+  it("rejects absolute paths instead of rewriting them as project-relative", async () => {
+    const service = new DocumentService({ projectRoot: tempDir });
+    const outside = await externalRoot();
+    const target = path.join(outside, "absolute.txt");
+
+    await expect(service.saveDocument(target, "must not write")).rejects.toThrow("非法项目路径");
+    await expect(fs.access(target)).rejects.toThrow();
+  });
+
+  it("rejects a file symlink that resolves outside the canonical project root", async (context) => {
+    const service = new DocumentService({ projectRoot: tempDir });
+    const outside = await externalRoot();
+    const outsideFile = path.join(outside, "outside.txt");
+    const linkedFile = path.join(tempDir, "01_大纲", "linked.txt");
+    await fs.writeFile(outsideFile, "outside-original", "utf8");
+    try {
+      await fs.symlink(outsideFile, linkedFile, "file");
+    } catch (error) {
+      if (isLinkPrivilegeError(error)) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+
+    await expect(service.saveDocument("01_大纲/linked.txt", "escaped-write")).rejects.toMatchObject({
+      code: "PROJECT_SCOPE_PATH_ESCAPE"
+    });
+    expect(await fs.readFile(outsideFile, "utf8")).toBe("outside-original");
+  });
+
+  it("rejects a directory symlink or Windows junction that resolves outside the project", async (context) => {
+    const service = new DocumentService({ projectRoot: tempDir });
+    const outside = await externalRoot();
+    const linkedDirectory = path.join(tempDir, "02_正文");
+    try {
+      await fs.symlink(outside, linkedDirectory, process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      if (isLinkPrivilegeError(error)) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+
+    await expect(service.saveDocument("02_正文/第一章.txt", "escaped-write")).rejects.toMatchObject({
+      code: "PROJECT_SCOPE_PATH_ESCAPE"
+    });
+    await expect(fs.access(path.join(outside, "第一章.txt"))).rejects.toThrow();
+  });
+
+  it("revalidates physical scope after the atomic temp write and blocks link replacement", async (context) => {
+    const service = new DocumentService({ projectRoot: tempDir });
+    const outside = await externalRoot();
+    const outsideTarget = path.join(outside, "第一章.txt");
+    const bodyDirectory = path.join(tempDir, "02_正文");
+    const parkedDirectory = path.join(tempDir, "02_正文.parked");
+    const target = path.join(bodyDirectory, "第一章.txt");
+    const tempPath = path.join(bodyDirectory, ".第一章.agent-test.tmp");
+    const backupPath = path.join(bodyDirectory, ".第一章.agent-test.bak");
+    await fs.mkdir(bodyDirectory);
+    await fs.writeFile(target, "inside-original", "utf8");
+    await fs.writeFile(outsideTarget, "outside-original", "utf8");
+
+    let linkCreated = false;
+    await expect(service.saveDocument("02_正文/第一章.txt", "new-content", {
+      atomicWrite: {
+        tempPath,
+        backupPath,
+        onStage: async (stage) => {
+          if (stage !== "temp_written") {
+            return;
+          }
+          await fs.rename(bodyDirectory, parkedDirectory);
+          try {
+            await fs.symlink(outside, bodyDirectory, process.platform === "win32" ? "junction" : "dir");
+            linkCreated = true;
+          } catch (error) {
+            await fs.rename(parkedDirectory, bodyDirectory);
+            if (isLinkPrivilegeError(error)) {
+              context.skip();
+              return;
+            }
+            throw error;
+          }
+        }
+      }
+    })).rejects.toMatchObject({ code: "PROJECT_SCOPE_PATH_ESCAPE" });
+
+    if (!linkCreated) {
+      return;
+    }
+    expect(await fs.readFile(outsideTarget, "utf8")).toBe("outside-original");
+  });
+
+  it("guards internal ledger writes from an external .agent junction", async (context) => {
+    const service = new DocumentService({ projectRoot: tempDir });
+    const outside = await externalRoot();
+    const agentDirectory = path.join(tempDir, "00_设定集", ".agent");
+    await fs.rm(agentDirectory, { recursive: true, force: true });
+    try {
+      await fs.symlink(outside, agentDirectory, process.platform === "win32" ? "junction" : "dir");
+    } catch (error) {
+      if (isLinkPrivilegeError(error)) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+
+    await expect(service.addLedgerItem("伏笔")).rejects.toMatchObject({ code: "PROJECT_SCOPE_PATH_ESCAPE" });
+    await expect(fs.access(path.join(outside, "ledger.json"))).rejects.toThrow();
+  });
+
+  it("detects replacement of the project directory at the same lexical path", async () => {
+    const service = new DocumentService({ projectRoot: tempDir });
+    const parkedRoot = `${tempDir}.parked`;
+    await service.canonicalProjectRoot();
+    await fs.rename(tempDir, parkedRoot);
+    await fs.mkdir(tempDir);
+    const replacementTarget = path.join(tempDir, "02_正文", "第一章.txt");
+
+    try {
+      await expect(service.saveDocument("02_正文/第一章.txt", "must-not-write")).rejects.toMatchObject({
+        code: "PROJECT_SCOPE_ROOT_CHANGED"
+      });
+      await expect(fs.access(replacementTarget)).rejects.toThrow();
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+      await fs.rename(parkedRoot, tempDir);
+    }
   });
 
   it("rejects blocked file types", async () => {
@@ -97,6 +233,21 @@ describe("document-service", () => {
       after_exists: true,
       after_excerpt: "新的大纲"
     });
+  });
+
+  it("uses a managed same-directory atomic replacement by default", async () => {
+    const service = new DocumentService({ projectRoot: tempDir });
+    const target = path.join(tempDir, "01_大纲", "大纲.txt");
+    const rename = vi.spyOn(fs, "rename");
+
+    await service.saveDocument("01_大纲/大纲.txt", "原子保存后的大纲");
+
+    expect(rename).toHaveBeenCalledWith(
+      expect.stringMatching(/\.大纲\.txt\.arcwriter-[a-f0-9]+\.tmp$/),
+      target
+    );
+    expect(await fs.readFile(target, "utf8")).toBe("原子保存后的大纲");
+    expect((await fs.readdir(path.dirname(target))).filter((name) => name.includes(".arcwriter-"))).toEqual([]);
   });
 
   it("creates missing files inside the project when saving", async () => {
@@ -223,6 +374,29 @@ describe("document-service", () => {
       before_exists: true,
       after_exists: false
     });
+  });
+
+  it("rolls back an archive batch when a later file cannot move", async () => {
+    const service = new DocumentService({
+      projectRoot: tempDir,
+      now: () => "2026-06-01 23:35:00",
+      renameFile: async (source, target) => {
+        if (source.endsWith(`${path.sep}副本.txt`) && target.includes(`${path.sep}99_回收站${path.sep}`)) {
+          throw new Error("模拟归档失败");
+        }
+        await fs.rename(source, target);
+      }
+    });
+    await fs.writeFile(path.join(tempDir, "01_大纲", "副本.txt"), "副本内容", "utf8");
+
+    await expect(service.archiveDocuments([
+      "00_设定集/说明.md",
+      "01_大纲/副本.txt"
+    ])).rejects.toThrow("已恢复已移动文件");
+
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "说明.md"), "utf8")).toBe("说明内容");
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "副本.txt"), "utf8")).toBe("副本内容");
+    expect(await service.listTimeline()).toEqual([]);
   });
 
   it("executes agent file operations with one batch timeline entry and operation log", async () => {
@@ -547,3 +721,14 @@ describe("document-service", () => {
     expect(await fs.readFile(path.join(tempDir, "00_设定集", "说明.md"), "utf8")).toBe("说明内容");
   });
 });
+
+async function externalRoot(): Promise<string> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "xiaoshuo-document-external-"));
+  externalRoots.push(root);
+  return root;
+}
+
+function isLinkPrivilegeError(error: unknown): boolean {
+  const code = typeof error === "object" && error ? String((error as NodeJS.ErrnoException).code || "") : "";
+  return code === "EPERM" || code === "EACCES" || code === "ENOTSUP";
+}

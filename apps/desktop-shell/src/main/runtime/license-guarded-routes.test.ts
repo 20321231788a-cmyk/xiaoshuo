@@ -82,11 +82,9 @@ describe("AI license guarded runtime routes", () => {
       createContext(),
       {
         ensureProjectSessionCurrent: vi.fn().mockResolvedValue({ path: "D:\\projects\\novel" }),
-        ensureDocumentSession: vi.fn(),
         readJsonBody: vi.fn(),
         readRawBody: vi.fn(),
         parseJsonRecord: vi.fn(),
-        booleanValue: vi.fn(),
         rebuildProjectManifest: vi.fn(),
         writeJson,
         writeNdjsonEvent: vi.fn(),

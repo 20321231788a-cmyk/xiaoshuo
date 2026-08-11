@@ -71,6 +71,60 @@ describe("prompt-skill-runner", () => {
     expect(content).toBe("新的大纲结果");
   });
 
+  it("uses the selected task model for skills migrated from the former secondary route", async () => {
+    await fs.mkdir(path.join(tempDir, "00_设定集", ".agent", "skills"), { recursive: true });
+    await fs.writeFile(
+      path.join(tempDir, "00_设定集", ".agent", "skills", "imported.json"),
+      JSON.stringify([{
+        id: "legacy_secondary_skill",
+        name: "旧备用任务",
+        description: "验证任务模型迁移",
+        input_mode: "text",
+        handler_type: "prompt",
+        prompt: "只回复测试结果。",
+        model_policy: { line: "task-model" },
+        writable: false
+      }]),
+      "utf8"
+    );
+    await fs.writeFile(configPath, JSON.stringify({
+      api_key: "main-key",
+      base_url: "https://main.example/v1",
+      model: "main-model",
+      task_model: "light-model"
+    }), "utf8");
+    const usedConfigs: Array<{ api_key: string; base_url: string; model: string }> = [];
+    const runner = new PromptSkillRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (config) => {
+          usedConfigs.push(config);
+          return "任务完成";
+        }
+      }
+    });
+
+    await runner.runSkill("legacy_secondary_skill", {
+      text: "测试输入",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: false,
+      attachment_ids: []
+    });
+
+    expect(usedConfigs).toContainEqual(expect.objectContaining({
+      api_key: "main-key",
+      base_url: "https://main.example/v1",
+      model: "light-model"
+    }));
+  });
+
   it("writes the generated result directly when write_result=true", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
@@ -96,6 +150,148 @@ describe("prompt-skill-runner", () => {
     expect(result.saved_path).toBe("01_大纲/大纲.txt");
     expect(result.data.saved_paths).toEqual(["01_大纲/大纲.txt"]);
     expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("可直接写入的大纲");
+  });
+
+  it("directly merges validated automatic lore after saving an outline", async () => {
+    await fs.writeFile(configPath, JSON.stringify({ api_key: "demo-key", model: "demo-model", auto_lore_extract_enabled: true }), "utf8");
+    const runner = new PromptSkillRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          const prompt = messages.map((message) => message.content).join("\n");
+          return prompt.includes("自动提取设定并合并写入保存")
+            ? "【人物设定】\n林默：主角，出身寒门。"
+            : "# 主线大纲\n林默在雨夜踏入宗门。";
+        }
+      }
+    });
+
+    const result = await runner.runSkill("outline_generate", {
+      text: "林默入宗",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 1500,
+      instruction: "生成大纲并保存",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: true,
+      attachment_ids: []
+    });
+
+    expect(result.data).toMatchObject({
+      saved_paths: ["01_大纲/大纲.txt"],
+      library_draft: { domain: "lore", requires_confirmation: false, direct_saved: true }
+    });
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "设定集", "人物设定.txt"), "utf8")).toContain("林默");
+  });
+
+  it("keeps replace-only outline generation in the preview cache", async () => {
+    const runner = new PromptSkillRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "新生成的大纲内容"
+      }
+    });
+
+    const result = await runner.runSkill("outline_generate", {
+      text: "生成前十章大纲",
+      chapter: 0,
+      end_chapter: 10,
+      target_words: 2500,
+      instruction: "先整大纲，给我前十章大纲，完全替换当前大纲",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: false,
+      attachment_ids: []
+    });
+
+    expect(result.data).toMatchObject({
+      pending_save: true,
+      save_plan: {
+        mode: "replace",
+        write_authorization: "preview_required",
+        should_auto_commit: false
+      }
+    });
+    expect(result.data.save_plan).toMatchObject({ requires_confirmation: true });
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("旧大纲");
+  });
+
+  it("continues a visibly truncated long outline in the same generation cache", async () => {
+    let calls = 0;
+    const runner = new PromptSkillRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => {
+          calls += 1;
+          return calls === 1 ? `${"大纲推进内容，".repeat(100)}` : "补全最后一个节点。";
+        }
+      }
+    });
+
+    const result = await runner.runSkill("outline_generate", {
+      text: "生成完整大纲",
+      chapter: 0,
+      end_chapter: 10,
+      target_words: 3000,
+      instruction: "生成完整大纲",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: false,
+      attachment_ids: []
+    });
+
+    expect(calls).toBe(2);
+    expect(result.result).toContain("补全最后一个节点。");
+    expect(result.data).toMatchObject({ pending_save: true });
+  });
+
+  it("defers an otherwise automatic prompt-skill commit without writing its target", async () => {
+    const runner = new PromptSkillRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "等待 journal 提交的大纲"
+      }
+    });
+
+    const result = await runner.runSkill("outline_generate", {
+      text: "直接生成",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: true,
+      attachment_ids: []
+    }, { deferAutoCommit: true });
+
+    expect(result.saved_path).toBe("");
+    expect(result.data).toMatchObject({
+      pending_save: true,
+      saved_paths: [],
+      target_path: "01_大纲/大纲.txt",
+      deferred_commit: {
+        kind: "prompt_skill_generated_cache",
+        skill_id: "outline_generate",
+        mode: "replace",
+        target_paths: ["01_大纲/大纲.txt"],
+        source: "prompt_skill",
+        requires_confirmation: false
+      }
+    });
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("旧大纲");
+
+    const cacheService = new GeneratedCacheService({ projectRoot: tempDir });
+    expect(await cacheService.readContent(String(result.data.cache_id || ""))).toBe("等待 journal 提交的大纲");
   });
 
   it("uses conversation attachments as source input when text is empty", async () => {
@@ -212,7 +408,7 @@ describe("prompt-skill-runner", () => {
     expect(capturedPrompt).not.toContain("SOURCE_TAIL_SHOULD_BE_TRIMMED");
   });
 
-  it("returns multi-target pending-save metadata for style_extract", async () => {
+  it("creates a confirmable style library draft instead of writing TXT projections", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
       config: { configPath },
@@ -235,16 +431,13 @@ describe("prompt-skill-runner", () => {
     });
 
     expect(result.data).toMatchObject({
-      pending_save: true,
-      target_paths: [
-        "00_设定集/风格库/写作风格.txt",
-        "00_设定集/风格库/风格示例.txt",
-        "00_设定集/风格库/参考素材.txt"
-      ]
+      pending_save: false,
+      requires_confirmation: true,
+      library_draft: { domain: "style", records: 3, requires_confirmation: true }
     });
   });
 
-  it("writes style sections into multiple target files when write_result=true", async () => {
+  it("writes a style library when the request explicitly asks to write it", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
       config: { configPath },
@@ -266,14 +459,179 @@ describe("prompt-skill-runner", () => {
       attachment_ids: []
     });
 
-    expect(result.data.saved_paths).toEqual([
-      "00_设定集/风格库/写作风格.txt",
-      "00_设定集/风格库/风格示例.txt",
-      "00_设定集/风格库/参考素材.txt"
-    ]);
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toBe("风格规则");
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "风格示例.txt"), "utf8")).toBe("示例特征");
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "参考素材.txt"), "utf8")).toBe("素材摘要");
+    expect(result.data).toMatchObject({
+      pending_save: false,
+      requires_confirmation: false,
+      library: { domain: "style", records: expect.any(Number), mode: "merge" }
+    });
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toContain("风格规则");
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "风格示例.txt"), "utf8")).toContain("示例特征");
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "参考素材.txt"), "utf8")).toContain("素材摘要");
+  });
+
+  it("honors an explicit style save for durable callers too", async () => {
+    const runner = new PromptSkillRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "【写作风格】\n风格规则\n\n【风格示例】\n示例特征\n\n【参考素材】\n素材摘要"
+      }
+    });
+
+    const result = await runner.runSkill("style_extract", {
+      text: "样文",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "提取风格并写入",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: true,
+      attachment_ids: []
+    }, { deferAutoCommit: true });
+
+    expect(result.data).toMatchObject({
+      pending_save: false,
+      requires_confirmation: false,
+      library: { domain: "style", records: expect.any(Number), mode: "merge" }
+    });
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toContain("风格规则");
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "风格示例.txt"), "utf8")).toContain("示例特征");
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "参考素材.txt"), "utf8")).toContain("素材摘要");
+  });
+
+  it("defers auto-commit after a streamed skill result", async () => {
+    const runner = new PromptSkillRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "流式延后提交的大纲"
+      }
+    });
+    const events = [];
+    for await (const event of runner.streamSkill("outline_generate", {
+      text: "流式生成",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: true,
+      attachment_ids: []
+    }, { deferAutoCommit: true })) {
+      events.push(event);
+    }
+
+    const final = events.find((event) => event.type === "final");
+    expect(final).toMatchObject({
+      type: "final",
+      payload: {
+        skill_result: {
+          data: {
+            pending_save: true,
+            deferred_commit: expect.objectContaining({ skill_id: "outline_generate" })
+          }
+        }
+      }
+    });
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("旧大纲");
+  });
+
+  it("reuses a finalized deterministic deferred cache without another model call", async () => {
+    let calls = 0;
+    const runner = new PromptSkillRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => {
+          calls += 1;
+          return "确定性缓存结果";
+        }
+      }
+    });
+    const payload = {
+      text: "生成大纲",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: true,
+      attachment_ids: []
+    };
+
+    const first = await runner.runSkill("outline_generate", payload, {
+      deferAutoCommit: true,
+      deterministicCacheId: "11111111111111111111111111111111"
+    });
+    const replay = await runner.runSkill("outline_generate", payload, {
+      deferAutoCommit: true,
+      deterministicCacheId: "11111111111111111111111111111111"
+    });
+
+    expect(calls).toBe(1);
+    expect(replay.result).toBe("确定性缓存结果");
+    expect(replay.data).toMatchObject({
+      cache_id: first.data.cache_id,
+      pending_save: true,
+      deferred_commit: expect.objectContaining({ skill_id: "outline_generate" })
+    });
+  });
+
+  it("restarts an unfinished deterministic stream cache and replays a finalized one", async () => {
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    await cache.createWithId("22222222222222222222222222222222", {
+      source: "skill_stream",
+      skill_id: "outline_generate",
+      target_paths: ["01_大纲/大纲.txt"],
+      mode: "replace"
+    });
+    await cache.replace("22222222222222222222222222222222", "partial output");
+
+    let calls = 0;
+    const runner = new PromptSkillRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => {
+          calls += 1;
+          return "重新开始后的完整结果";
+        }
+      }
+    });
+    const payload = {
+      text: "流式生成",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: true,
+      attachment_ids: []
+    };
+    const readFinal = async () => {
+      const events = [];
+      for await (const event of runner.streamSkill("outline_generate", payload, {
+        deferAutoCommit: true,
+        deterministicCacheId: "22222222222222222222222222222222"
+      })) events.push(event);
+      return events.find((event) => event.type === "final");
+    };
+
+    const first = await readFinal();
+    const replay = await readFinal();
+
+    expect(calls).toBe(1);
+    expect(await cache.readContent("22222222222222222222222222222222")).toBe("重新开始后的完整结果");
+    expect(first).toMatchObject({ type: "final", payload: { skill_result: { data: { pending_save: true } } } });
+    expect(replay).toMatchObject({ type: "final", payload: { skill_result: { result: "重新开始后的完整结果" } } });
   });
 
   it("runs detail outline skill locally and applies default deslop cleanup", async () => {
@@ -340,7 +698,7 @@ describe("prompt-skill-runner", () => {
     expect(capturedSystemPrompt).toContain("只改“怎么说”，不改“说什么”");
   });
 
-  it("returns multi-target pending-save metadata for genre_generate", async () => {
+  it("creates a confirmable genre library draft", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
       config: { configPath },
@@ -363,17 +721,13 @@ describe("prompt-skill-runner", () => {
     });
 
     expect(result.data).toMatchObject({
-      pending_save: true,
-      target_paths: [
-        "00_设定集/题材库/题材规则.txt",
-        "00_设定集/题材库/题材素材.txt",
-        "00_设定集/题材库/战斗模板.txt",
-        "00_设定集/题材库/违禁词.txt"
-      ]
+      pending_save: false,
+      requires_confirmation: true,
+      library_draft: { domain: "genre", records: 4, requires_confirmation: true }
     });
   });
 
-  it("writes genre sections into multiple target files when write_result=true", async () => {
+  it("writes a genre library when the request explicitly asks to write it", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
       config: { configPath },
@@ -395,17 +749,16 @@ describe("prompt-skill-runner", () => {
       attachment_ids: []
     });
 
-    expect(result.data.saved_paths).toEqual([
-      "00_设定集/题材库/题材规则.txt",
-      "00_设定集/题材库/题材素材.txt",
-      "00_设定集/题材库/战斗模板.txt",
-      "00_设定集/题材库/违禁词.txt"
-    ]);
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "题材库", "题材规则.txt"), "utf8")).toBe("规则内容");
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "题材库", "题材素材.txt"), "utf8")).toBe("素材内容");
+    expect(result.data).toMatchObject({
+      pending_save: false,
+      requires_confirmation: false,
+      library: { domain: "genre", records: expect.any(Number), mode: "merge" }
+    });
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "题材库", "题材规则.txt"), "utf8")).toContain("规则内容");
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "题材库", "题材素材.txt"), "utf8")).toContain("素材内容");
   });
 
-  it("returns multi-target pending-save metadata for lore_extract", async () => {
+  it("creates a confirmable lore library draft", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
       config: { configPath },
@@ -428,17 +781,13 @@ describe("prompt-skill-runner", () => {
     });
 
     expect(result.data).toMatchObject({
-      pending_save: true,
-      target_paths: [
-        "00_设定集/设定集/人物设定.txt",
-        "00_设定集/设定集/体系设定.txt",
-        "00_设定集/设定集/地图设定.txt",
-        "00_设定集/设定集/道具设定.txt"
-      ]
+      pending_save: false,
+      requires_confirmation: true,
+      library_draft: { domain: "lore", records: 2, requires_confirmation: true }
     });
   });
 
-  it("merges lore sections into existing files when write_result=true", async () => {
+  it("merges lore into the project when the request explicitly asks to write it", async () => {
     await fs.mkdir(path.join(tempDir, "00_设定集", "设定集"), { recursive: true });
     await fs.writeFile(path.join(tempDir, "00_设定集", "设定集", "人物设定.txt"), "林默：主角，出身寒门。", "utf8");
 
@@ -463,10 +812,14 @@ describe("prompt-skill-runner", () => {
       attachment_ids: []
     });
 
-    expect(result.data.saved_paths).toContain("00_设定集/设定集/人物设定.txt");
-    expect(result.data.saved_paths).toContain("00_设定集/设定集/体系设定.txt");
+    expect(result.data).toMatchObject({
+      pending_save: false,
+      requires_confirmation: false,
+      library: { domain: "lore", records: expect.any(Number), mode: "merge" }
+    });
     const mergedLore = await fs.readFile(path.join(tempDir, "00_设定集", "设定集", "人物设定.txt"), "utf8");
-    expect(mergedLore).toContain("林默：主角，出身寒门；擅长隐忍");
+    expect(mergedLore).toContain("简介：主角，出身寒门。");
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "设定集", "体系设定.txt"), "utf8")).toContain("修炼分九境");
   });
 
   it("drafts a skill from a URL using AI when configured", async () => {

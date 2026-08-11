@@ -138,8 +138,6 @@ export function TerminalView({
       }
     });
 
-    void startTerminal();
-
     return () => {
       unsubscribeData();
       unsubscribeExit();
@@ -187,9 +185,15 @@ export function TerminalView({
               <Eraser size={15} />
               <span>清屏</span>
             </button>
-            <button className="ghost-button" onClick={() => void startTerminal()} disabled={!canStartTerminal || busy}>
+            <button
+              className="ghost-button"
+              data-terminal-user-gesture
+              data-testid="terminal-start"
+              onClick={() => void startTerminal()}
+              disabled={!canStartTerminal || busy}
+            >
               <RotateCcw size={15} />
-              <span>{busy ? "连接中" : "重启终端"}</span>
+              <span>{busy ? "连接中" : sessionId ? "重启终端" : "连接终端"}</span>
             </button>
           </div>
         }
@@ -202,7 +206,7 @@ export function TerminalView({
                 : "还没有打开项目，终端不会自动启动，避免命令跑到应用目录。"
               : "终端只在 Electron 桌面壳内可用，浏览器预览会保留这个占位页。"}
           </strong>
-          <p>{sessionId ? `会话 ${sessionId}` : configuredCwd || "未打开项目"}</p>
+          <p data-testid="terminal-session-id">{sessionId ? `会话 ${sessionId}` : configuredCwd || "未打开项目"}</p>
         </div>
 
         {terminalReady && !hasProject && !allowAppDirectoryTerminal && (

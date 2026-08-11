@@ -23,24 +23,7 @@ import type { KeyboardEvent as ReactKeyboardEvent } from "react";
 import type { WorkbenchController } from "../hooks/useWorkbenchController.js";
 import { attachmentDisplayName } from "../lib/attachments.js";
 import { buildRailStatusSummary } from "../lib/railStatus.js";
-
-export type CenterFeature =
-  | "editor"
-  | "conversations"
-  | "timeline"
-  | "settings-set"
-  | "style-library"
-  | "theme-library"
-  | "batch"
-  | "crawl"
-  | "card_draw"
-  | "ledger"
-  | "revision"
-  | "skills"
-  | "traces"
-  | "consistency"
-  | "settings"
-  | "terminal";
+import type { CenterFeature } from "../navigation.js";
 
 export const railModes = [
   { key: "ai", label: "AI", icon: Bot, tab: "editor", feature: "editor" },
@@ -114,8 +97,8 @@ function RailResultPreview({ controller }: { controller: WorkbenchController }) 
         <div className="xw-rail-result-actions">
           <button className="xw-secondary-button compact" onClick={() => controller.savePendingGenerated("append")} disabled={controller.operationsBusy}>追加保存</button>
           <button className="xw-primary-button compact" onClick={() => controller.savePendingGenerated("replace")} disabled={controller.operationsBusy}>覆盖保存</button>
-          <button className="xw-secondary-button compact" onClick={controller.copyPendingGeneratedContent} disabled={controller.operationsBusy}>复制</button>
-          <button className="xw-danger-button compact" onClick={controller.discardPendingGenerated} disabled={controller.operationsBusy}>丢弃</button>
+          <button className="xw-secondary-button compact" onClick={() => void controller.copyPendingGeneratedContent()} disabled={controller.operationsBusy}>复制</button>
+          <button className="xw-danger-button compact" onClick={() => void controller.discardPendingGenerated()} disabled={controller.operationsBusy}>丢弃</button>
         </div>
       )}
     </article>

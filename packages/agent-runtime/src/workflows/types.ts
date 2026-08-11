@@ -8,6 +8,21 @@ import type { GeneratedSavePlanner } from "../generated-save-planner.js";
 import type { PromptSkillRunner } from "../skill-runner.js";
 import type { StreamingModelClient } from "../stream.js";
 import type { WebSearchClient } from "../web-search.js";
+import type { WorkflowCheckpointStore } from "../kernel/workflow-checkpoint.js";
+import type { CommitJournalService } from "../kernel/commit-journal-service.js";
+
+export type WorkflowDurableExecution = {
+  runId: string;
+  stepId: string;
+  attemptId: string;
+};
+
+export type WorkflowProgress = {
+  stage: string;
+  message: string;
+  completed?: number;
+  total?: number;
+};
 
 export type WorkflowRunContext = {
   projectRoot: string;
@@ -21,6 +36,13 @@ export type WorkflowRunContext = {
   skillRunner: PromptSkillRunner;
   trace?: AgentTraceRecorder;
   signal?: AbortSignal;
+  checkpoint?: WorkflowCheckpointStore;
+  /** Present only for a durable runtime execution. */
+  durableExecution?: WorkflowDurableExecution;
+  /** Durable file commit path for workflow-owned document writes. */
+  commitJournal?: CommitJournalService;
+  /** Ephemeral progress events for the active workflow stream. */
+  reportProgress?: (progress: WorkflowProgress) => void;
 };
 
 export type WorkflowHandler = {

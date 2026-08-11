@@ -195,6 +195,16 @@ export const styleDistillationProfileSchema = z
     source_summary: z.string().default(""),
     source_path: z.string().default(""),
     source_hash: z.string().default(""),
+    source_book_id: z.string().default(""),
+    source_report_path: z.string().default(""),
+    evidence_spans: z.array(z.object({
+      start: z.number().int().nonnegative(),
+      end: z.number().int().nonnegative(),
+      purpose: z.string().default(""),
+      hash: z.string().default("")
+    })).default([]),
+    evidence_version: z.number().int().nonnegative().default(1),
+    status: z.enum(["active", "stale", "orphaned"]).default("active"),
     distilled_at: z.string().default(""),
     enabled: z.boolean().default(false),
     profile_text: z.string().default("")

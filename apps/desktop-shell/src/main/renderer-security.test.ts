@@ -1,0 +1,45 @@
+import path from "node:path";
+import { describe, expect, it } from "vitest";
+import { isSafeExternalUrl, isTrustedRendererUrl } from "./renderer-security.js";
+
+const config = {
+  runtimeUrl: "http://127.0.0.1:4312/",
+  rendererUrl: "http://localhost:5173/",
+  packagedWorkbenchIndex: path.resolve("C:/ArcWriter/resources/workbench/index.html")
+};
+
+describe("renderer security", () => {
+  it("trusts the configured entry points and explicit production SPA routes", () => {
+    expect(isTrustedRendererUrl("http://127.0.0.1:4312/?desktop=1", config)).toBe(true);
+    expect(isTrustedRendererUrl("http://localhost:5173/?desktop=1", config)).toBe(true);
+    expect(isTrustedRendererUrl("http://localhost:5173/editor", config)).toBe(true);
+    expect(isTrustedRendererUrl("http://localhost:5173/settings/privacy", config)).toBe(true);
+    expect(isTrustedRendererUrl("http://localhost:5173/tools/skills/lore_extract/versions", config)).toBe(true);
+    expect(isTrustedRendererUrl("http://localhost:5173/tools/import", config)).toBe(true);
+    expect(isTrustedRendererUrl("http://127.0.0.1:4312/api/agent/runs", config)).toBe(false);
+    expect(isTrustedRendererUrl("http://localhost:5173/terminal", config)).toBe(false);
+    expect(isTrustedRendererUrl("http://localhost:5173/traces", config)).toBe(false);
+    expect(isTrustedRendererUrl("http://localhost:5173/card_draw", config)).toBe(false);
+    expect(isTrustedRendererUrl("http://localhost:5173/untrusted.html", config)).toBe(false);
+  });
+
+  it("does not grant trust to arbitrary file URLs", () => {
+    expect(isTrustedRendererUrl("file:///C:/ArcWriter/resources/workbench/index.html", config)).toBe(true);
+    expect(isTrustedRendererUrl("file:///C:/Users/Administrator/Downloads/attack.html", config)).toBe(false);
+  });
+
+  it("accepts only the explicitly configured development file entry point", () => {
+    const fileRendererConfig = {
+      ...config,
+      rendererUrl: "file:///C:/ArcWriter/smoke/bridge.html"
+    };
+    expect(isTrustedRendererUrl("file:///C:/ArcWriter/smoke/bridge.html", fileRendererConfig)).toBe(true);
+    expect(isTrustedRendererUrl("file:///C:/ArcWriter/smoke/neighbor.html", fileRendererConfig)).toBe(false);
+  });
+
+  it("only opens web links externally", () => {
+    expect(isSafeExternalUrl("https://example.com/docs")).toBe(true);
+    expect(isSafeExternalUrl("file:///C:/Windows/System32/cmd.exe")).toBe(false);
+    expect(isSafeExternalUrl("javascript:alert(1)")).toBe(false);
+  });
+});

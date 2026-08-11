@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { GeneratedSavePlanner } from "../generated-save-planner.js";
-import { AgentRuntimeService } from "../runtime.js";
+import { AgentRuntimeService, closeAllAgentRuntimeServices } from "../runtime.js";
 import { PromptSkillRunner } from "../skill-runner.js";
 import { ContinueDisassembleWorkflow } from "./continue-disassemble.js";
 import type { WorkflowRunContext } from "./types.js";
@@ -21,6 +21,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  closeAllAgentRuntimeServices();
   if (tempDir) {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
@@ -68,7 +69,7 @@ describe("ContinueDisassembleWorkflow", () => {
     expect(result.intent).toBe("skill");
     expect(book?.dir).toContain("00_设定集/拆书库/");
     expect(result.saved_paths).toEqual([`${book?.dir}/拆书细纲.txt`]);
-    expect(await fs.readFile(path.join(tempDir, "01_大纲", "拆书细纲.txt"), "utf8")).toContain("第001章");
+    await expect(fs.readFile(path.join(tempDir, "01_大纲", "拆书细纲.txt"), "utf8")).rejects.toThrow();
     expect(await fs.readFile(path.join(tempDir, book?.dir || "", "拆书细纲.txt"), "utf8")).toContain("第001章");
   });
 
@@ -93,6 +94,38 @@ describe("ContinueDisassembleWorkflow", () => {
 
     const book = result.skill_result?.data?.book as { dir?: string } | undefined;
     expect(result.saved_paths).toEqual([`${book?.dir}/拆书细纲.txt`]);
-    expect(await fs.readFile(path.join(tempDir, "01_大纲", "拆书细纲.txt"), "utf8")).toContain("继续扩展");
+    await expect(fs.readFile(path.join(tempDir, "01_大纲", "拆书细纲.txt"), "utf8")).rejects.toThrow();
+  });
+
+  it("journals durable detail-outline and manifest writes without project-level legacy sync", async () => {
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "第001章：继续扩展"
+      }
+    });
+    const response = await runtime.runAgent({
+      request_id: "durable-continue-disassemble-journal",
+      conversation_id: "",
+      content: "继续拆细纲",
+      current_path: "",
+      selection: "第一章：林默入宗门。",
+      project_context_hint: "",
+      skill_id: "continue_disassemble",
+      attachment_ids: []
+    });
+    const journal = runtime.listDurableCommitJournal(response.run_id);
+
+    expect(journal).toHaveLength(5);
+    expect(journal).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "workflow.continue_disassemble.book.source", stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.continue_disassemble.book.manifest.initial", stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.continue_disassemble.detail_outline.output", stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.continue_disassemble.book.manifest.detail_outline", stage: "finalized" })
+    ]));
+    expect(new Set(journal.map((entry) => `${entry.run_id}:${entry.step_id}:${entry.attempt_id}`))).toEqual(
+      new Set([journal.map((entry) => `${response.run_id}:${entry.step_id}:${entry.attempt_id}`)[0]])
+    );
   });
 });

@@ -1,9 +1,38 @@
 import { z } from "zod";
+import type {
+  NovelAgentWorkspaceSnapshot,
+  NovelBackgroundTask,
+  NovelBackgroundTaskControl,
+  NovelBackgroundTaskCreate,
+  NovelMemoryBatchDesktopRequest,
+  NovelMemoryBatchPrepareResult,
+  NovelMemoryBatchReviewResult,
+  NovelProjectTransferCommitRequest,
+  NovelProjectTransferPlan,
+  NovelProjectTransferPlanRequest,
+  NovelProjectTransferResult,
+  NovelProjectTransferSourceConfirmRequest,
+  NovelProjectTransferSourceConfirmResult,
+  NovelProjectRootRequest,
+  NovelRoomDesktopRequest,
+  NovelRoomResponse,
+  NovelToolInstallProposal,
+  NovelToolInstallProposalRequest,
+  NovelToolInstallRequest,
+  NovelToolInstallResult,
+  NovelTypedActionRequest,
+  NovelTypedActionResult,
+  NovelWorkspaceProject
+} from "./schemas/novel-agent.js";
 
 export const desktopIpcChannels = {
   appVersions: "app:versions",
   backendStatus: "backend:status",
   backendRestart: "backend:restart",
+  runtimeRequest: "runtime:request",
+  runtimeStreamStart: "runtime:stream:start",
+  runtimeStreamCancel: "runtime:stream:cancel",
+  runtimeStreamEvent: "runtime:stream:event",
   appOpenTutorial: "app:open-tutorial",
   appRequestRefresh: "app:request-refresh",
   appRequestRun: "app:request-run",
@@ -16,14 +45,31 @@ export const desktopIpcChannels = {
   shellExportProject: "shell:export-project",
   shellImportProject: "shell:import-project",
   shellCloudProjectsList: "shell:cloud-projects:list",
+  shellCloudProjectsInspect: "shell:cloud-projects:inspect",
   shellCloudProjectsUpload: "shell:cloud-projects:upload",
   shellCloudProjectsDownload: "shell:cloud-projects:download",
   shellCloudProjectsDelete: "shell:cloud-projects:delete",
   localStateGet: "local-state:get",
   localStateRecordProject: "local-state:record-project",
+  localStateRemoveRecentProject: "local-state:remove-recent-project",
   localStateSyncProject: "local-state:sync-project",
   localStatePatchSettings: "local-state:patch-settings",
   localStateTrackGeneratedCache: "local-state:track-generated-cache",
+  novelAuthorizeUserGesture: "novel:authorize-user-gesture",
+  novelIdentifyProject: "novel:identify-project",
+  novelSnapshot: "novel:snapshot",
+  novelReview: "novel:review",
+  novelToolPropose: "novel:tool-propose",
+  novelToolInstall: "novel:tool-install",
+  novelActionRun: "novel:action-run",
+  novelBackgroundCreate: "novel:background-create",
+  novelBackgroundControl: "novel:background-control",
+  novelTransferPickProject: "novel:transfer-pick-project",
+  novelTransferPlan: "novel:transfer-plan",
+  novelTransferConfirmSource: "novel:transfer-confirm-source",
+  novelTransferCommit: "novel:transfer-commit",
+  novelMemoryPrepare: "novel:memory-prepare",
+  novelMemoryConfirm: "novel:memory-confirm",
   terminalCreate: "terminal:create",
   terminalWrite: "terminal:write",
   terminalResize: "terminal:resize",
@@ -49,6 +95,32 @@ export const desktopBackendStatusSchema = z.object({
   pid: z.number().optional(),
   error: z.string().optional()
 });
+
+export const desktopRuntimeRequestSchema = z.object({
+  url: z.string().url(),
+  method: z.string().min(1).max(16).default("GET"),
+  headers: z.record(z.string()).default({}),
+  body: z.instanceof(Uint8Array).nullable().optional()
+});
+
+export const desktopRuntimeResponseSchema = z.object({
+  status: z.number().int().min(100).max(599),
+  statusText: z.string(),
+  headers: z.record(z.string()),
+  body: z.instanceof(Uint8Array).nullable()
+});
+
+export const desktopRuntimeStreamRequestSchema = desktopRuntimeRequestSchema.extend({
+  request_id: z.string().trim().min(1).max(120)
+});
+
+export const desktopRuntimeStreamStartResponseSchema = desktopRuntimeResponseSchema.omit({ body: true });
+
+export const desktopRuntimeStreamEventSchema = z.discriminatedUnion("type", [
+  z.object({ request_id: z.string().trim().min(1), type: z.literal("chunk"), body: z.instanceof(Uint8Array) }),
+  z.object({ request_id: z.string().trim().min(1), type: z.literal("end") }),
+  z.object({ request_id: z.string().trim().min(1), type: z.literal("error"), error: z.string().default("桌面流式请求失败") })
+]);
 
 export const desktopShellCapabilitiesSchema = z.object({
   terminal: z.object({
@@ -106,8 +178,11 @@ export const cloudProjectSlotSchema = z
     id: z.string().default(""),
     slot_id: z.number().int().min(1).max(3),
     project_name: z.string().default(""),
+    project_id: z.string().default(""),
     file_name: z.string().default(""),
     size: z.number().int().nonnegative().default(0),
+    core_size: z.number().int().nonnegative().default(0),
+    revision: z.number().int().nonnegative().default(0),
     sha256: z.string().default(""),
     created_at: z.string().default(""),
     updated_at: z.string().default("")
@@ -118,17 +193,42 @@ export const cloudProjectListResponseSchema = z
   .object({
     slots: z.array(cloudProjectSlotSchema).default([]),
     limit: z.number().int().default(3),
-    max_upload_bytes: z.number().int().default(20 * 1024 * 1024),
+    max_upload_bytes: z.number().int().default(30 * 1024 * 1024),
     daily_upload_limit: z.number().int().default(10),
     today_upload_count: z.number().int().nonnegative().default(0),
-    today_upload_remaining: z.number().int().nonnegative().default(10)
+    today_upload_remaining: z.number().int().nonnegative().default(10),
+    daily_upload_bytes_limit: z.number().int().nonnegative().default(0),
+    daily_upload_bytes_used: z.number().int().nonnegative().default(0),
+    daily_upload_bytes_remaining: z.number().int().nonnegative().default(0),
+    monthly_upload_bytes_limit: z.number().int().nonnegative().default(0),
+    monthly_upload_bytes_used: z.number().int().nonnegative().default(0),
+    monthly_upload_bytes_remaining: z.number().int().nonnegative().default(0),
+    monthly_download_bytes_limit: z.number().int().nonnegative().default(0),
+    monthly_download_bytes_used: z.number().int().nonnegative().default(0),
+    monthly_download_bytes_remaining: z.number().int().nonnegative().default(0),
+    quota_resets_at: z.string().default("")
   })
   .passthrough();
 
 export const cloudProjectUploadRequestSchema = z.object({
   slot_id: z.number().int().min(1).max(3),
   project_path: z.string().min(1),
-  project_name: z.string().default("")
+  project_name: z.string().default(""),
+  project_id: z.string().default(""),
+  sync_mode: z.enum(["manual", "auto"]).default("manual")
+});
+
+export const cloudProjectInspectRequestSchema = z.object({
+  project_path: z.string().min(1)
+});
+
+export const cloudProjectInspectResponseSchema = z.object({
+  ok: z.boolean().default(true),
+  project_path: z.string(),
+  core_bytes: z.number().int().nonnegative(),
+  file_count: z.number().int().nonnegative(),
+  max_upload_bytes: z.number().int().nonnegative().default(30 * 1024 * 1024),
+  largest_files: z.array(z.object({ path: z.string(), size: z.number().int().nonnegative() })).default([])
 });
 
 export const cloudProjectDownloadRequestSchema = z.object({
@@ -148,7 +248,9 @@ export const cloudProjectUploadResponseSchema = z
     uploaded_bytes: z.number().int().nonnegative().default(0),
     daily_upload_limit: z.number().int().default(10),
     today_upload_count: z.number().int().nonnegative().default(0),
-    today_upload_remaining: z.number().int().nonnegative().default(10)
+    today_upload_remaining: z.number().int().nonnegative().default(10),
+    core_bytes: z.number().int().nonnegative().default(0),
+    unchanged: z.boolean().default(false)
   })
   .passthrough();
 
@@ -156,7 +258,9 @@ export const cloudProjectDownloadResponseSchema = z
   .object({
     ok: z.boolean().default(true),
     project_path: z.string().default(""),
-    backup_path: z.string().default("")
+    backup_path: z.string().default(""),
+    restored_files: z.number().int().nonnegative().default(0),
+    restored_bytes: z.number().int().nonnegative().default(0)
   })
   .passthrough();
 
@@ -196,6 +300,9 @@ export const localStateGeneratedCacheSchema = z.object({
   mode: z.enum(["replace", "append"]).optional(),
   cache_path: z.string().optional(),
   cache_chars: z.number().int().nonnegative(),
+  conversation_id: z.string().optional(),
+  message_id: z.string().optional(),
+  run_id: z.string().optional(),
   created_at: z.string(),
   updated_at: z.string()
 });
@@ -214,6 +321,10 @@ export const localStateRecordProjectRequestSchema = z.object({
   name: z.string().min(1),
   opened_at: z.string().optional(),
   previous_path: z.string().optional()
+});
+
+export const localStateRemoveRecentProjectRequestSchema = z.object({
+  path: z.string().trim().min(1)
 });
 
 export const localStateSyncProjectRequestSchema = z.object({
@@ -240,6 +351,9 @@ export const localStateTrackGeneratedCacheRequestSchema = z.object({
   mode: z.enum(["replace", "append"]).optional(),
   cache_path: z.string().optional(),
   cache_chars: z.number().int().nonnegative().default(0),
+  conversation_id: z.string().optional(),
+  message_id: z.string().optional(),
+  run_id: z.string().optional(),
   created_at: z.string().optional(),
   updated_at: z.string().optional()
 });
@@ -308,12 +422,19 @@ export const desktopUpdateStatusSchema = z.object({
 export type DesktopIpcChannel = (typeof desktopIpcChannels)[keyof typeof desktopIpcChannels];
 export type DesktopVersions = z.infer<typeof desktopVersionsSchema>;
 export type DesktopBackendStatus = z.infer<typeof desktopBackendStatusSchema>;
+export type DesktopRuntimeRequest = z.input<typeof desktopRuntimeRequestSchema>;
+export type DesktopRuntimeResponse = z.infer<typeof desktopRuntimeResponseSchema>;
+export type DesktopRuntimeStreamRequest = z.input<typeof desktopRuntimeStreamRequestSchema>;
+export type DesktopRuntimeStreamStartResponse = z.infer<typeof desktopRuntimeStreamStartResponseSchema>;
+export type DesktopRuntimeStreamEvent = z.infer<typeof desktopRuntimeStreamEventSchema>;
 export type DesktopShellCapabilities = z.infer<typeof desktopShellCapabilitiesSchema>;
 export type DesktopProjectPickerResponse = z.infer<typeof desktopProjectPickerResponseSchema>;
 export type DesktopProjectExportRequest = z.input<typeof desktopProjectExportRequestSchema>;
 export type DesktopProjectArchiveResponse = z.infer<typeof desktopProjectArchiveResponseSchema>;
 export type CloudProjectSlot = z.infer<typeof cloudProjectSlotSchema>;
 export type CloudProjectListResponse = z.infer<typeof cloudProjectListResponseSchema>;
+export type CloudProjectInspectRequest = z.input<typeof cloudProjectInspectRequestSchema>;
+export type CloudProjectInspectResponse = z.infer<typeof cloudProjectInspectResponseSchema>;
 export type CloudProjectUploadRequest = z.input<typeof cloudProjectUploadRequestSchema>;
 export type CloudProjectDownloadRequest = z.input<typeof cloudProjectDownloadRequestSchema>;
 export type CloudProjectDeleteRequest = z.input<typeof cloudProjectDeleteRequestSchema>;
@@ -326,6 +447,7 @@ export type LocalStateProject = z.infer<typeof localStateProjectSchema>;
 export type LocalStateGeneratedCache = z.infer<typeof localStateGeneratedCacheSchema>;
 export type LocalStateSnapshot = z.infer<typeof localStateSnapshotSchema>;
 export type LocalStateRecordProjectRequest = z.infer<typeof localStateRecordProjectRequestSchema>;
+export type LocalStateRemoveRecentProjectRequest = z.infer<typeof localStateRemoveRecentProjectRequestSchema>;
 export type LocalStateSyncProjectRequest = z.infer<typeof localStateSyncProjectRequestSchema>;
 export type LocalStatePatchSettingsRequest = z.infer<typeof localStatePatchSettingsRequestSchema>;
 export type LocalStateTrackGeneratedCacheRequest = z.infer<typeof localStateTrackGeneratedCacheRequestSchema>;
@@ -343,6 +465,12 @@ export type XiaoShuoDesktopApi = {
   versions: () => Promise<DesktopVersions>;
   backendStatus: () => Promise<DesktopBackendStatus>;
   restartBackend: () => Promise<DesktopBackendStatus>;
+  runtimeRequest: (request: DesktopRuntimeRequest) => Promise<DesktopRuntimeResponse>;
+  runtimeStream: {
+    start: (request: DesktopRuntimeStreamRequest) => Promise<DesktopRuntimeStreamStartResponse>;
+    cancel: (requestId: string) => void;
+    onEvent: (callback: (event: DesktopRuntimeStreamEvent) => void) => () => void;
+  };
   onOpenTutorial: (callback: () => void) => () => void;
   onRequestRefresh: (callback: () => void) => () => void;
   onRequestRun: (callback: () => void) => () => void;
@@ -356,6 +484,7 @@ export type XiaoShuoDesktopApi = {
   importProject: () => Promise<DesktopProjectArchiveResponse>;
   cloudProjects: {
     list: () => Promise<CloudProjectListResponse>;
+    inspect: (request: CloudProjectInspectRequest) => Promise<CloudProjectInspectResponse>;
     upload: (request: CloudProjectUploadRequest) => Promise<CloudProjectUploadResponse>;
     downloadToProject: (request: CloudProjectDownloadRequest) => Promise<CloudProjectDownloadResponse>;
     delete: (request: CloudProjectDeleteRequest) => Promise<CloudProjectDeleteResponse>;
@@ -363,9 +492,26 @@ export type XiaoShuoDesktopApi = {
   localState: {
     get: () => Promise<LocalStateSnapshot>;
     recordProject: (request: LocalStateRecordProjectRequest) => Promise<LocalStateSnapshot>;
+    removeRecentProject: (request: LocalStateRemoveRecentProjectRequest) => Promise<LocalStateSnapshot>;
     syncProject: (request: LocalStateSyncProjectRequest) => Promise<LocalStateSnapshot>;
     patchSettings: (request: LocalStatePatchSettingsRequest) => Promise<LocalStateSnapshot>;
     trackGeneratedCache: (request: LocalStateTrackGeneratedCacheRequest) => Promise<LocalStateSnapshot>;
+  };
+  novelAgent: {
+    identifyProject: (request: NovelProjectRootRequest) => Promise<NovelWorkspaceProject>;
+    snapshot: (request: NovelWorkspaceProject) => Promise<NovelAgentWorkspaceSnapshot>;
+    review: (request: NovelRoomDesktopRequest) => Promise<NovelRoomResponse>;
+    proposeTool: (request: NovelToolInstallProposalRequest) => Promise<NovelToolInstallProposal>;
+    installTool: (request: NovelToolInstallRequest) => Promise<NovelToolInstallResult>;
+    runAction: (request: NovelTypedActionRequest) => Promise<NovelTypedActionResult>;
+    createBackgroundTask: (request: NovelBackgroundTaskCreate) => Promise<NovelBackgroundTask>;
+    controlBackgroundTask: (request: NovelBackgroundTaskControl) => Promise<NovelBackgroundTask>;
+    pickTransferProject: () => Promise<NovelWorkspaceProject | null>;
+    createTransferPlan: (request: NovelProjectTransferPlanRequest) => Promise<NovelProjectTransferPlan>;
+    confirmTransferSource: (request: NovelProjectTransferSourceConfirmRequest) => Promise<NovelProjectTransferSourceConfirmResult>;
+    commitTransfer: (request: NovelProjectTransferCommitRequest) => Promise<NovelProjectTransferResult>;
+    prepareMemoryBatch: (request: NovelWorkspaceProject) => Promise<NovelMemoryBatchPrepareResult>;
+    confirmMemoryBatch: (request: NovelMemoryBatchDesktopRequest) => Promise<NovelMemoryBatchReviewResult>;
   };
   terminal: {
     create: (request?: TerminalCreateRequest) => Promise<TerminalSession>;

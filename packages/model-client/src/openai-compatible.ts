@@ -1,4 +1,6 @@
 import type { ModelConfig } from "@xiaoshuo/config-service";
+import { resolveModelRequestCapability, type ReasoningEffort } from "@xiaoshuo/shared";
+import type { ModelUsage } from "./usage.js";
 
 export type ChatCompletionMessage = {
   role: "system" | "user" | "assistant";
@@ -12,11 +14,58 @@ export type OpenAICompatibleClientOptions = {
 
 export type ModelRequestOptions = {
   signal?: AbortSignal;
+  reasoningEffort?: ReasoningEffort;
+  /** Trusted hard cap applied to the provider request; never supplied by model text. */
+  maxOutputTokens?: number;
+  /** Request provider usage in stream terminal events when the provider supports it. */
+  captureUsage?: boolean;
+  /**
+   * Lifecycle callbacks for each physical HTTP dispatch. They intentionally
+   * live below requestCompletion so stream fallback and retry paths cannot
+   * hide an outbound call from a durable budget governor.
+   */
+  dispatchLifecycle?: ModelDispatchLifecycle;
+};
+
+export type ModelStreamChunk = {
+  channel: "reasoning" | "answer";
+  text: string;
+};
+
+export type ModelCompletionResult = {
+  reasoning: string;
+  answer: string;
+};
+
+export type ModelDispatchInput = {
+  config: Pick<ModelConfig, "base_url" | "model">;
+  messages: ChatCompletionMessage[];
+  stream: boolean;
+  maxOutputTokens?: number;
+};
+
+export type ModelDispatchLifecycle = {
+  beforeDispatch?: (input: ModelDispatchInput) => unknown | Promise<unknown>;
+  onDispatchStarted?: (input: ModelDispatchInput & { context: unknown }) => void | Promise<void>;
+  onUsage?: (input: ModelDispatchInput & { context: unknown; usage: ModelUsage }) => void | Promise<void>;
+  onDispatchFinished?: (input: ModelDispatchInput & {
+    context: unknown;
+    usage?: ModelUsage;
+    error?: unknown;
+  }) => void | Promise<void>;
+};
+
+type DispatchRecord = {
+  input: ModelDispatchInput;
+  context: unknown;
+  lifecycle: ModelDispatchLifecycle;
+  usage?: ModelUsage;
 };
 
 export class OpenAICompatibleClient {
   private readonly fetchFn: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly dispatchRecords = new WeakMap<Response, DispatchRecord>();
 
   constructor(options: OpenAICompatibleClientOptions = {}) {
     this.fetchFn = options.fetchFn ?? fetch;
@@ -44,59 +93,101 @@ export class OpenAICompatibleClient {
       }
     }
 
-    const response = await this.fetchChatCompletions(
-      config,
-      {
-        model: config.model,
-        messages,
-        temperature: temperature ?? config.temperature,
-        top_p: config.top_p
-      },
-      options
-    );
+    const response = await this.fetchChatCompletions(config, buildRequestBody(config, messages, temperature, options), options);
 
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(formatApiError(response.status, text));
+    try {
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        throw new Error(formatApiError(response.status, text));
+      }
+
+      const payload = await response.json();
+      const usage = extractProviderUsage(payload);
+      if (usage) {
+        await this.recordDispatchUsage(response, usage);
+      }
+      const result = extractMessageText(payload).trim();
+      if (result) {
+        return result;
+      }
+      throw new Error(streamError ? `模型返回空内容（流式错误：${streamError}）` : "模型返回空内容");
+    } catch (error) {
+      await this.finishDispatch(response, error);
+      throw error;
+    } finally {
+      await this.finishDispatch(response);
+    }
+  }
+
+  async requestDetailedCompletion(config: ModelConfig, messages: ChatCompletionMessage[], temperature?: number, options: ModelRequestOptions = {}): Promise<ModelCompletionResult> {
+    let streamError = "";
+    try {
+      const reasoningParts: string[] = [];
+      const answerParts: string[] = [];
+      for await (const chunk of this.streamDetailedCompletion(config, messages, temperature, options)) {
+        (chunk.channel === "reasoning" ? reasoningParts : answerParts).push(chunk.text);
+      }
+      const answer = answerParts.join("").trim();
+      if (answer) {
+        return { reasoning: reasoningParts.join("").trim(), answer };
+      }
+    } catch (error) {
+      if (isAbortLike(error, options.signal)) throw createAbortError();
+      streamError = error instanceof Error ? error.message : String(error);
+      if (!canRetryWithoutStream(streamError)) throw error;
     }
 
-    const payload = await response.json();
-    const result = extractMessageText(payload).trim();
-    if (result) {
-      return result;
+    const response = await this.fetchChatCompletions(config, buildRequestBody(config, messages, temperature, options), options);
+    try {
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        throw new Error(formatApiError(response.status, text));
+      }
+      const payload = await response.json();
+      const usage = extractProviderUsage(payload);
+      if (usage) await this.recordDispatchUsage(response, usage);
+      const result = extractMessageParts(payload);
+      if (result.answer.trim()) return { reasoning: result.reasoning.trim(), answer: result.answer.trim() };
+      throw new Error(streamError ? `模型返回空内容（流式错误：${streamError}）` : "模型返回空内容");
+    } catch (error) {
+      await this.finishDispatch(response, error);
+      throw error;
+    } finally {
+      await this.finishDispatch(response);
     }
-    throw new Error(streamError ? `模型返回空内容（流式错误：${streamError}）` : "模型返回空内容");
   }
 
   async *streamCompletion(config: ModelConfig, messages: ChatCompletionMessage[], temperature?: number, options: ModelRequestOptions = {}): AsyncGenerator<string> {
-    const response = await this.fetchChatCompletions(
-      config,
-      {
-        model: config.model,
-        messages,
-        temperature: temperature ?? config.temperature,
-        top_p: config.top_p,
-        stream: true
-      },
-      options
-    );
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new Error(formatApiError(response.status, text));
+    for await (const chunk of this.streamDetailedCompletion(config, messages, temperature, options)) {
+      if (chunk.channel === "answer") yield chunk.text;
     }
-    if (!response.body) {
-      throw new Error("模型流式响应不可用");
-    }
+  }
 
-    const reader = response.body.getReader();
-    const cancelReader = () => {
-      void reader.cancel().catch(() => {});
-    };
-    options.signal?.addEventListener("abort", cancelReader, { once: true });
-    const decoder = new TextDecoder();
-    let buffer = "";
+  async *streamDetailedCompletion(config: ModelConfig, messages: ChatCompletionMessage[], temperature?: number, options: ModelRequestOptions = {}): AsyncGenerator<ModelStreamChunk> {
+    const response = await this.fetchChatCompletions(config, {
+      ...buildRequestBody(config, messages, temperature, options),
+      stream: true,
+      ...(options.captureUsage ? { stream_options: { include_usage: true } } : {})
+    }, options);
+
+    let cancelReader: (() => void) | undefined;
+    let dispatchError: unknown;
     try {
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        throw new Error(formatApiError(response.status, text));
+      }
+      if (!response.body) {
+        throw new Error("模型流式响应不可用");
+      }
+
+      const reader = response.body.getReader();
+      cancelReader = () => {
+        void reader.cancel().catch(() => {});
+      };
+      options.signal?.addEventListener("abort", cancelReader, { once: true });
+      const decoder = new TextDecoder();
+      let buffer = "";
       while (true) {
         throwIfSignalAborted(options.signal);
         const { done, value } = await reader.read();
@@ -105,7 +196,11 @@ export class OpenAICompatibleClient {
         const lines = buffer.split(/\r?\n/);
         buffer = lines.pop() || "";
         for (const line of lines) {
-          for (const chunk of extractStreamLineChunks(line)) {
+          const parsed = parseStreamLinePayload(line);
+          if (parsed?.usage) {
+            await this.recordDispatchUsage(response, parsed.usage);
+          }
+          for (const chunk of parsed?.chunks || []) {
             yield chunk;
           }
         }
@@ -113,17 +208,25 @@ export class OpenAICompatibleClient {
           break;
         }
       }
-      for (const chunk of extractStreamLineChunks(buffer)) {
+      const finalPayload = parseStreamLinePayload(buffer);
+      if (finalPayload?.usage) {
+        await this.recordDispatchUsage(response, finalPayload.usage);
+      }
+      for (const chunk of finalPayload?.chunks || []) {
         throwIfSignalAborted(options.signal);
         yield chunk;
       }
     } catch (error) {
+      dispatchError = error;
       if (isAbortLike(error, options.signal)) {
         throw createAbortError();
       }
       throw error;
     } finally {
-      options.signal?.removeEventListener("abort", cancelReader);
+      if (cancelReader) {
+        options.signal?.removeEventListener("abort", cancelReader);
+      }
+      await this.finishDispatch(response, dispatchError);
     }
   }
 
@@ -132,9 +235,12 @@ export class OpenAICompatibleClient {
     body: {
       model: string;
       messages: ChatCompletionMessage[];
-      temperature: number;
-      top_p: number;
+      temperature?: number;
+      top_p?: number;
+      reasoning_effort?: ReasoningEffort;
+      thinking?: { type: "enabled" };
       stream?: boolean;
+      stream_options?: { include_usage: boolean };
     },
     options: ModelRequestOptions = {}
   ): Promise<Response> {
@@ -142,6 +248,15 @@ export class OpenAICompatibleClient {
       throw new Error("未配置可用的大模型 API");
     }
     throwIfSignalAborted(options.signal);
+    const maxOutputTokens = normalizeMaxOutputTokens(options.maxOutputTokens);
+    const dispatchInput: ModelDispatchInput = {
+      config: { base_url: config.base_url, model: config.model },
+      messages: body.messages,
+      stream: body.stream === true,
+      ...(maxOutputTokens ? { maxOutputTokens } : {})
+    };
+    const lifecycle = options.dispatchLifecycle;
+    const dispatchContext = lifecycle?.beforeDispatch ? await lifecycle.beforeDispatch(dispatchInput) : undefined;
     const baseUrl = normalizeBaseUrl(config.base_url);
     const controller = new AbortController();
     let timedOut = false;
@@ -152,18 +267,29 @@ export class OpenAICompatibleClient {
     const abortFromCaller = () => controller.abort();
     options.signal?.addEventListener("abort", abortFromCaller, { once: true });
     try {
-      return await this.fetchFn(new URL("chat/completions", baseUrl), {
+      if (lifecycle?.onDispatchStarted) {
+        await lifecycle.onDispatchStarted({ ...dispatchInput, context: dispatchContext });
+      }
+      const response = await this.fetchFn(new URL("chat/completions", baseUrl), {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${config.api_key}`
         },
         body: JSON.stringify({
-          ...body
+          ...body,
+          ...(maxOutputTokens ? { max_tokens: maxOutputTokens } : {})
         }),
         signal: controller.signal
       });
+      if (lifecycle) {
+        this.dispatchRecords.set(response, { input: dispatchInput, context: dispatchContext, lifecycle });
+      }
+      return response;
     } catch (error) {
+      if (lifecycle?.onDispatchFinished) {
+        await lifecycle.onDispatchFinished({ ...dispatchInput, context: dispatchContext, error });
+      }
       if (timedOut) {
         throw new Error("接口请求超时，请检查网络或降低单次生成长度。");
       }
@@ -176,6 +302,68 @@ export class OpenAICompatibleClient {
       options.signal?.removeEventListener("abort", abortFromCaller);
     }
   }
+
+  private async recordDispatchUsage(response: Response, usage: ModelUsage): Promise<void> {
+    const record = this.dispatchRecords.get(response);
+    if (!record) {
+      return;
+    }
+    record.usage = usage;
+    if (record.lifecycle.onUsage) {
+      await record.lifecycle.onUsage({ ...record.input, context: record.context, usage });
+    }
+  }
+
+  private async finishDispatch(response: Response, error?: unknown): Promise<void> {
+    const record = this.dispatchRecords.get(response);
+    if (!record) {
+      return;
+    }
+    this.dispatchRecords.delete(response);
+    if (record.lifecycle.onDispatchFinished) {
+      await record.lifecycle.onDispatchFinished({
+        ...record.input,
+        context: record.context,
+        ...(record.usage ? { usage: record.usage } : {}),
+        ...(error === undefined ? {} : { error })
+      });
+    }
+  }
+}
+
+function buildRequestBody(
+  config: ModelConfig,
+  messages: ChatCompletionMessage[],
+  temperature: number | undefined,
+  options: ModelRequestOptions
+): {
+  model: string;
+  messages: ChatCompletionMessage[];
+  temperature?: number;
+  top_p?: number;
+  reasoning_effort?: ReasoningEffort;
+  thinking?: { type: "enabled" };
+} {
+  const capability = resolveModelRequestCapability(config.model, config.base_url);
+  const requestedEffort = options.reasoningEffort;
+  const effectiveEffort = requestedEffort && capability.supportsReasoning
+    ? capability.reasoningEfforts.includes(requestedEffort)
+      ? requestedEffort
+      : capability.reasoningEfforts.length === 1
+        ? capability.reasoningEfforts[0]
+        : undefined
+    : undefined;
+  const omitSampling = Boolean(effectiveEffort && capability.omitSamplingParameters);
+  return {
+    model: config.model,
+    messages,
+    ...(!omitSampling ? {
+      temperature: temperature ?? config.temperature,
+      top_p: config.top_p
+    } : {}),
+    ...(effectiveEffort ? { reasoning_effort: effectiveEffort } : {}),
+    ...(effectiveEffort && capability.enableDeepSeekThinking ? { thinking: { type: "enabled" as const } } : {})
+  };
 }
 
 function createAbortError(): Error {
@@ -206,15 +394,30 @@ function normalizeBaseUrl(baseUrl: string): string {
 }
 
 function extractMessageText(payload: unknown): string {
+  return extractMessageParts(payload).answer;
+}
+
+function extractMessageParts(payload: unknown): ModelCompletionResult {
   const choices = asArray((payload as { choices?: unknown })?.choices);
-  const content = choices
+  const answer = choices
     .flatMap((choice) => {
       const record = asRecord(choice);
       const message = asRecord(record?.message);
       return [...normalizeContent(message?.content), ...normalizeContent(record?.text)];
     })
     .join("");
-  return content || extractTopLevelText(payload);
+  const reasoning = choices
+    .flatMap((choice) => {
+      const record = asRecord(choice);
+      const message = asRecord(record?.message);
+      return [
+        ...normalizeContent(message?.reasoning_content),
+        ...normalizeContent(message?.reasoning),
+        ...normalizeThinkingContent(message?.content)
+      ];
+    })
+    .join("");
+  return { answer: answer || extractTopLevelText(payload), reasoning };
 }
 
 function extractDeltaText(payload: unknown): string {
@@ -235,18 +438,80 @@ function extractDeltaText(payload: unknown): string {
   return content || extractTopLevelText(payload);
 }
 
-function extractStreamLineChunks(line: string): string[] {
+function extractDetailedDelta(payload: unknown): ModelStreamChunk[] {
+  const choices = asArray((payload as { choices?: unknown })?.choices);
+  const chunks: ModelStreamChunk[] = [];
+  for (const choice of choices) {
+    const record = asRecord(choice);
+    const delta = asRecord(record?.delta);
+    const message = asRecord(record?.message);
+    const reasoning = [
+      ...normalizeContent(delta?.reasoning_content),
+      ...normalizeContent(delta?.reasoning),
+      ...normalizeContent(message?.reasoning_content),
+      ...normalizeContent(message?.reasoning),
+      ...normalizeThinkingContent(delta?.content),
+      ...normalizeThinkingContent(message?.content)
+    ].join("");
+    const answer = [
+      ...normalizeContent(delta?.content),
+      ...normalizeContent(delta?.text),
+      ...normalizeContent(message?.content),
+      ...normalizeContent(record?.text)
+    ].join("");
+    if (reasoning) chunks.push({ channel: "reasoning", text: reasoning });
+    if (answer) chunks.push({ channel: "answer", text: answer });
+  }
+  if (!chunks.length) {
+    const answer = extractTopLevelText(payload);
+    if (answer) chunks.push({ channel: "answer", text: answer });
+  }
+  return chunks;
+}
+
+function parseStreamLinePayload(line: string): { chunks: ModelStreamChunk[]; usage?: ModelUsage } | null {
   const payloadText = normalizeStreamPayloadLine(line);
   if (!payloadText) {
-    return [];
+    return null;
   }
   try {
     const parsed = JSON.parse(payloadText);
-    const chunk = extractDeltaText(parsed);
-    return chunk ? [chunk] : [];
+    const chunks = extractDetailedDelta(parsed);
+    const usage = extractProviderUsage(parsed);
+    return {
+      chunks,
+      ...(usage ? { usage } : {})
+    };
   } catch {
-    return [];
+    return null;
   }
+}
+
+function extractProviderUsage(payload: unknown): ModelUsage | null {
+  const usage = asRecord(asRecord(payload)?.usage);
+  if (!usage) {
+    return null;
+  }
+  const promptTokens = integerUsageValue(usage.prompt_tokens ?? usage.input_tokens);
+  const completionTokens = integerUsageValue(usage.completion_tokens ?? usage.output_tokens);
+  const totalTokens = integerUsageValue(usage.total_tokens)
+    ?? (promptTokens !== null && completionTokens !== null ? promptTokens + completionTokens : null);
+  if (promptTokens === null || completionTokens === null || totalTokens === null) {
+    return null;
+  }
+  return { promptTokens, completionTokens, totalTokens };
+}
+
+function integerUsageValue(value: unknown): number | null {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+function normalizeMaxOutputTokens(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return undefined;
+  }
+  const parsed = Math.floor(value);
+  return parsed > 0 ? parsed : undefined;
 }
 
 function normalizeStreamPayloadLine(line: string): string {
@@ -285,6 +550,16 @@ function normalizeContent(value: unknown): string[] {
     });
   }
   return [];
+}
+
+function normalizeThinkingContent(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const record = asRecord(item);
+    const type = String(record?.type || "").toLowerCase();
+    if (!record || !["thinking", "reasoning", "reasoning_content"].includes(type)) return [];
+    return [...normalizeContent(record.text), ...normalizeContent(record.content), ...normalizeContent(record.thinking)];
+  });
 }
 
 function extractTopLevelText(payload: unknown): string {

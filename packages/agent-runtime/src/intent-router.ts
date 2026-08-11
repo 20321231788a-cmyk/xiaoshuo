@@ -1,7 +1,7 @@
 import type { AgentIntent, SkillDefinition } from "@xiaoshuo/shared";
 
 const GENERATION_VERBS =
-  "生成|帮我写|写|创作|起草|创建|建立|扩展|扩写|扩成|展开|细化|转成|拆成|拆为|拆分|规划|整理|完善|补全|制定|输出|生成一下|写一下|做一下|弄一下|来一段|来一版|续写|接着写|继续写";
+  "生成|帮我写|写|创作|起草|创建|建立|更新|扩展|扩写|扩成|展开|细化|转成|拆成|拆为|拆分|规划|整理|完善|补全|制定|输出|生成一下|写一下|做一下|弄一下|整一下|整|搞|来一段|来一版|续写|接着写|继续写";
 const BODY_GENERATION_VERBS = "生成|帮我写|写|创作|起草|输出|生成一下|写一下|来一段|来一版|续写|接着写|继续写";
 const CHAPTER_OUTLINE_TERMS = "章纲|章节大纲|章节纲要|分章大纲|分章纲要|章节规划|单章大纲";
 const DETAIL_OUTLINE_TERMS = "细纲|详纲|详细大纲";
@@ -78,6 +78,7 @@ type RouteSignals = {
 };
 
 const BUILTIN_SKILL_ROUTES: SkillRoute[] = [
+  { skillId: "style_genre_generate", pattern: /(风格(?:库)?(?:与|和|及|、)?题材(?:库)?|题材(?:库)?(?:与|和|及|、)?风格(?:库)?)/ },
   { skillId: "continue_disassemble", pattern: /拆细纲|继续拆|扩展拆书|拆书细纲/ },
   { skillId: "story_deslop", pattern: /story[-_ ]?deslop|去\s*AI\s*味|去味|太\s*AI|AI味/i },
   { skillId: "polish_text", pattern: /润色|润一下|润一润|精修|改写|修文|优化表达|顺一下|打磨|去油/ },
@@ -107,14 +108,14 @@ const BUILTIN_SKILL_ROUTES: SkillRoute[] = [
   },
   {
     skillId: "genre_generate",
-    pattern: /(生成|创建|建立|配置|设置|设定|补全|完善|写).{0,24}(题材库|题材规则|题材素材|战斗模板|违禁词)|题材库.{0,24}(生成|创建|建立|配置|设置|设定|补全|完善|配置好)/
+    pattern: /(生成|创建|建立|更新|配置|设置|设定|补全|完善|写).{0,24}(题材库|题材规则|题材素材|战斗模板|违禁词)|题材库.{0,24}(生成|创建|建立|更新|配置|设置|设定|补全|完善|配置好)/
   },
   {
     skillId: "outline_generate",
     pattern: new RegExp(`(${GENERATION_VERBS}).{0,32}(${OUTLINE_TERMS})|灵感.{0,12}(大纲|扩展|扩写|扩成)|脑洞.{0,12}(大纲|扩展|扩写|扩成)`)
   },
-  { skillId: "lore_extract", pattern: /(提取|抽取|同步|自动提取|整理|归纳).{0,24}(设定|人设|人物|世界观|体系|地图|道具)|整理人设|提取人设/ },
-  { skillId: "style_extract", pattern: /(提取|抽取|分析|总结|整理).{0,24}(风格|文风|写法|样文风格)|风格提取|文风分析/ },
+  { skillId: "lore_extract", pattern: /(提取|抽取|同步|自动提取|整理|归纳|更新|补全|完善).{0,24}(设定|人设|人物|世界观|体系|地图|道具)|整理人设|提取人设/ },
+  { skillId: "style_extract", pattern: /(提取|抽取|分析|总结|整理|更新|补全|完善|生成|创建|建立|配置|设置|设定|写).{0,24}(风格|风格库|文风|写法|样文风格)|风格(?:库)?(?:生成|创建|建立|配置|设置|完善)|风格提取|文风分析/ },
   { skillId: "consistency_check", pattern: /一致性|冲突|检查冲突|审稿|设定矛盾|前后矛盾|连续性检查/ },
   { skillId: "scan_pits", pattern: /伏笔|坑点|线索|填坑|埋坑/ }
 ];
@@ -135,6 +136,7 @@ const BUILTIN_ROUTE_SKILLS: SkillDefinition[] = [
   makeBuiltinSkill("lore_extract", "设定提取", "从正文或资料中提取人物、地名、组织、能力和世界规则。", "prompt", ["00_设定集/设定集"]),
   makeBuiltinSkill("style_extract", "风格提取", "从样文中提取可复用的写作风格规则、风格示例特征和参考素材摘要。", "prompt", ["00_设定集/风格库"]),
   makeBuiltinSkill("genre_generate", "题材生成", "生成题材规则、题材素材、战斗或冲突模板和违禁词。", "prompt", ["00_设定集/题材库"]),
+  makeBuiltinSkill("style_genre_generate", "创建风格与题材库", "同时生成写作风格库和题材库；明确保存时同步写入。", "workflow", ["00_设定集/风格库", "00_设定集/题材库"]),
   makeBuiltinSkill("nuwa_style_distill", "女娲风格蒸馏", "蒸馏文风档案并复用写作风格。", "workflow", ["00_设定集/.agent/style_distillation/current.json"]),
   makeBuiltinSkill("book_fusion", "融梗", "从多本已拆书籍中融合核心设定和剧情骨架。", "workflow", ["00_设定集/融梗方案"]),
   makeBuiltinSkill("disassemble_book", "拆书", "拆解原文、样文或小说。", "workflow", ["00_设定集/拆书库"]),
@@ -331,6 +333,13 @@ export function classifyAgentIntent(text: string, manualSkillId = "", skills: Sk
   const ranked = rankSkillRoutes(normalizedText, skills, { limit: 1 });
   const top = ranked[0];
 
+  // “创建大纲文件并保存” is a contextual file action, not a request to
+  // invent another outline.  The file-operation runner retrieves the latest
+  // substantive assistant result (or the selection) and saves that exact text.
+  if (shouldPreferContextualSave(normalizedText)) {
+    return "file_operation";
+  }
+
   if (top && shouldAutoCallSkill(top, routeSignals, normalizedText)) {
     return "skill";
   }
@@ -355,6 +364,20 @@ export function classifyAgentIntent(text: string, manualSkillId = "", skills: Sk
     return /\b(read|context)\b/.test(lowered) ? "read_context" : "chat";
   }
   return "chat";
+}
+
+function shouldPreferContextualSave(text: string): boolean {
+  const normalized = String(text || "");
+  if (/(重新生成|再生成|从头生成|全新生成|另起一份|新写一份)/.test(normalized)) {
+    return false;
+  }
+  if (!/(保存|存到|写入|写进|写到|同步到|落到|写回|创建文件|新建文件|建立文件)/.test(normalized)) {
+    return false;
+  }
+  if (!/(大纲|细纲|章纲|正文)/.test(normalized)) {
+    return false;
+  }
+  return /(文件|上文|上面|刚才|这份|当前(?:内容|结果)?|已有(?:内容|大纲)?|保存)/.test(normalized) && !/(?:生成|写作|创作).{0,12}(?:并|后)?(?:保存|写入)/.test(normalized);
 }
 
 function scoreSkillRoute(text: string, skill: SkillDefinition, routeSignals: RouteSignals, currentSkillId: string): RankedSkillRoute | null {
@@ -577,7 +600,7 @@ function detectRouteSignals(text: string): RouteSignals {
   const detailOutline = new RegExp(DETAIL_OUTLINE_TERMS).test(normalized);
   const outlineMention = new RegExp(OUTLINE_TERMS).test(normalized) || chapterOutline || detailOutline;
   const outlinePlanning =
-    (outlineMention && /(生成|写|扩展|扩写|扩成|展开|细化|规划|拆分|制定|整理|完善|补全|转成)/.test(normalized)) ||
+    (outlineMention && /(生成|写|更新|扩展|扩写|扩成|展开|细化|规划|拆分|制定|整理|完善|补全|转成|整|弄|搞)/.test(normalized)) ||
     /(灵感|脑洞).{0,16}(大纲|梗概|总纲|扩成|扩展|扩写)/.test(normalized);
   const bodyWriting =
     /(来一段正文|一段正文|写成文|写一章)/.test(normalized) ||
@@ -591,10 +614,11 @@ function detectRouteSignals(text: string): RouteSignals {
       normalized
     ) && !outlinePlanning;
   const polish = /(润色|润一下|润一润|精修|修文|优化表达|打磨|去\s*AI\s*味|去AI味|去味|太AI|改写)/i.test(normalized);
-  const styleExtract = /(提取|抽取|分析|总结|整理).{0,24}(风格|文风|写法|样文风格)|风格提取|文风分析/.test(normalized);
-  const loreExtract = /(提取|抽取|同步|自动提取|整理|归纳).{0,24}(设定|人设|人物|世界观|体系|地图|道具)|整理人设|提取人设/.test(normalized);
+  const styleExtract = /(提取|抽取|分析|总结|整理|更新|补全|完善|生成|创建|建立|配置|设置|设定|写).{0,24}(风格|风格库|文风|写法|样文风格)|风格(?:库)?(?:生成|创建|建立|配置|设置|完善)|风格提取|文风分析/.test(normalized);
+  const genreGenerate = /(生成|创建|建立|更新|配置|设置|设定|补全|完善|写).{0,24}(题材库|题材规则|题材素材|战斗模板|违禁词)|题材库.{0,24}(生成|创建|建立|更新|配置|设置|设定|补全|完善|配置好)/.test(normalized);
+  const loreExtract = /(提取|抽取|同步|自动提取|整理|归纳|更新|补全|完善).{0,24}(设定|人设|人物|世界观|体系|地图|道具)|整理人设|提取人设/.test(normalized);
   const pitScan = /(扫描|提取|抽取|整理|梳理|追踪).{0,24}(伏笔|坑点|线索)|伏笔|坑点|线索|填坑|埋坑/.test(normalized);
-  const extract = styleExtract || loreExtract || pitScan || /提取|抽取|extract/i.test(normalized);
+  const extract = styleExtract || genreGenerate || loreExtract || pitScan || /提取|抽取|extract/i.test(normalized);
   const consistency = /一致性|冲突|检查冲突|审稿|设定矛盾|前后矛盾|连续性检查|矛盾检查/.test(normalized);
   const readContext = isReadContextIntent(normalized);
   const continuation = /续写|接着写|继续写|往下写|续上|补后续|接上文|沿着上文|继续来一段|再来一段|继续拆|继续拆书|扩展拆书/.test(normalized);

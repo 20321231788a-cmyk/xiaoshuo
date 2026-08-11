@@ -35,6 +35,15 @@ const bodySkill = skill({
   builtin: true
 });
 
+const styleGenreSkill = skill({
+  id: "style_genre_generate",
+  name: "创建风格与题材库",
+  description: "同时生成写作风格库和题材库；明确保存时同步写入。",
+  handler_type: "workflow",
+  linked_targets: ["00_设定集/风格库", "00_设定集/题材库"],
+  builtin: true
+});
+
 describe("intent-router semantic ranking", () => {
   it("classifies natural-language skill management requests before normal skill routing", () => {
     expect(classifySkillManagementIntent("把当前选区做成一个“短篇审稿”技能")?.action).toBe("draft");
@@ -66,6 +75,24 @@ describe("intent-router semantic ranking", () => {
     expect(ranked[0]?.skillId).toBe("outline_generate");
     expect(resolveSkillRoute("帮我把这个灵感扩成大纲", "", [outlineSkill, bodySkill])).toBe("outline_generate");
     expect(classifyAgentIntent("帮我把这个灵感扩成大纲", "", [outlineSkill, bodySkill])).toBe("skill");
+  });
+
+  it("routes contextual outline-file saves before outline generation", () => {
+    expect(classifyAgentIntent("先帮我创建大纲文件并保存", "", [outlineSkill, bodySkill])).toBe("file_operation");
+    expect(classifyAgentIntent("保存刚才这份章纲到文件", "", [outlineSkill, bodySkill])).toBe("file_operation");
+    expect(classifyAgentIntent("重新生成并保存一份大纲", "", [outlineSkill, bodySkill])).toBe("skill");
+  });
+
+  it("treats colloquial outline replacement as generation plus preview, not contextual save", () => {
+    const text = "先整大纲，给我前十张大纲，完全替换当前大纲";
+    expect(resolveSkillRoute(text, "", [outlineSkill, bodySkill])).toBe("outline_generate");
+    expect(classifyAgentIntent(text, "", [outlineSkill, bodySkill])).toBe("skill");
+  });
+
+  it("routes combined style and genre creation to the atomic workflow", () => {
+    const text = "创建都市高武的风格与题材库并保存";
+    expect(resolveSkillRoute(text, "", [outlineSkill, bodySkill, styleGenreSkill])).toBe("style_genre_generate");
+    expect(classifyAgentIntent(text, "", [outlineSkill, bodySkill, styleGenreSkill])).toBe("skill");
   });
 
   it("does not fall back to outline_generate for dialogue, body, or style-writing requests", () => {

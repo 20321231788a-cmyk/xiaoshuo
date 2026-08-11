@@ -43,6 +43,33 @@ describe("model-client", () => {
     expect(chunks).toEqual(["你", "好"]);
   });
 
+  it("keeps reasoning and answer stream channels separate", async () => {
+    const client = new OpenAICompatibleClient({
+      fetchFn: vi.fn(async () =>
+        new Response(
+          [
+            'data: {"choices":[{"delta":{"reasoning_content":"先分析"}}]}',
+            'data: {"choices":[{"delta":{"reasoning":"再核对"}}]}',
+            'data: {"choices":[{"delta":{"content":"最终答案"}}]}',
+            "data: [DONE]"
+          ].join("\n"),
+          { status: 200 }
+        )
+      ) as typeof fetch
+    });
+
+    const chunks = [];
+    for await (const chunk of client.streamDetailedCompletion(configuredModel, [{ role: "user", content: "hi" }])) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual([
+      { channel: "reasoning", text: "先分析" },
+      { channel: "reasoning", text: "再核对" },
+      { channel: "answer", text: "最终答案" }
+    ]);
+  });
+
   it("streams naked ndjson delta events", async () => {
     const client = new OpenAICompatibleClient({
       fetchFn: vi.fn(async () =>
@@ -122,6 +149,84 @@ describe("model-client", () => {
     expect(fallbackBody.top_p).toBe(0.88);
   });
 
+  it("runs the budget lifecycle for every physical dispatch and forwards a trusted output cap", async () => {
+    const fetchFn = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('{"error":{"message":"streaming unsupported"}}', { status: 400 }))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: "fallback result" } }],
+            usage: { prompt_tokens: 5, completion_tokens: 7, total_tokens: 12 }
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )
+      );
+    const before = vi.fn((input) => ({ id: `${input.stream ? "stream" : "plain"}-${input.maxOutputTokens}` }));
+    const started = vi.fn();
+    const usage = vi.fn();
+    const finished = vi.fn();
+    const client = new OpenAICompatibleClient({ fetchFn: fetchFn as typeof fetch });
+
+    await expect(client.requestCompletion(configuredModel, [{ role: "user", content: "hi" }], undefined, {
+      maxOutputTokens: 23,
+      captureUsage: true,
+      dispatchLifecycle: {
+        beforeDispatch: before,
+        onDispatchStarted: started,
+        onUsage: usage,
+        onDispatchFinished: finished
+      }
+    })).resolves.toBe("fallback result");
+
+    expect(before).toHaveBeenCalledTimes(2);
+    expect(started).toHaveBeenCalledTimes(2);
+    expect(finished).toHaveBeenCalledTimes(2);
+    expect(usage).toHaveBeenCalledWith(expect.objectContaining({
+      stream: false,
+      usage: { promptTokens: 5, completionTokens: 7, totalTokens: 12 }
+    }));
+    for (const call of fetchFn.mock.calls) {
+      expect(JSON.parse(String(call[1]?.body || "{}"))).toMatchObject({ max_tokens: 23 });
+    }
+    expect(JSON.parse(String(fetchFn.mock.calls[0]?.[1]?.body || "{}"))).toMatchObject({
+      stream: true,
+      stream_options: { include_usage: true }
+    });
+  });
+
+  it("forwards terminal stream usage to the physical dispatch lifecycle", async () => {
+    const receivedUsage: unknown[] = [];
+    const client = new OpenAICompatibleClient({
+      fetchFn: vi.fn(async () =>
+        new Response(
+          [
+            'data: {"choices":[{"delta":{"content":"预算"}}]}',
+            'data: {"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}',
+            "data: [DONE]"
+          ].join("\n"),
+          { status: 200 }
+        )
+      ) as typeof fetch
+    });
+
+    const chunks: string[] = [];
+    for await (const chunk of client.streamCompletion(configuredModel, [{ role: "user", content: "hi" }], undefined, {
+      captureUsage: true,
+      dispatchLifecycle: {
+        beforeDispatch: () => "reservation-1",
+        onUsage: (event) => {
+          receivedUsage.push(event.usage);
+        }
+      }
+    })) {
+      chunks.push(chunk);
+    }
+
+    expect(chunks).toEqual(["预算"]);
+    expect(receivedUsage).toEqual([{ promptTokens: 3, completionTokens: 2, totalTokens: 5 }]);
+  });
+
   it("passes an abort signal to fetch and preserves caller cancellation", async () => {
     let requestInit: RequestInit | undefined;
     const fetchFn = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -196,5 +301,58 @@ describe("model-client", () => {
     expect(formatApiError(504, "Gateway Time-out")).toContain("模型网关超时");
     expect(formatApiError(503, "Service Unavailable")).toContain("模型网关暂时不可用");
     expect(canRetryWithoutStream("streaming unsupported")).toBe(true);
+  });
+
+  it("sends OpenAI low, medium and high reasoning effort without sampling parameters", async () => {
+    for (const reasoningEffort of ["low", "medium", "high"] as const) {
+      let requestBody = "";
+      const fetchFn = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        requestBody = String(init?.body || "{}");
+        return new Response('data: {"choices":[{"delta":{"content":"ok"}}]}', { status: 200 });
+      });
+      const client = new OpenAICompatibleClient({ fetchFn: fetchFn as typeof fetch });
+      const config = { ...configuredModel, base_url: "https://api.openai.com/v1", model: "gpt-5-mini" };
+      const chunks: string[] = [];
+      for await (const chunk of client.streamCompletion(config, [{ role: "user", content: "hi" }], undefined, { reasoningEffort })) {
+        chunks.push(chunk);
+      }
+      const body = JSON.parse(requestBody) as Record<string, unknown>;
+      expect(body).toMatchObject({ reasoning_effort: reasoningEffort });
+      expect(body).not.toHaveProperty("temperature");
+      expect(body).not.toHaveProperty("top_p");
+    }
+  });
+
+  it("uses real DeepSeek thinking parameters and normalizes unsupported lower levels to high", async () => {
+    let requestBody = "";
+    const fetchFn = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestBody = String(init?.body || "{}");
+      return new Response('data: {"choices":[{"delta":{"content":"ok"}}]}', { status: 200 });
+    });
+    const client = new OpenAICompatibleClient({ fetchFn: fetchFn as typeof fetch });
+    const config = { ...configuredModel, base_url: "https://api.deepseek.com/v1", model: "deepseek-chat" };
+    for await (const _chunk of client.streamCompletion(config, [{ role: "user", content: "hi" }], undefined, { reasoningEffort: "medium" })) {
+      // consume stream
+    }
+    const body = JSON.parse(requestBody) as Record<string, unknown>;
+    expect(body).toMatchObject({ reasoning_effort: "high", thinking: { type: "enabled" } });
+    expect(body).not.toHaveProperty("temperature");
+    expect(body).not.toHaveProperty("top_p");
+  });
+
+  it("omits reasoning parameters for unsupported models", async () => {
+    let requestBody = "";
+    const fetchFn = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      requestBody = String(init?.body || "{}");
+      return new Response('data: {"choices":[{"delta":{"content":"ok"}}]}', { status: 200 });
+    });
+    const client = new OpenAICompatibleClient({ fetchFn: fetchFn as typeof fetch });
+    for await (const _chunk of client.streamCompletion(configuredModel, [{ role: "user", content: "hi" }], undefined, { reasoningEffort: "high" })) {
+      // consume stream
+    }
+    const body = JSON.parse(requestBody) as Record<string, unknown>;
+    expect(body).not.toHaveProperty("reasoning_effort");
+    expect(body).not.toHaveProperty("thinking");
+    expect(body).toMatchObject({ temperature: 0.2, top_p: 0.88 });
   });
 });

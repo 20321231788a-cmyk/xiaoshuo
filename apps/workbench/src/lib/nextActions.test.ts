@@ -172,10 +172,7 @@ function makeSnapshot(options: {
       base_url: options.config?.base_url ?? "",
       model: options.config?.model ?? "",
       temp: 0.7,
-      secondary_api_key: "",
-      secondary_base_url: "",
-      secondary_model: "",
-      secondary_temp: 0.5,
+      task_model: "",
       model_thinking_enabled: false,
       enable_consistency_revision: true,
       consistency_revision_score: 80,
@@ -221,7 +218,7 @@ function makeSnapshot(options: {
     },
     skills: [],
     conversations: options.hasConversation
-      ? [{ id: "conv", title: "会话", created_at: "", updated_at: "", current_skill: "", current_agent: "", message_count: 1, attachment_count: 0 }]
+      ? [{ id: "conv", title: "会话", created_at: "", updated_at: "", current_skill: "", current_agent: "", message_count: 1, attachment_count: 0, model_override: "", reasoning_enabled: false, reasoning_effort: "medium", conversation_type: "assistant" as const, task_metadata: { entry: "", source_path: "", source_book_id: "", target_paths: [], created_for: "" } }]
       : [],
     jobs: Array.from({ length: failedJobCount }, (_, index) => ({
       id: `job-${index}`,

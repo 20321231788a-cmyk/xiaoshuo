@@ -3,7 +3,14 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { exportProjectArchive, importProjectArchive, importProjectArchiveToExisting } from "./project-archive.js";
+import {
+  exportCloudCoreArchiveToTemp,
+  exportProjectArchive,
+  importCloudCoreArchiveToExisting,
+  importProjectArchive,
+  importProjectArchiveToExisting,
+  inspectCloudCoreProject
+} from "./project-archive.js";
 
 const tempDirs: string[] = [];
 
@@ -46,6 +53,35 @@ describe("project archive", () => {
     expect(entryNames).not.toContain("node_modules/pkg/index.js");
     expect(entryNames).not.toContain("debug.log");
     expect(entryNames).not.toContain("scratch.tmp");
+  });
+
+  it("exports only cloud core files and reports their logical size", async () => {
+    const tempDir = await makeTempDir();
+    const projectPath = path.join(tempDir, "Core Novel");
+    await writeText(path.join(projectPath, "01_大纲", "细纲.txt"), "细纲");
+    await writeText(path.join(projectPath, "02_正文", "第一章.md"), "正文");
+    await writeText(path.join(projectPath, "00_设定集", "风格库", "写作风格.txt"), "冷峻");
+    await writeText(path.join(projectPath, "00_设定集", ".agent", "story-planning.jsonl"), "{}\n");
+    await writeText(path.join(projectPath, "00_设定集", ".agent", "conversations", "secret.json"), "不应上传");
+    await writeText(path.join(projectPath, "封面", "cover.png"), "not-an-image");
+
+    const inspection = await inspectCloudCoreProject(projectPath);
+    expect(inspection.file_count).toBe(4);
+    expect(inspection.files.map((entry) => entry.path)).not.toContain("00_设定集/.agent/conversations/secret.json");
+
+    const exported = await exportCloudCoreArchiveToTemp({ projectPath, tempDir, projectId: "project-one", projectName: "Core Novel" });
+    const entries = new AdmZip(exported.archivePath).getEntries().map((entry) => entry.entryName);
+    expect(entries).toContain("01_大纲/细纲.txt");
+    expect(entries).toContain(".arcwriter-cloud-manifest.json");
+    expect(entries).not.toContain("封面/cover.png");
+    expect(entries).not.toContain("00_设定集/.agent/conversations/secret.json");
+  });
+
+  it("rejects cloud core data above the configured logical limit", async () => {
+    const tempDir = await makeTempDir();
+    const projectPath = path.join(tempDir, "Large Novel");
+    await writeText(path.join(projectPath, "02_正文", "正文.txt"), "超过限制的正文");
+    await expect(inspectCloudCoreProject(projectPath, 4)).rejects.toThrow("核心数据超过 30MB");
   });
 
   it("imports a project archive into a non-conflicting folder", async () => {
@@ -109,5 +145,25 @@ describe("project archive", () => {
 
     await expect(importProjectArchiveToExisting({ archivePath, targetProjectPath: targetProject })).rejects.toThrow("不安全路径");
     await expect(fs.readFile(path.join(targetProject, "02_正文", "本地.txt"), "utf8")).resolves.toBe("保留正文");
+  });
+
+  it("restores only core files and preserves unrelated local data", async () => {
+    const tempDir = await makeTempDir();
+    const sourceProject = path.join(tempDir, "Cloud Core");
+    const targetProject = path.join(tempDir, "Local Project");
+    await writeText(path.join(sourceProject, "02_正文", "新章.txt"), "云端正文");
+    await writeText(path.join(sourceProject, "00_设定集", "题材库", "题材规则.txt"), "悬疑");
+    await writeText(path.join(targetProject, "02_正文", "旧章.txt"), "本地旧正文");
+    await writeText(path.join(targetProject, "封面", "cover.png"), "local-cover");
+    await writeText(path.join(targetProject, "00_设定集", ".agent", "conversations", "local.json"), "local-chat");
+    const exported = await exportCloudCoreArchiveToTemp({ projectPath: sourceProject, tempDir });
+
+    const restored = await importCloudCoreArchiveToExisting({ archivePath: exported.archivePath, targetProjectPath: targetProject });
+
+    expect(restored.restored_files).toBe(2);
+    await expect(fs.readFile(path.join(targetProject, "02_正文", "新章.txt"), "utf8")).resolves.toBe("云端正文");
+    await expect(fs.stat(path.join(targetProject, "02_正文", "旧章.txt"))).rejects.toThrow();
+    await expect(fs.readFile(path.join(targetProject, "封面", "cover.png"), "utf8")).resolves.toBe("local-cover");
+    await expect(fs.readFile(path.join(targetProject, "00_设定集", ".agent", "conversations", "local.json"), "utf8")).resolves.toBe("local-chat");
   });
 });

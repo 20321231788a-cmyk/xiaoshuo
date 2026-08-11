@@ -1,15 +1,21 @@
 import { ConversationService } from "@xiaoshuo/conversation-service";
-import { loadModelConfig, readRawConfig } from "@xiaoshuo/config-service";
+import { loadTaskModelConfig } from "@xiaoshuo/config-service";
 import { OpenAICompatibleClient } from "@xiaoshuo/model-client";
-import { conversationMessageRequestSchema, type CurrentProject } from "@xiaoshuo/shared";
+import {
+  conversationMessageRequestSchema,
+  conversationCreateRequestSchema,
+  conversationModelPreferencesSchema,
+  type CurrentProject
+} from "@xiaoshuo/shared";
 import { AgentRuntimeService, encodeNdjsonEvent } from "@xiaoshuo/agent-runtime";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { createRequestAbortSignal } from "./http-utils.js";
 import { writeAiLicenseRequiredIfNeeded } from "./license-guard.js";
 import type { RuntimeContext } from "./types.js";
+import { getProjectAgentRuntime } from "./agent-runtime-registry.js";
 
 type JsonRecord = Record<string, unknown>;
-type RuntimeAbortOptions = { signal: AbortSignal };
+type RuntimeAbortOptions = { signal?: AbortSignal };
 type AbortableConversationRuntimeService = Omit<AgentRuntimeService, "sendMessage" | "streamMessage"> & {
   sendMessage: (
     conversationId: Parameters<AgentRuntimeService["sendMessage"]>[0],
@@ -44,6 +50,10 @@ type RuntimeConversationRouteDeps = {
   matchConversationRoute: (pathname: string) => ConversationRouteMatch;
 };
 
+function canWriteNdjsonResponse(response: ServerResponse): boolean {
+  return !response.writableEnded && !response.destroyed;
+}
+
 export async function handleConversationRoutes(
   request: IncomingMessage,
   response: ServerResponse,
@@ -69,7 +79,7 @@ export async function handleConversationRoutes(
     return true;
   }
   if (!conversationRoute.id && request.method === "POST") {
-    deps.writeJson(response, 200, await service.createConversation(await deps.readJsonBody(request)));
+    deps.writeJson(response, 200, await service.createConversation(conversationCreateRequestSchema.parse(await deps.readJsonBody(request))));
     return true;
   }
   if (conversationRoute.id && !conversationRoute.action && request.method === "GET") {
@@ -81,15 +91,25 @@ export async function handleConversationRoutes(
     deps.writeJson(response, 200, await service.renameConversation(conversationRoute.id, deps.stringValue(payload.title)));
     return true;
   }
+  if (conversationRoute.id && !conversationRoute.action && request.method === "DELETE") {
+    try {
+      deps.writeJson(response, 200, await service.deleteConversation(conversationRoute.id));
+    } catch (error) {
+      deps.writeJson(response, 404, { detail: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+  if (conversationRoute.id && conversationRoute.action === "model-preferences" && request.method === "PUT") {
+    const payload = conversationModelPreferencesSchema.parse(await deps.readJsonBody(request));
+    deps.writeJson(response, 200, await service.updateModelPreferences(conversationRoute.id, payload));
+    return true;
+  }
   if (conversationRoute.id && conversationRoute.action === "messages" && request.method === "POST") {
     if (await writeAiLicenseRequiredIfNeeded(context, response, deps.writeJson)) {
       return true;
     }
-    const runtime = new AgentRuntimeService({
-      projectRoot: projectPath,
-      config: { rootDir: context.projectRoot, env: process.env }
-    }) as AbortableConversationRuntimeService;
-    const signal = createRequestAbortSignal(request, response);
+    const runtime = await getProjectAgentRuntime(context, projectPath) as AbortableConversationRuntimeService;
+    const transportSignal = createRequestAbortSignal(request, response);
     const rawBody = await deps.readRawBody(request);
     const payload = conversationMessageRequestSchema.parse(deps.parseJsonRecord(rawBody));
     const acceptHeader = String(request.headers["accept"] || "").toLowerCase();
@@ -99,29 +119,34 @@ export async function handleConversationRoutes(
       deps.addCorsHeaders(response);
       response.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8" });
       try {
-        for await (const event of runtime.streamMessage(conversationRoute.id, payload, { signal })) {
-          deps.writeNdjsonEvent(response, event);
+        // The HTTP stream is a renderer transport, not durable-run ownership.
+        // A reload must not abort a run that the user can pause/cancel/resume
+        // through its durable controls after the renderer reconnects.
+        for await (const event of runtime.streamMessage(conversationRoute.id, payload, {})) {
+          if (!transportSignal.aborted && canWriteNdjsonResponse(response)) {
+            deps.writeNdjsonEvent(response, event);
+          }
         }
       } catch (error) {
-        if (!signal.aborted) {
+        if (!transportSignal.aborted && canWriteNdjsonResponse(response)) {
           deps.writeNdjsonEvent(response, {
             type: "error",
             message: error instanceof Error ? error.message : String(error)
           });
         }
       } finally {
-        if (!response.writableEnded) {
+        if (canWriteNdjsonResponse(response)) {
           response.end();
         }
       }
     } else {
       try {
-        const result = await runtime.sendMessage(conversationRoute.id, payload, { signal });
-        if (!signal.aborted) {
+        const result = await runtime.sendMessage(conversationRoute.id, payload, { signal: transportSignal });
+        if (!transportSignal.aborted) {
           deps.writeJson(response, 200, result);
         }
       } catch (error) {
-        if (!signal.aborted) {
+        if (!transportSignal.aborted) {
           deps.writeJson(response, 400, { detail: error instanceof Error ? error.message : String(error) });
         }
       }
@@ -171,19 +196,12 @@ export async function handleConversationRoutes(
         return true;
       }
       const configOptions = { rootDir: projectPath, env: process.env };
-      const rawConfig = await readRawConfig(configOptions);
-      const hasExplicitSecondary = Boolean(String(rawConfig.secondary_api_key || "").trim() && String(rawConfig.secondary_model || "").trim());
-      let config = hasExplicitSecondary ? await loadModelConfig(configOptions, "secondary") : await loadModelConfig(configOptions, "primary");
+      let config = await loadTaskModelConfig(configOptions);
       if (!config.configured) {
         deps.writeJson(response, 200, await service.summarizeConversation(conversationRoute.id));
         return true;
       }
-      if (!hasExplicitSecondary) {
-        config = {
-          ...config,
-          temperature: Math.min(config.temperature, 0.2)
-        };
-      }
+      config = { ...config, temperature: Math.min(config.temperature, 0.2) };
       try {
         const detail = await service.getConversation(conversationRoute.id);
         const joined = detail.messages.slice(-18).map((msg) => `${msg.role}: ${msg.content}`).join("\n\n");

@@ -1,28 +1,27 @@
-import type { CSSProperties, ReactNode } from "react";
+import type { ReactNode } from "react";
 
 export function AppShell({
-  rightWidth,
-  left,
+  navigation,
+  topbar,
   center,
-  splitter,
-  right,
-  dialog
+  dialog,
+  navigationCollapsed = false
 }: {
-  rightWidth: number;
-  left: ReactNode;
+  navigation: ReactNode;
+  topbar: ReactNode;
   center: ReactNode;
-  splitter: ReactNode;
-  right: ReactNode;
   dialog?: ReactNode;
+  navigationCollapsed?: boolean;
 }) {
   return (
-    <div className="shell xw-shell">
-      <main className="xw-workspace-shell" style={{ "--xw-right-col": `${rightWidth}px` } as CSSProperties}>
-        {left}
-        <section className="xw-center surface">{center}</section>
-        {splitter}
-        {right}
-      </main>
+    <div className={`app-shell${navigationCollapsed ? " nav-collapsed" : ""}`}>
+      {navigation}
+      <section className="app-main">
+        {topbar}
+        <div className="page-slot">
+          {center}
+        </div>
+      </section>
       {dialog}
     </div>
   );

@@ -1,14 +1,20 @@
+import { existsSync } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ModelConfig } from "@xiaoshuo/config-service";
 import { ConversationService } from "@xiaoshuo/conversation-service";
+import { DocumentService } from "@xiaoshuo/document-service";
 import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
-import type { ChatCompletionMessage } from "@xiaoshuo/model-client";
-import type { AgentStreamEvent } from "@xiaoshuo/shared";
+import { ProjectManifestService } from "@xiaoshuo/project-manifest";
+import type { ChatCompletionMessage, ModelRequestOptions } from "@xiaoshuo/model-client";
+import type { AgentStreamEvent, ConversationMessageRequest } from "@xiaoshuo/shared";
 import { getAgentTraceFilePath } from "./agent-trace.js";
-import { AgentRuntimeService } from "./runtime.js";
+import { RunCoordinator } from "./kernel/run-coordinator.js";
+import { InMemoryAgentFeatureFlagRegistry } from "./kernel/feature-flag-registry.js";
+import { AgentRuntimeService, closeAllAgentRuntimeServices } from "./runtime.js";
+import { AgentChatRunner } from "./chat-runner.js";
 
 let tempDir = "";
 let configPath = "";
@@ -28,7 +34,202 @@ beforeEach(async () => {
   await fs.writeFile(path.join(tempDir, "00_设定集", "题材库", "题材规则.txt"), "升级流", "utf8");
 });
 
+function validDisassemblyBatchJson() {
+  return JSON.stringify({
+    chapter_range: "第1章",
+    plot_events: ["林默入宗"],
+    characters: ["林默"],
+    world_rules: [],
+    items_and_factions: [],
+    foreshadowing: [],
+    pacing_style: ["快节奏"]
+  });
+}
+
+describe("agent-runtime B2 feature flag branches", () => {
+  const chatRequest = {
+    conversation_id: "",
+    content: "请继续讨论项目",
+    current_path: "",
+    selection: "",
+    project_context_hint: "",
+    skill_id: "",
+    attachment_ids: []
+  };
+
+  it("uses ModelGateway retries only when model_gateway_v2 is enabled", async () => {
+    let gatewayAttempts = 0;
+    const enabled = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      featureFlags: new InMemoryAgentFeatureFlagRegistry({
+        agent_execution_v2_mode: "on",
+        model_gateway_v2: true
+      }),
+      modelClient: {
+        requestCompletion: async () => {
+          gatewayAttempts += 1;
+          if (gatewayAttempts === 1) {
+            throw new Error("simulated gateway timeout");
+          }
+          return "Gateway 已恢复";
+        }
+      }
+    });
+
+    await expect(enabled.runAgent({ ...chatRequest, request_id: "gateway-enabled" })).resolves.toMatchObject({ reply: "Gateway 已恢复" });
+    expect(gatewayAttempts).toBeGreaterThan(1);
+    enabled.close();
+
+    let legacyAttempts = 0;
+    const disabled = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      featureFlags: new InMemoryAgentFeatureFlagRegistry({ agent_execution_v2_mode: "on" }),
+      modelClient: {
+        requestCompletion: async () => {
+          legacyAttempts += 1;
+          throw new Error("simulated legacy validation failure");
+        }
+      }
+    });
+
+    await expect(disabled.runAgent({ ...chatRequest, request_id: "gateway-disabled" })).rejects.toThrow("simulated legacy validation failure");
+    expect(legacyAttempts).toBe(1);
+    disabled.close();
+  });
+
+  it("enforces quality_gate_v2 before generated content is committed", async () => {
+    const flags = new InMemoryAgentFeatureFlagRegistry({
+      agent_execution_v2_mode: "on",
+      model_gateway_v2: true,
+      quality_gate_v2: true
+    });
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath }, featureFlags: flags });
+
+    await expect(runtime.commitGeneratedCache({
+      content: "#不合规标题",
+      source: "test",
+      skill_id: "chat_generated",
+      mode: "replace",
+      target_paths: ["02_正文/质量门拒绝.txt"]
+    })).rejects.toMatchObject({ code: "QUALITY_GATE_REJECTED" });
+    await expect(fs.stat(path.join(tempDir, "02_正文", "质量门拒绝.txt"))).rejects.toMatchObject({ code: "ENOENT" });
+    expect(runtime.listDurableRuns(undefined, 10)).toHaveLength(0);
+    runtime.close();
+  });
+
+  it("injects confirmed memory into model context only when memory_context_selector_v2 is enabled", async () => {
+    const enabledFlags = new InMemoryAgentFeatureFlagRegistry({
+      agent_execution_v2_mode: "on",
+      model_gateway_v2: true,
+      agent_replanning_v2: true,
+      context_budget_v2: true,
+      memory_v2: true,
+      memory_context_selector_v2: true
+    });
+    let enabledMessages: ChatCompletionMessage[] = [];
+    const enabled = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      featureFlags: enabledFlags,
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          enabledMessages = messages;
+          return "已读取记忆";
+        }
+      }
+    });
+    const claim = await enabled.createGovernedMemoryClaim({
+      id: "selector-claim",
+      subject: "陆尘",
+      predicate: "境界",
+      object: "练气期",
+      interval: {},
+      status: "draft"
+    });
+    const requested = await enabled.requestGovernedMemoryConfirmation(claim.id, claim.revision);
+    const approved = await enabled.resolveGovernedMemoryConfirmation({
+      confirmationId: requested.confirmation_id,
+      expectedVersion: requested.version,
+      decision: "approved"
+    });
+    await enabled.confirmGovernedMemoryClaim({
+      claimId: claim.id,
+      confirmationId: approved.confirmation_id,
+      expectedConfirmationVersion: approved.version
+    });
+    await enabled.runAgent({ ...chatRequest, request_id: "selector-enabled" });
+    expect(enabledMessages.map((message) => message.content).join("\n")).toContain("陆尘 境界 练气期");
+    enabled.close();
+
+    let disabledMessages: ChatCompletionMessage[] = [];
+    const disabled = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      featureFlags: new InMemoryAgentFeatureFlagRegistry({
+        agent_execution_v2_mode: "on",
+        model_gateway_v2: true,
+        agent_replanning_v2: true,
+        context_budget_v2: true,
+        memory_v2: true,
+        memory_context_selector_v2: false
+      }),
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          disabledMessages = messages;
+          return "不注入记忆";
+        }
+      }
+    });
+    await disabled.runAgent({ ...chatRequest, request_id: "selector-disabled" });
+    expect(disabledMessages.map((message) => message.content).join("\n")).not.toContain("陆尘 境界 练气期");
+    disabled.close();
+  });
+
+  it("allows failed multi-step skill replanning only when agent_replanning_v2 is enabled", async () => {
+    const skillPlan = {
+      should_call_skill: true,
+      selected_reason: "test",
+      confidence: 1,
+      steps: [
+        { skill_id: "missing_first_skill", name: "first", instruction: "", text: "", reason: "test", confidence: 1 },
+        { skill_id: "missing_second_skill", name: "second", instruction: "", text: "", reason: "test", confidence: 1 }
+      ]
+    };
+    const request = { ...chatRequest, content: "运行测试技能计划" };
+
+    const runPlan = async (enabled: boolean) => {
+      const runtime = new AgentRuntimeService({
+        projectRoot: tempDir,
+        config: { configPath },
+        featureFlags: new InMemoryAgentFeatureFlagRegistry({
+          agent_execution_v2_mode: "on",
+          model_gateway_v2: true,
+          agent_replanning_v2: enabled
+        })
+      });
+      const internal = runtime as unknown as {
+        planSkillExecution: () => Promise<typeof skillPlan>;
+        runSkillPlan: (plan: typeof skillPlan, payload: typeof request) => Promise<unknown>;
+      };
+      let replanCalls = 0;
+      internal.planSkillExecution = async () => {
+        replanCalls += 1;
+        return skillPlan;
+      };
+      await internal.runSkillPlan(skillPlan, request);
+      runtime.close();
+      return replanCalls;
+    };
+
+    await expect(runPlan(false)).resolves.toBe(0);
+    await expect(runPlan(true)).resolves.toBe(1);
+  });
+});
+
 afterEach(async () => {
+  closeAllAgentRuntimeServices();
   if (tempDir) {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
@@ -48,6 +249,691 @@ async function readAgentRunTraces() {
     .filter(Boolean)
     .map((line) => JSON.parse(line));
 }
+
+async function waitForRunStatus(runtime: AgentRuntimeService, runId: string, status: string): Promise<void> {
+  for (let attempt = 0; attempt < 300; attempt++) {
+    if (runtime.getDurableRun(runId)?.status === status) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const current = runtime.getDurableRun(runId);
+  const events = runtime.listDurableRunEvents(runId).map((event) => event.event_type).join(",");
+  throw new Error(`Run ${runId} did not reach ${status}; current=${current?.status || "missing"}; error=${current?.error || "-"}; events=${events}`);
+}
+
+async function waitForCacheStatus(cache: GeneratedCacheService, cacheId: string, status: string): Promise<void> {
+  for (let attempt = 0; attempt < 1_000; attempt++) {
+    if ((await cache.get(cacheId)).status === status) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const current = await cache.get(cacheId);
+  throw new Error(`Cache ${cacheId} did not reach ${status}; current=${current.status}`);
+}
+
+describe("agent-runtime governed memory", () => {
+  it("keeps memory_v2 fail-closed and promotes a claim only through a persistent user receipt", async () => {
+    const disabled = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+    await expect(disabled.listGovernedMemoryClaims()).rejects.toMatchObject({ code: "MEMORY_V2_DISABLED" });
+    disabled.close();
+
+    const flags = new InMemoryAgentFeatureFlagRegistry({
+      agent_execution_v2_mode: "on",
+      model_gateway_v2: true,
+      agent_replanning_v2: true,
+      context_budget_v2: true,
+      memory_v2: true
+    });
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath }, featureFlags: flags });
+    const claim = await runtime.createGovernedMemoryClaim({
+      id: "runtime-memory-claim",
+      subject: "陆尘",
+      predicate: "境界",
+      object: "练气期",
+      interval: {},
+      status: "draft"
+    });
+    const requested = await runtime.requestGovernedMemoryConfirmation(claim.id, claim.revision);
+    const approved = await runtime.resolveGovernedMemoryConfirmation({
+      confirmationId: requested.confirmation_id,
+      expectedVersion: requested.version,
+      decision: "approved"
+    });
+    await expect(runtime.confirmGovernedMemoryClaim({
+      claimId: claim.id,
+      confirmationId: approved.confirmation_id,
+      expectedConfirmationVersion: requested.version
+    })).rejects.toMatchObject({ code: "MEMORY_CONFIRMATION_VERSION_CONFLICT" });
+    const confirmed = await runtime.confirmGovernedMemoryClaim({
+      claimId: claim.id,
+      confirmationId: approved.confirmation_id,
+      expectedConfirmationVersion: approved.version
+    });
+    expect(confirmed).toMatchObject({ status: "confirmed", revision: 1 });
+    runtime.close();
+
+    const reopened = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath }, featureFlags: flags });
+    await expect(reopened.listGovernedMemoryClaims()).resolves.toMatchObject([{ id: claim.id, status: "confirmed", revision: 1 }]);
+    reopened.close();
+  });
+
+  it("snapshots memory revision on a durable run, pauses it after source invalidation, and blocks stale resume", async () => {
+    const flags = new InMemoryAgentFeatureFlagRegistry({
+      agent_execution_v2_mode: "on",
+      model_gateway_v2: true,
+      agent_replanning_v2: true,
+      context_budget_v2: true,
+      memory_v2: true
+    });
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      featureFlags: flags,
+      modelClient: { requestCompletion: async () => await new Promise<string>(() => undefined) }
+    });
+    await runtime.createGovernedMemoryClaim({
+      id: "memory-revision-claim",
+      subject: "陆尘",
+      predicate: "境界",
+      object: "练气期",
+      interval: {},
+      status: "draft",
+      sourceRef: "01_大纲/大纲.txt",
+      sourceRevision: "sha256:old"
+    });
+    const created = await runtime.createDurableRun({
+      request_id: "memory-revision-run",
+      conversation_id: "",
+      content: "继续讨论陆尘的修炼进度",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    });
+    expect(created.run.base_memory_revision).toBe(1);
+
+    await runtime.invalidateGovernedMemorySource({
+      sourceRef: "01_大纲/大纲.txt",
+      currentSourceRevision: "sha256:new"
+    });
+    expect(runtime.listDurableRunEvents(created.run.run_id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event_type: "memory.revision_stale", payload: { base_memory_revision: 1, current_memory_revision: 2 } })
+    ]));
+    expect(() => runtime.resumeDurableRun(created.run.run_id, "resume-stale-memory", runtime.getDurableRun(created.run.run_id)!.version))
+      .toThrow(expect.objectContaining({ code: "MEMORY_REVISION_STALE" }));
+    runtime.close();
+  });
+
+  it("adds a persisted governed conversation summary to chat context only when memory_v2 is enabled", async () => {
+    const flags = new InMemoryAgentFeatureFlagRegistry({
+      agent_execution_v2_mode: "on",
+      model_gateway_v2: true,
+      agent_replanning_v2: true,
+      context_budget_v2: true,
+      memory_v2: true
+    });
+    let capturedMessages: ChatCompletionMessage[] = [];
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      featureFlags: flags,
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          capturedMessages = messages;
+          return "收到。";
+        }
+      }
+    });
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const conversation = await conversations.createConversation({ title: "记忆上下文" });
+    await runtime.upsertGovernedConversationMemory({
+      conversationId: conversation.id,
+      confirmedFacts: ["陆尘目前是练气期"],
+      decisions: ["先完成大纲"],
+      rejectedOptions: [],
+      userPreferences: [],
+      openTasks: ["补第 2 章"],
+      currentGoal: "完成第一卷",
+      sourceMessageIds: ["message-1"]
+    });
+    const runner = new AgentChatRunner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          capturedMessages = messages;
+          return "收到。";
+        }
+      },
+      governedConversationMemory: {
+        load: (conversationId) => runtime.getGovernedConversationMemory(conversationId),
+        upsert: (input) => runtime.upsertGovernedConversationMemory(input)
+      }
+    });
+    let governedBlockIncluded = false;
+    await runner.runAgent({
+      request_id: "governed-summary-context",
+      conversation_id: conversation.id,
+      content: "继续写作",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    }, "chat", (event) => {
+      if (event.scope === "agent_chat_stable") {
+        governedBlockIncluded = event.context.blocks.some((block) => block.id === "governed_conversation_memory" && block.included);
+      }
+    });
+    expect(capturedMessages.some((message) => message.content.includes("结构化会话状态"))).toBe(true);
+    expect(capturedMessages.some((message) => message.content.includes("陆尘目前是练气期"))).toBe(true);
+    expect(governedBlockIncluded).toBe(true);
+    await expect(runtime.getGovernedConversationMemory(conversation.id)).resolves.toMatchObject({
+      confirmedFacts: ["陆尘目前是练气期"],
+      sourceMessageIds: expect.arrayContaining(["message-1"])
+    });
+    runtime.close();
+  });
+});
+
+describe("agent-runtime stale run recovery", () => {
+  it("keeps a stale chat run paused when its durable budget has expired", async () => {
+    const stale = new RunCoordinator({
+      projectRoot: tempDir,
+      runtimeInstanceId: "runtime-stale",
+      now: () => new Date("2020-01-01T00:00:00.000Z"),
+      autoHeartbeat: false
+    });
+    const request = {
+      request_id: "stale-chat-recovery",
+      conversation_id: "",
+      content: "继续讨论本章剧情",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    };
+    const original = stale.beginRun(request, { stepType: "chat", actionId: "agent.chat", retryable: true });
+
+    let modelCalls = 0;
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => {
+          modelCalls += 1;
+          return "已从中断处继续。";
+        }
+      }
+    });
+
+    await waitForRunStatus(runtime, original.run_id, "paused");
+
+    expect(modelCalls).toBe(0);
+    expect(runtime.getDurableRun(original.run_id)).toMatchObject({
+      run_id: original.run_id,
+      status: "paused",
+      recovery_reason: "BUDGET_DEADLINE_EXCEEDED",
+      error_code: "BUDGET_DEADLINE_EXCEEDED"
+    });
+    expect(runtime.exportDurableRun(original.run_id).attempts).toEqual([
+      expect.objectContaining({ attempt: 1, status: "interrupted", error_code: "RUNTIME_LEASE_EXPIRED" })
+    ]);
+    expect(runtime.listDurableRunEvents(original.run_id).map((event) => event.event_type)).toEqual(expect.arrayContaining([
+      "run.recovered",
+      "run.budget_blocked",
+      "run.recovery_deferred"
+    ]));
+    stale.close();
+  });
+
+  it("keeps an expired file-operation run paused until its journal path is available", () => {
+    const stale = new RunCoordinator({
+      projectRoot: tempDir,
+      runtimeInstanceId: "runtime-stale-file-operation",
+      now: () => new Date("2020-01-01T00:00:00.000Z"),
+      autoHeartbeat: false
+    });
+    const original = stale.beginRun({
+      request_id: "stale-file-operation-recovery",
+      conversation_id: "",
+      content: "把当前文档里的林默替换为杨瑞",
+      current_path: "02_正文/第一章.txt",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    }, { stepType: "file_operation", actionId: "agent.file_operation", retryable: false });
+
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+
+    expect(runtime.getDurableRun(original.run_id)).toMatchObject({
+      run_id: original.run_id,
+      status: "paused",
+      recovery_reason: "BUDGET_DEADLINE_EXCEEDED",
+      error_code: "BUDGET_DEADLINE_EXCEEDED"
+    });
+    expect(runtime.listDurableRunEvents(original.run_id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ event_type: "run.recovery_deferred", payload: { reason: "FILE_OPERATION_JOURNAL_REQUIRED" } })
+    ]));
+    stale.close();
+  });
+});
+
+describe("agent-runtime feature-flag admission", () => {
+  it("does not call the model, write files, or persist a run when v2 is disabled", async () => {
+    let modelCalls = 0;
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      featureFlags: new InMemoryAgentFeatureFlagRegistry({ agent_execution_v2_mode: "off" }),
+      modelClient: {
+        requestCompletion: async () => {
+          modelCalls += 1;
+          return "must not be called";
+        }
+      }
+    });
+    const request = {
+      request_id: "disabled-agent-run",
+      conversation_id: "",
+      content: "生成正文",
+      current_path: "02_正文/第一章.txt",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    };
+
+    await expect(runtime.runAgent(request)).rejects.toMatchObject({ code: "AGENT_EXECUTION_V2_DISABLED" });
+    await expect(runtime.createDurableRun({ ...request, request_id: "disabled-durable-run" })).rejects.toMatchObject({
+      code: "AGENT_EXECUTION_V2_DISABLED"
+    });
+    await expect(runtime.streamAgentRun({ ...request, request_id: "disabled-stream-run" }).next()).rejects.toMatchObject({
+      code: "AGENT_EXECUTION_V2_DISABLED"
+    });
+    await expect(runtime.runDurableSkill("not-looked-up", {
+      text: "",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "不应读取 skill",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: false,
+      attachment_ids: []
+    })).rejects.toMatchObject({ code: "AGENT_EXECUTION_V2_DISABLED" });
+
+    expect(modelCalls).toBe(0);
+    expect(runtime.listDurableRuns()).toEqual([]);
+    expect(await fs.readFile(path.join(tempDir, "02_正文", "第一章.txt"), "utf8").catch(() => "")).toBe("");
+  });
+});
+
+describe("agent-runtime generated cache commits", () => {
+  it("commits a pending cache through a synthetic durable run", async () => {
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    const entry = await cache.create({
+      source: "chat",
+      skill_id: "chat_generated",
+      target_paths: ["02_正文/第一章.txt"],
+      mode: "replace"
+    });
+    await cache.replace(entry.cache_id, "journal 提交正文");
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+
+    const result = await runtime.commitGeneratedCache({
+      cache_id: entry.cache_id,
+      source: "generated_save_route",
+      skill_id: "chat_generated",
+      mode: "replace",
+      target_paths: ["02_正文/第一章.txt"]
+    });
+
+    expect(result.run_id).toMatch(/^run_/);
+    expect(result.saved_paths).toEqual(["02_正文/第一章.txt"]);
+    expect(result.cache.status).toBe("committed");
+    expect(runtime.getDurableRun(result.run_id)?.status).toBe("completed");
+    expect(runtime.exportDurableRun(result.run_id).steps[0]).toMatchObject({
+      type: "file_operation",
+      action_id: "agent.generated_cache_commit",
+      retryable: true,
+      requires_confirmation: false
+    });
+    expect(runtime.listDurableCommitJournal(result.run_id)).toEqual([
+      expect.objectContaining({
+        run_id: result.run_id,
+        action: "generated_cache.commit.target:02_正文/第一章.txt",
+        stage: "finalized"
+      })
+    ]);
+    expect(await fs.readFile(path.join(tempDir, "02_正文", "第一章.txt"), "utf8")).toBe("journal 提交正文");
+  });
+
+  it("replays the same raw append without duplicating the document side effect", async () => {
+    await fs.writeFile(path.join(tempDir, "01_大纲", "追加测试.txt"), "已有内容", "utf8");
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+    const input = {
+      content: "新增内容",
+      source: "generated_save_route",
+      skill_id: "chat_generated",
+      mode: "append" as const,
+      target_paths: ["01_大纲/追加测试.txt"]
+    };
+
+    const first = await runtime.commitGeneratedCache(input);
+    const replay = await runtime.commitGeneratedCache(input);
+
+    expect(first.saved_paths).toEqual(["01_大纲/追加测试.txt"]);
+    expect(replay.replayed).toBe(true);
+    expect(replay.run_id).toBe(first.run_id);
+    expect(replay.cache_id).toBe(first.cache_id);
+    expect(replay.journal_ids).toEqual(first.journal_ids);
+    expect(runtime.listDurableRuns(undefined, 20)).toHaveLength(1);
+    expect(runtime.listDurableCommitJournal()).toHaveLength(1);
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "追加测试.txt"), "utf8"))
+      .toBe("已有内容\n\n---\n新增内容\n");
+  });
+
+  it("folds repeated save-plan segments for one target into one replay-safe journal write", async () => {
+    await fs.writeFile(path.join(tempDir, "01_大纲", "追加测试.txt"), "第一章", "utf8");
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    const entry = await cache.create({
+      source: "chat",
+      skill_id: "chat_generated",
+      target_paths: ["01_大纲/追加测试.txt"],
+      mode: "append",
+      save_plan: {
+        action: "split_and_save",
+        mode: "append",
+        target_paths: ["01_大纲/追加测试.txt"],
+        segments: [
+          { target_path: "01_大纲/追加测试.txt", content: "第二章", mode: "append", reason: "first" },
+          { target_path: "01_大纲/追加测试.txt", content: "第三章", mode: "append", reason: "second" }
+        ],
+        reason: "append two sections",
+        confidence: 1,
+        requires_confirmation: false,
+        should_auto_commit: true,
+        source: "chat",
+        skill_id: "chat_generated"
+      }
+    });
+    await cache.replace(entry.cache_id, "fallback");
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+
+    const first = await runtime.commitGeneratedCache({ cache_id: entry.cache_id });
+    const replay = await runtime.commitGeneratedCache({ cache_id: entry.cache_id });
+
+    expect(first.saved_paths).toEqual(["01_大纲/追加测试.txt"]);
+    expect(replay.run_id).toBe(first.run_id);
+    expect(runtime.listDurableCommitJournal(first.run_id)).toEqual([
+      expect.objectContaining({
+        action: "generated_cache.commit.save_plan_target:01_大纲/追加测试.txt",
+        stage: "finalized"
+      })
+    ]);
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "追加测试.txt"), "utf8"))
+      .toBe("第一章\n\n---\n第二章\n\n---\n第三章\n");
+  });
+
+  it("repairs pending cache metadata from a completed synthetic run", async () => {
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    const entry = await cache.create({
+      source: "chat",
+      target_paths: ["02_正文/第一章.txt"],
+      mode: "replace"
+    });
+    await cache.replace(entry.cache_id, "已写入但元数据待收口");
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+    const runtimeCache = (runtime as unknown as { cache: GeneratedCacheService }).cache;
+    const markCommitted = runtimeCache.markCommitted.bind(runtimeCache);
+    let failMetadataCommit = true;
+    runtimeCache.markCommitted = async (...args) => {
+      if (failMetadataCommit) {
+        throw new Error("simulated metadata commit failure");
+      }
+      return markCommitted(...args);
+    };
+    const input = {
+      cache_id: entry.cache_id,
+      source: "generated_save_route",
+      mode: "replace" as const,
+      target_paths: ["02_正文/第一章.txt"]
+    };
+
+    await expect(runtime.commitGeneratedCache(input)).rejects.toThrow("simulated metadata commit failure");
+    const completedRun = runtime.listDurableRuns(["completed"], 10)[0];
+    expect(completedRun?.status).toBe("completed");
+    expect((await cache.get(entry.cache_id)).status).toBe("pending");
+
+    failMetadataCommit = false;
+    const repaired = await runtime.commitGeneratedCache(input);
+
+    expect(repaired.run_id).toBe(completedRun?.run_id);
+    expect(repaired.replayed).toBe(true);
+    expect(runtime.listDurableCommitJournal(repaired.run_id)).toHaveLength(1);
+    expect((await cache.get(entry.cache_id)).status).toBe("committed");
+  });
+
+  it("retries a failed multi-target commit on the same run without rewriting finalized targets", async () => {
+    const blockedParent = path.join(tempDir, "blocked");
+    await fs.writeFile(blockedParent, "not a directory", "utf8");
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    const entry = await cache.create({
+      source: "chat",
+      target_paths: ["blocked/第二章.txt", "02_正文/第一章.txt"],
+      mode: "append"
+    });
+    await cache.replace(entry.cache_id, "多目标正文");
+    await fs.writeFile(path.join(tempDir, "02_正文", "第一章.txt"), "已有第一章", "utf8");
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+    const input = {
+      cache_id: entry.cache_id,
+      source: "generated_save_route",
+      mode: "append" as const,
+      target_paths: ["blocked/第二章.txt", "02_正文/第一章.txt"]
+    };
+
+    await expect(runtime.commitGeneratedCache(input)).rejects.toThrow();
+    const failedRun = runtime.listDurableRuns(["failed"], 10)[0];
+    expect(failedRun?.status).toBe("failed");
+    expect((await cache.get(entry.cache_id)).status).toBe("pending");
+    expect(await fs.readFile(path.join(tempDir, "02_正文", "第一章.txt"), "utf8"))
+      .toBe("已有第一章\n\n---\n多目标正文\n");
+    expect(runtime.listDurableCommitJournal(failedRun?.run_id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ target_path: expect.stringContaining("第一章.txt"), stage: "finalized" }),
+      expect.objectContaining({ target_path: expect.stringContaining("第二章.txt"), stage: "recovery_required" })
+    ]));
+
+    await fs.rm(blockedParent);
+    await fs.mkdir(blockedParent);
+    const recovered = await runtime.commitGeneratedCache({
+      ...input,
+      source: "generated_cache_commit_route"
+    });
+
+    expect(recovered.run_id).toBe(failedRun?.run_id);
+    expect(runtime.getDurableRun(recovered.run_id)?.status).toBe("completed");
+    expect(runtime.exportDurableRun(recovered.run_id).attempts).toHaveLength(2);
+    expect(runtime.listDurableCommitJournal(recovered.run_id)).toHaveLength(3);
+    expect(await fs.readFile(path.join(tempDir, "02_正文", "第一章.txt"), "utf8"))
+      .toBe("已有第一章\n\n---\n多目标正文\n");
+    expect(await fs.readFile(path.join(blockedParent, "第二章.txt"), "utf8")).toBe("多目标正文\n");
+    expect((await cache.get(entry.cache_id)).status).toBe("committed");
+  });
+
+  it("turns sectioned style cache content into a confirmable library draft", async () => {
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    const entry = await cache.create({
+      source: "skill_stream",
+      skill_id: "style_extract",
+      target_paths: [
+        "00_设定集/风格库/写作风格.txt",
+        "00_设定集/风格库/风格示例.txt",
+        "00_设定集/风格库/参考素材.txt"
+      ],
+      mode: "replace"
+    });
+    await cache.replace(entry.cache_id, [
+      "写作风格",
+      "短句、留白。",
+      "风格示例",
+      "雨打旧檐。",
+      "参考素材",
+      "明清话本。"
+    ].join("\n"));
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+
+    const result = await runtime.commitGeneratedCache({
+      cache_id: entry.cache_id,
+      source: "generated_save_route",
+      skill_id: "style_extract",
+      mode: "replace",
+      target_paths: ["02_正文/不应写入.txt"],
+      save_plan: {
+        action: "save_generated",
+        mode: "replace",
+        target_paths: ["02_正文/也不应写入.txt"],
+        segments: [],
+        reason: "untrusted transport plan",
+        confidence: 1,
+        requires_confirmation: false,
+        should_auto_commit: true,
+        source: "transport",
+        skill_id: "style_extract"
+      }
+    });
+
+    expect(result.saved_paths).toEqual([]);
+    expect(result.run_id).toBe("");
+    expect(result.cache).toMatchObject({
+      status: "committed",
+      saved_paths: [expect.stringMatching(/^00_设定集\/\.agent\/library-drafts\/generated-/)]
+    });
+    expect(runtime.listDurableCommitJournal(result.run_id)).toEqual([]);
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toBe("克制冷静");
+    expect(existsSync(path.join(tempDir, "00_设定集", ".agent", "libraries", "style.v1.jsonl"))).toBe(false);
+    const draftPath = result.cache.saved_paths[0]!;
+    const draft = JSON.parse(await fs.readFile(path.join(tempDir, ...draftPath.split("/")), "utf8"));
+    expect(draft).toMatchObject({ domain: "style", source: "generated_cache:generated_save_route" });
+    expect(draft.records.map((record: { kind: string }) => record.kind)).toEqual(expect.arrayContaining([
+      "style_profile", "style_example", "style_material"
+    ]));
+    expect(existsSync(path.join(tempDir, "02_正文", "不应写入.txt"))).toBe(false);
+    expect(existsSync(path.join(tempDir, "02_正文", "也不应写入.txt"))).toBe(false);
+  });
+
+  it("rejects a request skill that conflicts with pending cache metadata before any journal write", async () => {
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    const entry = await cache.create({
+      source: "chat",
+      skill_id: "chat_generated",
+      target_paths: ["02_正文/第一章.txt"],
+      mode: "replace"
+    });
+    await cache.replace(entry.cache_id, "普通正文缓存");
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+
+    await expect(runtime.commitGeneratedCache({
+      cache_id: entry.cache_id,
+      skill_id: "style_extract",
+      mode: "replace"
+    })).rejects.toMatchObject({
+      code: "GENERATED_CACHE_SKILL_MISMATCH"
+    });
+
+    expect(runtime.listDurableRuns(undefined, 20)).toHaveLength(0);
+    expect(runtime.listDurableCommitJournal()).toHaveLength(0);
+    expect((await cache.get(entry.cache_id)).status).toBe("pending");
+    expect(existsSync(path.join(tempDir, "02_正文", "第一章.txt"))).toBe(false);
+  });
+
+  it("replays a sectioned cache as the same library draft without projection writes", async () => {
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    const entry = await cache.create({
+      source: "skill_stream",
+      skill_id: "style_extract",
+      target_paths: [],
+      mode: "append"
+    });
+    await cache.replace(entry.cache_id, [
+      "写作风格",
+      "新增风格",
+      "风格示例",
+      "新增示例",
+      "参考素材",
+      "新增素材"
+    ].join("\n"));
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+
+    const first = await runtime.commitGeneratedCache({
+      cache_id: entry.cache_id,
+      source: "generated_save_route",
+      skill_id: "style_extract",
+      mode: "append"
+    });
+    const replay = await runtime.commitGeneratedCache({
+      cache_id: entry.cache_id,
+      source: "generated_cache_commit_route",
+      mode: "append"
+    });
+
+    expect(first.cache.saved_paths).toEqual(replay.cache.saved_paths);
+    expect(replay.replayed).toBe(true);
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toBe("克制冷静");
+    expect((await cache.get(entry.cache_id)).status).toBe("committed");
+  });
+
+  it("uses the cached sectioned mode when creating a library draft", async () => {
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    const entry = await cache.create({
+      source: "skill_stream",
+      skill_id: "style_extract",
+      target_paths: [],
+      mode: "append"
+    });
+    await cache.replace(entry.cache_id, "新增风格");
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+
+    const result = await runtime.commitGeneratedCache({
+      cache_id: entry.cache_id,
+      skill_id: "style_extract"
+    });
+
+    const draft = JSON.parse(await fs.readFile(path.join(tempDir, ...result.cache.saved_paths[0]!.split("/")), "utf8"));
+    expect(draft).toMatchObject({ domain: "style" });
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toBe("克制冷静");
+  });
+
+  it("discards deterministic raw sectioned caches when parsing produces no target", async () => {
+    const runtime = new AgentRuntimeService({ projectRoot: tempDir, config: { configPath } });
+    const input = {
+      content: "人物设定\n暂无。",
+      source: "generated_save_route",
+      skill_id: "lore_extract",
+      mode: "replace" as const,
+      target_paths: [] as string[]
+    };
+
+    const first = await runtime.commitGeneratedCache(input);
+    const replay = await runtime.commitGeneratedCache(input);
+
+    expect(first.saved_paths).toEqual([]);
+    expect(first.run_id).toBe("");
+    expect(first.cache.status).toBe("discarded");
+    expect(replay.cache_id).toBe(first.cache_id);
+    expect(replay.replayed).toBe(true);
+    expect(replay.cache.status).toBe("discarded");
+    expect(runtime.listDurableRuns(undefined, 20)).toHaveLength(0);
+    await expect(new GeneratedCacheService({ projectRoot: tempDir }).readContent(first.cache_id)).rejects.toThrow();
+  });
+});
 
 describe("agent-runtime chat flow", () => {
   it("runs read-context chat locally and persists the conversation", async () => {
@@ -117,6 +1003,22 @@ describe("agent-runtime chat flow", () => {
     });
 
     const [trace] = await readAgentRunTraces();
+    expect(result.run_id).toEqual(expect.stringMatching(/^run_/));
+    expect(trace.run_id).toBe(result.run_id);
+    expect(runtime.getDurableRun(result.run_id!)).toMatchObject({
+      run_id: result.run_id,
+      status: "completed",
+      project_id: await new ProjectManifestService(tempDir).getProjectId(),
+      conversation_id: result.conversation!.id,
+      steps: [expect.objectContaining({ status: "done", attempts: 1 })]
+    });
+    expect(runtime.listDurableRunEvents(result.run_id!).map((event) => event.event_type).filter((t) => t !== "run.budget_consumed")).toEqual([
+      "run.created",
+      "run.planning",
+      "run.started",
+      "budget.step_consumed",
+      "run.completed"
+    ]);
     expect(trace).toMatchObject({
       conversation_id: result.conversation!.id,
       intent: "read_context",
@@ -163,6 +1065,38 @@ describe("agent-runtime chat flow", () => {
       })
     ]);
     expect(trace.duration_ms).toEqual(expect.any(Number));
+  });
+
+  it("creates one durable run for a request id and executes it in the background", async () => {
+    let resolveReply: ((value: string) => void) | undefined;
+    const reply = new Promise<string>((resolve) => {
+      resolveReply = resolve;
+    });
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => reply
+      }
+    });
+    const request = {
+      request_id: "background-created-run",
+      conversation_id: "",
+      content: "请总结当前项目",
+      current_path: "01_大纲/大纲.txt",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    };
+
+    const created = await runtime.createDurableRun(request);
+    const replay = await runtime.createDurableRun(request);
+
+    expect(created).toMatchObject({ created: true, run: { status: "running", request_id: request.request_id } });
+    expect(replay).toMatchObject({ created: false, run: { request_id: request.request_id } });
+    resolveReply!("后台执行完成");
+    await waitForRunStatus(runtime, created.run.run_id, "completed");
   });
 
   it("records reference file metadata in assembled context traces", async () => {
@@ -327,14 +1261,45 @@ describe("agent-runtime chat flow", () => {
     }
 
     expect(events.map((event) => event.type)).toEqual(["start", "final"]);
-    expect(events[0]).toMatchObject({ type: "start", intent: "file_operation" });
+    expect(events[0]).toMatchObject({ type: "start", intent: "file_operation", run_id: expect.stringMatching(/^run_/) });
     expect(events[1]).toMatchObject({
       type: "final",
       payload: {
         intent: "file_operation",
-        requires_confirmation: true
+        requires_confirmation: true,
+        run_id: (events[0] as Extract<AgentStreamEvent, { type: "start" }>).run_id
       }
     });
+  });
+
+  it("executes a resolved AI archive operation directly when the global permission allows it", async () => {
+    await fs.mkdir(path.join(tempDir, "01_大纲"), { recursive: true });
+    await fs.writeFile(path.join(tempDir, "01_大纲", "大纲.txt"), "待归档大纲", "utf8");
+    await fs.writeFile(configPath, JSON.stringify({ api_key: "demo-key", model: "demo-model", project_file_permission_mode: "direct_save_delete" }), "utf8");
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => JSON.stringify({
+          summary: "归档大纲",
+          operations: [{ action: "archive_file", path: "01_大纲/大纲.txt", text: "", old_text: "", new_text: "", target_path: "", reason: "用户要求删除" }]
+        })
+      }
+    });
+
+    const result = await runtime.runAgent({
+      conversation_id: "",
+      content: "删除大纲文件",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    });
+
+    expect(result.requires_confirmation).toBe(false);
+    expect(result.reply).toBe("已将 1 个文件移入项目回收站，可在项目时间线恢复。");
+    await expect(fs.access(path.join(tempDir, "01_大纲", "大纲.txt"))).rejects.toThrow();
   });
 
   it("streams chat locally with attachment-backed context", async () => {
@@ -389,6 +1354,16 @@ describe("agent-runtime chat flow", () => {
         reply: "第一句第二句"
       }
     });
+    const streamRunId = (events[0] as Extract<AgentStreamEvent, { type: "start" }>).run_id;
+    expect(streamRunId).toMatch(/^run_/);
+    if (!streamRunId) {
+      throw new Error("Stream start event did not include a durable run id");
+    }
+    expect(runtime.getDurableRun(streamRunId)).toMatchObject({
+      run_id: streamRunId,
+      status: "completed",
+      steps: [expect.objectContaining({ status: "done", attempts: 1 })]
+    });
 
     expect(capturedMessages[1]?.content).toContain("【source.txt】");
     expect(capturedMessages.at(-1)?.content).toContain("当前文档：01_大纲/大纲.txt");
@@ -396,6 +1371,51 @@ describe("agent-runtime chat flow", () => {
     const updated = await conversations.getConversation(conversation.id);
     expect(updated.messages).toHaveLength(2);
     expect(updated.messages[1]?.content).toBe("第一句第二句");
+  });
+
+  it("streams and persists reasoning separately when thinking mode is enabled", async () => {
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const conversation = await conversations.createConversation({ title: "reasoning stream" });
+    await conversations.updateModelPreferences(conversation.id, {
+      model_override: "gpt-5-mini",
+      reasoning_enabled: true,
+      reasoning_effort: "medium"
+    });
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "fallback",
+        async *streamDetailedCompletion() {
+          yield { channel: "reasoning" as const, text: "先检查大纲。" };
+          yield { channel: "answer" as const, text: "这是正文回复。" };
+        }
+      }
+    });
+
+    const events: AgentStreamEvent[] = [];
+    for await (const event of runtime.streamAgentRun({
+      conversation_id: conversation.id,
+      content: "继续创作",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "delta", channel: "reasoning", text: "先检查大纲。" }),
+      expect.objectContaining({ type: "delta", channel: "answer", text: "这是正文回复。" })
+    ]));
+    const updated = await conversations.getConversation(conversation.id);
+    expect(updated.messages.at(-1)).toMatchObject({
+      role: "assistant",
+      content: "这是正文回复。",
+      reasoning_content: "先检查大纲。"
+    });
   });
 
   it("marks partial streamed chat replies as stopped when cancelled", async () => {
@@ -619,6 +1639,42 @@ describe("agent-runtime chat flow", () => {
     expect(await fs.readFile(path.join(tempDir, "02_正文", "第一章.txt"), "utf8")).not.toContain("林默");
   });
 
+  it("routes durable direct saves through the commit journal with the active run identity", async () => {
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "unused"
+      }
+    });
+
+    const result = await runtime.runAgent({
+      conversation_id: "",
+      content: "保存到大纲：这是 durable 提交内容",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    });
+
+    const run = runtime.getDurableRun(result.run_id || "");
+    const journals = runtime.listDurableCommitJournal(result.run_id);
+    expect(run).not.toBeNull();
+    expect(journals).toHaveLength(1);
+    expect(journals[0]).toMatchObject({
+      run_id: result.run_id,
+      step_id: run?.steps[0]?.step_id,
+      action: "append_text",
+      stage: "finalized"
+    });
+    expect(journals[0]?.attempt_id).toMatch(/^attempt_/);
+    expect(journals[0]?.fencing_token).toBeGreaterThanOrEqual(1);
+    expect(existsSync(journals[0]?.backup_path || "")).toBe(true);
+    expect(await fs.readFile(journals[0]!.backup_path, "utf8")).toBe("这是测试大纲");
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toContain("这是 durable 提交内容");
+  });
+
   it("limits batch replace to current document scope when requested", async () => {
     await fs.writeFile(path.join(tempDir, "01_大纲", "人物设定.txt"), "林默出现在设定里。", "utf8");
     await fs.writeFile(path.join(tempDir, "02_正文", "第一章.txt"), "林默只在正文里出现一次。", "utf8");
@@ -707,7 +1763,9 @@ describe("agent-runtime chat flow", () => {
     }
 
     expect(requestCalls).toBeGreaterThan(0);
-    expect(events.map((event) => event.type)).toEqual(["start", "delta", "final"]);
+    expect(events[0]?.type).toBe("start");
+    expect(events.at(-1)?.type).toBe("final");
+    expect(events.some((event) => event.type === "delta")).toBe(true);
     expect(events[1]).toMatchObject({
       type: "delta",
       text: "普通补偿回复"
@@ -738,6 +1796,7 @@ describe("agent-runtime chat flow", () => {
     });
 
     const payload = {
+      request_id: "conversation-writeback-journal",
       content: "测试发送消息",
       skill_id: "",
       agent_name: "test-agent",
@@ -762,6 +1821,206 @@ describe("agent-runtime chat flow", () => {
     // Check file content
     const fileContent = await fs.readFile(path.join(tempDir, "02_正文/第一章.txt"), "utf8");
     expect(fileContent).toBe("助理回复内容");
+    const run = runtime.listDurableRuns(["completed"], 10)
+      .find((item) => item.request_id === "conversation-writeback-journal");
+    expect(run?.status).toBe("completed");
+    expect(runtime.listDurableCommitJournal(run!.run_id)).toEqual([
+      expect.objectContaining({
+        run_id: run!.run_id,
+        action: "generated_cache.commit.target:02_正文/第一章.txt",
+        stage: "finalized"
+      })
+    ]);
+    const writeBack = result.skill_result?.data?.conversation_write_back as Record<string, unknown> | undefined;
+    expect(writeBack).toMatchObject({
+      run_id: run!.run_id,
+      saved_paths: ["02_正文/第一章.txt"]
+    });
+    const cacheId = String(writeBack?.cache_id || "");
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    expect(await cache.get(cacheId)).toMatchObject({
+      status: "committed",
+      commit_run_id: run!.run_id,
+      commit_request_id: "conversation-writeback-journal"
+    });
+    await expect(cache.readContent(cacheId)).rejects.toThrow("正文不存在");
+  });
+
+  it("applies model preferences only to the selected conversation request", async () => {
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const conversation = await conversations.createConversation({ title: "模型覆盖" });
+    await conversations.updateModelPreferences(conversation.id, {
+      model_override: "gpt-5-mini",
+      reasoning_enabled: true,
+      reasoning_effort: "high"
+    });
+    const captured: {
+      config?: ModelConfig;
+      options?: ModelRequestOptions;
+      messages: ChatCompletionMessage[];
+    } = { messages: [] };
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (config, messages, _temperature, options) => {
+          captured.config = config;
+          captured.messages = messages;
+          captured.options = options || {};
+          return "覆盖模型回复";
+        }
+      }
+    });
+
+    await runtime.sendMessage(conversation.id, {
+      content: "测试会话模型",
+      skill_id: "",
+      agent_name: "",
+      write_target: "",
+      insert_mode: "none",
+      runtime_context: "",
+      attachment_ids: []
+    });
+
+    expect(captured.config?.model).toBe("gpt-5-mini");
+    expect(captured.options?.reasoningEffort).toBe("high");
+    expect(captured.messages.map((item) => item.content).join("\n")).not.toContain("思考模式已开启");
+    expect(JSON.parse(await fs.readFile(configPath, "utf8")).model).toBe("demo-model");
+  });
+
+  it("resumes conversation write_target from its pending cache without rerunning the model or duplicating write-back messages", async () => {
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const conversation = await conversations.createConversation({ title: "写回恢复测试" });
+    let modelCalls = 0;
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => {
+          modelCalls += 1;
+          return "写回恢复内容";
+        }
+      }
+    });
+    const coordinator = (runtime as any).runCoordinator;
+    const completeRun = coordinator.completeRun.bind(coordinator);
+    let failBeforeOuterCompletion = true;
+    coordinator.completeRun = (...args: any[]) => {
+      if (failBeforeOuterCompletion) {
+        failBeforeOuterCompletion = false;
+        throw new Error("simulated conversation writeback outer completion crash");
+      }
+      return completeRun(...args);
+    };
+    const payload = {
+      request_id: "conversation-writeback-recovery",
+      content: "测试发送消息",
+      skill_id: "",
+      agent_name: "test-agent",
+      write_target: "02_正文/第一章.txt",
+      insert_mode: "replace" as const,
+      runtime_context: "",
+      attachment_ids: []
+    };
+
+    await expect(runtime.sendMessage(conversation.id, payload))
+      .rejects.toThrow("simulated conversation writeback outer completion crash");
+    const failedRun = runtime.listDurableRuns(["failed"], 10)[0];
+    expect(failedRun?.status).toBe("failed");
+    expect(runtime.listDurableCommitJournal(failedRun!.run_id)).toEqual([
+      expect.objectContaining({
+        action: "generated_cache.commit.target:02_正文/第一章.txt",
+        stage: "finalized"
+      })
+    ]);
+    expect(await fs.readFile(path.join(tempDir, "02_正文", "第一章.txt"), "utf8"))
+      .toBe("写回恢复内容");
+    const cacheRoot = path.join(tempDir, "00_设定集", ".agent", "generated_cache");
+    const cacheIds = await fs.readdir(cacheRoot);
+    expect(cacheIds).toHaveLength(1);
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    expect(await cache.get(cacheIds[0]!)).toMatchObject({
+      status: "pending",
+      skill_id: "conversation_write_back"
+    });
+    await expect(cache.readContent(cacheIds[0]!)).resolves.toBe("写回恢复内容");
+    let detail = await conversations.getConversation(conversation.id);
+    expect(detail.messages.filter((message) =>
+      message.role === "system" && message.content.includes("已写回 02_正文/第一章.txt")
+    )).toHaveLength(1);
+
+    const resumed = runtime.resumeDurableRun(failedRun!.run_id, "op_conversation_writeback_resume", failedRun!.version);
+    expect(resumed.run_id).toBe(failedRun?.run_id);
+    await waitForRunStatus(runtime, failedRun!.run_id, "completed");
+    await waitForCacheStatus(cache, cacheIds[0]!, "committed");
+
+    expect(modelCalls).toBe(1);
+    expect(runtime.exportDurableRun(failedRun!.run_id).attempts).toHaveLength(2);
+    expect(runtime.listDurableCommitJournal(failedRun!.run_id)).toHaveLength(1);
+    expect(await cache.get(cacheIds[0]!)).toMatchObject({
+      status: "committed",
+      commit_run_id: failedRun?.run_id,
+      commit_request_id: "conversation-writeback-recovery"
+    });
+    await expect(cache.readContent(cacheIds[0]!)).rejects.toThrow("正文不存在");
+    expect(await fs.readFile(path.join(tempDir, "02_正文", "第一章.txt"), "utf8"))
+      .toBe("写回恢复内容");
+    detail = await conversations.getConversation(conversation.id);
+    expect(detail.messages.filter((message) =>
+      message.role === "system" && message.content.includes("已写回 02_正文/第一章.txt")
+    )).toHaveLength(1);
+  }, 30_000);
+
+  it("streams conversation write_target through the durable journal before yielding the final event", async () => {
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const conversation = await conversations.createConversation({ title: "流式写回测试" });
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "流式写回内容"
+      }
+    });
+
+    const events: AgentStreamEvent[] = [];
+    for await (const event of runtime.streamMessage(conversation.id, {
+      request_id: "conversation-writeback-stream",
+      content: "测试流式回复",
+      skill_id: "",
+      agent_name: "test-agent",
+      write_target: "02_正文/第一章.txt",
+      insert_mode: "replace" as const,
+      runtime_context: "",
+      attachment_ids: []
+    } as ConversationMessageRequest & { request_id: string })) {
+      events.push(event);
+    }
+
+    expect(events[0]?.type).toBe("start");
+    expect(events.at(-1)?.type).toBe("final");
+    expect(events.some((event) => event.type === "delta")).toBe(true);
+    const final = events.find((event) => event.type === "final");
+    expect(final?.type).toBe("final");
+    if (final?.type !== "final") {
+      throw new Error("missing final event");
+    }
+    expect(final.payload.saved_paths).toContain("02_正文/第一章.txt");
+    expect(final.payload.conversation?.messages.at(-1)).toMatchObject({
+      role: "system",
+      content: "已写回 02_正文/第一章.txt"
+    });
+    const run = runtime.listDurableRuns(["completed"], 10)
+      .find((item) => item.request_id === "conversation-writeback-stream");
+    expect(run?.status).toBe("completed");
+    expect(runtime.listDurableCommitJournal(run!.run_id)).toEqual([
+      expect.objectContaining({
+        run_id: run!.run_id,
+        action: "generated_cache.commit.target:02_正文/第一章.txt",
+        stage: "finalized"
+      })
+    ]);
+    expect(await fs.readFile(path.join(tempDir, "02_正文", "第一章.txt"), "utf8"))
+      .toBe("流式写回内容");
   });
 
   it("sendMessage includes explicit project reference files in conversation context", async () => {
@@ -1096,7 +2355,7 @@ describe("agent-runtime chat flow", () => {
 
     const events: AgentStreamEvent[] = [];
     for await (const event of runtime.streamMessage(conversation.id, {
-      content: "生成新版大纲并保存到大纲",
+      content: "创建一份项目简介",
       skill_id: "",
       agent_name: "",
       write_target: "",
@@ -1113,9 +2372,227 @@ describe("agent-runtime chat flow", () => {
       throw new Error("missing final event");
     }
     expect(final.payload.skill_result?.data).toMatchObject({
+      run_id: final.payload.run_id,
       saved_paths: ["01_大纲/大纲.txt"]
     });
+    const runId = String(final.payload.run_id || "");
+    expect(runtime.listDurableCommitJournal(runId)).toEqual([
+      expect.objectContaining({
+        run_id: runId,
+        action: "generated_cache.commit.target:01_大纲/大纲.txt",
+        stage: "finalized"
+      })
+    ]);
+    const cacheId = String(final.payload.skill_result?.data?.cache_id || "");
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    expect(await cache.get(cacheId)).toMatchObject({ status: "committed", commit_run_id: runId });
+    await expect(cache.readContent(cacheId)).rejects.toThrow("正文不存在");
     expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("新的大纲内容");
+  });
+
+  it("auto-saves non-streamed chat replies through the active durable run journal", async () => {
+    let modelCalls = 0;
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          if (messages[0]?.content.includes("生成结果保存规划器")) {
+            return JSON.stringify({
+              action: "replace_existing",
+              mode: "replace",
+              target_paths: ["01_大纲/大纲.txt"],
+              reason: "用户要求保存到大纲。",
+              confidence: 0.91,
+              requires_confirmation: false,
+              should_auto_commit: true
+            });
+          }
+          modelCalls += 1;
+          return "非流式 chat journal 大纲";
+        }
+      }
+    });
+
+    const result = await runtime.runAgent({
+      request_id: "chat-auto-save-journal",
+      conversation_id: "",
+      content: "创建一份项目简介",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    });
+
+    expect(modelCalls).toBe(1);
+    expect(result.intent).toBe("chat");
+    expect(result.saved_paths).toEqual(["01_大纲/大纲.txt"]);
+    expect(result.skill_result?.data).toMatchObject({
+      run_id: result.run_id,
+      request_id: "chat-auto-save-journal",
+      saved_paths: ["01_大纲/大纲.txt"]
+    });
+    expect(runtime.listDurableCommitJournal(result.run_id)).toEqual([
+      expect.objectContaining({
+        run_id: result.run_id,
+        action: "generated_cache.commit.target:01_大纲/大纲.txt",
+        stage: "finalized"
+      })
+    ]);
+    const cacheId = String(result.skill_result?.data?.cache_id || "");
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    expect(await cache.get(cacheId)).toMatchObject({
+      status: "committed",
+      commit_run_id: result.run_id,
+      commit_request_id: "chat-auto-save-journal"
+    });
+    await expect(cache.readContent(cacheId)).rejects.toThrow("正文不存在");
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8"))
+      .toBe("非流式 chat journal 大纲");
+  });
+
+  it("resumes a chat auto-save from its pending cache after journals finalize but outer completion fails", async () => {
+    let modelCalls = 0;
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          if (messages[0]?.content.includes("生成结果保存规划器")) {
+            return JSON.stringify({
+              action: "replace_existing",
+              mode: "replace",
+              target_paths: ["01_大纲/大纲.txt"],
+              reason: "用户要求保存到大纲。",
+              confidence: 0.91,
+              requires_confirmation: false,
+              should_auto_commit: true
+            });
+          }
+          modelCalls += 1;
+          return "可恢复 chat journal 大纲";
+        }
+      }
+    });
+    const coordinator = (runtime as any).runCoordinator;
+    const completeRun = coordinator.completeRun.bind(coordinator);
+    let failBeforeOuterCompletion = true;
+    coordinator.completeRun = (...args: any[]) => {
+      if (failBeforeOuterCompletion) {
+        failBeforeOuterCompletion = false;
+        throw new Error("simulated chat outer completion crash");
+      }
+      return completeRun(...args);
+    };
+    const request = {
+      request_id: "chat-auto-save-recovery",
+      conversation_id: "",
+      content: "创建一份项目简介",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    };
+
+    await expect(runtime.runAgent(request)).rejects.toThrow("simulated chat outer completion crash");
+    const failedRun = runtime.listDurableRuns(["failed"], 10)[0];
+    expect(failedRun?.status).toBe("failed");
+    expect(runtime.listDurableCommitJournal(failedRun?.run_id)).toEqual([
+      expect.objectContaining({ stage: "finalized" })
+    ]);
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8"))
+      .toBe("可恢复 chat journal 大纲");
+    const cacheRoot = path.join(tempDir, "00_设定集", ".agent", "generated_cache");
+    const cacheIds = await fs.readdir(cacheRoot);
+    expect(cacheIds).toHaveLength(1);
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    expect(await cache.get(cacheIds[0]!)).toMatchObject({ status: "pending" });
+    await expect(cache.readContent(cacheIds[0]!)).resolves.toBe("可恢复 chat journal 大纲");
+
+    const resumed = runtime.resumeDurableRun(failedRun!.run_id, "op_chat_auto_save_resume", failedRun!.version);
+    expect(resumed.run_id).toBe(failedRun?.run_id);
+    await waitForRunStatus(runtime, failedRun!.run_id, "completed");
+
+    expect(modelCalls).toBe(1);
+    expect(runtime.exportDurableRun(failedRun!.run_id).attempts).toHaveLength(2);
+    expect(runtime.listDurableCommitJournal(failedRun!.run_id)).toHaveLength(1);
+    await waitForCacheStatus(cache, cacheIds[0]!, "committed");
+    expect(await cache.get(cacheIds[0]!)).toMatchObject({
+      status: "committed",
+      commit_run_id: failedRun?.run_id,
+      commit_request_id: "chat-auto-save-recovery"
+    });
+    await expect(cache.readContent(cacheIds[0]!)).rejects.toThrow("正文不存在");
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8"))
+      .toBe("可恢复 chat journal 大纲");
+  }, 30_000);
+
+  it("reconciles chat auto-save cache metadata from a completed observation without rerunning the model", async () => {
+    let modelCalls = 0;
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          if (messages[0]?.content.includes("生成结果保存规划器")) {
+            return JSON.stringify({
+              action: "replace_existing",
+              mode: "replace",
+              target_paths: ["01_大纲/大纲.txt"],
+              reason: "用户要求保存到大纲。",
+              confidence: 0.91,
+              requires_confirmation: false,
+              should_auto_commit: true
+            });
+          }
+          modelCalls += 1;
+          return "已完成 observation 的 chat 缓存待收口";
+        }
+      }
+    });
+    const runtimeCache = (runtime as any).cache as GeneratedCacheService;
+    const markCommitted = runtimeCache.markCommitted.bind(runtimeCache);
+    let failCacheFinalization = true;
+    runtimeCache.markCommitted = async (...args) => {
+      if (failCacheFinalization) {
+        failCacheFinalization = false;
+        throw new Error("simulated chat cache finalization failure");
+      }
+      return markCommitted(...args);
+    };
+    const request = {
+      request_id: "chat-auto-save-after-complete-recovery",
+      conversation_id: "",
+      content: "创建一份项目简介",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "",
+      attachment_ids: []
+    };
+
+    const first = await runtime.runAgent(request);
+    const runId = String(first.run_id || "");
+    const cacheId = String(first.skill_result?.data?.cache_id || "");
+    expect(runtime.getDurableRun(runId)?.status).toBe("completed");
+    expect(await runtimeCache.get(cacheId)).toMatchObject({ status: "pending" });
+    await expect(runtimeCache.readContent(cacheId)).resolves.toBe("已完成 observation 的 chat 缓存待收口");
+
+    const replay = await runtime.runAgent(request);
+
+    expect(modelCalls).toBe(1);
+    expect(replay.run_id).toBe(runId);
+    expect(replay.skill_result?.data).toMatchObject({ run_id: runId, replayed: true });
+    expect(await runtimeCache.get(cacheId)).toMatchObject({
+      status: "committed",
+      commit_run_id: runId,
+      commit_request_id: request.request_id
+    });
+    await expect(runtimeCache.readContent(cacheId)).rejects.toThrow("正文不存在");
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8"))
+      .toBe("已完成 observation 的 chat 缓存待收口");
   });
 
   it("runs local prompt skill intent via manual skill id", async () => {
@@ -1301,8 +2778,17 @@ describe("agent-runtime chat flow", () => {
     expect(result.intent).toBe("skill");
     expect(result.saved_paths).toEqual(["01_大纲/大纲.txt"]);
     expect(result.skill_result?.data).toMatchObject({
+      run_id: result.run_id,
       saved_paths: ["01_大纲/大纲.txt"]
     });
+    expect(result.run_id).toMatch(/^run_/);
+    expect(runtime.listDurableCommitJournal(result.run_id)).toEqual([
+      expect.objectContaining({
+        run_id: result.run_id,
+        action: "generated_cache.commit.target:01_大纲/大纲.txt",
+        stage: "finalized"
+      })
+    ]);
     expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("新的大纲内容");
   });
 
@@ -1349,6 +2835,56 @@ describe("agent-runtime chat flow", () => {
         reply: "技能流式最终结果"
       }
     });
+  });
+
+  it("publishes a streamed prompt-skill final only after its outer-run journals finalize", async () => {
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "流式 durable 写入结果"
+      }
+    });
+
+    let final: Extract<AgentStreamEvent, { type: "final" }> | undefined;
+    for await (const event of runtime.streamAgentRun({
+      request_id: "stream-prompt-skill-durable",
+      conversation_id: "",
+      content: "请生成大纲并写入文件",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "outline_generate",
+      attachment_ids: []
+    })) {
+      if (event.type !== "final") {
+        continue;
+      }
+      final = event;
+      const runId = String(event.payload.run_id || "");
+      expect(event.payload.saved_paths).toEqual(["01_大纲/大纲.txt"]);
+      expect(runtime.listDurableCommitJournal(runId)).toEqual([
+        expect.objectContaining({
+          run_id: runId,
+          action: "generated_cache.commit.target:01_大纲/大纲.txt",
+          stage: "finalized"
+        })
+      ]);
+    }
+
+    expect(final?.payload.skill_result?.data).toMatchObject({
+      run_id: final?.payload.run_id,
+      request_id: "stream-prompt-skill-durable",
+      saved_paths: ["01_大纲/大纲.txt"]
+    });
+    const runId = String(final?.payload.run_id || "");
+    const cacheId = String(final?.payload.skill_result?.data?.cache_id || "");
+    expect(runtime.getDurableRun(runId)?.status).toBe("completed");
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    expect(await cache.get(cacheId)).toMatchObject({ status: "committed", commit_run_id: runId });
+    await expect(cache.readContent(cacheId)).rejects.toThrow("正文不存在");
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8"))
+      .toBe("流式 durable 写入结果");
   });
 
   it("passes target_words into local outline skill requests", async () => {
@@ -1468,13 +3004,17 @@ describe("agent-runtime chat flow", () => {
     expect(result.conversation?.messages[1]?.content).toBe("自动建会话的技能回复");
   });
 
-  it("orchestrates multiple skills from a complex chat request", async () => {
+  it("pauses multi-skill orchestration when an earlier step requires confirmation", async () => {
     const conversations = new ConversationService({ projectRoot: tempDir });
     const conversation = await conversations.createConversation({ title: "编排会话" });
     const calls: string[] = [];
     const runtime = new AgentRuntimeService({
       projectRoot: tempDir,
       config: { configPath },
+      featureFlags: new InMemoryAgentFeatureFlagRegistry({
+        agent_execution_v2_mode: "on",
+        agent_inline_plan_ui: true
+      }),
       modelClient: {
         requestCompletion: async (_config, messages) => {
           const system = messages[0]?.content || "";
@@ -1508,15 +3048,94 @@ describe("agent-runtime chat flow", () => {
       attachment_ids: []
     });
 
-    expect(result.skill_result?.data?.skill_steps).toHaveLength(2);
+    expect(result.requires_confirmation).toBe(true);
+    expect(result.skill_result?.data?.skill_steps).toHaveLength(1);
     expect(result.skill_result?.data?.skill_steps).toMatchObject([
-      { skill_id: "lore_extract", status: "done" },
-      { skill_id: "consistency_check", status: "done" }
+      { skill_id: "lore_extract", status: "waiting_confirmation" }
     ]);
-    expect(result.conversation.current_skill).toBe("consistency_check");
+    expect(result.conversation.current_skill).toBe("lore_extract");
     expect(result.conversation.messages.at(-1)?.metadata.skill_plan).toBeTruthy();
-    expect(calls.length).toBeGreaterThanOrEqual(2);
-    expect(calls.some((item) => item.includes("连续性审稿人"))).toBe(true);
+    const inlinePlan = result.conversation.messages.at(-1)?.metadata.inline_plan as Record<string, unknown>;
+    expect(inlinePlan).toMatchObject({
+      run_id: expect.stringMatching(/^run_/),
+      run_version: expect.any(Number),
+      plan_version: expect.any(Number),
+      current_step_id: expect.stringMatching(/^step_/),
+      step_ids: [expect.stringMatching(/^step_/)]
+    });
+    expect(runtime.getDurableRun(String(inlinePlan.run_id))?.version).toBe(inlinePlan.run_version);
+    expect(calls).toHaveLength(1);
+    expect(calls.some((item) => item.includes("连续性审稿人"))).toBe(false);
+  });
+
+  it("persists a pending inline-plan assistant message before a streaming run completes", async () => {
+    const conversations = new ConversationService({ projectRoot: tempDir });
+    const conversation = await conversations.createConversation({ title: "重载计划卡" });
+    let releaseSkill: ((value: string) => void) | undefined;
+    const skillReply = new Promise<string>((resolve) => {
+      releaseSkill = resolve;
+    });
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      featureFlags: new InMemoryAgentFeatureFlagRegistry({
+        agent_execution_v2_mode: "on",
+        agent_inline_plan_ui: true
+      }),
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          if ((messages[0]?.content || "").includes("技能调度器")) {
+            return JSON.stringify({
+              should_call_skill: true,
+              confidence: 0.91,
+              selected_reason: "需要提取设定。",
+              steps: [{ skill_id: "lore_extract", instruction: "提取设定", reason: "结构化设定", confidence: 0.9 }]
+            });
+          }
+          return skillReply;
+        }
+      }
+    });
+
+    const stream = runtime.streamMessage(conversation.id, {
+      content: "请提取这段设定",
+      skill_id: "",
+      agent_name: "",
+      write_target: "",
+      insert_mode: "none",
+      runtime_context: "林舟得到一枚古玉。",
+      attachment_ids: []
+    });
+    const first = await stream.next();
+
+    expect(first.value).toMatchObject({
+      type: "start",
+      inline_plan: {
+        run_id: expect.stringMatching(/^run_/),
+        step_ids: [expect.stringMatching(/^step_/)]
+      }
+    });
+    const runId = String((first.value as Extract<typeof first.value, { type: "start" }>).inline_plan?.run_id || "");
+    const pending = await conversations.getConversation(conversation.id);
+    expect(pending.messages.at(-1)).toMatchObject({
+      role: "assistant",
+      content: "正在执行…",
+      metadata: {
+        inline_plan_pending: true,
+        inline_plan: { run_id: runId }
+      }
+    });
+
+    releaseSkill?.("【人物设定】\n主角：林舟");
+    for await (const _event of stream) {
+      // Consume the durable stream so the test does not leave a live run.
+    }
+    const completed = await conversations.getConversation(conversation.id);
+    expect(completed.messages.some((message) => message.metadata.inline_plan_pending === true)).toBe(false);
+    expect(completed.messages.at(-1)).toMatchObject({
+      role: "assistant",
+      metadata: { inline_plan: { run_id: runId } }
+    });
   });
 
   it("uses an imported replacement skill when a builtin is disabled", async () => {
@@ -1572,7 +3191,10 @@ describe("agent-runtime chat flow", () => {
     });
 
     expect(result.intent).toBe("skill");
-    expect(result.skill_result?.data?.skill_steps).toMatchObject([{ skill_id: "custom_polish", status: "done" }]);
+    expect(result.requires_confirmation).toBe(true);
+    expect(result.skill_result?.data?.skill_steps).toMatchObject([
+      { skill_id: "custom_polish", status: "waiting_confirmation" }
+    ]);
     expect(result.reply).toBe("导入技能润色结果");
   });
 
@@ -1716,7 +3338,7 @@ describe("agent-runtime chat flow", () => {
     expect(continued.conversation.current_skill).toBe("style_dialogue");
   });
 
-  it("routes genre_generate skill intent locally with multi-target pending-save metadata", async () => {
+  it("routes genre_generate skill intent to a confirmable library draft", async () => {
     const runtime = new AgentRuntimeService({
       projectRoot: tempDir,
       config: { configPath },
@@ -1739,18 +3361,15 @@ describe("agent-runtime chat flow", () => {
     const result = await runtime.runAgent(request);
 
     expect(result.intent).toBe("skill");
+    expect(result.requires_confirmation).toBe(true);
     expect(result.skill_result?.data).toMatchObject({
-      pending_save: true,
-      target_paths: [
-        "00_设定集/题材库/题材规则.txt",
-        "00_设定集/题材库/题材素材.txt",
-        "00_设定集/题材库/战斗模板.txt",
-        "00_设定集/题材库/违禁词.txt"
-      ]
+      pending_save: false,
+      requires_confirmation: true,
+      library_draft: { domain: "genre", records: 4 }
     });
   });
 
-  it("routes style_extract skill intent locally with multi-target pending-save metadata", async () => {
+  it("routes style_extract skill intent to a confirmable library draft", async () => {
     const runtime = new AgentRuntimeService({
       projectRoot: tempDir,
       config: { configPath },
@@ -1773,17 +3392,15 @@ describe("agent-runtime chat flow", () => {
     const result = await runtime.runAgent(request);
 
     expect(result.intent).toBe("skill");
+    expect(result.requires_confirmation).toBe(true);
     expect(result.skill_result?.data).toMatchObject({
-      pending_save: true,
-      target_paths: [
-        "00_设定集/风格库/写作风格.txt",
-        "00_设定集/风格库/风格示例.txt",
-        "00_设定集/风格库/参考素材.txt"
-      ]
+      pending_save: false,
+      requires_confirmation: true,
+      library_draft: { domain: "style", records: 3 }
     });
   });
 
-  it("routes lore_extract skill intent locally with multi-target pending-save metadata", async () => {
+  it("routes lore_extract skill intent to a confirmable library draft", async () => {
     const runtime = new AgentRuntimeService({
       projectRoot: tempDir,
       config: { configPath },
@@ -1806,11 +3423,11 @@ describe("agent-runtime chat flow", () => {
     const result = await runtime.runAgent(request);
 
     expect(result.intent).toBe("skill");
+    expect(result.requires_confirmation).toBe(true);
     expect(result.skill_result?.data).toMatchObject({
-      saved_paths: [
-        "00_设定集/设定集/人物设定.txt",
-        "00_设定集/设定集/体系设定.txt"
-      ]
+      saved_paths: [],
+      requires_confirmation: true,
+      library_draft: { domain: "lore", records: 2 }
     });
   });
 
@@ -1820,7 +3437,9 @@ describe("agent-runtime chat flow", () => {
       projectRoot: tempDir,
       config: { configPath },
       modelClient: {
-        requestCompletion: async () => responses.shift() || ""
+        requestCompletion: async (_config, messages) => messages.map((message) => message.content).join("\n").includes("只根据本批原文输出 JSON")
+          ? validDisassemblyBatchJson()
+          : responses.shift() || ""
       }
     });
 
@@ -1843,14 +3462,63 @@ describe("agent-runtime chat flow", () => {
     expect(result.saved_paths?.[0]).toContain("00_设定集/拆书库/");
     expect(result.saved_paths).toEqual([
       `${book?.dir}/拆书设定提取.txt`,
-      `${book?.dir}/反向细纲.txt`
+      `${book?.dir}/反向细纲.txt`,
+      `${book?.dir}/拆书报告.md`
     ]);
     expect(book?.paths?.lore).toBe(`${book?.dir}/拆书设定提取.txt`);
     expect(book?.paths?.reverse_outline).toBe(`${book?.dir}/反向细纲.txt`);
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "设定集", "拆书设定提取.txt"), "utf8")).toContain("林默");
-    expect(await fs.readFile(path.join(tempDir, "01_大纲", "反向细纲.txt"), "utf8")).toContain("第一章");
+    expect(runtime.listDurableRunEvents(result.run_id || "")).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event_type: "workflow.progress",
+        payload: expect.objectContaining({ skill_id: "disassemble_book", total: 4 })
+      })
+    ]));
+    await expect(fs.readFile(path.join(tempDir, "00_设定集", "设定集", "拆书设定提取.txt"), "utf8")).rejects.toThrow();
     expect(await fs.readFile(path.join(tempDir, book?.dir || "", "拆书设定提取.txt"), "utf8")).toContain("林默");
-    expect(await fs.readFile(path.join(tempDir, book?.dir || "", "反向细纲.txt"), "utf8")).toContain("第一章");
+    expect(await fs.readFile(path.join(tempDir, book?.dir || "", "反向细纲.txt"), "utf8")).toContain("## 逐章速览");
+  });
+
+  it("streams disassembly stage progress before the final result", async () => {
+    const responses = ["【人物设定】\n林默：主角，出身寒门。", "第一章：林默入宗门。"];
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: { requestCompletion: async (_config, messages) => messages.map((message) => message.content).join("\n").includes("只根据本批原文输出 JSON")
+        ? validDisassemblyBatchJson()
+        : responses.shift() || "" }
+    });
+    const events: AgentStreamEvent[] = [];
+
+    for await (const event of runtime.streamAgentRun({
+      request_id: "stream-disassembly-progress",
+      conversation_id: "",
+      content: "请拆书",
+      current_path: "",
+      selection: "林默从寒门少年一路成长为宗门天骄。",
+      project_context_hint: "",
+      skill_id: "disassemble_book",
+      attachment_ids: []
+    })) {
+      events.push(event);
+    }
+
+    const progress = events.filter(
+      (event): event is Extract<AgentStreamEvent, { type: "delta" }> => event.type === "delta" && event.stage === "workflow_progress"
+    );
+    expect(progress.map((event) => event.text)).toEqual(expect.arrayContaining([
+      expect.stringContaining("1/1"),
+      expect.stringContaining("2/4"),
+      expect.stringContaining("4/4")
+    ]));
+    const runId = events.find((event): event is Extract<AgentStreamEvent, { type: "start" }> => event.type === "start")?.run_id;
+    expect(runId).toBeTruthy();
+    expect(runtime.listDurableRunEvents(runId || "")).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        event_type: "workflow.progress",
+        payload: expect.objectContaining({ skill_id: "disassemble_book", total: 4 })
+      })
+    ]));
+    expect(events.at(-1)?.type).toBe("final");
   });
 
   it("runs continue_disassemble locally and writes 拆书细纲 into a fresh book directory", async () => {
@@ -1879,7 +3547,7 @@ describe("agent-runtime chat flow", () => {
     expect(result.intent).toBe("skill");
     expect(book?.dir).toContain("00_设定集/拆书库/");
     expect(result.saved_paths).toEqual([`${book?.dir}/拆书细纲.txt`]);
-    expect(await fs.readFile(path.join(tempDir, "01_大纲", "拆书细纲.txt"), "utf8")).toContain("第001章");
+    await expect(fs.readFile(path.join(tempDir, "01_大纲", "拆书细纲.txt"), "utf8")).rejects.toThrow();
     expect(await fs.readFile(path.join(tempDir, book?.dir || "", "拆书细纲.txt"), "utf8")).toContain("第001章");
   });
 
@@ -2163,7 +3831,7 @@ describe("agent-runtime chat flow", () => {
       score: 82,
       risks: ["人物动机略弱", "章纲钩子不够清晰"],
       reason: "整体连续性基本成立",
-      model_line: "primary-fallback"
+      model_line: "current-model-fallback"
     });
     expect(result.reply).toContain('"score": 82');
   });
@@ -2371,6 +4039,10 @@ describe("agent-runtime chat flow", () => {
       deslopped: true
     });
     expect(await fs.readFile(path.join(tempDir, "02_正文", "第001章.txt"), "utf8")).toContain("林默沿着石阶一步步向上");
+    expect(runtime.listDurableCommitJournal(result.run_id)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ target_path: expect.stringContaining("第001章.txt"), stage: "finalized" }),
+      expect.objectContaining({ target_path: expect.stringContaining("章节交接摘要.jsonl"), stage: "finalized" })
+    ]));
   });
 
   it("runs batch_generate locally and writes multiple chapter files", async () => {
@@ -2700,5 +4372,262 @@ describe("agent-runtime chat flow", () => {
     const updatedManifest = JSON.parse(await fs.readFile(manifestPath, "utf8"));
     expect(updatedManifest.selected_id).toBe("candidate_01");
     expect(updatedManifest.archived_paths.length).toBe(1);
+  });
+
+  it("commits a direct prompt skill through one durable run and replays its saved result", async () => {
+    let modelCalls = 0;
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => {
+          modelCalls += 1;
+          return "由 durable Prompt Skill 写入的大纲";
+        }
+      }
+    });
+    const request = {
+      request_id: "prompt-skill-durable-replay",
+      text: "生成大纲",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "生成并保存大纲",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: true,
+      attachment_ids: []
+    };
+
+    const first = await runtime.runDurableSkill("outline_generate", request);
+    const replay = await runtime.runDurableSkill("outline_generate", request);
+    const runId = String(first.data.run_id || "");
+
+    expect(modelCalls).toBe(2);
+    expect(first.saved_path).toBe("01_大纲/大纲.txt");
+    expect(first.data.saved_paths).toEqual(["01_大纲/大纲.txt"]);
+    expect(first.data).toMatchObject({
+      run_id: runId,
+      request_id: "prompt-skill-durable-replay",
+      replayed: false
+    });
+    expect(replay.data).toMatchObject({
+      run_id: runId,
+      request_id: "prompt-skill-durable-replay",
+      replayed: true
+    });
+    expect(runId).toMatch(/^run_/);
+    expect(runtime.getDurableRun(runId)?.status).toBe("completed");
+    expect(runtime.listDurableCommitJournal(runId)).toEqual([
+      expect.objectContaining({
+        run_id: runId,
+        action: "generated_cache.commit.target:01_大纲/大纲.txt",
+        stage: "finalized"
+      })
+    ]);
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8"))
+      .toBe("由 durable Prompt Skill 写入的大纲");
+    const cacheId = String(first.data.cache_id || "");
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    expect(await cache.get(cacheId)).toMatchObject({
+      status: "committed",
+      commit_run_id: runId,
+      commit_request_id: "prompt-skill-durable-replay"
+    });
+    await expect(cache.readContent(cacheId)).rejects.toThrow("正文不存在");
+  });
+
+  it("resumes the same prompt-skill run from its pending cache after journals finalize but outer completion fails", async () => {
+    let modelCalls = 0;
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => {
+          modelCalls += 1;
+          return "恢复窗口中的同一份大纲";
+        }
+      }
+    });
+    const coordinator = (runtime as any).runCoordinator;
+    const completeRun = coordinator.completeRun.bind(coordinator);
+    let failBeforeOuterCompletion = true;
+    coordinator.completeRun = (...args: any[]) => {
+      if (failBeforeOuterCompletion) {
+        failBeforeOuterCompletion = false;
+        throw new Error("simulated crash before outer completion");
+      }
+      return completeRun(...args);
+    };
+    const request = {
+      request_id: "prompt-skill-before-complete-recovery",
+      text: "生成大纲",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "生成并保存大纲",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: true,
+      attachment_ids: []
+    };
+
+    await expect(runtime.runDurableSkill("outline_generate", request))
+      .rejects.toThrow("simulated crash before outer completion");
+    const failedRun = runtime.listDurableRuns(["failed"], 10)[0];
+    expect(failedRun?.status).toBe("failed");
+    expect(runtime.listDurableCommitJournal(failedRun?.run_id)).toEqual([
+      expect.objectContaining({ stage: "finalized" })
+    ]);
+    const cacheRoot = path.join(tempDir, "00_设定集", ".agent", "generated_cache");
+    const cacheIds = await fs.readdir(cacheRoot);
+    expect(cacheIds).toHaveLength(1);
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    expect(await cache.get(cacheIds[0]!)).toMatchObject({ status: "pending" });
+    await expect(cache.readContent(cacheIds[0]!)).resolves.toBe("恢复窗口中的同一份大纲");
+
+    const recovered = await runtime.runDurableSkill("outline_generate", request);
+
+    expect(modelCalls).toBe(2);
+    expect(recovered.data.run_id).toBe(failedRun?.run_id);
+    expect(runtime.getDurableRun(String(recovered.data.run_id))?.status).toBe("completed");
+    expect(runtime.exportDurableRun(String(recovered.data.run_id)).attempts).toHaveLength(2);
+    expect(runtime.listDurableCommitJournal(String(recovered.data.run_id))).toHaveLength(1);
+    expect(await cache.get(cacheIds[0]!)).toMatchObject({
+      status: "committed",
+      commit_run_id: failedRun?.run_id
+    });
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8"))
+      .toBe("恢复窗口中的同一份大纲");
+  });
+
+  it("reconciles pending cache metadata from a completed prompt-skill observation without rerunning the model", async () => {
+    let modelCalls = 0;
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => {
+          modelCalls += 1;
+          return "已完成 run 的缓存待收口";
+        }
+      }
+    });
+    const runtimeCache = (runtime as any).cache as GeneratedCacheService;
+    const markCommitted = runtimeCache.markCommitted.bind(runtimeCache);
+    let failCacheFinalization = true;
+    runtimeCache.markCommitted = async (...args) => {
+      if (failCacheFinalization) {
+        failCacheFinalization = false;
+        throw new Error("simulated cache finalization failure");
+      }
+      return markCommitted(...args);
+    };
+    const request = {
+      request_id: "prompt-skill-after-complete-recovery",
+      text: "生成大纲",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "生成并保存大纲",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: true,
+      attachment_ids: []
+    };
+
+    const first = await runtime.runDurableSkill("outline_generate", request);
+    const runId = String(first.data.run_id || "");
+    const cacheId = String(first.data.cache_id || "");
+    expect(runtime.getDurableRun(runId)?.status).toBe("completed");
+    expect(await runtimeCache.get(cacheId)).toMatchObject({ status: "pending" });
+    await expect(runtimeCache.readContent(cacheId)).resolves.toBe("已完成 run 的缓存待收口");
+
+    const replay = await runtime.runDurableSkill("outline_generate", request);
+
+    expect(modelCalls).toBe(2);
+    expect(replay.data).toMatchObject({ run_id: runId, replayed: true });
+    expect(await runtimeCache.get(cacheId)).toMatchObject({
+      status: "committed",
+      commit_run_id: runId,
+      commit_request_id: request.request_id
+    });
+    await expect(runtimeCache.readContent(cacheId)).rejects.toThrow("正文不存在");
+  });
+
+  it("writes durable lore extraction only when the instruction explicitly requests save", async () => {
+    const loreDir = path.join(tempDir, "00_设定集", "设定集");
+    await fs.mkdir(loreDir, { recursive: true });
+    await fs.writeFile(path.join(loreDir, "人物设定.txt"), "林默：主角，出身寒门。", "utf8");
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "【人物设定】\n林默：主角，出身寒门；擅长隐忍。"
+      }
+    });
+
+    const result = await runtime.runDurableSkill("lore_extract", {
+      request_id: "prompt-skill-lore-merge",
+      text: "林默踏入宗门",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "提取设定并写入",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: true,
+      attachment_ids: []
+    });
+
+    const runId = String(result.data.run_id || "");
+    expect(result.data).toMatchObject({
+      saved_paths: [
+        "00_设定集/设定集/人物设定.txt",
+        "00_设定集/设定集/体系设定.txt",
+        "00_设定集/设定集/地图设定.txt",
+        "00_设定集/设定集/道具设定.txt"
+      ],
+      library: { domain: "lore", mode: "merge" }
+    });
+    expect(await fs.readFile(path.join(loreDir, "人物设定.txt"), "utf8"))
+      .toContain("林默");
+    expect(runtime.listDurableCommitJournal(runId)).toEqual([]);
+  });
+
+  it("does not let an explicit lore overwrite bypass draft confirmation", async () => {
+    const loreDir = path.join(tempDir, "00_设定集", "设定集");
+    await fs.mkdir(loreDir, { recursive: true });
+    await fs.writeFile(path.join(loreDir, "人物设定.txt"), "林默：旧设定，不应保留。", "utf8");
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () => "【人物设定】\n林默：新设定，已加入宗门。"
+      }
+    });
+
+    const result = await runtime.runDurableSkill("lore_extract", {
+      request_id: "prompt-skill-lore-overwrite",
+      text: "林默踏入宗门",
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 2500,
+      instruction: "提取人物设定并覆盖当前内容",
+      target_path: "",
+      conversation_id: "",
+      source_path: "",
+      write_result: true,
+      attachment_ids: []
+    });
+
+    const content = await fs.readFile(path.join(loreDir, "人物设定.txt"), "utf8");
+    expect(content).toBe("林默：旧设定，不应保留。");
+    expect(result.data).toMatchObject({ library_draft: { domain: "lore", records: 1, requires_confirmation: true } });
+    expect(runtime.listDurableCommitJournal(String(result.data.run_id || ""))).toEqual([]);
   });
 });

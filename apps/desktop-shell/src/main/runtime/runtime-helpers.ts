@@ -5,7 +5,12 @@ import { randomUUID } from "node:crypto";
 import type { RuntimeContext } from "./types.js";
 
 export async function ensureProjectSessionCurrent(context: RuntimeContext): Promise<CurrentProject> {
-  return context.projectSession.getCurrentProject();
+  const currentProject = await context.projectSession.getCurrentProject();
+  if (currentProject.path && context.projectIdentityRegistry) {
+    const projectId = await new ProjectManifestService(currentProject.path).getProjectId();
+    await context.projectIdentityRegistry.confirm(currentProject.path, projectId);
+  }
+  return currentProject;
 }
 
 export function startDocumentSession(sessions: Map<string, DocumentTimelineSession>, projectPath: string): DocumentTimelineSession {

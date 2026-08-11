@@ -65,6 +65,7 @@ export type GeneratedSavePlanInput = {
   currentPath?: string;
   chapter?: number;
   writeRequested?: boolean;
+  writeAuthorization?: "preview_required" | "explicit_commit";
 };
 
 export class GeneratedSavePlanner {
@@ -130,7 +131,7 @@ export class GeneratedSavePlanner {
           "路径必须是项目内相对路径，必须遵守旧项目目录规则。",
           "固定目标：大纲=01_大纲/大纲.txt，细纲=01_大纲/细纲.txt，章纲=01_大纲/章纲.txt，正文=02_正文/正文.txt。",
           "章节正文使用 02_正文/第XXX章.txt；人物/体系/地图/道具设定写入 00_设定集/设定集/；风格写入 00_设定集/风格库/写作风格.txt、风格示例.txt、参考素材.txt；题材写入 00_设定集/题材库/题材规则.txt、题材素材.txt、战斗模板.txt、违禁词.txt。",
-          "只有用户明确要求保存、写入、同步、追加、覆盖，或系统 writeRequested=true 时，才 should_auto_commit=true。",
+          "只有用户明确要求保存、写入、落盘、同步到文件，或系统 writeRequested=true 时，才 should_auto_commit=true。替换、覆盖、追加只表示写入方式，未明确保存时必须 requires_confirmation=true。",
           "覆盖已有内容、目标不清晰、拆分多文件或置信度低时 requires_confirmation=true。",
           '输出格式：{"action":"...","mode":"replace|append","target_paths":["..."],"segments":[{"target_path":"...","content":"...","mode":"replace|append","reason":"..."}],"reason":"...","confidence":0-1,"requires_confirmation":true|false,"should_auto_commit":true|false}'
         ].join("\n")
@@ -225,7 +226,9 @@ export class GeneratedSavePlanner {
   private async applyConfirmationPolicy(plan: GeneratedSavePlan, input: GeneratedSavePlanInput): Promise<GeneratedSavePlan> {
     const targetPaths = this.normalizeTargetPaths(plan.target_paths);
     const confidence = Math.max(0, Math.min(1, Number(plan.confidence || 0)));
-    const hasWriteIntent = Boolean(input.writeRequested || hasExplicitWriteIntent(input.instruction));
+    const hasWriteIntent = input.writeAuthorization
+      ? input.writeAuthorization === "explicit_commit"
+      : Boolean(input.writeRequested || hasExplicitWriteIntent(input.instruction));
     const lowConfidence = confidence < 0.58;
     const manyTargets = targetPaths.length > 1 && input.skillId !== "lore_extract" && input.skillId !== "style_extract" && input.skillId !== "genre_generate";
     const unclear = plan.action !== "no_save" && !targetPaths.length;
@@ -249,7 +252,8 @@ export class GeneratedSavePlanner {
       target_paths: targetPaths,
       confidence,
       requires_confirmation: requiresConfirmation,
-      should_auto_commit: Boolean(hasWriteIntent && plan.action !== "no_save" && targetPaths.length)
+      should_auto_commit: Boolean(hasWriteIntent && plan.action !== "no_save" && targetPaths.length),
+      write_authorization: hasWriteIntent ? "explicit_commit" : "preview_required"
     });
   }
 
@@ -392,7 +396,7 @@ export class GeneratedSavePlanner {
 }
 
 export function hasExplicitWriteIntent(text: string): boolean {
-  return /(同步|写入|保存|更新|替换|覆盖|落到|写回|补充|补全|完善|补齐|填充|配置好|设置好|建立|创建|追加|存到|写进|写到)/.test(text || "");
+  return /(同步|写入|保存|落到|写回|存到|写进|写到|创建文件|新建文件|建立文件|并保存|并写入|并落盘)/.test(text || "");
 }
 
 function clip(text: string, limit: number): string {

@@ -1,7 +1,13 @@
 import { loadModelConfig, loadPublicConfig, loadWebSearchConfig, type ConfigServiceOptions, type ModelConfig } from "@xiaoshuo/config-service";
 import { ConversationService } from "@xiaoshuo/conversation-service";
 import { DocumentService } from "@xiaoshuo/document-service";
-import { canRetryWithoutStream, OpenAICompatibleClient, type ChatCompletionMessage } from "@xiaoshuo/model-client";
+import {
+  canRetryWithoutStream,
+  OpenAICompatibleClient,
+  type ChatCompletionMessage,
+  type ModelCompletionResult,
+  type ModelRequestOptions
+} from "@xiaoshuo/model-client";
 import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
 import { SkillService } from "@xiaoshuo/skill-service";
 import { VectorIndex } from "@xiaoshuo/vector-service";
@@ -14,6 +20,7 @@ import {
   type ConversationAttachment,
   type ConversationDetail,
   type ConversationMessageRequest,
+  resolveModelRequestCapability,
   type SkillDefinition
 } from "@xiaoshuo/shared";
 import path from "node:path";
@@ -30,11 +37,13 @@ import {
 import { applyHumanizerIfEnabled } from "./humanizer.js";
 import { assembleContext } from "./kernel/context-assembler.js";
 import type { AssembledContext, ContextBlock } from "./kernel/context-block.js";
+import { scheduleModelContextBlocks } from "./context-scheduling.js";
 import { ProjectFileResolver } from "./kernel/project-file-resolver.js";
 import { buildReferenceContextBlocks } from "./kernel/reference-context.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import { splitVisibleStreamText } from "./stream.js";
 import { isCancellationError, throwIfAborted, type AgentRunOptions } from "./cancellation.js";
+import type { GovernedConversationMemory } from "./governed-memory-store.js";
 
 const MAX_RUNTIME_CONTEXT_CHARS = 8_000;
 const MAX_USER_INPUT_CHARS = 16_000;
@@ -42,7 +51,7 @@ const MAX_CONTEXT_CHARS = 36_000;
 const MAX_COMPACT_CONTEXT_CHARS = 14_000;
 
 type ChatModelClient = Pick<OpenAICompatibleClient, "requestCompletion"> &
-  Partial<Pick<OpenAICompatibleClient, "streamCompletion">>;
+  Partial<Pick<OpenAICompatibleClient, "streamCompletion" | "streamDetailedCompletion" | "requestDetailedCompletion">>;
 
 export type ChatContextAssemblyObserver = (event: { scope: string; context: AssembledContext }) => void;
 
@@ -58,6 +67,20 @@ export type AgentChatRunnerOptions = {
   config?: ConfigServiceOptions;
   modelClient?: ChatModelClient;
   webSearchClient?: WebSearchClient;
+  /** Product-owned toggle. `false` preserves the legacy character-budget assembler. */
+  useContextBudget?: () => boolean;
+  governedConversationMemory?: {
+    /** Runtime-owned flag check. A constructed adapter is not proof that the
+     * optional governed-memory store is enabled for this project. */
+    enabled?(): boolean;
+    load(conversationId: string): Promise<GovernedConversationMemory | null>;
+    upsert(input: Omit<GovernedConversationMemory, "projectId" | "memoryRevision" | "updatedAt">): Promise<GovernedConversationMemory>;
+  };
+  governedMemoryContext?: {
+    /** P4b selector: only confirmed claims may enter model context. */
+    enabled?(): boolean;
+    load(): Promise<string>;
+  };
 };
 
 export class AgentChatRunner {
@@ -69,6 +92,9 @@ export class AgentChatRunner {
   private readonly webSearchClient: WebSearchClient;
   private readonly skills: SkillService;
   private readonly fileResolver: ProjectFileResolver;
+  private readonly governedConversationMemory?: AgentChatRunnerOptions["governedConversationMemory"];
+  private readonly governedMemoryContext?: AgentChatRunnerOptions["governedMemoryContext"];
+  private readonly useContextBudget: () => boolean;
 
   constructor(options: AgentChatRunnerOptions) {
     this.projectRoot = path.resolve(options.projectRoot);
@@ -79,6 +105,9 @@ export class AgentChatRunner {
     this.webSearchClient = options.webSearchClient ?? new DefaultWebSearchClient();
     this.skills = new SkillService({ projectRoot: this.projectRoot });
     this.fileResolver = new ProjectFileResolver({ projectRoot: this.projectRoot, documents: this.documents });
+    this.governedConversationMemory = options.governedConversationMemory;
+    this.governedMemoryContext = options.governedMemoryContext;
+    this.useContextBudget = options.useContextBudget ?? (() => false);
   }
 
   async runAgent(
@@ -89,17 +118,19 @@ export class AgentChatRunner {
   ): Promise<AgentRunResponse> {
     throwIfAborted(options.signal);
     const state = await this.prepareConversationState(payload);
-    const config = await this.requireModelConfig();
+    const config = await this.requireModelConfig(state.detail);
+    const requestOptions = this.modelRequestOptions(state.detail, options.signal);
     const webSearchSources: WebSearchSource[] = [];
-    const messages = await this.buildMessages(state.detail, payload, config.thinking_enabled, false, webSearchSources, contextObserver);
+    const messages = await this.buildMessages(state.detail, payload, false, webSearchSources, contextObserver);
     throwIfAborted(options.signal);
 
     try {
-      const reply = String(await this.modelClient.requestCompletion(config, messages, config.temperature, { signal: options.signal })).trim();
+      const detailed = await this.completeDetailedOnce(config, messages, state.detail.reasoning_enabled, options, requestOptions);
+      const reply = detailed.answer;
       throwIfAborted(options.signal);
       const humanized = await this.humanizeConversationText(state.detail, reply, options);
       throwIfAborted(options.signal);
-      const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized);
+      const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized, detailed.reasoning);
       return this.buildResponse(intent, humanized.text, conversation, webSearchSources);
     } catch (error) {
       if (isCancellationError(error, options.signal)) {
@@ -108,13 +139,14 @@ export class AgentChatRunner {
       if (!looksGatewayTimeout(error)) {
         throw error;
       }
-      const compactMessages = await this.buildMessages(state.detail, payload, config.thinking_enabled, true, undefined, contextObserver);
+      const compactMessages = await this.buildMessages(state.detail, payload, true, undefined, contextObserver);
       throwIfAborted(options.signal);
-      const reply = String(await this.modelClient.requestCompletion(config, compactMessages, config.temperature, { signal: options.signal })).trim();
+      const detailed = await this.completeDetailedOnce(config, compactMessages, state.detail.reasoning_enabled, options, requestOptions);
+      const reply = detailed.answer;
       throwIfAborted(options.signal);
       const humanized = await this.humanizeConversationText(state.detail, reply, options);
       throwIfAborted(options.signal);
-      const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized);
+      const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized, detailed.reasoning);
       return this.buildResponse(intent, humanized.text, conversation, webSearchSources);
     }
   }
@@ -134,11 +166,14 @@ export class AgentChatRunner {
       skill_id: ""
     };
 
-    const config = await this.requireModelConfig();
+    const config = await this.requireModelConfig(state.detail);
+    const requestOptions = this.modelRequestOptions(state.detail, options.signal);
     const webSearchSources: WebSearchSource[] = [];
-    const baseMessages = await this.buildMessages(state.detail, payload, config.thinking_enabled, false, webSearchSources, contextObserver);
-    const compactMessages = await this.buildMessages(state.detail, payload, config.thinking_enabled, true, undefined, contextObserver);
+    const baseMessages = await this.buildMessages(state.detail, payload, false, webSearchSources, contextObserver);
+    const compactMessages = await this.buildMessages(state.detail, payload, true, undefined, contextObserver);
     const streamCompletion = this.modelClient.streamCompletion?.bind(this.modelClient);
+    const streamDetailedCompletion = this.modelClient.streamDetailedCompletion?.bind(this.modelClient);
+    const reasoningParts: string[] = [];
     const replyParts: string[] = [];
     let stoppedPersisted = false;
     const persistStoppedReply = async () => {
@@ -146,16 +181,69 @@ export class AgentChatRunner {
         return;
       }
       const partial = replyParts.join("").trim();
-      if (!partial) {
+      const reasoning = reasoningParts.join("").trim();
+      if (!partial && !reasoning) {
         return;
       }
       stoppedPersisted = true;
-      await this.persistStoppedAssistantReply(state.detail.id, partial, webSearchSources).catch(() => {});
+      await this.persistStoppedAssistantReply(state.detail.id, partial || "已停止。", webSearchSources, reasoning).catch(() => {});
     };
 
-    if (streamCompletion) {
+    if (streamDetailedCompletion) {
       try {
-        for await (const chunk of streamCompletion(config, baseMessages, config.temperature, { signal: options.signal })) {
+        for await (const chunk of streamDetailedCompletion(config, baseMessages, config.temperature, requestOptions)) {
+          throwIfAborted(options.signal);
+          if (!chunk.text) continue;
+          if (chunk.channel === "reasoning") {
+            if (!state.detail.reasoning_enabled) continue;
+            reasoningParts.push(chunk.text);
+            yield { type: "delta", channel: "reasoning", text: chunk.text };
+            continue;
+          }
+          replyParts.push(chunk.text);
+          for (const visibleChunk of splitVisibleStreamText(chunk.text)) {
+            yield { type: "delta", channel: "answer", text: visibleChunk };
+          }
+        }
+      } catch (error) {
+        if (isCancellationError(error, options.signal)) {
+          await persistStoppedReply();
+          throw error;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        if (replyParts.length || reasoningParts.length) {
+          yield { type: "error", message };
+          return;
+        }
+        try {
+          const fallback = looksGatewayTimeout(error)
+            ? await this.completeDetailedOnce(config, compactMessages, state.detail.reasoning_enabled, options, requestOptions)
+            : canRetryWithoutStream(message)
+              ? await this.completeDetailedOnce(config, baseMessages, state.detail.reasoning_enabled, options, requestOptions)
+              : { reasoning: "", answer: "" };
+          if (!fallback.answer && !looksGatewayTimeout(error) && !canRetryWithoutStream(message)) throw error;
+          if (fallback.reasoning) {
+            reasoningParts.push(fallback.reasoning);
+            yield { type: "delta", channel: "reasoning", text: fallback.reasoning };
+          }
+          if (fallback.answer) {
+            replyParts.push(fallback.answer);
+            for (const visibleChunk of splitVisibleStreamText(fallback.answer)) {
+              yield { type: "delta", channel: "answer", text: visibleChunk };
+            }
+          }
+        } catch (fallbackError) {
+          if (isCancellationError(fallbackError, options.signal)) {
+            await persistStoppedReply();
+            throw fallbackError;
+          }
+          yield { type: "error", message: fallbackError instanceof Error ? fallbackError.message : String(fallbackError) };
+          return;
+        }
+      }
+    } else if (streamCompletion) {
+      try {
+        for await (const chunk of streamCompletion(config, baseMessages, config.temperature, requestOptions)) {
           throwIfAborted(options.signal);
           if (!chunk) {
             continue;
@@ -164,6 +252,7 @@ export class AgentChatRunner {
           for (const visibleChunk of splitVisibleStreamText(chunk)) {
             yield {
               type: "delta",
+              channel: "answer",
               text: visibleChunk
             };
           }
@@ -183,9 +272,9 @@ export class AgentChatRunner {
         }
         try {
           const fallbackReply = looksGatewayTimeout(error)
-            ? await this.completeOnce(config, compactMessages, options)
+            ? await this.completeOnce(config, compactMessages, options, requestOptions)
             : canRetryWithoutStream(message)
-              ? await this.completeOnce(config, baseMessages, options)
+              ? await this.completeOnce(config, baseMessages, options, requestOptions)
               : "";
           if (!fallbackReply && !looksGatewayTimeout(error) && !canRetryWithoutStream(message)) {
             throw error;
@@ -195,6 +284,7 @@ export class AgentChatRunner {
             for (const visibleChunk of splitVisibleStreamText(fallbackReply)) {
               yield {
                 type: "delta",
+                channel: "answer",
                 text: visibleChunk
               };
             }
@@ -213,12 +303,13 @@ export class AgentChatRunner {
       }
     } else {
       try {
-        const reply = await this.completeOnce(config, baseMessages, options);
+        const reply = await this.completeOnce(config, baseMessages, options, requestOptions);
         if (reply) {
           replyParts.push(reply);
           for (const visibleChunk of splitVisibleStreamText(reply)) {
             yield {
               type: "delta",
+              channel: "answer",
               text: visibleChunk
             };
           }
@@ -232,12 +323,13 @@ export class AgentChatRunner {
           if (!looksGatewayTimeout(error)) {
             throw error;
           }
-          const reply = await this.completeOnce(config, compactMessages, options);
+          const reply = await this.completeOnce(config, compactMessages, options, requestOptions);
           if (reply) {
             replyParts.push(reply);
             for (const visibleChunk of splitVisibleStreamText(reply)) {
               yield {
                 type: "delta",
+                channel: "answer",
                 text: visibleChunk
               };
             }
@@ -258,12 +350,13 @@ export class AgentChatRunner {
 
     if (!replyParts.length) {
       try {
-        const reply = await this.completeOnce(config, baseMessages, options);
+        const reply = await this.completeOnce(config, baseMessages, options, requestOptions);
         if (reply) {
           replyParts.push(reply);
           for (const visibleChunk of splitVisibleStreamText(reply)) {
             yield {
               type: "delta",
+              channel: "answer",
               text: visibleChunk
             };
           }
@@ -287,13 +380,14 @@ export class AgentChatRunner {
       if (await this.shouldRunConversationHumanizer(state.detail, reply)) {
         yield {
           type: "delta",
+          channel: "answer",
           text: "",
           stage: "humanizer_start"
         };
       }
       const humanized = await this.humanizeConversationText(state.detail, reply, options);
       throwIfAborted(options.signal);
-      const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized);
+      const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized, reasoningParts.join(""));
       yield {
         type: "final",
         payload: this.buildResponse(intent, humanized.text, conversation, webSearchSources)
@@ -306,11 +400,38 @@ export class AgentChatRunner {
     }
   }
 
-  private async completeOnce(config: ModelConfig, messages: ChatCompletionMessage[], options: AgentRunOptions = {}): Promise<string> {
+  private async completeOnce(
+    config: ModelConfig,
+    messages: ChatCompletionMessage[],
+    options: AgentRunOptions = {},
+    requestOptions: Pick<ModelRequestOptions, "reasoningEffort"> = {}
+  ): Promise<string> {
     throwIfAborted(options.signal);
-    const reply = String(await this.modelClient.requestCompletion(config, messages, config.temperature, { signal: options.signal })).trim();
+    const reply = String(await this.modelClient.requestCompletion(config, messages, config.temperature, {
+      ...requestOptions,
+      signal: options.signal
+    })).trim();
     throwIfAborted(options.signal);
     return reply;
+  }
+
+  private async completeDetailedOnce(
+    config: ModelConfig,
+    messages: ChatCompletionMessage[],
+    reasoningEnabled: boolean,
+    options: AgentRunOptions = {},
+    requestOptions: Pick<ModelRequestOptions, "reasoningEffort"> = {}
+  ): Promise<ModelCompletionResult> {
+    throwIfAborted(options.signal);
+    if (reasoningEnabled && this.modelClient.requestDetailedCompletion) {
+      const result = await this.modelClient.requestDetailedCompletion(config, messages, config.temperature, {
+        ...requestOptions,
+        signal: options.signal
+      });
+      throwIfAborted(options.signal);
+      return { reasoning: String(result.reasoning || "").trim(), answer: String(result.answer || "").trim() };
+    }
+    return { reasoning: "", answer: await this.completeOnce(config, messages, options, requestOptions) };
   }
 
   private async prepareConversationState(payload: AgentRunRequest): Promise<{ detail: ConversationDetail }> {
@@ -381,11 +502,13 @@ export class AgentChatRunner {
     conversationId: string,
     reply: string,
     webSearchSources: WebSearchSource[] = [],
-    humanizer?: { applied: boolean; error?: string }
+    humanizer?: { applied: boolean; error?: string },
+    reasoningContent = ""
   ): Promise<ConversationDetail> {
     let detail = await this.conversations.appendMessage(conversationId, {
       role: "assistant",
       content: String(reply || "").trim() || "已完成。",
+      reasoning_content: String(reasoningContent || "").trim(),
       metadata: {
         ...(humanizer?.applied ? { humanized: true, humanizer_skill_id: "humanizer_zh" } : {}),
         ...(humanizer?.error ? { humanizer_error: humanizer.error } : {}),
@@ -397,17 +520,43 @@ export class AgentChatRunner {
       detail = await this.conversations.summarizeConversation(conversationId);
     }
 
+    await this.synchronizeGovernedConversationMemory(detail);
+
     return detail;
+  }
+
+  /**
+   * This is deliberately deterministic and only stores a conversation
+   * projection. It never creates or confirms a CanonClaim.
+   */
+  async synchronizeGovernedConversationMemory(detail: ConversationDetail): Promise<void> {
+    const adapter = this.governedConversationMemory;
+    if (!adapter || adapter.enabled?.() === false) {
+      return;
+    }
+    const derived = deriveGovernedConversationMemory(detail);
+    const existing = await adapter.load(detail.id);
+    await adapter.upsert({
+      ...derived,
+      confirmedFacts: mergeMemoryEntries(existing?.confirmedFacts, derived.confirmedFacts),
+      decisions: mergeMemoryEntries(existing?.decisions, derived.decisions),
+      rejectedOptions: mergeMemoryEntries(existing?.rejectedOptions, derived.rejectedOptions),
+      userPreferences: mergeMemoryEntries(existing?.userPreferences, derived.userPreferences),
+      openTasks: mergeMemoryEntries(existing?.openTasks, derived.openTasks),
+      sourceMessageIds: mergeMemoryEntries(existing?.sourceMessageIds, derived.sourceMessageIds)
+    });
   }
 
   private async persistStoppedAssistantReply(
     conversationId: string,
     partialReply: string,
-    webSearchSources: WebSearchSource[] = []
+    webSearchSources: WebSearchSource[] = [],
+    reasoningContent = ""
   ): Promise<ConversationDetail> {
     return this.conversations.appendMessage(conversationId, {
       role: "assistant",
       content: String(partialReply || "").trim() || "已停止。",
+      reasoning_content: String(reasoningContent || "").trim(),
       metadata: {
         stopped: true,
         cancelled: true,
@@ -416,24 +565,43 @@ export class AgentChatRunner {
     });
   }
 
-  private async requireModelConfig(): Promise<ModelConfig> {
+  private async requireModelConfig(detail?: Pick<ConversationDetail, "model_override">): Promise<ModelConfig> {
     const config = await loadModelConfig(this.config, "primary");
     if (!config.configured) {
       throw new Error("未配置主线路 API Key 或模型名。");
     }
-    return config;
+    const modelOverride = String(detail?.model_override || "").trim();
+    return modelOverride ? { ...config, model: modelOverride } : config;
+  }
+
+  private modelRequestOptions(
+    detail: Pick<ConversationDetail, "model_override" | "reasoning_enabled" | "reasoning_effort">,
+    signal?: AbortSignal
+  ): ModelRequestOptions {
+    if (!detail.reasoning_enabled) return { signal };
+    const modelId = String(detail.model_override || "").trim();
+    const capability = modelId ? resolveModelRequestCapability(modelId) : null;
+    const selected = detail.reasoning_effort || "medium";
+    const reasoningEffort = capability?.supportsReasoning
+      ? capability.reasoningEfforts.includes(selected)
+        ? selected
+        : capability.reasoningEfforts.length === 1
+          ? capability.reasoningEfforts[0]
+          : undefined
+      : selected;
+    return { signal, ...(reasoningEffort ? { reasoningEffort } : {}) };
   }
 
   private async buildMessages(
     detail: ConversationDetail,
     payload: AgentRunRequest,
-    thinkingEnabled: boolean,
     compact: boolean,
     webSearchSources?: WebSearchSource[],
     contextObserver?: ChatContextAssemblyObserver
   ): Promise<ChatCompletionMessage[]> {
     const continuity = await buildProjectContinuityContext(this.projectRoot);
     const attachments = await this.resolveAttachmentTexts(detail, payload.attachment_ids);
+    const governedSummary = this.governedConversationMemory ? await this.governedConversationMemory.load(detail.id) : null;
     const recentMessages = detail.messages
       .slice(compact ? -5 : -7, -1)
       .filter((message) => message.role === "user" || message.role === "assistant")
@@ -445,11 +613,20 @@ export class AgentChatRunner {
     const messages: ChatCompletionMessage[] = [
       {
         role: "system",
-        content: buildSystemPrompt(thinkingEnabled)
+        content: buildSystemPrompt()
       },
       {
         role: "system",
-        content: buildStableProjectContext(detail, continuity, attachments, compact, contextObserver, compact ? "agent_chat_stable_compact" : "agent_chat_stable")
+        content: buildStableProjectContext(
+          detail,
+          continuity,
+          attachments,
+          governedSummary,
+          compact,
+          this.useContextBudget(),
+          contextObserver,
+          compact ? "agent_chat_stable_compact" : "agent_chat_stable"
+        )
       }
     ];
 
@@ -477,40 +654,49 @@ export class AgentChatRunner {
   ): Promise<string> {
     const runtimeContext = await this.resolveRuntimeContext(payload, compact);
     const referenceBlocks = await this.resolveReferenceBlocks(payload, compact);
+    const governedMemoryContext = await this.resolveGovernedMemoryContext(compact);
     const limit = compact ? 3_000 : 5_000;
     const webSearchContext = await this.buildWebSearchContext(payload.content || "", runtimeContext, compact, webSearchSources);
-    const assembled = assembleContext(
-      [
+    const contextBlocks: ContextBlock[] = [
         {
           id: "turn_instructions",
           title: "本轮动态上下文说明",
-          source: "runtime",
+          source: "runtime" as const,
           priority: "critical",
           content: ["【本轮动态上下文】", "这些内容只用于当前这一轮的回答，优先级低于项目稳定上下文。"].join("\n")
         },
         {
           id: "runtime_context",
           title: "当前文档/选区/前端读取上下文",
-          source: "runtime",
+          source: "runtime" as const,
           priority: "high",
           content: `【当前文档/选区/前端读取上下文】\n${clipText(runtimeContext, limit) || "暂无"}`
         },
         ...referenceBlocks,
+        ...(governedMemoryContext ? [{
+          id: "governed_memory_context",
+          title: "已确认项目记忆",
+          source: "project" as const,
+          priority: "high" as const,
+          content: `【已确认项目记忆】\n${governedMemoryContext}`
+        }] : []),
         {
           id: "web_search_context",
           title: "联网搜索小说素材",
-          source: "web",
+          source: "web" as const,
           priority: "medium",
           content: `【联网搜索小说素材】\n${webSearchContext}`
         },
         {
           id: "user_input",
           title: "用户输入",
-          source: "conversation",
+          source: "conversation" as const,
           priority: "critical",
           content: `【用户输入】\n${clipText(payload.content || "", compact ? 8_000 : MAX_USER_INPUT_CHARS)}`
         }
-      ],
+      ];
+    const assembled = assembleContext(
+      scheduleContextBlocks(contextBlocks, this.useContextBudget(), compact),
       { budget: compact ? MAX_COMPACT_CONTEXT_CHARS : MAX_CONTEXT_CHARS }
     );
     return observeContextAssembly(compact ? "agent_chat_turn_compact" : "agent_chat_turn", assembled, contextObserver);
@@ -559,6 +745,17 @@ export class AgentChatRunner {
       });
     } catch {
       return [];
+    }
+  }
+
+  private async resolveGovernedMemoryContext(compact: boolean): Promise<string> {
+    if (!this.governedMemoryContext?.enabled?.()) {
+      return "";
+    }
+    try {
+      return clipText(await this.governedMemoryContext.load(), compact ? 2_000 : 6_000);
+    } catch {
+      return "";
     }
   }
 
@@ -724,12 +921,15 @@ export class AgentChatRunner {
       skill_id: resolvedSkillId
     };
 
-    const config = await this.requireModelConfig();
+    const config = await this.requireModelConfig(detail);
+    const requestOptions = this.modelRequestOptions(detail, options.signal);
     const skill = resolvedSkillId ? await this.skills.getSkill(resolvedSkillId).catch(() => null) : null;
     const webSearchSources: WebSearchSource[] = [];
-    const baseMessages = await this.buildConversationMessages(detail, payload, skill, config.thinking_enabled, false, webSearchSources);
-    const compactMessages = await this.buildConversationMessages(detail, payload, skill, config.thinking_enabled, true);
+    const baseMessages = await this.buildConversationMessages(detail, payload, skill, false, webSearchSources);
+    const compactMessages = await this.buildConversationMessages(detail, payload, skill, true);
     const streamCompletion = this.modelClient.streamCompletion?.bind(this.modelClient);
+    const streamDetailedCompletion = this.modelClient.streamDetailedCompletion?.bind(this.modelClient);
+    const reasoningParts: string[] = [];
     const replyParts: string[] = [];
     let stoppedPersisted = false;
     const persistStoppedReply = async () => {
@@ -737,28 +937,86 @@ export class AgentChatRunner {
         return;
       }
       const partial = replyParts.join("").trim();
-      if (!partial) {
+      const reasoning = reasoningParts.join("").trim();
+      if (!partial && !reasoning) {
         return;
       }
       stoppedPersisted = true;
-      await this.conversations
-        .appendMessage(conversationId, {
-          role: "assistant",
-          content: partial,
-          metadata: {
-            skill_id: detail.current_skill,
-            agent_name: detail.current_agent,
-            stopped: true,
-            cancelled: true,
-            ...(webSearchSources.length ? { web_search_sources: webSearchSources } : {})
-          }
-        })
-        .catch(() => {});
+      await this.persistStoppedAssistantReply(conversationId, partial || "已停止。", webSearchSources, reasoning).catch(() => {});
     };
 
-    if (streamCompletion) {
+    if (streamDetailedCompletion) {
       try {
-        for await (const chunk of streamCompletion(config, baseMessages, config.temperature, { signal: options.signal })) {
+        for await (const chunk of streamDetailedCompletion(config, baseMessages, config.temperature, requestOptions)) {
+          throwIfAborted(options.signal);
+          if (!chunk.text) {
+            continue;
+          }
+          if (chunk.channel === "reasoning") {
+            if (!detail.reasoning_enabled) {
+              continue;
+            }
+            reasoningParts.push(chunk.text);
+            yield {
+              type: "delta",
+              channel: "reasoning",
+              text: chunk.text
+            };
+            continue;
+          }
+          replyParts.push(chunk.text);
+          for (const visibleChunk of splitVisibleStreamText(chunk.text)) {
+            yield {
+              type: "delta",
+              channel: "answer",
+              text: visibleChunk
+            };
+          }
+        }
+      } catch (error) {
+        if (isCancellationError(error, options.signal)) {
+          await persistStoppedReply();
+          throw error;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        if (replyParts.length || reasoningParts.length) {
+          yield { type: "error", message };
+          return;
+        }
+        try {
+          const fallback = looksGatewayTimeout(error)
+            ? await this.completeDetailedOnce(config, compactMessages, detail.reasoning_enabled, options, requestOptions)
+            : canRetryWithoutStream(message)
+              ? await this.completeDetailedOnce(config, baseMessages, detail.reasoning_enabled, options, requestOptions)
+              : { reasoning: "", answer: "" };
+          if (!fallback.answer && !looksGatewayTimeout(error) && !canRetryWithoutStream(message)) {
+            throw error;
+          }
+          if (fallback.reasoning) {
+            reasoningParts.push(fallback.reasoning);
+            yield { type: "delta", channel: "reasoning", text: fallback.reasoning };
+          }
+          if (fallback.answer) {
+            replyParts.push(fallback.answer);
+            for (const visibleChunk of splitVisibleStreamText(fallback.answer)) {
+              yield { type: "delta", channel: "answer", text: visibleChunk };
+            }
+          }
+        } catch (fallbackError) {
+          if (isCancellationError(fallbackError, options.signal)) {
+            await persistStoppedReply();
+            throw fallbackError;
+          }
+          yield {
+            type: "error",
+            message: fallbackError instanceof Error ? fallbackError.message : String(fallbackError)
+          };
+          return;
+        }
+      }
+    } else if (streamCompletion) {
+      try {
+        for await (const chunk of streamCompletion(config, baseMessages, config.temperature, requestOptions)) {
           throwIfAborted(options.signal);
           if (!chunk) {
             continue;
@@ -766,6 +1024,7 @@ export class AgentChatRunner {
           replyParts.push(chunk);
           yield {
             type: "delta",
+            channel: "answer",
             text: chunk
           };
         }
@@ -784,9 +1043,9 @@ export class AgentChatRunner {
         }
         try {
           const fallbackReply = looksGatewayTimeout(error)
-            ? await this.completeOnce(config, compactMessages, options)
+            ? await this.completeOnce(config, compactMessages, options, requestOptions)
             : canRetryWithoutStream(message)
-              ? await this.completeOnce(config, baseMessages, options)
+              ? await this.completeOnce(config, baseMessages, options, requestOptions)
               : "";
           if (!fallbackReply && !looksGatewayTimeout(error) && !canRetryWithoutStream(message)) {
             throw error;
@@ -795,6 +1054,7 @@ export class AgentChatRunner {
             replyParts.push(fallbackReply);
             yield {
               type: "delta",
+              channel: "answer",
               text: fallbackReply
             };
           }
@@ -812,11 +1072,12 @@ export class AgentChatRunner {
       }
     } else {
       try {
-        const reply = await this.completeOnce(config, baseMessages, options);
+        const reply = await this.completeOnce(config, baseMessages, options, requestOptions);
         if (reply) {
           replyParts.push(reply);
           yield {
             type: "delta",
+            channel: "answer",
             text: reply
           };
         }
@@ -829,11 +1090,12 @@ export class AgentChatRunner {
           if (!looksGatewayTimeout(error)) {
             throw error;
           }
-          const reply = await this.completeOnce(config, compactMessages, options);
+          const reply = await this.completeOnce(config, compactMessages, options, requestOptions);
           if (reply) {
             replyParts.push(reply);
             yield {
               type: "delta",
+              channel: "answer",
               text: reply
             };
           }
@@ -853,11 +1115,12 @@ export class AgentChatRunner {
 
     if (!replyParts.length) {
       try {
-        const reply = await this.completeOnce(config, baseMessages, options);
+        const reply = await this.completeOnce(config, baseMessages, options, requestOptions);
         if (reply) {
           replyParts.push(reply);
           yield {
             type: "delta",
+            channel: "answer",
             text: reply
           };
         }
@@ -899,6 +1162,7 @@ export class AgentChatRunner {
       id: randomUUID().replaceAll("-", ""),
       role: "assistant" as const,
       content: reply || "已完成。",
+      reasoning_content: detail.reasoning_enabled ? reasoningParts.join("").trim() : "",
       created_at: getNowString(),
       metadata: {
         skill_id: detail.current_skill,
@@ -957,11 +1221,12 @@ export class AgentChatRunner {
   ): Promise<{ reply: string; webSearchSources: WebSearchSource[] }> {
     throwIfAborted(options.signal);
     const skill = detail.current_skill ? await this.skills.getSkill(detail.current_skill).catch(() => null) : null;
-    const config = await this.requireModelConfig();
+    const config = await this.requireModelConfig(detail);
+    const requestOptions = this.modelRequestOptions(detail, options.signal);
     const webSearchSources: WebSearchSource[] = [];
-    const messages = await this.buildConversationMessages(detail, payload, skill, config.thinking_enabled, false, webSearchSources);
+    const messages = await this.buildConversationMessages(detail, payload, skill, false, webSearchSources);
     try {
-      const reply = (await this.modelClient.requestCompletion(config, messages, config.temperature, { signal: options.signal })).trim();
+      const reply = (await this.modelClient.requestCompletion(config, messages, config.temperature, requestOptions)).trim();
       throwIfAborted(options.signal);
       return { reply, webSearchSources };
     } catch (error) {
@@ -971,8 +1236,8 @@ export class AgentChatRunner {
       if (!looksGatewayTimeout(error)) {
         throw error;
       }
-      const retryMessages = await this.buildConversationMessages(detail, payload, skill, config.thinking_enabled, true);
-      const reply = (await this.modelClient.requestCompletion(config, retryMessages, config.temperature, { signal: options.signal })).trim();
+      const retryMessages = await this.buildConversationMessages(detail, payload, skill, true);
+      const reply = (await this.modelClient.requestCompletion(config, retryMessages, config.temperature, requestOptions)).trim();
       throwIfAborted(options.signal);
       return { reply, webSearchSources };
     }
@@ -982,7 +1247,6 @@ export class AgentChatRunner {
     detail: ConversationDetail,
     payload: ConversationMessageRequest,
     skill: SkillDefinition | null,
-    thinkingEnabled: boolean,
     compact: boolean,
     webSearchSources?: WebSearchSource[]
   ): Promise<ChatCompletionMessage[]> {
@@ -996,8 +1260,8 @@ export class AgentChatRunner {
         content: clipText(message.content, compact ? 900 : 1800)
       })) as ChatCompletionMessage[];
 
-    const systemPrompt = this.buildConversationSystemPrompt(skill, detail.current_agent, thinkingEnabled);
-    const stableContext = buildStableProjectContext(detail, continuity, attachments, compact);
+    const systemPrompt = this.buildConversationSystemPrompt(skill, detail.current_agent);
+    const stableContext = buildStableProjectContext(detail, continuity, attachments, null, compact, this.useContextBudget());
     const taskInstruction = this.buildTaskInstruction(detail, skill);
 
     const messages: ChatCompletionMessage[] = [
@@ -1022,14 +1286,11 @@ export class AgentChatRunner {
     return messages;
   }
 
-  private buildConversationSystemPrompt(skill: SkillDefinition | null, agentName: string, thinkingEnabled: boolean): string {
+  private buildConversationSystemPrompt(skill: SkillDefinition | null, agentName: string): string {
     let base =
       "你是 ArcWriter 的本地项目助手。优先遵守项目状态、大纲、设定、风格库和题材库。" +
       "回答要直接可用，少解释，不要脱离现有项目乱扩设定。" +
       "你可以自主判断用户真实意图；本地文件、技能、索引和上下文由系统指路提供，不要被固定关键词束缚。";
-    if (thinkingEnabled) {
-      base += "\n思考模式已开启：先在内部判断任务类型、可用上下文、是否需要本地能力，再给出结果；不要输出思考过程，只输出可交付内容。";
-    }
     if (agentName) {
       base += `\n当前代理：${agentName}。`;
     }
@@ -1063,6 +1324,7 @@ export class AgentChatRunner {
     const vectorLimit = compact ? 1800 : 4000;
     const userLimit = compact ? 8000 : 16000;
     const referenceBlocks = await this.resolveConversationReferenceBlocks(payload, compact);
+    const governedMemoryContext = await this.resolveGovernedMemoryContext(compact);
 
     let vectorContext = "None";
     const vectorIndex = new VectorIndex(this.projectRoot);
@@ -1082,45 +1344,53 @@ export class AgentChatRunner {
     }
     const webSearchContext = await this.buildWebSearchContext(text, rtContext, compact, webSearchSources);
 
-    const assembled = assembleContext(
-      [
+    const contextBlocks: ContextBlock[] = [
         {
           id: "turn_instructions",
           title: "会话本轮动态上下文说明",
-          source: "runtime",
+          source: "runtime" as const,
           priority: "critical",
           content: ["【本轮动态上下文】", "这些内容每轮可能变化，优先级低于前置项目稳定上下文；只在与用户目标相关时使用。"].join("\n")
         },
         {
           id: "runtime_context",
           title: "当前文档/选区/前端读取上下文",
-          source: "runtime",
+          source: "runtime" as const,
           priority: "high",
           content: `【当前文档/选区/前端读取上下文】\n${clipText(rtContext, runtimeLimit) || "暂无"}`
         },
         ...referenceBlocks,
+        ...(governedMemoryContext ? [{
+          id: "governed_memory_context",
+          title: "已确认项目记忆",
+          source: "project" as const,
+          priority: "high" as const,
+          content: `【已确认项目记忆】\n${governedMemoryContext}`
+        }] : []),
         {
           id: "vector_context",
           title: "长期记忆召回",
-          source: "vector",
+          source: "vector" as const,
           priority: "medium",
           content: `【长期记忆召回】\n${clipText(vectorContext, vectorLimit)}`
         },
         {
           id: "web_search_context",
           title: "联网搜索小说素材",
-          source: "web",
+          source: "web" as const,
           priority: "medium",
           content: `【联网搜索小说素材】\n${webSearchContext}`
         },
         {
           id: "user_input",
           title: "用户输入",
-          source: "conversation",
+          source: "conversation" as const,
           priority: "critical",
           content: `【用户输入】\n${clipText(text, userLimit)}`
         }
-      ],
+      ];
+    const assembled = assembleContext(
+      scheduleContextBlocks(contextBlocks, this.useContextBudget(), compact),
       { budget: compact ? MAX_COMPACT_CONTEXT_CHARS : MAX_CONTEXT_CHARS }
     );
     return assembled.text;
@@ -1240,6 +1510,51 @@ export class AgentChatRunner {
   }
 }
 
+function formatGovernedConversationMemory(summary: GovernedConversationMemory, compact: boolean): string {
+  const sections = [
+    ["已确认会话事实", summary.confirmedFacts],
+    ["已作决定", summary.decisions],
+    ["已拒绝选项", summary.rejectedOptions],
+    ["用户偏好", summary.userPreferences],
+    ["未完成任务", summary.openTasks]
+  ] as const;
+  const body = sections
+    .filter(([, entries]) => entries.length)
+    .map(([title, entries]) => `【${title}】\n${entries.map((entry) => `- ${entry}`).join("\n")}`);
+  if (summary.currentGoal) {
+    body.unshift(`【当前目标】\n${summary.currentGoal}`);
+  }
+  return `结构化会话状态（memory revision ${summary.memoryRevision}，仅作上下文，不改变项目正典）：\n${clipText(body.join("\n"), compact ? 1_200 : 2_400)}`;
+}
+
+function deriveGovernedConversationMemory(detail: ConversationDetail): Omit<GovernedConversationMemory, "projectId" | "memoryRevision" | "updatedAt"> {
+  const userMessages = detail.messages.filter((message) => message.role === "user");
+  const extract = (expression: RegExp): string[] => userMessages.flatMap((message) => message.content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .flatMap((line) => {
+      const match = expression.exec(line);
+      return match?.[1]?.trim() ? [match[1].trim()] : [];
+    }));
+  const latestUser = userMessages.at(-1)?.content.trim() || "";
+  return {
+    conversationId: detail.id,
+    // Only explicit, labelled user statements enter structured fields. Model
+    // output is deliberately excluded from this automatic projection.
+    confirmedFacts: extract(/^(?:确认事实|设定事实|正典)\s*[:：]\s*(.+)$/),
+    decisions: extract(/^(?:决定|选择)\s*[:：]\s*(.+)$/),
+    rejectedOptions: extract(/^(?:拒绝|不采用)\s*[:：]\s*(.+)$/),
+    userPreferences: extract(/^(?:偏好|风格偏好)\s*[:：]\s*(.+)$/),
+    openTasks: extract(/^(?:待办|下一步)\s*[:：]\s*(.+)$/),
+    currentGoal: clipText(latestUser, 1_200),
+    sourceMessageIds: detail.messages.map((message) => message.id)
+  };
+}
+
+function mergeMemoryEntries(existing: readonly string[] | undefined, derived: readonly string[]): string[] {
+  return [...new Set([...(existing ?? []), ...derived].map((entry) => String(entry).trim()).filter(Boolean))];
+}
+
 function resolveWriteBackMode(payload: ConversationMessageRequest): "append" | "replace" {
   if (!payload.write_target?.trim()) {
     return "replace";
@@ -1256,22 +1571,21 @@ function getNowString(): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
-function buildSystemPrompt(thinkingEnabled: boolean): string {
-  const base =
+function buildSystemPrompt(): string {
+  return (
     "你是 ArcWriter 的本地项目助手。优先遵守项目状态、大纲、设定、风格库和题材库。" +
     "回答要直接可用，少解释，不要脱离现有项目乱扩设定。" +
-    "你可以主动综合当前项目上下文、固定上下文、附件摘录和当前文档内容来回答。";
-  if (!thinkingEnabled) {
-    return base;
-  }
-  return `${base}\n思考模式已开启：先在内部判断最相关上下文，再输出结果；不要展示思考过程。`;
+    "你可以主动综合当前项目上下文、固定上下文、附件摘录和当前文档内容来回答。"
+  );
 }
 
 function buildStableProjectContext(
   detail: ConversationDetail,
   continuity: Awaited<ReturnType<typeof buildProjectContinuityContext>>,
   attachments: Array<[ConversationAttachment, string]>,
+  governedSummary: GovernedConversationMemory | null,
   compact: boolean,
+  useContextBudget: boolean,
   contextObserver?: ChatContextAssemblyObserver,
   scope = compact ? "stable_project_context_compact" : "stable_project_context"
 ): string {
@@ -1298,6 +1612,16 @@ function buildStableProjectContext(
           source: "runtime",
           priority: "critical",
           content: "【自动压缩】已压缩项目上下文以避免超时，请优先完成用户当前目标。"
+        }
+      : null,
+    governedSummary
+      ? {
+          id: "governed_conversation_memory",
+          title: "结构化会话状态",
+          source: "conversation",
+          priority: "high",
+          maxChars: compact ? 1_200 : 2_400,
+          content: formatGovernedConversationMemory(governedSummary, compact)
         }
       : null,
     {
@@ -1361,13 +1685,19 @@ function buildStableProjectContext(
       content: `【固定上下文】\n${pinned}`
     }
   ].filter((block): block is ContextBlock => Boolean(block));
-  const assembled = assembleContext(blocks, { budget: compact ? MAX_COMPACT_CONTEXT_CHARS : MAX_CONTEXT_CHARS });
+  const assembled = assembleContext(scheduleModelContextBlocks(blocks, useContextBudget, compact), {
+    budget: compact ? MAX_COMPACT_CONTEXT_CHARS : MAX_CONTEXT_CHARS
+  });
   return observeContextAssembly(scope, assembled, contextObserver);
 }
 
 function observeContextAssembly(scope: string, context: AssembledContext, observer?: ChatContextAssemblyObserver): string {
   observer?.({ scope, context });
   return context.text;
+}
+
+function scheduleContextBlocks(blocks: ContextBlock[], enabled: boolean, compact: boolean): ContextBlock[] {
+  return scheduleModelContextBlocks(blocks, enabled, compact);
 }
 
 function clipText(text: string, limit: number): string {

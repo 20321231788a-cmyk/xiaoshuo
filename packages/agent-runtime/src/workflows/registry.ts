@@ -6,6 +6,7 @@ import { ContinueDisassembleWorkflow } from "./continue-disassemble.js";
 import { DisassembleBookWorkflow } from "./disassemble-book.js";
 import { NuwaStyleDistillWorkflow } from "./nuwa-style-distill.js";
 import { ScanPitsWorkflow } from "./scan-pits.js";
+import { StyleGenreGenerateWorkflow } from "./style-genre-generate.js";
 import type { WorkflowHandler } from "./types.js";
 
 export const WORKFLOW_SKILL_IDS = [
@@ -16,7 +17,8 @@ export const WORKFLOW_SKILL_IDS = [
   "consistency_check",
   "body_generate",
   "batch_generate",
-  "book_fusion"
+  "book_fusion",
+  "style_genre_generate"
 ] as const;
 
 export type WorkflowSkillId = (typeof WORKFLOW_SKILL_IDS)[number];
@@ -43,6 +45,7 @@ registerWorkflow(bodyGenerateWorkflow);
 registerWorkflow(new BatchGenerateWorkflow(bodyGenerateWorkflow));
 registerWorkflow(new ScanPitsWorkflow());
 registerWorkflow(new BookFusionWorkflow());
+registerWorkflow(new StyleGenreGenerateWorkflow());
 registerWorkflow(new NuwaStyleDistillWorkflow());
 registerWorkflow(new ContinueDisassembleWorkflow());
 registerWorkflow(new DisassembleBookWorkflow());

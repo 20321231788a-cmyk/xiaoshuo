@@ -1,0 +1,97 @@
+name: ArcWriter Small-Scale Formal Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: arcwriter-small-scale-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    name: Build and publish small-scale release
+    runs-on: windows-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        run: npx playwright install chromium
+
+      - name: Validate tagged version
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tagRef = gh api "/repos/$env:GITHUB_REPOSITORY/git/ref/tags/$env:GITHUB_REF_NAME" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $tagRef.object.type -ne 'tag') { throw 'Release tag must be an annotated tag' }
+          $tagObject = gh api "/repos/$env:GITHUB_REPOSITORY/git/tags/$($tagRef.object.sha)" | ConvertFrom-Json
+          if ($LASTEXITCODE -ne 0 -or $tagObject.object.type -ne 'commit') { throw 'Annotated release tag target is invalid' }
+          $version = [string](Get-Content apps/desktop-shell/package.json -Raw | ConvertFrom-Json).version
+          if ($version -notmatch '^\d+\.\d+\.\d+$' -or $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "Expected a matching three-part desktop version, found tag $env:GITHUB_REF_NAME and package version $version"
+          }
+          $sourceCommit = (git rev-list -n 1 $env:GITHUB_REF).Trim()
+          if ($sourceCommit -notmatch '^[0-9a-f]{40}$') { throw 'Unable to resolve tagged source commit' }
+          if ($tagObject.object.sha -ne $sourceCommit) { throw 'Remote tag target does not match checked-out source' }
+
+      - name: Run release checks
+        run: npm run acceptance:preview
+
+      - name: Package Windows installer
+        run: npm run dist -w @xiaoshuo/desktop-shell
+
+      - name: Stage release files
+        shell: pwsh
+        run: |
+          $releaseDirectory = Join-Path $env:GITHUB_WORKSPACE 'apps/desktop-shell/release'
+          $stageDirectory = Join-Path $env:GITHUB_WORKSPACE 'artifacts/release'
+          New-Item -ItemType Directory -Force -Path $stageDirectory | Out-Null
+          $version = [string](Get-Content apps/desktop-shell/package.json -Raw | ConvertFrom-Json).version
+          $installer = Join-Path $releaseDirectory "ArcWriter-Setup-$version.exe"
+          $blockmap = "$installer.blockmap"
+          $latest = Join-Path $releaseDirectory 'latest.yml'
+          foreach ($path in @($installer, $blockmap, $latest)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing release file: $path" }
+            Copy-Item -LiteralPath $path -Destination $stageDirectory
+          }
+          $files = @(Get-ChildItem -LiteralPath $stageDirectory -File)
+          if ($files.Count -ne 3) { throw 'Unexpected files in staged release directory' }
+
+      - name: Preserve installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: arcwriter-small-scale-${{ github.ref_name }}-${{ github.sha }}
+          path: artifacts/release
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish formal GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = [string](Get-Content apps/desktop-shell/package.json -Raw | ConvertFrom-Json).version
+          $notes = "docs/releases/v$version.md"
+          if (-not (Test-Path -LiteralPath $notes -PathType Leaf)) { throw "Missing release notes: $notes" }
+          $files = @(Get-ChildItem -LiteralPath artifacts/release -File)
+          gh release create $env:GITHUB_REF_NAME $files.FullName --verify-tag --latest --title "ArcWriter $version" --notes-file $notes
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub Release publication failed' }

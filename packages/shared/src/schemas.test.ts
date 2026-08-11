@@ -2,10 +2,16 @@ import { describe, expect, it } from "vitest";
 import {
   desktopShellCapabilitiesSchema,
   conversationMessageRequestSchema,
+  conversationDetailSchema,
+  coverGenerationRequestSchema,
+  coverHistoryResponseSchema,
+  normalizeAiModelOption,
+  resolveModelRequestCapability,
   documentInfoSchema,
   healthSchema,
   jobInfoSchema,
   localStateRecordProjectRequestSchema,
+  localStateRemoveRecentProjectRequestSchema,
   localStateSnapshotSchema,
   projectChromeSnapshotSchema,
   projectOpenRequestSchema,
@@ -56,6 +62,44 @@ describe("shared schemas", () => {
         confirm_write: true
       })
     ).toMatchObject({ insert_mode: "append", confirm_write: true });
+  });
+
+  it("supplies conversation model defaults without rewriting old payloads", () => {
+    const detail = conversationDetailSchema.parse({
+      id: "old-conversation",
+      title: "旧会话",
+      created_at: "",
+      updated_at: "",
+      current_skill: "",
+      current_agent: "",
+      message_count: 0,
+      attachment_count: 0,
+      summary: "",
+      pinned_context: [],
+      attachments: [],
+      messages: []
+    });
+    expect(detail).toMatchObject({ model_override: "", reasoning_effort: "medium" });
+  });
+
+  it("maps reasoning capabilities conservatively", () => {
+    expect(resolveModelRequestCapability("gpt-5-mini").reasoningEfforts).toEqual(["low", "medium", "high"]);
+    expect(resolveModelRequestCapability("deepseek-reasoner").reasoningEfforts).toEqual(["high"]);
+    expect(resolveModelRequestCapability("custom-chat", "unknown").reasoningEfforts).toEqual([]);
+    expect(normalizeAiModelOption({ id: "text-embedding-3-small" }).selectable).toBe(false);
+  });
+
+  it("validates cover requests and version history", () => {
+    const request = coverGenerationRequestSchema.parse({
+      mode: "text_to_image",
+      book_title: "  长夜行  ",
+      author_name: "南山",
+      font_style: "行草",
+      genre_style: "悬疑"
+    });
+    expect(request.book_title).toBe("长夜行");
+    expect(() => coverGenerationRequestSchema.parse({ ...request, mode: "image_to_image" })).toThrow("图生图模式需要参考图片");
+    expect(coverHistoryResponseSchema.parse({ records: [] }).records).toEqual([]);
   });
 
   it("accepts a minimal project chrome snapshot", () => {
@@ -182,8 +226,13 @@ describe("shared schemas", () => {
       path: snapshot.recent_projects[0]?.path,
       name: snapshot.recent_projects[0]?.name
     });
+    const removeRequest = localStateRemoveRecentProjectRequestSchema.parse({
+      path: ` ${snapshot.recent_projects[0]?.path} `
+    });
 
     expect(snapshot.recent_projects).toHaveLength(1);
     expect(recordRequest.opened_at).toBeUndefined();
+    expect(removeRequest.path).toBe(snapshot.recent_projects[0]?.path);
+    expect(() => localStateRemoveRecentProjectRequestSchema.parse({ path: "  " })).toThrow();
   });
 });

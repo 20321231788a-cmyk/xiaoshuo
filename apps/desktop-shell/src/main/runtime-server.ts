@@ -1,6 +1,6 @@
-import { AgentRuntimeService, encodeNdjsonEvent } from "@xiaoshuo/agent-runtime";
+import { encodeNdjsonEvent } from "@xiaoshuo/agent-runtime";
 import { loadPublicConfig, savePublicConfig } from "@xiaoshuo/config-service";
-import { DocumentService, type DocumentTimelineSession } from "@xiaoshuo/document-service";
+import { CanonicalProjectPathGuardError, DocumentService, type DocumentTimelineSession } from "@xiaoshuo/document-service";
 import { JobManager } from "@xiaoshuo/job-service";
 import { ProjectManifestService } from "@xiaoshuo/project-manifest";
 import { ProjectSessionService } from "@xiaoshuo/project-session";
@@ -13,27 +13,38 @@ import {
   cardDrawSelectRequestSchema,
   type CurrentProject
 } from "@xiaoshuo/shared";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
+import path from "node:path";
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { URL } from "node:url";
 import {
   addCorsHeaders,
   booleanValue,
+  closeProjectAgentRuntimes,
   createRequestAbortSignal,
   ensureDocumentSession,
   ensureProjectSessionCurrent,
+  getProjectAgentRuntime,
   handleAgentRoutes,
   handleAgentTraceRoutes,
   handleBaseRuntimeRoutes,
   handleConversationRoutes,
+  handleCoverRoutes,
+  handleFeedbackRoutes,
   handleGeneratedCacheRoutes,
   handleJobRoutes,
   handleProjectDocumentRoutes,
+  handleProjectLibraryRoutes,
+  handleReviewReportRoutes,
+  handleStoryPlanningRoutes,
   handleProjectReferenceRoutes,
   handleSkillRoutes,
   handleVectorRoutes,
   handleGraphRoutes,
+  handleMemoryRoutes,
+  handleModelDiscoveryRoutes,
   handleWebsiteAiRoutes,
+  runtimeRequestAccessStatus,
   listRuntimeJobs,
   matchCardDrawRoute,
   matchConversationRoute,
@@ -56,6 +67,7 @@ import {
   stringValue,
   stripTrailingSlash,
   type JsonRecord,
+  type CoverImageNormalizer,
   type RuntimeContext,
   type RuntimeServerOptions,
   type RuntimeServerState,
@@ -63,13 +75,20 @@ import {
   writeJson,
   writeNdjsonEvent
 } from "./runtime/index.js";
+import { ProjectIdentityRegistry, ProjectIdentityRegistryError } from "./project-identity-registry.js";
+import { loadDesktopAgentFeatureFlags } from "./agent-feature-flags.js";
 
 export { runtimeHost, runtimePort, runtimeUrl, type RuntimeServerOptions, type RuntimeServerState } from "./runtime/types.js";
 type ShellLike = { openPath: (target: string) => unknown };
 let shellBridge: ShellLike | null = null;
+let coverImageNormalizer: CoverImageNormalizer | null = null;
 
 export function registerRuntimeShell(shellLike: ShellLike): void {
   shellBridge = shellLike;
+}
+
+export function registerRuntimeCoverImageNormalizer(normalizer: CoverImageNormalizer): void {
+  coverImageNormalizer = normalizer;
 }
 
 export async function startRuntimeServer(options: RuntimeServerOptions): Promise<void> {
@@ -80,8 +99,29 @@ export async function startRuntimeServer(options: RuntimeServerOptions): Promise
   const jobManager = new JobManager({ idFactory: () => "ts-" + randomUUID().replace(/-/g, "") });
   const projectSession = new ProjectSessionService({ stateFilePath: options.stateFilePath });
   const documentSessions = options.state.documentSessions || new Map<string, DocumentTimelineSession>();
+  const agentRuntimes = options.state.agentRuntimes || new Map();
+  const projectIdentityRegistry = options.state.projectIdentityRegistry || new ProjectIdentityRegistry(
+    options.projectIdentityRegistryPath || path.join(path.dirname(options.stateFilePath), "project-identities.json")
+  );
+  const desktopFlags = !options.safeAgent && options.state.featureFlags
+    ? { featureFlags: options.state.featureFlags, autoRecoverStaleRuns: options.state.autoRecoverStaleRuns !== false }
+    : await loadDesktopAgentFeatureFlags(
+        options.agentFeatureFlagOverridesPath || path.join(path.dirname(options.stateFilePath), "agent-feature-flags.json"),
+        options.safeAgent ? [...process.argv, "--safe-agent"] : process.argv
+      );
+  // Browser E2E cannot use Electron's preload bridge. The explicit token is
+  // accepted only by the separately-gated test runtime process.
+  const sessionToken = process.env.XIAOSHUO_E2E_RUNTIME === "1" && process.env.XIAOSHUO_E2E_SESSION_TOKEN
+    ? process.env.XIAOSHUO_E2E_SESSION_TOKEN
+    : randomBytes(32).toString("base64url");
+  const allowedOrigins = runtimeAllowedOrigins();
   options.state.jobManager = jobManager;
   options.state.documentSessions = documentSessions;
+  options.state.agentRuntimes = agentRuntimes;
+  options.state.projectIdentityRegistry = projectIdentityRegistry;
+  options.state.featureFlags = desktopFlags.featureFlags;
+  options.state.autoRecoverStaleRuns = desktopFlags.autoRecoverStaleRuns;
+  options.state.sessionToken = sessionToken;
   const restoredProject = await projectSession.getCurrentProject();
   if (restoredProject.path) {
     startDocumentSession(documentSessions, restoredProject.path);
@@ -92,9 +132,20 @@ export async function startRuntimeServer(options: RuntimeServerOptions): Promise
       projectRoot: options.projectRoot,
       jobManager,
       projectSession,
-      documentSessions
+      documentSessions,
+      agentRuntimes,
+      projectIdentityRegistry,
+      featureFlags: desktopFlags.featureFlags,
+      autoRecoverStaleRuns: desktopFlags.autoRecoverStaleRuns,
+      sessionToken,
+      allowedOrigins
     }).catch((error) => {
       options.state.lastError = error instanceof Error ? error.message : String(error);
+      const code = runtimeScopeErrorCode(error);
+      if (error instanceof ProjectIdentityRegistryError || error instanceof CanonicalProjectPathGuardError || code) {
+        writeJson(response, 409, { detail: options.state.lastError, code: code || "PROJECT_SCOPE_REJECTED" });
+        return;
+      }
       writeJson(response, 500, { detail: options.state.lastError });
     });
   });
@@ -110,7 +161,17 @@ export async function startRuntimeServer(options: RuntimeServerOptions): Promise
   });
 }
 
+function runtimeScopeErrorCode(error: unknown): string {
+  const code = error && typeof error === "object" && "code" in error
+    ? String((error as { code?: unknown }).code || "")
+    : "";
+  return code.startsWith("PROJECT_SCOPE_") || code.startsWith("PROJECT_IDENTITY_") ? code : "";
+}
+
 export async function stopRuntimeServer(state: RuntimeServerState): Promise<void> {
+  closeProjectAgentRuntimes(state.agentRuntimes);
+  state.agentRuntimes = undefined;
+  state.sessionToken = undefined;
   const server = state.server;
   state.server = undefined;
   state.ready = false;
@@ -123,21 +184,50 @@ export async function stopRuntimeServer(state: RuntimeServerState): Promise<void
 }
 
 async function handleRuntimeRequest(request: IncomingMessage, response: ServerResponse, context: RuntimeContext): Promise<void> {
-  addCorsHeaders(response);
+  const origin = Array.isArray(request.headers.origin) ? request.headers.origin[0] || "" : request.headers.origin || "";
+  const url = new URL(request.url || "/", runtimeUrl);
+  const pathname = stripTrailingSlash(url.pathname);
+  const accessStatus = runtimeRequestAccessStatus(request, pathname, {
+    expectedHost: `${runtimeHost}:${runtimePort}`,
+    allowedOrigins: context.allowedOrigins || [],
+    sessionToken: context.sessionToken || ""
+  });
+  if (accessStatus === 403) {
+    writeJson(response, 403, { detail: "拒绝非本机来源或主机访问 ArcWriter 本地服务" });
+    return;
+  }
+  if (accessStatus === 401) {
+    writeJson(response, 401, { detail: "本地运行时会话未认证", code: "RUNTIME_SESSION_REQUIRED" });
+    return;
+  }
+  addCorsHeaders(response, origin, context.allowedOrigins || []);
   if (request.method === "OPTIONS") {
     response.writeHead(204);
     response.end();
     return;
   }
 
-  const url = new URL(request.url || "/", runtimeUrl);
-  const pathname = stripTrailingSlash(url.pathname);
-
   if (await handleBaseRuntimeRoutes(request, response, pathname, context, { readJsonBody, writeJson })) {
     return;
   }
 
+  if (await handleModelDiscoveryRoutes(request, response, pathname, { readJsonBody, writeJson })) {
+    return;
+  }
+
   if (await handleWebsiteAiRoutes(request, response, pathname, context, { readJsonBody, writeJson })) {
+    return;
+  }
+
+  if (await handleCoverRoutes(request, response, pathname, url.searchParams, context, {
+    ensureProjectSessionCurrent,
+    readRawBody,
+    parseJsonRecord,
+    createRequestAbortSignal,
+    writeJson,
+    openPath: (target) => shellBridge?.openPath(target),
+    normalizeImage: coverImageNormalizer
+  })) {
     return;
   }
 
@@ -160,6 +250,33 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
     return;
   }
 
+  if (await handleProjectLibraryRoutes(request, response, pathname, context, {
+    ensureProjectSessionCurrent,
+    ensureDocumentSession,
+    readJsonBody,
+    writeJson
+  })) {
+    return;
+  }
+
+  if (await handleStoryPlanningRoutes(request, response, pathname, context, {
+    ensureProjectSessionCurrent,
+    ensureDocumentSession,
+    readJsonBody,
+    writeJson
+  })) {
+    return;
+  }
+
+  if (await handleReviewReportRoutes(request, response, pathname, context, {
+    ensureProjectSessionCurrent,
+    ensureDocumentSession,
+    readJsonBody,
+    writeJson
+  })) {
+    return;
+  }
+
   if (await handleProjectReferenceRoutes(request, response, pathname, context, {
     ensureProjectSessionCurrent,
     readJsonBody,
@@ -170,21 +287,27 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
 
   if (await handleAgentRoutes(request, response, pathname, context, {
     ensureProjectSessionCurrent,
-    ensureDocumentSession,
     readJsonBody,
     readRawBody,
     parseJsonRecord,
-    booleanValue,
     rebuildProjectManifest,
     writeJson,
     writeNdjsonEvent,
     addCorsHeaders
-  })) {
+  }, url.searchParams)) {
     return;
   }
 
   if (await handleAgentTraceRoutes(request, response, pathname, url.searchParams, context, {
     ensureProjectSessionCurrent,
+    writeJson
+  })) {
+    return;
+  }
+
+  if (await handleFeedbackRoutes(request, response, pathname, context, {
+    ensureProjectSessionCurrent,
+    readJsonBody,
     writeJson
   })) {
     return;
@@ -217,10 +340,7 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
     const signal = createRequestAbortSignal(request, response);
     const rawBody = await readRawBody(request);
     const payload = cardDrawRequestSchema.parse(parseJsonRecord(rawBody));
-    const runtime = new AgentRuntimeService({
-      projectRoot: currentProject.path,
-      config: { rootDir: context.projectRoot, env: process.env }
-    });
+    const runtime = await getProjectAgentRuntime(context, currentProject.path);
     try {
       const result = await runtime.generateCardDraw(payload, () => undefined, { signal });
       if (!signal.aborted) {
@@ -247,10 +367,7 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
     }
     const rawBody = await readRawBody(request);
     const payload = cardDrawSelectRequestSchema.parse(parseJsonRecord(rawBody));
-    const runtime = new AgentRuntimeService({
-      projectRoot: currentProject.path,
-      config: { rootDir: context.projectRoot, env: process.env }
-    });
+    const runtime = await getProjectAgentRuntime(context, currentProject.path);
     try {
       const result = await runtime.selectCardDraw(cardDrawRoute.drawId, payload);
       await rebuildProjectManifest(currentProject.path);
@@ -306,6 +423,14 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
     return;
   }
 
+  if (await handleMemoryRoutes(request, response, pathname, context, {
+    ensureProjectSessionCurrent,
+    readJsonBody,
+    writeJson
+  })) {
+    return;
+  }
+
   if (await handleJobRoutes(request, response, pathname, context, {
     ensureProjectSessionCurrent,
     readJsonBody,
@@ -318,4 +443,17 @@ async function handleRuntimeRequest(request: IncomingMessage, response: ServerRe
   }
 
   writeJson(response, 404, { detail: `未找到该接口: ${request.method} ${pathname}` });
+}
+
+function runtimeAllowedOrigins(): string[] {
+  const origins = [runtimeUrl];
+  const rendererUrl = process.env.XIAOSHUO_RENDERER_URL;
+  if (rendererUrl) {
+    try {
+      origins.push(new URL(rendererUrl).origin);
+    } catch {
+      // Invalid renderer URLs are rejected by BrowserWindow loading before any request can be trusted.
+    }
+  }
+  return [...new Set(origins)];
 }

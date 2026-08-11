@@ -1,20 +1,25 @@
-import { loadModelConfig, type ConfigServiceOptions } from "@xiaoshuo/config-service";
+import { loadModelConfig, loadPublicConfig, loadTaskModelConfig, type ConfigServiceOptions, type ModelConfig } from "@xiaoshuo/config-service";
 import { ConversationService } from "@xiaoshuo/conversation-service";
-import { DocumentService } from "@xiaoshuo/document-service";
+import { DocumentService, ProjectLibraryService } from "@xiaoshuo/document-service";
 import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
 import { OpenAICompatibleClient, type ChatCompletionMessage } from "@xiaoshuo/model-client";
 import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
 import { SkillService } from "@xiaoshuo/skill-service";
-import { skillRunResponseSchema, skillDraftFromUrlRequestSchema, skillDraftResponseSchema, type AgentStreamEvent, type SkillDefinition, type SkillRunRequest, type SkillRunResponse, type SkillDraftFromUrlRequest, type SkillDraftResponse } from "@xiaoshuo/shared";
+import { skillRunResponseSchema, skillDraftFromUrlRequestSchema, skillDraftResponseSchema, type AgentStreamEvent, type GeneratedSavePlan, type ProjectLibraryRecord, type SkillDefinition, type SkillRunRequest, type SkillRunResponse, type SkillDraftFromUrlRequest, type SkillDraftResponse } from "@xiaoshuo/shared";
 import path from "node:path";
 import { HUMANIZER_SYSTEM_PROMPT, applyHumanizerIfEnabled } from "./humanizer.js";
 import { GeneratedSavePlanner } from "./generated-save-planner.js";
 import { assembleContext } from "./kernel/context-assembler.js";
 import type { ContextBlock } from "./kernel/context-block.js";
+import { scheduleModelContextBlocks } from "./context-scheduling.js";
 import { ProjectFileResolver } from "./kernel/project-file-resolver.js";
+import { createGeneratedLibraryDraft, recordsFromGeneratedSections } from "./library-draft.js";
+import { commitGeneratedStoryPlanning, isStoryPlanningGeneratedSkillId, type StoryPlanningGeneratedSkillId } from "./generated-story-planning.js";
+import { isSectionedGeneratedSkillId, sectionedGeneratedTargetPaths } from "./sectioned-generated-save.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
 import { streamModelText, StreamingGenerationSession, type StreamingModelClient } from "./stream.js";
 import { isCancellationError, throwIfAborted, type AgentRunOptions } from "./cancellation.js";
+import { skillRunResponseRequiresConfirmation } from "./pending-confirmation.js";
 
 const DEFAULT_TARGETS: Record<string, string> = {
   outline_generate: "01_大纲/大纲.txt",
@@ -28,25 +33,9 @@ const DEFAULT_TARGETS: Record<string, string> = {
   humanizer_zh: "02_正文/去AI味结果.txt"
 };
 
-const STYLE_SECTION_TARGETS: Record<string, string> = {
-  写作风格: "00_设定集/风格库/写作风格.txt",
-  风格示例: "00_设定集/风格库/风格示例.txt",
-  参考素材: "00_设定集/风格库/参考素材.txt"
-};
-
-const GENRE_SECTION_TARGETS: Record<string, string> = {
-  题材规则: "00_设定集/题材库/题材规则.txt",
-  题材素材: "00_设定集/题材库/题材素材.txt",
-  战斗模板: "00_设定集/题材库/战斗模板.txt",
-  违禁词: "00_设定集/题材库/违禁词.txt"
-};
-
-const LORE_SECTION_TARGETS: Record<string, string> = {
-  人物设定: "00_设定集/设定集/人物设定.txt",
-  体系设定: "00_设定集/设定集/体系设定.txt",
-  地图设定: "00_设定集/设定集/地图设定.txt",
-  道具设定: "00_设定集/设定集/道具设定.txt"
-};
+function defaultTargetForStoryPlanningSkill(skillId: StoryPlanningGeneratedSkillId): string {
+  return DEFAULT_TARGETS[skillId] || "01_大纲/大纲.txt";
+}
 
 const LORE_EXTRACT_SOURCE_FALLBACKS = ["01_大纲/章纲.txt", "01_大纲/细纲.txt", "01_大纲/大纲.txt"];
 
@@ -59,6 +48,7 @@ const PROMPT_SKILL_SOURCE_FALLBACKS: Record<string, string[]> = {
 
 const MAX_SOURCE_CHARS = 24_000;
 const MAX_COMPACT_PROMPT_CHARS = 12_000;
+const MAX_CONTINUATION_CHARS = 48;
 
 const STORY_DESLOP_SYSTEM_PROMPT = `
 你是 story-deslop 去AI味编辑。任务：检测并清除网文文本里的 AI 写作痕迹，让文字回到自然、有人味的状态。
@@ -86,6 +76,22 @@ export type PromptSkillRunnerOptions = {
   projectRoot: string;
   config?: ConfigServiceOptions;
   modelClient?: StreamingModelClient;
+  /** Product-owned P4a capability. False preserves the legacy assembler. */
+  useContextBudget?: () => boolean;
+};
+
+/**
+ * Keeps generation and its pending cache intact while leaving a durable caller
+ * responsible for committing document side effects through its journal.
+ */
+export type PromptSkillRunOptions = AgentRunOptions & {
+  deferAutoCommit?: boolean;
+  deterministicCacheId?: string;
+};
+
+/** Internal-only controls for composite workflows that own their output format. */
+type RawPromptSkillRunOptions = AgentRunOptions & {
+  systemPromptOverride?: string;
 };
 
 export class PromptSkillRunner {
@@ -98,6 +104,7 @@ export class PromptSkillRunner {
   private readonly modelClient: StreamingModelClient;
   private readonly savePlanner: GeneratedSavePlanner;
   private readonly fileResolver: ProjectFileResolver;
+  private readonly useContextBudget: () => boolean;
 
   constructor(options: PromptSkillRunnerOptions) {
     this.projectRoot = path.resolve(options.projectRoot);
@@ -107,6 +114,7 @@ export class PromptSkillRunner {
     this.cache = new GeneratedCacheService({ projectRoot: this.projectRoot });
     this.conversations = new ConversationService({ projectRoot: this.projectRoot });
     this.modelClient = options.modelClient ?? new OpenAICompatibleClient();
+    this.useContextBudget = options.useContextBudget ?? (() => false);
     this.fileResolver = new ProjectFileResolver({ projectRoot: this.projectRoot, documents: this.documents });
     this.savePlanner = new GeneratedSavePlanner({
       projectRoot: this.projectRoot,
@@ -120,7 +128,21 @@ export class PromptSkillRunner {
     return Boolean(skill && skill.handler_type === "prompt" && !LOCAL_BLOCKED_SKILLS.has(skill.id));
   }
 
-  async runSkill(skillId: string, payload: SkillRunRequest, options: AgentRunOptions = {}): Promise<SkillRunResponse> {
+  /**
+   * Generates a prompt-skill result without creating a cache, draft or file
+   * side effect.  Composite workflows own validation and their atomic commit.
+   */
+  async generateRawSkill(skillId: string, payload: SkillRunRequest, options: RawPromptSkillRunOptions = {}): Promise<string> {
+    throwIfAborted(options.signal);
+    const skill = await this.skills.getSkill(skillId);
+    if (!skill) throw new Error(`未知 skill: ${skillId}`);
+    if (skill.handler_type !== "prompt" || LOCAL_BLOCKED_SKILLS.has(skill.id)) {
+      throw new Error(`TS runtime 尚未接管该 skill: ${skillId}`);
+    }
+    return this.runPromptSkill(skill, payload, options);
+  }
+
+  async runSkill(skillId: string, payload: SkillRunRequest, options: PromptSkillRunOptions = {}): Promise<SkillRunResponse> {
     throwIfAborted(options.signal);
     const skill = await this.skills.getSkill(skillId);
     if (!skill) {
@@ -128,13 +150,18 @@ export class PromptSkillRunner {
     }
     if (skill.handler_type !== "prompt" || LOCAL_BLOCKED_SKILLS.has(skill.id)) {
       throw new Error(`TS runtime 尚未接管该 skill: ${skillId}`);
+    }
+
+    const restored = await this.restoreDeferredSkillResult(skill, payload, options);
+    if (restored) {
+      return restored;
     }
 
     const result = await this.runPromptSkill(skill, payload, options);
     return this.finalizePromptSkill(skill, payload, result, undefined, options);
   }
 
-  async *streamSkill(skillId: string, payload: SkillRunRequest, options: AgentRunOptions = {}): AsyncGenerator<AgentStreamEvent> {
+  async *streamSkill(skillId: string, payload: SkillRunRequest, options: PromptSkillRunOptions = {}): AsyncGenerator<AgentStreamEvent> {
     throwIfAborted(options.signal);
     const skill = await this.skills.getSkill(skillId);
     if (!skill) {
@@ -144,7 +171,16 @@ export class PromptSkillRunner {
       throw new Error(`TS runtime 尚未接管该 skill: ${skillId}`);
     }
 
-    const config = await loadModelConfig(this.config, "primary");
+    const restored = await this.restoreDeferredSkillResult(skill, payload, options);
+    if (restored) {
+      yield {
+        type: "final",
+        payload: await this.skillResponseToAgentResponse(skill, payload, restored)
+      };
+      return;
+    }
+
+    const config = await this.resolveSkillModelConfig(skill);
     if (!config.configured) {
       throw new Error("未配置主线路 API Key 或模型名。");
     }
@@ -156,14 +192,18 @@ export class PromptSkillRunner {
     const compactMessages = this.buildMessages(skill, systemPrompt, context, sourceText || payload.text, payload.instruction, true);
     const session = new StreamingGenerationSession(this.cache);
     const initialTargets = this.pendingSaveTargets(skill, payload);
-    const initial = await session.start({
-      source: "skill_stream",
-      target_paths: initialTargets,
-      skill_id: skill.id,
-      mode: "replace",
-      conversation_id: payload.conversation_id,
-      summary: `Skill 流式缓存：${skill.name}`
-    });
+    const deterministicCacheId = String(options.deterministicCacheId || "").trim();
+    let deterministicText = "";
+    const initial = deterministicCacheId
+      ? await this.startDeterministicStreamCache(deterministicCacheId, skill, payload, initialTargets)
+      : await session.start({
+        source: "skill_stream",
+        target_paths: initialTargets,
+        skill_id: skill.id,
+        mode: "replace",
+        conversation_id: payload.conversation_id,
+        summary: `Skill 流式缓存：${skill.name}`
+      });
 
     try {
       for await (const chunk of streamModelText({
@@ -175,7 +215,12 @@ export class PromptSkillRunner {
         signal: options.signal
       })) {
         throwIfAborted(options.signal);
-        await session.append(chunk);
+        if (deterministicCacheId) {
+          deterministicText += chunk;
+          await this.cache.append(deterministicCacheId, chunk);
+        } else {
+          await session.append(chunk);
+        }
         yield {
           type: "delta",
           text: chunk,
@@ -186,11 +231,41 @@ export class PromptSkillRunner {
           append_mode: "replace"
         };
       }
-      const raw = await session.finalize();
+      const raw = deterministicCacheId
+        ? await this.cache.get(deterministicCacheId)
+        : await session.finalize();
       throwIfAborted(options.signal);
-      const finalText = await this.applyDefaultDeslop(skill.id, session.text || "", options);
+      let streamedText = deterministicCacheId ? deterministicText : session.text || "";
+      const continuation = await this.continuePromptResult(
+        skill,
+        payload,
+        config,
+        messages,
+        streamedText,
+        options
+      );
+      if (continuation) {
+        streamedText += continuation;
+        if (deterministicCacheId) {
+          await this.cache.append(deterministicCacheId, continuation);
+        } else {
+          await session.append(continuation);
+        }
+        for (const visibleChunk of splitVisibleText(continuation)) {
+          yield {
+            type: "delta",
+            text: visibleChunk,
+            stage: "skill_continuation",
+            skill_id: skill.id,
+            cache_id: initial.cache_id,
+            target_paths: initialTargets,
+            append_mode: "append"
+          };
+        }
+      }
+      const finalText = await this.applyDefaultDeslop(skill.id, streamedText, options);
       throwIfAborted(options.signal);
-      if (finalText.trim() !== (session.text || "").trim()) {
+      if (finalText.trim() !== streamedText.trim()) {
         await this.cache.replace(initial.cache_id, finalText);
       }
       yield {
@@ -206,7 +281,11 @@ export class PromptSkillRunner {
         )
       };
     } catch (error) {
-      await session.fail(error);
+      if (deterministicCacheId) {
+        await this.cache.markFailed(deterministicCacheId, error instanceof Error ? error.message : String(error));
+      } else {
+        await session.fail(error);
+      }
       if (isCancellationError(error, options.signal)) {
         throw error;
       }
@@ -217,16 +296,41 @@ export class PromptSkillRunner {
     }
   }
 
-  private async runPromptSkill(skill: SkillDefinition, payload: SkillRunRequest, options: AgentRunOptions = {}): Promise<string> {
+  private async startDeterministicStreamCache(
+    cacheId: string,
+    skill: SkillDefinition,
+    payload: SkillRunRequest,
+    targetPaths: string[]
+  ): Promise<{ cache_id: string; cache_path: string; chars: number }> {
+    const existing = await this.cache.get(cacheId).catch(() => null);
+    if (existing && existing.status !== "pending") {
+      throw new Error(`确定性 Skill 流式缓存状态为 ${existing.status}，不能重新开始`);
+    }
+    const meta = existing || await this.cache.createWithId(cacheId, {
+      source: "skill_stream",
+      target_paths: targetPaths,
+      skill_id: skill.id,
+      mode: "replace",
+      conversation_id: payload.conversation_id,
+      summary: `Skill 流式缓存：${skill.name}`
+    });
+    if (meta.skill_id && meta.skill_id !== skill.id) {
+      throw new Error(`确定性 Skill 缓存已绑定到 ${meta.skill_id}`);
+    }
+    await this.cache.replace(cacheId, "");
+    return { cache_id: cacheId, cache_path: meta.cache_path, chars: 0 };
+  }
+
+  private async runPromptSkill(skill: SkillDefinition, payload: SkillRunRequest, options: RawPromptSkillRunOptions = {}): Promise<string> {
     throwIfAborted(options.signal);
-    const config = await loadModelConfig(this.config, "primary");
+    const config = await this.resolveSkillModelConfig(skill);
     if (!config.configured) {
       throw new Error("未配置主线路 API Key 或模型名。");
     }
 
     const context = await buildProjectContinuityContext(this.projectRoot);
     const sourceText = await this.resolvePromptSourceText(skill, payload);
-    const systemPrompt = this.resolveSystemPrompt(skill);
+    const systemPrompt = String(options.systemPromptOverride || this.resolveSystemPrompt(skill)).trim();
 
     try {
       const result = await this.modelClient.requestCompletion(
@@ -236,7 +340,8 @@ export class PromptSkillRunner {
         { signal: options.signal }
       );
       throwIfAborted(options.signal);
-      return this.applyDefaultDeslop(skill.id, result, options);
+      const completed = await this.continuePromptResult(skill, payload, config, this.buildMessages(skill, systemPrompt, context, sourceText || payload.text, payload.instruction, false), result, options);
+      return this.applyDefaultDeslop(skill.id, `${result}${completed}`, options);
     } catch (error) {
       if (isCancellationError(error, options.signal)) {
         throw error;
@@ -253,7 +358,44 @@ export class PromptSkillRunner {
       { signal: options.signal }
     );
     throwIfAborted(options.signal);
-    return this.applyDefaultDeslop(skill.id, compactResult, options);
+    const completed = await this.continuePromptResult(skill, payload, config, this.buildMessages(skill, systemPrompt, context, sourceText || payload.text, payload.instruction, true), compactResult, options);
+    return this.applyDefaultDeslop(skill.id, `${compactResult}${completed}`, options);
+  }
+
+  private async continuePromptResult(
+    skill: SkillDefinition,
+    payload: SkillRunRequest,
+    config: Awaited<ReturnType<typeof this.resolveSkillModelConfig>>,
+    baseMessages: ChatCompletionMessage[],
+    current: string,
+    options: AgentRunOptions
+  ): Promise<string> {
+    if (!shouldContinueGeneratedText(skill.id, payload, current)) {
+      return "";
+    }
+    let full = String(current || "");
+    const appended: string[] = [];
+    for (let attempt = 0; attempt < 2 && shouldContinueGeneratedText(skill.id, payload, full); attempt += 1) {
+      throwIfAborted(options.signal);
+      const continuation = await this.modelClient.requestCompletion(
+        config,
+        [
+          ...baseMessages,
+          { role: "assistant", content: full },
+          {
+            role: "user",
+            content: "上一段生成在这里被截断。请从最后一句继续，只输出尚未完成的内容，不要重复已有内容，不要解释。"
+          }
+        ],
+        config.temperature,
+        { signal: options.signal }
+      );
+      const text = String(continuation || "").trim();
+      if (!text) break;
+      appended.push(text);
+      full += text;
+    }
+    return appended.join("\n");
   }
 
   private buildMessages(
@@ -265,7 +407,7 @@ export class PromptSkillRunner {
     compact: boolean
   ): ChatCompletionMessage[] {
     const prompt = buildSkillPrompt(skill, context, sourceText, instruction, compact);
-    const assembled = assembleContext(prompt, {
+    const assembled = assembleContext(scheduleModelContextBlocks(prompt, this.useContextBudget(), compact), {
       mode: compact ? "compact_retry" : "prompt_skill",
       budget: compact ? MAX_COMPACT_PROMPT_CHARS : undefined,
       separator: "\n\n"
@@ -378,12 +520,74 @@ export class PromptSkillRunner {
     }
   }
 
+  private async restoreDeferredSkillResult(
+    skill: SkillDefinition,
+    payload: SkillRunRequest,
+    options: PromptSkillRunOptions
+  ): Promise<SkillRunResponse | null> {
+    const cacheId = String(options.deterministicCacheId || "").trim();
+    if (!cacheId || !options.deferAutoCommit) {
+      return null;
+    }
+    const meta = await this.cache.get(cacheId).catch(() => null);
+    if (!meta || meta.status !== "pending" || meta.skill_id !== skill.id || !meta.save_plan) {
+      return null;
+    }
+    const result = await this.cache.readContent(cacheId).catch(() => "");
+    if (!result.trim()) {
+      return null;
+    }
+    const savePlan = meta.save_plan;
+    const targetPaths = savePlan.target_paths.length ? savePlan.target_paths : this.pendingSaveTargets(skill, payload);
+    return skillRunResponseSchema.parse({
+      result,
+      saved_path: "",
+      data: {
+        skill_id: skill.id,
+        saved_paths: [],
+        pending_save: true,
+        target_paths: targetPaths,
+        target_path: targetPaths[0] || "",
+        result,
+        default_mode: savePlan.mode,
+        cache_id: cacheId,
+        cache_path: meta.cache_path,
+        cache_chars: meta.chars,
+        save_plan: savePlan,
+        deferred_commit: this.deferredCommitDescription(skill, payload, cacheId, savePlan, targetPaths)
+      }
+    });
+  }
+
+  private deferredCommitDescription(
+    skill: SkillDefinition,
+    payload: SkillRunRequest,
+    cacheId: string,
+    savePlan: GeneratedSavePlan,
+    targetPaths: string[]
+  ): Record<string, unknown> {
+    return {
+      kind: "prompt_skill_generated_cache",
+      cache_id: cacheId,
+      skill_id: skill.id,
+      mode: savePlan.mode,
+      target_paths: targetPaths,
+      save_plan: savePlan,
+      source: "prompt_skill",
+      summary: `Prompt Skill auto-commit: ${skill.name || skill.id}`,
+      requires_confirmation: Boolean(savePlan.requires_confirmation),
+      ...(skill.id === "lore_extract"
+        ? { lore_merge_existing: !shouldOverwriteLore(payload.instruction) }
+        : {})
+    };
+  }
+
   private async finalizePromptSkill(
     skill: SkillDefinition,
     payload: SkillRunRequest,
     result: string,
     existingCache?: { cacheId: string; cachePath?: string; cacheChars?: number },
-    options: AgentRunOptions = {}
+    options: PromptSkillRunOptions = {}
   ): Promise<SkillRunResponse> {
     throwIfAborted(options.signal);
     const humanized = await applyHumanizerIfEnabled({
@@ -436,7 +640,17 @@ export class PromptSkillRunner {
       throwIfAborted(options.signal);
       const entry = existingCache?.cacheId
         ? await this.cache.get(existingCache.cacheId)
-        : await this.cache.create({
+          : options.deterministicCacheId
+            ? await this.cache.createWithId(options.deterministicCacheId, {
+                source: "skill_result",
+                target_paths: targetPaths,
+                skill_id: skill.id,
+                mode: savePlan.mode,
+                conversation_id: payload.conversation_id,
+                summary: `Skill 结果缓存：${skill.name}`,
+                save_plan: savePlan
+              })
+            : await this.cache.create({
             source: "skill_result",
             target_paths: targetPaths,
             skill_id: skill.id,
@@ -444,32 +658,80 @@ export class PromptSkillRunner {
             conversation_id: payload.conversation_id,
             summary: `Skill 结果缓存：${skill.name}`,
             save_plan: savePlan
-          });
+              });
       if (!existingCache?.cacheId) {
         await this.cache.replace(entry.cache_id, finalResult);
       }
 
-      if (await this.savePlanner.shouldAutoCommit(savePlan)) {
+      const shouldAutoCommit = await this.savePlanner.shouldAutoCommit(savePlan);
+      if (isSectionedGeneratedSkillId(skill.id)) {
+        const directLibrarySave = Boolean(payload.write_result && shouldAutoCommit && hasExplicitLibrarySave(payload.instruction));
+        if (directLibrarySave) {
+          const committed = await this.commitGeneratedLibrary(skill.id, finalResult, payload.instruction);
+          savedPaths = committed.projection_paths;
+          savedPath = savedPaths[0] || "";
+          data.saved_paths = savedPaths;
+          data.library = {
+            domain: committed.domain,
+            revision: committed.revision,
+            records: committed.records.length,
+            mode: isReplaceLibraryInstruction(payload.instruction) ? "replace" : "merge"
+          };
+          data.pending_save = false;
+          data.requires_confirmation = false;
+          await this.cache.markCommitted(entry.cache_id, savedPaths, { cleanupContent: true });
+        } else {
+          const draft = await createGeneratedLibraryDraft({
+            projectRoot: this.projectRoot,
+            cacheId: entry.cache_id,
+            skillId: skill.id,
+            result: finalResult,
+            mode: savePlan.mode,
+            source: `prompt_skill:${skill.id}`
+          });
+          const draftPath = draft ? `00_设定集/.agent/library-drafts/${draft.draft_id}.jsonl` : "";
+          await this.cache.markCommitted(entry.cache_id, draftPath ? [draftPath] : [], { cleanupContent: false });
+          data.library_draft = draft ? {
+            draft_id: draft.draft_id,
+            domain: draft.domain,
+            records: draft.records.length,
+            requires_confirmation: true
+          } : undefined;
+          data.pending_save = false;
+          data.requires_confirmation = Boolean(draft);
+        }
+      } else if (shouldAutoCommit && !options.deferAutoCommit) {
         throwIfAborted(options.signal);
-        savedPaths =
-          skill.id === "style_extract"
-            ? await this.saveStyleSections(finalResult, savePlan.mode, {
-                summaryPrefix: "风格库确认保存"
-              })
-            : skill.id === "genre_generate"
-            ? await this.saveGenreSections(finalResult, savePlan.mode, {
-                summaryPrefix: "题材库确认保存"
-              })
-            : skill.id === "lore_extract"
-              ? await this.saveLoreSections(finalResult, savePlan.mode, {
-                  summaryPrefix: "设定提取确认保存",
-                  mergeExisting: !shouldOverwriteLore(payload.instruction)
-                })
-              : await this.cache.commitSavePlan(entry.cache_id, savePlan, {
-                cleanupContent: true
-              });
+        savedPaths = await this.cache.commitSavePlan(entry.cache_id, savePlan, {
+          cleanupContent: true
+        });
         savedPath = savedPaths[0] || "";
         data.saved_paths = savedPaths;
+        if (isStoryPlanningGeneratedSkillId(skill.id)) {
+          try {
+            const structured = await commitGeneratedStoryPlanning({
+              projectRoot: this.projectRoot,
+              skillId: skill.id,
+              content: finalResult,
+              mode: savePlan.mode,
+              modelClient: this.modelClient,
+              config: this.config,
+              signal: options.signal
+            });
+            data.story_planning = {
+              revision: structured.revision,
+              nodes: structured.nodes,
+              projection_paths: structured.savedPaths,
+              requires_confirmation: false
+            };
+            const library = await this.createAutomaticOutlineLoreDraft(skill.id, finalResult, payload, options);
+            if (library) {
+              data.library_draft = library;
+            }
+          } catch (error) {
+            data.postprocess_warning = error instanceof Error ? error.message : String(error);
+          }
+        }
         await this.cache.markCommitted(entry.cache_id, savedPaths, { cleanupContent: true });
       } else {
         const meta = await this.cache.get(entry.cache_id);
@@ -482,6 +744,9 @@ export class PromptSkillRunner {
         data.cache_path = meta.cache_path;
         data.cache_chars = meta.chars;
         data.save_plan = meta.save_plan || savePlan;
+        if (shouldAutoCommit && options.deferAutoCommit) {
+          data.deferred_commit = this.deferredCommitDescription(skill, payload, entry.cache_id, meta.save_plan || savePlan, targetPaths);
+        }
       }
     }
 
@@ -489,6 +754,60 @@ export class PromptSkillRunner {
       result: finalResult,
       saved_path: savedPath,
       data
+    });
+  }
+
+  /**
+   * Detailed setting extraction is deliberately limited to outline sources.
+   * Body chapters are handled by the one-sentence chapter recap pipeline.
+   */
+  private async createAutomaticOutlineLoreDraft(
+    skillId: StoryPlanningGeneratedSkillId,
+    content: string,
+    payload: SkillRunRequest,
+    options: PromptSkillRunOptions
+  ): Promise<Record<string, unknown> | undefined> {
+    const settings = await loadPublicConfig(this.config).catch(() => null);
+    if (!settings?.auto_lore_extract_enabled || !content.trim()) {
+      return undefined;
+    }
+    const result = await this.runSkill("lore_extract", {
+      text: content,
+      chapter: 0,
+      end_chapter: 0,
+      target_words: 0,
+      conversation_id: payload.conversation_id || "",
+      source_path: payload.target_path || defaultTargetForStoryPlanningSkill(skillId),
+      target_path: "",
+      instruction: "自动提取设定并合并写入保存：仅提取这份已经保存的大纲、细纲或章纲中明确出现的人物、世界观、体系、地图、道具与组织。不得臆造；通过校验后合并写入设定资料库及投影文件。",
+      write_result: true,
+      attachment_ids: []
+    }, options);
+    const library = result.data?.library;
+    if (!library || typeof library !== "object" || Array.isArray(library)) {
+      throw new Error("自动提取设定未返回可保存的资料库结果。");
+    }
+    return { ...(library as Record<string, unknown>), requires_confirmation: false, direct_saved: true };
+  }
+
+  private async commitGeneratedLibrary(
+    skillId: "style_extract" | "genre_generate" | "lore_extract",
+    content: string,
+    instruction: string
+  ) {
+    const domain = skillId === "style_extract" ? "style" : skillId === "genre_generate" ? "genre" : "lore";
+    const incoming = recordsFromGeneratedSections(skillId, content, "replace");
+    if (!incoming.length) throw new Error("生成资料未通过结构校验，未写入项目资料库。");
+    const libraries = new ProjectLibraryService({ projectRoot: this.projectRoot });
+    const current = await libraries.get(domain);
+    const replace = isReplaceLibraryInstruction(instruction);
+    const existing = current.status === "migration_required" ? current.migration_preview?.records || [] : current.records;
+    return libraries.save(domain, {
+      baseRevision: current.revision,
+      records: replace ? incoming : mergeLibraryRecords(existing, incoming),
+      source: `prompt_skill:${skillId}`,
+      summary: `${replace ? "替换" : "合并"}AI生成${domain === "style" ? "写作风格库" : domain === "genre" ? "题材库" : "设定资料库"}`,
+      allowProjectionDrift: replace
     });
   }
 
@@ -505,20 +824,20 @@ export class PromptSkillRunner {
       results: [],
       skill_result: result,
       saved_paths: savedPaths,
-      requires_confirmation: false,
+      requires_confirmation: skillRunResponseRequiresConfirmation(result),
       current_skill: skill.name || skill.id
     };
   }
 
   private pendingSaveTargets(skill: SkillDefinition, payload: SkillRunRequest): string[] {
     if (skill.id === "style_extract") {
-      return Object.values(STYLE_SECTION_TARGETS);
+      return sectionedGeneratedTargetPaths("style_extract");
     }
     if (skill.id === "genre_generate") {
-      return Object.values(GENRE_SECTION_TARGETS);
+      return sectionedGeneratedTargetPaths("genre_generate");
     }
     if (skill.id === "lore_extract") {
-      return Object.values(LORE_SECTION_TARGETS);
+      return sectionedGeneratedTargetPaths("lore_extract");
     }
     const explicit = normalizeOptionalPath(this.documents, payload.target_path);
     if (explicit) {
@@ -544,6 +863,18 @@ export class PromptSkillRunner {
       normalized.push(relPath);
     }
     return normalized;
+  }
+
+  /**
+   * Imported skills may retain the former secondary-line policy. That policy
+   * now means the selected task model, while an empty selection transparently
+   * falls back to the active main model.
+   */
+  private async resolveSkillModelConfig(skill: SkillDefinition): Promise<ModelConfig> {
+    if (skill.model_policy?.line === "task-model") {
+      return loadTaskModelConfig(this.config);
+    }
+    return loadModelConfig(this.config, "primary");
   }
 
   private async applyDefaultDeslop(skillId: string, value: string, options: AgentRunOptions = {}): Promise<string> {
@@ -600,125 +931,6 @@ export class PromptSkillRunner {
       return `${STORY_DESLOP_SYSTEM_PROMPT}\n\n用户手动调用时，仍然只返回去AI味后的文本。若用户明确要求检测报告，再单独输出简短报告。`;
     }
     return (skill.prompt || "").trim() || `你是小说创作技能：${skill.name}。${skill.description}`;
-  }
-
-  public async saveStyleSections(
-    result: string,
-    mode: "replace" | "append",
-    options: { summaryPrefix: string }
-  ): Promise<string[]> {
-    let sections = splitStyleSections(result);
-    if (!Object.keys(sections).length) {
-      const fallback = String(result || "").trim();
-      if (!fallback) {
-        return [];
-      }
-      sections = { 写作风格: fallback };
-    }
-
-    const savedPaths: string[] = [];
-    for (const [title, relPath] of Object.entries(STYLE_SECTION_TARGETS)) {
-      const body = String(sections[title] || "").trim();
-      if (!body) {
-        continue;
-      }
-      await this.saveGeneratedText(relPath, body, mode, `${options.summaryPrefix}：${title}`);
-      savedPaths.push(relPath);
-    }
-    return savedPaths;
-  }
-
-  public async saveGenreSections(
-    result: string,
-    mode: "replace" | "append",
-    options: { summaryPrefix: string }
-  ): Promise<string[]> {
-    let sections = splitGenreSections(result);
-    if (!Object.keys(sections).length) {
-      const fallback = String(result || "").trim();
-      if (!fallback) {
-        return [];
-      }
-      sections = { 题材规则: fallback };
-    }
-
-    const savedPaths: string[] = [];
-    for (const [title, relPath] of Object.entries(GENRE_SECTION_TARGETS)) {
-      const body = String(sections[title] || "").trim();
-      if (!body) {
-        continue;
-      }
-      await this.saveGeneratedText(relPath, body, mode, `${options.summaryPrefix}：${title}`);
-      savedPaths.push(relPath);
-    }
-    return savedPaths;
-  }
-
-  public async saveLoreSections(
-    result: string,
-    mode: "replace" | "append",
-    options: { summaryPrefix: string; mergeExisting: boolean }
-  ): Promise<string[]> {
-    const sections = splitLoreSections(result);
-    if (!Object.keys(sections).length) {
-      return [];
-    }
-
-    const savedPaths: string[] = [];
-    for (const [title, relPath] of Object.entries(LORE_SECTION_TARGETS)) {
-      const body = String(sections[title] || "").trim();
-      if (isEmptyLoreBody(body)) {
-        continue;
-      }
-      if (mode === "append") {
-        await this.saveGeneratedText(relPath, body, "append", `${options.summaryPrefix}：${title}`);
-        savedPaths.push(relPath);
-        continue;
-      }
-
-      let nextText = body;
-      if (options.mergeExisting) {
-        let existing = "";
-        try {
-          existing = await this.documents.readRawText(relPath);
-        } catch {
-          existing = "";
-        }
-        nextText = mergeLoreSectionText(title, existing, body);
-      }
-      if (!String(nextText || "").trim()) {
-        continue;
-      }
-      await this.documents.saveDocument(relPath, String(nextText).trim(), {
-        source: "skill",
-        summary: `${options.summaryPrefix}：${title}`
-      });
-      savedPaths.push(relPath);
-    }
-    return savedPaths;
-  }
-
-  private async saveGeneratedText(relPath: string, content: string, mode: "replace" | "append", summary: string): Promise<void> {
-    const targetPath = normalizeOptionalPath(this.documents, relPath);
-    if (!targetPath) {
-      throw new Error("保存目标不能为空");
-    }
-    const text = String(content || "").trim();
-    if (!text) {
-      throw new Error("生成内容为空，已阻止写入文件");
-    }
-    if (mode === "append") {
-      let existing = "";
-      try {
-        existing = await this.documents.readRawText(targetPath);
-      } catch {
-        existing = "";
-      }
-      const nextText = existing.trim() ? `${existing.trimEnd()}\n\n---\n${text}\n` : `${text}\n`;
-      await this.documents.saveDocument(targetPath, nextText, { source: "agent_generated_save", summary });
-      return;
-    }
-    await this.documents.saveDocument(targetPath, text, { source: "agent_generated_save", summary });
   }
 
   async draftSkillFromUrl(payload: SkillDraftFromUrlRequest, options: AgentRunOptions = {}): Promise<SkillDraftResponse> {
@@ -826,6 +1038,37 @@ function normalizeOptionalPath(documents: DocumentService, value: string): strin
   }
 }
 
+function shouldContinueGeneratedText(skillId: string, payload: SkillRunRequest, value: string): boolean {
+  const text = String(value || "").trim();
+  if (!text || text.length < 600) return false;
+  const targetWords = Math.max(0, Number(payload.target_words || 0));
+  if (targetWords > 0 && text.length >= Math.max(targetWords * 1.1, targetWords + 200)) return false;
+  const incompleteEnding = /[，、：:；;（(\[{]$/.test(text)
+    || /(?:未完|待续|后续|下一段|下文|如下：?)$/.test(text)
+    || !/[。！？!?…」』”"）)\]}]$/.test(text);
+  if (!incompleteEnding) return false;
+  // Very short metadata skills should not be expanded just because a model
+  // omitted terminal punctuation. Long-form story and outline skills benefit
+  // from one or two continuation calls when the answer visibly stops mid-flow.
+  return skillId.includes("outline") || skillId.includes("body") || skillId.includes("continue") || skillId.includes("batch") || Boolean(targetWords >= 3000);
+}
+
+function splitVisibleText(value: string): string[] {
+  const chars = Array.from(String(value || ""));
+  if (chars.length <= MAX_CONTINUATION_CHARS) return value ? [value] : [];
+  const chunks: string[] = [];
+  let current = "";
+  for (const char of chars) {
+    current += char;
+    if (Array.from(current).length >= MAX_CONTINUATION_CHARS && /[\s，。！？；：、,.!?;:\n]/u.test(char)) {
+      chunks.push(current);
+      current = "";
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
 function buildSkillPrompt(
   skill: SkillDefinition,
   context: Awaited<ReturnType<typeof buildProjectContinuityContext>>,
@@ -924,370 +1167,34 @@ function guardAgainstOverdelete(original: string, cleaned: string): string {
   return cleaned;
 }
 
-function splitStyleSections(result: string): Record<string, string> {
-  const text = String(result || "").trim();
-  if (!text) {
-    return {};
-  }
-
-  const sections: Record<string, string[]> = {
-    写作风格: [],
-    风格示例: [],
-    参考素材: []
-  };
-  const aliases: Record<string, keyof typeof sections> = {
-    写作风格: "写作风格",
-    写作风格规则: "写作风格",
-    文风规则: "写作风格",
-    文风: "写作风格",
-    风格示例: "风格示例",
-    风格示例特征: "风格示例",
-    参考素材: "参考素材",
-    参考素材摘要: "参考素材"
-  };
-
-  const heading =
-    /^[ \t]*(?:#{1,6}[ \t]*)?(?:[【\[])?[ \t]*(写作风格规则|写作风格|文风规则|文风|风格示例特征|风格示例|参考素材摘要|参考素材)[ \t]*(?:[】\]])?[ \t]*[:：]?[ \t]*$/gmu;
-  const matches = [...text.matchAll(heading)];
-  if (matches.length) {
-    for (let index = 0; index < matches.length; index += 1) {
-      const alias = (matches[index]?.[1] || "").trim();
-      const title = aliases[alias];
-      if (!title) {
-        continue;
-      }
-      const start = matches[index]?.index !== undefined ? matches[index]!.index! + matches[index]![0].length : 0;
-      const end = index + 1 < matches.length && matches[index + 1]?.index !== undefined ? matches[index + 1]!.index! : text.length;
-      const body = text.slice(start, end).trim();
-      if (body) {
-        sections[title]!.push(body);
-      }
-    }
-    return compactSections(sections);
-  }
-
-  const fenced = /\*\*(00_设定集\/风格库\/([^*\n]+?\.txt))\*\*\s*```(?:\w+)?\s*(.*?)```/gs;
-  for (const match of text.matchAll(fenced)) {
-    const filename = match[2] || "";
-    const body = String(match[3] || "").trim();
-    for (const [title, relPath] of Object.entries(STYLE_SECTION_TARGETS)) {
-      if (path.posix.basename(relPath) === filename && body) {
-        sections[title]!.push(body);
-      }
-    }
-  }
-
-  return compactSections(sections);
-}
-
-function splitGenreSections(result: string): Record<string, string> {
-  const text = String(result || "").trim();
-  if (!text) {
-    return {};
-  }
-
-  const sections: Record<string, string[]> = {
-    题材规则: [],
-    题材素材: [],
-    战斗模板: [],
-    违禁词: []
-  };
-  const aliases: Record<string, keyof typeof sections> = {
-    题材规则: "题材规则",
-    规则: "题材规则",
-    世界规则: "题材规则",
-    题材素材: "题材素材",
-    素材: "题材素材",
-    灵感素材: "题材素材",
-    脑洞素材: "题材素材",
-    战斗模板: "战斗模板",
-    冲突模板: "战斗模板",
-    冲突场景模板: "战斗模板",
-    场景模板: "战斗模板",
-    违禁词: "违禁词",
-    禁忌词: "违禁词",
-    禁用词: "违禁词"
-  };
-
-  const heading = /^[ \t]*(?:#{1,6}[ \t]*)?(?:[【\[])?[ \t]*(题材规则|规则|世界规则|题材素材|素材|灵感素材|脑洞素材|战斗模板|冲突模板|冲突场景模板|场景模板|违禁词|禁忌词|禁用词)[ \t]*(?:[】\]])?[ \t]*[:：]?[ \t]*$/gmu;
-  const matches = [...text.matchAll(heading)];
-  if (matches.length) {
-    for (let index = 0; index < matches.length; index += 1) {
-      const alias = (matches[index]?.[1] || "").trim();
-      const title = aliases[alias];
-      if (!title) {
-        continue;
-      }
-      const start = matches[index]?.index !== undefined ? matches[index]!.index! + matches[index]![0].length : 0;
-      const end = index + 1 < matches.length && matches[index + 1]?.index !== undefined ? matches[index + 1]!.index! : text.length;
-      const body = text.slice(start, end).trim();
-      if (body) {
-        sections[title]!.push(body);
-      }
-    }
-    return Object.fromEntries(
-      Object.entries(sections)
-        .map(([title, parts]) => [title, parts.join("\n\n").trim()])
-        .filter(([, body]) => Boolean(body))
-    );
-  }
-
-  const fenced = /\*\*(00_设定集\/题材库\/([^*\n]+?\.txt))\*\*\s*```(?:\w+)?\s*(.*?)```/gs;
-  for (const match of text.matchAll(fenced)) {
-    const filename = match[2] || "";
-    const body = String(match[3] || "").trim();
-    for (const [title, relPath] of Object.entries(GENRE_SECTION_TARGETS)) {
-      if (path.posix.basename(relPath) === filename && body) {
-        sections[title]!.push(body);
-      }
-    }
-  }
-
-  return Object.fromEntries(
-    Object.entries(sections)
-      .map(([title, parts]) => [title, parts.join("\n\n").trim()])
-      .filter(([, body]) => Boolean(body))
-  );
-}
-
-function compactSections(sections: Record<string, string[]>): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(sections)
-      .map(([title, parts]) => [title, parts.join("\n\n").trim()])
-      .filter(([, body]) => Boolean(body))
-  );
-}
-
-function splitLoreSections(result: string): Record<string, string> {
-  const text = String(result || "").trim();
-  if (!text) {
-    return {};
-  }
-
-  const sections: Record<string, string[]> = {
-    人物设定: [],
-    体系设定: [],
-    地图设定: [],
-    道具设定: []
-  };
-  const aliases: Record<string, keyof typeof sections> = {
-    人物: "人物设定",
-    人物设定: "人物设定",
-    角色: "人物设定",
-    角色设定: "人物设定",
-    体系: "体系设定",
-    体系设定: "体系设定",
-    世界观: "体系设定",
-    世界设定: "体系设定",
-    规则设定: "体系设定",
-    能力体系: "体系设定",
-    势力组织: "体系设定",
-    地图: "地图设定",
-    地图设定: "地图设定",
-    地点: "地图设定",
-    地点设定: "地图设定",
-    地理设定: "地图设定",
-    道具: "道具设定",
-    道具设定: "道具设定",
-    物品: "道具设定",
-    物品设定: "道具设定",
-    法宝设定: "道具设定",
-    装备设定: "道具设定"
-  };
-
-  const heading =
-    /^[ \t]*(?:#{1,6}[ \t]*)?(?:[【\[])?[ \t]*(人物设定|人物|角色设定|角色|体系设定|体系|世界观|世界设定|规则设定|能力体系|势力组织|地图设定|地图|地点设定|地点|地理设定|道具设定|道具|物品设定|物品|法宝设定|装备设定)[ \t]*(?:[】\]])?[ \t]*[:：]?[ \t]*$/gmu;
-  const matches = [...text.matchAll(heading)];
-  if (matches.length) {
-    for (let index = 0; index < matches.length; index += 1) {
-      const alias = (matches[index]?.[1] || "").trim();
-      const title = aliases[alias];
-      if (!title) {
-        continue;
-      }
-      const start = matches[index]?.index !== undefined ? matches[index]!.index! + matches[index]![0].length : 0;
-      const end = index + 1 < matches.length && matches[index + 1]?.index !== undefined ? matches[index + 1]!.index! : text.length;
-      const body = text.slice(start, end).trim();
-      if (body) {
-        sections[title]!.push(body);
-      }
-    }
-    return Object.fromEntries(
-      Object.entries(sections)
-        .map(([title, parts]) => [title, parts.join("\n\n").trim()])
-        .filter(([, body]) => Boolean(body))
-    );
-  }
-
-  for (const block of text.split(/\n{2,}/)) {
-    const clean = block.trim();
-    if (!clean) {
-      continue;
-    }
-    sections[classifyLoreBlock(clean)]!.push(clean);
-  }
-  return Object.fromEntries(
-    Object.entries(sections)
-      .map(([title, parts]) => [title, parts.join("\n\n").trim()])
-      .filter(([, body]) => Boolean(body))
-  );
-}
-
-function classifyLoreBlock(text: string): keyof typeof LORE_SECTION_TARGETS {
-  if (/道具|物品|法宝|武器|装备|丹药|符箓|灵器|宝物|剑|刀|枪|弓/.test(text)) {
-    return "道具设定";
-  }
-  if (/地图|地点|地名|地理|地域|城|镇|村|山|海|河|谷|洞府|秘境|遗迹|宫|殿/.test(text)) {
-    return "地图设定";
-  }
-  if (/人物|角色|主角|配角|姓名|身份|性格|动机|关系|师父|弟子|父|母|兄|姐|妹|男|女/.test(text)) {
-    return "人物设定";
-  }
-  if (/世界|规则|体系|组织|势力|宗门|家族|能力|功法|境界|修为|血脉|种族|法则|等级/.test(text)) {
-    return "体系设定";
-  }
-  return "体系设定";
-}
-
-function isEmptyLoreBody(text: string): boolean {
-  const cleaned = String(text || "").trim().replace(/^[\s\-*]+/, "").replace(/[ 。.；;]+$/g, "");
-  return !cleaned || ["无", "暂无", "未提取", "未发现", "没有内容"].includes(cleaned);
-}
-
 function shouldOverwriteLore(instruction: string): boolean {
   return /(覆盖|替换|清空.*重写|重写|改写).{0,12}(当前内容|原内容|设定集|设定卡|人物设定|体系设定|地图设定|道具设定)?/.test(
     instruction || ""
   );
 }
 
-function mergeLoreSectionText(title: string, existing: string, incoming: string): string {
-  const existingBlocks = loreMergeBlocks(existing, title);
-  const incomingBlocks = loreMergeBlocks(incoming, title);
-  const merged: string[] = [];
-  const keyToIndex = new Map<string, number>();
+function hasExplicitLibrarySave(instruction: string): boolean {
+  return /(保存|保存到|写入|写进|写到|落盘|落到|同步到)/.test(instruction || "");
+}
 
-  for (const block of existingBlocks) {
-    const key = loreMergeKey(block);
-    if (key) {
-      keyToIndex.set(key, merged.length);
-    }
-    merged.push(block);
+function isReplaceLibraryInstruction(instruction: string): boolean {
+  return /(创建|重建|替换|覆盖)/.test(instruction || "");
+}
+
+function mergeLibraryRecords(existing: ProjectLibraryRecord[], incoming: ProjectLibraryRecord[]): ProjectLibraryRecord[] {
+  const merged = existing.filter((record) => record.status === "active").map((record, index) => ({ ...record, order: index }));
+  const keys = new Set(merged.map(libraryRecordKey));
+  for (const record of incoming) {
+    const key = libraryRecordKey(record);
+    if (keys.has(key)) continue;
+    keys.add(key);
+    merged.push({ ...record, order: merged.length });
   }
-
-  for (const block of incomingBlocks) {
-    const key = loreMergeKey(block);
-    if (key && keyToIndex.has(key)) {
-      const index = keyToIndex.get(key)!;
-      merged[index] = mergeLoreDuplicate(merged[index] || "", block);
-      continue;
-    }
-    if (merged.some((item) => sameLoreDetail(item, block))) {
-      continue;
-    }
-    if (key) {
-      keyToIndex.set(key, merged.length);
-    }
-    merged.push(block);
-  }
-
-  return merged
-    .map((block) => block.trim())
-    .filter(Boolean)
-    .join("\n\n")
-    .trim();
+  return merged;
 }
 
-function loreMergeBlocks(text: string, sectionTitle: string): string[] {
-  const blocks: string[] = [];
-  const current: string[] = [];
-  const headingPattern = new RegExp(`^\\s*(?:[【\\[])?${escapeRegExp(sectionTitle)}(?:[】\\]])?\\s*[:：]?\\s*$`);
-
-  const flush = () => {
-    const block = current.join("\n").trim();
-    current.length = 0;
-    if (block && !isEmptyLoreBody(block)) {
-      blocks.push(block);
-    }
-  };
-
-  for (const rawLine of String(text || "").split(/\r?\n/)) {
-    const line = rawLine.replace(/\s+$/, "");
-    const stripped = line.trim();
-    if (!stripped || stripped === "---" || /^【自动提取[^】]*】$/.test(stripped) || headingPattern.test(stripped)) {
-      flush();
-      continue;
-    }
-    if (startsNewLoreItem(stripped) && current.length) {
-      flush();
-    }
-    current.push(stripped);
-  }
-  flush();
-  return blocks;
-}
-
-function startsNewLoreItem(line: string): boolean {
-  return /^[-*•]\s*\S{1,32}[：:]/.test(line) || /^\d+[.、]\s*\S{1,32}[：:]/.test(line) || /^\S{1,32}[：:]/.test(line);
-}
-
-function loreMergeKey(block: string): string {
-  const first = String(block || "")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find(Boolean) || "";
-  const cleaned = first.replace(/^[-*•\d.、\s]+/, "");
-  const match = /^([^：:\n]{1,32})[：:]/.exec(cleaned);
-  if (match) {
-    return match[1]!.replace(/\s+/g, "").toLowerCase();
-  }
-  return cleaned.replace(/\W+/gu, "").slice(0, 40).toLowerCase();
-}
-
-function mergeLoreDuplicate(existing: string, incoming: string): string {
-  const [oldKey, oldDetail] = splitLoreItem(existing);
-  const [newKey, newDetail] = splitLoreItem(incoming);
-  if (oldKey && newKey && oldKey === newKey) {
-    const details: string[] = [];
-    for (const detail of [oldDetail, newDetail]) {
-      for (const part of splitLoreDetailParts(detail)) {
-        if (!details.some((item) => sameLoreDetail(part, item))) {
-          details.push(part);
-        }
-      }
-    }
-    return details.length ? `${newKey}：${details.join("；")}` : incoming.trim();
-  }
-  if (sameLoreDetail(existing, incoming)) {
-    return existing.trim().length >= incoming.trim().length ? existing.trim() : incoming.trim();
-  }
-  return `${existing.trim()}\n${incoming.trim()}`.trim();
-}
-
-function splitLoreItem(block: string): [string, string] {
-  const text = String(block || "").trim().replace(/^[-*•\d.、\s]+/, "");
-  const match = /^([^：:\n]{1,32})[：:]\s*(.*)$/s.exec(text);
-  if (!match) {
-    return ["", text];
-  }
-  return [match[1]!.replace(/\s+/g, "").trim(), match[2]!.trim()];
-}
-
-function splitLoreDetailParts(detail: string): string[] {
-  const parts = String(detail || "")
-    .split(/[；;]\s*|\n+/)
-    .map((part) => part.trim().replace(/[。；;]+$/g, ""))
-    .filter(Boolean);
-  return parts.length ? parts : String(detail || "").trim() ? [String(detail).trim()] : [];
-}
-
-function sameLoreDetail(left: string, right: string): boolean {
-  const leftNorm = String(left || "").replace(/\s+/g, "");
-  const rightNorm = String(right || "").replace(/\s+/g, "");
-  return Boolean(leftNorm && rightNorm && (leftNorm.includes(rightNorm) || rightNorm.includes(leftNorm)));
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function libraryRecordKey(record: ProjectLibraryRecord): string {
+  return `${record.kind}:${String(record.name || "").replace(/\s+/g, "").toLowerCase()}`;
 }
 
 const MAX_SKILL_TEXT_CHARS = 120000;

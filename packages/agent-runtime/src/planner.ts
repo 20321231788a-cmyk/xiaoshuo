@@ -22,7 +22,7 @@ const FIXED_TEXT_TARGETS: Record<string, string> = {
 export type AgentPlannerOptions = {
   projectRoot: string;
   config?: ConfigServiceOptions;
-  modelClient?: Pick<OpenAICompatibleClient, "requestCompletion"> & Partial<Pick<OpenAICompatibleClient, "streamCompletion">>;
+  modelClient?: Pick<OpenAICompatibleClient, "requestCompletion"> & Partial<Pick<OpenAICompatibleClient, "streamCompletion" | "streamDetailedCompletion" | "requestDetailedCompletion">>;
   webSearchClient?: import("./web-search.js").WebSearchClient;
 };
 
@@ -78,8 +78,13 @@ export class AgentPlanner {
     }
 
     try {
-      const content = await this.modelClient.requestCompletion(config, this.buildPlannerMessages(input.instruction, docs), 0.1, { signal: options.signal });
-      const parsed = this.parseJson(content);
+      const raw = await this.modelClient.requestCompletion(
+        config,
+        this.buildPlannerMessages(input.instruction, docs),
+        0.1,
+        { signal: options.signal }
+      );
+      const parsed = agentPlanResponseSchema.parse(this.parseJson(raw));
       const rawOperations = Array.isArray(parsed.operations) ? parsed.operations : [];
       if (!rawOperations.length) {
         warnings.push("AI 未返回有效 operations。");
@@ -171,6 +176,7 @@ export class AgentPlanner {
           "固定写入目标：大纲=01_大纲/大纲.txt，细纲=01_大纲/细纲.txt，章纲=01_大纲/章纲.txt，正文=02_正文/正文.txt。",
           "设定集卡片固定路径：00_设定集/设定集/人物设定.txt、体系设定.txt、地图设定.txt、道具设定.txt。",
           "如果用户要生成新内容并落到项目文档，operations 不能为空，text 必须包含要写入的正文。",
+          "不适用的 text、old_text、new_text、target_path、reason 必须输出空字符串，不得输出 null。",
           '输出格式：{"summary":"...","operations":[{"action":"...","path":"...","target_path":"...","text":"...","old_text":"...","new_text":"...","reason":"..."}]}'
         ].join("\n")
       },

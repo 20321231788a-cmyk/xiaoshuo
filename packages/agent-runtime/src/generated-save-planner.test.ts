@@ -71,4 +71,35 @@ describe("GeneratedSavePlanner", () => {
     expect(plan.requires_confirmation).toBe(true);
     expect(plan.should_auto_commit).toBe(false);
   });
+
+  it("keeps replacement mode pending when the user did not explicitly authorize saving", async () => {
+    const planner = new GeneratedSavePlanner({ projectRoot: tempDir });
+
+    const plan = await planner.planGeneratedSave({
+      instruction: "先整大纲，给我前十章大纲，完全替换当前大纲",
+      content: "### 第一章\n觉醒仪式\n\n### 第二章\n第一次冲突",
+      source: "skill",
+      skillId: "outline_generate"
+    });
+
+    expect(plan.mode).toBe("replace");
+    expect(plan.write_authorization).toBe("preview_required");
+    expect(plan.requires_confirmation).toBe(true);
+    expect(plan.should_auto_commit).toBe(false);
+  });
+
+  it("only auto-commits when saving is explicit, not merely because replacement was requested", async () => {
+    const planner = new GeneratedSavePlanner({ projectRoot: tempDir });
+
+    const plan = await planner.planGeneratedSave({
+      instruction: "生成大纲并保存到大纲",
+      content: "新大纲内容",
+      source: "skill",
+      skillId: "outline_generate"
+    });
+
+    expect(plan.write_authorization).toBe("explicit_commit");
+    expect(plan.requires_confirmation).toBe(false);
+    expect(plan.should_auto_commit).toBe(true);
+  });
 });

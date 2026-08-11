@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-08-10T00:00:00.000Z",
+  "title": "Design System: ArcWriter",
+  "extensions": {
+    "colorMeta": {
+      "ink": { "role": "neutral", "displayName": "Violet Ink", "canonical": "oklch(25% 0.018 285)", "tonalRamp": ["oklch(15% 0.018 285)", "oklch(25% 0.018 285)", "oklch(34% 0.018 285)", "oklch(44% 0.018 285)", "oklch(52% 0.018 285)", "oklch(64% 0.014 285)", "oklch(78% 0.012 285)", "oklch(92% 0.01 285)"] },
+      "paper": { "role": "neutral", "displayName": "Warm Paper", "canonical": "oklch(98.4% 0.012 82)", "tonalRamp": ["oklch(35% 0.012 82)", "oklch(48% 0.012 82)", "oklch(60% 0.012 82)", "oklch(72% 0.012 82)", "oklch(82% 0.012 82)", "oklch(90% 0.012 82)", "oklch(96.8% 0.017 82)", "oklch(98.4% 0.012 82)"] },
+      "stone": { "role": "neutral", "displayName": "Violet Stone", "canonical": "oklch(95.2% 0.009 285)", "tonalRamp": ["oklch(25% 0.012 285)", "oklch(36% 0.012 285)", "oklch(48% 0.012 285)", "oklch(60% 0.012 285)", "oklch(72% 0.012 285)", "oklch(84% 0.012 285)", "oklch(92.5% 0.012 285)", "oklch(95.2% 0.009 285)"] },
+      "accent": { "role": "primary", "displayName": "Plum Ink", "canonical": "oklch(42% 0.075 335)", "tonalRamp": ["oklch(22% 0.055 335)", "oklch(30% 0.065 335)", "oklch(36% 0.074 335)", "oklch(42% 0.075 335)", "oklch(53% 0.07 335)", "oklch(63% 0.065 335)", "oklch(77% 0.055 335)", "oklch(94.5% 0.025 335)"] },
+      "success": { "role": "secondary", "displayName": "Moss Confirmation", "canonical": "oklch(45% 0.068 142)", "tonalRamp": ["oklch(20% 0.04 142)", "oklch(30% 0.055 142)", "oklch(38% 0.062 142)", "oklch(45% 0.068 142)", "oklch(56% 0.06 142)", "oklch(68% 0.05 142)", "oklch(80% 0.036 142)", "oklch(94% 0.025 142)"] },
+      "warning": { "role": "tertiary", "displayName": "Amber Attention", "canonical": "oklch(52% 0.08 75)", "tonalRamp": ["oklch(24% 0.05 75)", "oklch(34% 0.065 75)", "oklch(43% 0.075 75)", "oklch(52% 0.08 75)", "oklch(62% 0.07 75)", "oklch(72% 0.06 75)", "oklch(83% 0.045 75)", "oklch(95% 0.03 75)"] },
+      "danger": { "role": "tertiary", "displayName": "Brick Error", "canonical": "oklch(48% 0.10 28)", "tonalRamp": ["oklch(22% 0.065 28)", "oklch(31% 0.08 28)", "oklch(40% 0.094 28)", "oklch(48% 0.10 28)", "oklch(58% 0.09 28)", "oklch(68% 0.075 28)", "oklch(80% 0.05 28)", "oklch(95% 0.026 28)"] }
+    },
+    "typographyMeta": {
+      "body": { "displayName": "Interface Body", "purpose": "Supporting UI copy and general controls." },
+      "control": { "displayName": "Compact Control", "purpose": "Navigation, buttons and dense operational rows." },
+      "heading": { "displayName": "Section Heading", "purpose": "Section and panel anchors." },
+      "page-title": { "displayName": "Page Title", "purpose": "The single title for a working surface." },
+      "manuscript": { "displayName": "Manuscript Serif", "purpose": "Long-form Chinese drafting and reading." }
+    },
+    "shadows": [
+      { "name": "quiet-lift", "value": "0 1px 2px oklch(25% 0.015 285 / 0.08), 0 4px 8px oklch(25% 0.015 285 / 0.05)", "purpose": "A restrained lift for an elevated command or review surface." },
+      { "name": "drawer-lift", "value": "-14px 0 32px rgba(53, 39, 29, .16)", "purpose": "Separates the pending-review drawer from the current work plane." }
+    ],
+    "motion": [
+      { "name": "state-feedback", "value": "180ms ease-out", "purpose": "Colour, border and small transform feedback only. No decorative layout animation." },
+      { "name": "reduced-motion", "value": "1ms override under prefers-reduced-motion", "purpose": "Preserves access to all functionality without prolonged animation." }
+    ],
+    "breakpoints": [
+      { "name": "desktop-rail-collapse", "value": "1120px" },
+      { "name": "compact-height", "value": "780px" },
+      { "name": "desktop-minimum", "value": "1024px" }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "Commit, create or advance a single meaningful action.",
+      "html": "<button class=\"ds-btn-primary\">保存修改</button>",
+      "css": ".ds-btn-primary { min-height: 32px; display: inline-flex; align-items: center; justify-content: center; padding: 0 12px; border: 1px solid var(--aw-accent); border-radius: var(--aw-radius-control); background: var(--aw-accent); color: var(--aw-paper); font: 650 13px Inter, Segoe UI, Microsoft YaHei UI, sans-serif; } .ds-btn-primary:hover { background: var(--aw-accent-hover); } .ds-btn-primary:focus-visible { outline: 2px solid var(--aw-focus); outline-offset: 2px; } .ds-btn-primary:disabled { opacity: .48; cursor: not-allowed; }"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "A contextual action that does not commit the primary task.",
+      "html": "<button class=\"ds-btn-secondary\">查看详情</button>",
+      "css": ".ds-btn-secondary { min-height: 32px; display: inline-flex; align-items: center; justify-content: center; padding: 0 12px; border: 1px solid var(--aw-line); border-radius: var(--aw-radius-control); background: var(--aw-paper); color: var(--aw-text); font: 650 13px Inter, Segoe UI, Microsoft YaHei UI, sans-serif; } .ds-btn-secondary:hover { border-color: var(--aw-line-strong); background: var(--aw-stone); } .ds-btn-secondary:focus-visible { outline: 2px solid var(--aw-focus); outline-offset: 2px; }"
+    },
+    {
+      "name": "Workspace Navigation Item",
+      "kind": "nav",
+      "refersTo": "workspace-nav-active",
+      "description": "The compact route control for the permanent writing workspace rail.",
+      "html": "<button class=\"ds-nav-item ds-active\"><span aria-hidden=\"true\">✦</span> 故事大纲</button>",
+      "css": ".ds-nav-item { width: 100%; height: 31px; display: flex; align-items: center; gap: 9px; padding: 0 9px; border: 0; border-radius: 4px; background: transparent; color: var(--aw-text); font: 400 12px Inter, Segoe UI, Microsoft YaHei UI, sans-serif; text-align: left; } .ds-nav-item:hover { background: var(--aw-stone-deep); color: var(--aw-ink); } .ds-nav-item.ds-active { background: var(--aw-accent-soft); color: var(--aw-accent); font-weight: 680; } .ds-nav-item:focus-visible { outline: 2px solid var(--aw-focus); outline-offset: 2px; }"
+    },
+    {
+      "name": "Compact Input",
+      "kind": "input",
+      "refersTo": "input-default",
+      "description": "Search, name and short configuration input for dense desktop surfaces.",
+      "html": "<label class=\"ds-input-wrap\">项目名称<input class=\"ds-input\" value=\"林昊往事\" /></label>",
+      "css": ".ds-input-wrap { display: grid; gap: 4px; color: var(--aw-muted); font: 400 12px Inter, Segoe UI, Microsoft YaHei UI, sans-serif; } .ds-input { min-height: 34px; padding: 0 9px; border: 1px solid var(--aw-line); border-radius: var(--aw-radius-control); background: var(--aw-paper); color: var(--aw-ink); font: 400 13px Inter, Segoe UI, Microsoft YaHei UI, sans-serif; } .ds-input:focus-visible { outline: 2px solid var(--aw-focus); outline-offset: 2px; }"
+    },
+    {
+      "name": "Review Confirmation Panel",
+      "kind": "custom",
+      "refersTo": "pending-review-panel",
+      "description": "An inline, read-only confirmation surface that states destination and risk before generated work writes into a project.",
+      "html": "<section class=\"ds-review\"><header><strong>生成结果待确认</strong><small>尚未写入项目</small></header><p>01_大纲/大纲.txt · 覆盖写入</p><button>确认覆盖主线大纲</button></section>",
+      "css": ".ds-review { overflow: hidden; border: 1px solid var(--aw-line-strong); border-radius: var(--aw-radius-panel); background: var(--aw-paper); color: var(--aw-text); font: 400 12px Inter, Segoe UI, Microsoft YaHei UI, sans-serif; } .ds-review header { min-height: 37px; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 11px; border-bottom: 1px solid var(--aw-line); background: var(--aw-stone); } .ds-review strong { color: var(--aw-ink); font-size: 13px; } .ds-review small { color: var(--aw-warning); font-weight: 650; } .ds-review p { margin: 0; padding: 10px 11px; } .ds-review button { min-height: 29px; margin: 0 11px 11px; padding: 0 10px; border: 1px solid var(--aw-accent); border-radius: var(--aw-radius-control); background: var(--aw-accent); color: var(--aw-paper); font: 650 12px Inter, Segoe UI, Microsoft YaHei UI, sans-serif; } .ds-review button:hover { background: var(--aw-accent-hover); } .ds-review button:focus-visible { outline: 2px solid var(--aw-focus); outline-offset: 2px; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Quiet Writing Desk",
+    "overview": "ArcWriter is a calm, local-first writing desk rather than an AI control room. Its warm paper ground keeps the manuscript and the author in charge; cool violet-grey neutrals recede into navigation, controls and operational detail. A restrained plum accent marks the few places where a user can act, commit or understand current selection. The system has the density of a professional desktop tool, but it earns density through hierarchy and progressive disclosure.",
+    "keyCharacteristics": [
+      "Warm reading surfaces, cool operational surfaces and one controlled plum accent.",
+      "Chinese-first desktop typography, with a dedicated Songti manuscript voice.",
+      "Fine 1px dividers and tonal changes establish structure before shadows do.",
+      "Inline confirmation and right-side drawers preserve context instead of interrupting it.",
+      "Compact controls, 1024px minimum desktop layout and a collapsed navigation treatment for narrow windows."
+    ],
+    "rules": [
+      { "name": "The One Plum Rule", "body": "Plum is an action and selection signal. Keep it below roughly one tenth of a normal workspace surface, so the next meaningful action remains immediately legible.", "section": "colors" },
+      { "name": "The Status Must Speak Rule", "body": "Success, warning and error always appear with explicit Chinese status copy and, where space permits, an icon. Colour is reinforcement, never the only carrier of meaning.", "section": "colors" },
+      { "name": "The Manuscript Has the Last Word Rule", "body": "In an active editor, manuscript text is visually larger, more spacious and more central than every navigation or AI control around it.", "section": "typography" },
+      { "name": "The Paper Stack Rule", "body": "If a surface can be separated by paper, stone or a fine rule, do that. Add a shadow only when the surface physically overlays another working plane.", "section": "elevation" }
+    ],
+    "dos": [
+      "Do keep the main workspace on Warm Paper and support rails or secondary panels on Violet Stone.",
+      "Do show AI context, destination, overwrite scope, failure reason and recovery action near the operation that needs them.",
+      "Do use progressive disclosure: message preview first, right-side review drawer second, a modal only when the work genuinely cannot remain in context."
+    ],
+    "donts": [
+      "Don't turn ArcWriter into a generic SaaS dashboard, with hero metrics, equal-weight card grids or a control-room visual hierarchy.",
+      "Don't use decorative glassmorphism, large high-saturation blue fields or purple gradients.",
+      "Don't make the interface resemble a code IDE.",
+      "Don't let three columns compete at equal visual weight.",
+      "Don't use a coloured left or right card stripe, gradient text, decorative blur or shadow stacks to manufacture hierarchy.",
+      "Don't hide what AI read, where a result will write or what an overwrite replaces."
+    ]
+  }
+}

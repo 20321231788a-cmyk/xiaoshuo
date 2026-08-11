@@ -13,9 +13,21 @@
     "build:desktop": "npm run build -w @xiaoshuo/desktop-shell",
     "smoke:desktop": "npm run smoke -w @xiaoshuo/desktop-shell",
     "typecheck": "npm run typecheck --workspaces --if-present",
-    "test": "npm run build -w @xiaoshuo/shared && vitest run",
+    "test": "npm run build -w @xiaoshuo/shared && vitest run && npm run test:node-scripts",
+    "test:node-scripts": "node --test apps/desktop-shell/scripts/download-previous-release-installer.node-test.mjs apps/desktop-shell/scripts/verify-release-evidence.node-test.mjs scripts/run-rc-evals.node-test.mjs",
     "test:watch": "vitest",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "eval:routing": "node scripts/run-eval.mjs routing packages/agent-runtime/src/routing-eval.test.ts",
+    "eval:planning": "node scripts/run-eval.mjs planning packages/agent-runtime/src/planner.test.ts",
+    "eval:memory": "node scripts/run-eval.mjs memory packages/agent-runtime/src/memory.test.ts",
+    "eval:quality": "node scripts/run-eval.mjs quality packages/agent-runtime/src/evaluator-registry.test.ts",
+    "eval:recovery": "node scripts/run-eval.mjs recovery packages/agent-runtime/src/kernel/run-recovery.e2e.test.ts",
+    "eval:security": "node scripts/run-eval.mjs security packages/agent-runtime/src/agent-loop.test.ts",
+    "eval:novel-agent": "node scripts/run-eval.mjs novel-agent packages/shared/src/schemas/novel-agent.test.ts packages/agent-runtime/src/novel-room-coordinator.test.ts packages/agent-runtime/src/novel-memory-batch.test.ts apps/desktop-shell/src/main/novel-agent-control-service.test.ts",
+    "eval:excluded-capabilities": "node scripts/run-eval.mjs excluded-capabilities packages/agent-runtime/src/negative-capability-policy.test.ts packages/agent-runtime/src/agent-loop.test.ts packages/agent-runtime/src/memory.test.ts packages/agent-runtime/src/action-confirmation.test.ts packages/agent-runtime/src/file-operation-confirmation.test.ts packages/agent-runtime/src/kernel/execution-store.test.ts packages/agent-runtime/src/kernel/run-coordinator.test.ts apps/desktop-shell/src/preload/user-gesture-ticket.test.ts apps/desktop-shell/src/preload/novel-user-gesture-ticket.test.ts apps/desktop-shell/src/main/terminal-user-gesture-authorization.test.ts apps/desktop-shell/src/main/novel-user-gesture-authorization.test.ts apps/desktop-shell/src/main/project-identity-registry.test.ts apps/desktop-shell/src/main/runtime/project-document-routes.test.ts",
+    "eval:all": "npm run eval:routing && npm run eval:planning && npm run eval:memory && npm run eval:quality && npm run eval:recovery && npm run eval:security && npm run eval:novel-agent && npm run eval:excluded-capabilities",
+    "acceptance:ui-library": "npm run typecheck -w @xiaoshuo/shared && npm run typecheck -w @xiaoshuo/document-service && npm run typecheck -w @xiaoshuo/vector-service && npm run typecheck -w @xiaoshuo/agent-runtime && npm run typecheck -w @xiaoshuo/desktop-shell && npm run typecheck -w @xiaoshuo/workbench && vitest run packages/document-service/src/project-library-service.test.ts packages/vector-service/src/graph-context.test.ts packages/agent-runtime/src/runtime.test.ts packages/agent-runtime/src/skill-runner.test.ts apps/desktop-shell/src/main/runtime/project-library-routes.test.ts && npm run build:workbench && git diff --check",
+    "acceptance:preview": "npm run typecheck && npm test && npm run eval:all && npm run build:workbench && npm run build:desktop && npm run test:e2e && npm run smoke:desktop && git diff --check"
   },
   "dependencies": {
     "adm-zip": "^0.5.17",

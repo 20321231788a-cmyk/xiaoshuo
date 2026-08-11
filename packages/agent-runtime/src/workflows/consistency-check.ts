@@ -1,9 +1,11 @@
-import { loadModelConfig, readRawConfig, type ModelConfig } from "@xiaoshuo/config-service";
+import { loadTaskModelConfig, type ModelConfig } from "@xiaoshuo/config-service";
 import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
 import type { ChatCompletionMessage } from "@xiaoshuo/model-client";
 import type { AgentRunRequest, AgentRunResponse, ConversationDetail } from "@xiaoshuo/shared";
 import { GraphMemory, type CheckGraphDraftConsistencyResult } from "@xiaoshuo/vector-service";
 import { randomUUID } from "node:crypto";
+import fs from "node:fs/promises";
+import path from "node:path";
 import { buildConsistencyCheckPrompt, parseConsistencyCheckResult } from "../prompts/consistency.js";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
 import { throwIfAborted } from "../cancellation.js";
@@ -130,24 +132,17 @@ function attachGraphAdvisory(
   };
 }
 
-async function loadAssistantModelConfig(context: WorkflowRunContext): Promise<{ config: ModelConfig; line: "secondary" | "primary-fallback" }> {
-  const rawConfig = await readRawConfig(context.config);
-  const hasExplicitSecondary = Boolean(String(rawConfig.secondary_api_key || "").trim() && String(rawConfig.secondary_model || "").trim());
-  if (hasExplicitSecondary) {
-    const secondary = await loadModelConfig(context.config, "secondary");
-    return { config: secondary, line: "secondary" };
+async function loadAssistantModelConfig(
+  context: WorkflowRunContext
+): Promise<{ config: ModelConfig; line: "task-model" | "current-model-fallback" }> {
+  const taskConfig = await loadTaskModelConfig(context.config);
+  if (!taskConfig.configured) {
+    throw new Error("未配置当前主路线 API Key 或模型名。");
   }
-  const primary = await loadModelConfig(context.config, "primary");
-  if (primary.configured) {
-    return {
-      config: {
-        ...primary,
-        temperature: Math.min(primary.temperature, 0.2)
-      },
-      line: "primary-fallback"
-    };
-  }
-  throw new Error("未配置主线路或副线路 API Key / 模型名。");
+  return {
+    config: { ...taskConfig, temperature: Math.min(taskConfig.temperature, 0.2) },
+    line: taskConfig.model_source === "task-model" ? "task-model" : "current-model-fallback"
+  };
 }
 
 async function resolveConsistencyChapterOutline(request: AgentRunRequest, context: WorkflowRunContext): Promise<string> {
@@ -169,6 +164,10 @@ async function resolveConsistencyChapterOutline(request: AgentRunRequest, contex
 }
 
 async function resolveWorkflowSourceText(request: AgentRunRequest, context: WorkflowRunContext): Promise<string> {
+  if ((request as { review_scope?: unknown }).review_scope === "project") {
+    const projectText = await readProjectBodyText(context.projectRoot);
+    if (projectText) return projectText;
+  }
   const direct = String(request.selection || "").trim();
   if (direct) {
     return direct;
@@ -199,6 +198,38 @@ async function resolveWorkflowSourceText(request: AgentRunRequest, context: Work
     }
   }
   return "";
+}
+
+async function readProjectBodyText(projectRoot: string): Promise<string> {
+  const bodyDir = path.join(projectRoot, "02_正文");
+  const entries = await fs.readdir(bodyDir, { withFileTypes: true }).catch(() => []);
+  const chapters = entries
+    .filter((entry) => entry.isFile() && /\.(?:txt|md)$/i.test(entry.name))
+    .map((entry) => entry.name)
+    .sort(compareChapterFiles);
+  let remaining = SOURCE_IMPORT_CHARS;
+  const sections: string[] = [];
+  for (const name of chapters) {
+    if (remaining <= 0) break;
+    const content = await fs.readFile(path.join(bodyDir, name), "utf8").catch(() => "");
+    const text = String(content || "").trim().slice(0, remaining);
+    if (!text) continue;
+    sections.push(`【${name}】\n${text}`);
+    remaining -= text.length;
+  }
+  return sections.join("\n\n");
+}
+
+function compareChapterFiles(left: string, right: string): number {
+  const leftNumber = chapterNumber(left);
+  const rightNumber = chapterNumber(right);
+  if (leftNumber !== rightNumber) return leftNumber - rightNumber;
+  return left.localeCompare(right, "zh-CN");
+}
+
+function chapterNumber(name: string): number {
+  const match = /(?:第\s*)?(\d+)\s*章/.exec(name) || /(\d+)/.exec(name);
+  return match ? Number(match[1]) : Number.MAX_SAFE_INTEGER;
 }
 
 function resolveWorkflowSourcePath(request: AgentRunRequest): string {

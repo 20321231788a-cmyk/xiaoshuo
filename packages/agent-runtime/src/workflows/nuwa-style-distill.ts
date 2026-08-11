@@ -16,8 +16,15 @@ import type {
 import { createHash, randomUUID } from "node:crypto";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
 import { throwIfAborted } from "../cancellation.js";
+import { createGeneratedLibraryDraft } from "../library-draft.js";
+import {
+  DISASSEMBLE_SOURCE_IMPORT_CHARS,
+  listDisassembleBooks,
+  readDisassembleBookText,
+  sampleWholeBookSource
+} from "./disassemble-library.js";
 
-const DISTILLATION_SOURCE_IMPORT_CHARS = 60_000;
+const DISTILLATION_SOURCE_IMPORT_CHARS = DISASSEMBLE_SOURCE_IMPORT_CHARS;
 
 export class NuwaStyleDistillWorkflow implements WorkflowHandler {
   id = "nuwa_style_distill";
@@ -39,7 +46,8 @@ export class NuwaStyleDistillWorkflow implements WorkflowHandler {
         attachment_ids: request.attachment_ids || [],
         ...((request as any).action !== undefined ? { action: (request as any).action } : {}),
         ...((request as any).enabled !== undefined ? { enabled: (request as any).enabled } : {}),
-        ...((request as any).book_title !== undefined ? { book_title: (request as any).book_title } : {})
+        ...((request as any).book_title !== undefined ? { book_title: (request as any).book_title } : {}),
+        ...((request as any).source_book_id !== undefined ? { source_book_id: (request as any).source_book_id } : {})
       } as SkillRunRequest,
       context
     );
@@ -51,7 +59,7 @@ export class NuwaStyleDistillWorkflow implements WorkflowHandler {
       results: [],
       skill_result: result,
       saved_paths: result.saved_path ? [result.saved_path] : [],
-      requires_confirmation: false
+      requires_confirmation: Boolean(result.data?.requires_confirmation)
     };
   }
 
@@ -88,6 +96,9 @@ export class NuwaStyleDistillWorkflow implements WorkflowHandler {
       const current = await readProjectStyleDistillation(context.projectRoot);
       if (!current) {
         throw new Error("当前项目还没有蒸馏书籍");
+      }
+      if (current.status !== "active" && Boolean((payload as any).enabled)) {
+        throw new Error(current.status === "orphaned" ? "蒸馏原文已丢失，不能重新启用；请重新关联或蒸馏。" : "蒸馏原文已变化，不能重新启用；请重新蒸馏。");
       }
       const enabled = Boolean((payload as any).enabled);
       const profile = await writeProjectStyleDistillation(context.projectRoot, {
@@ -138,7 +149,7 @@ export class NuwaStyleDistillWorkflow implements WorkflowHandler {
       "",
       "要求：不要输出原文大段摘录；不要泛泛而谈；每条规则都要能直接约束大纲、章纲和正文生成。",
       "",
-      `【待蒸馏文本】\n${source.text.slice(0, 60_000)}`
+      `【待蒸馏文本】\n【全书分布采样】\n${sampleWholeBookSource(source.text, 60_000)}`
     ].join("\n");
 
     const raw = String(
@@ -161,10 +172,23 @@ export class NuwaStyleDistillWorkflow implements WorkflowHandler {
       book_title: source.bookTitle,
       source_summary: source.summary,
       source_path: source.sourcePath,
-      source_hash: createHash("sha256").update(source.text).digest("hex").slice(0, 16),
+      source_hash: createHash("sha256").update(source.text).digest("hex"),
+      source_book_id: source.sourceBookId,
+      source_report_path: source.sourceBookId ? `00_设定集/拆书库/${source.sourceBookId}/拆书报告.md` : "",
+      evidence_spans: buildEvidenceSpans(source.text),
+      evidence_version: 1,
+      status: "active",
       distilled_at: new Date().toISOString(),
       enabled: true,
       profile_text: raw
+    });
+    const draft = await createGeneratedLibraryDraft({
+      projectRoot: context.projectRoot,
+      cacheId: `nuwa-${profile.source_hash}`,
+      skillId: "style_extract",
+      result: `## 写作风格\n${profile.book_title}\n\n${raw}`,
+      mode: "append",
+      source: `nuwa_style_distill:${source.sourceBookId || profile.source_hash}`
     });
 
     return {
@@ -174,25 +198,59 @@ export class NuwaStyleDistillWorkflow implements WorkflowHandler {
       data: {
         skill_id: this.id,
         profile,
-        saved_paths: ["00_设定集/.agent/style_distillation/current.json"]
+        saved_paths: ["00_设定集/.agent/style_distillation/current.json"],
+        library_draft: draft ? {
+          draft_id: draft.draft_id,
+          domain: draft.domain,
+          records: draft.records.length,
+          requires_confirmation: true
+        } : undefined,
+        requires_confirmation: Boolean(draft)
       }
     };
   }
 }
 
+function buildEvidenceSpans(text: string): Array<{ start: number; end: number; purpose: string; hash: string }> {
+  const source = String(text || "");
+  if (!source) return [];
+  const size = Math.min(2400, Math.max(600, Math.floor(source.length / 4)));
+  const positions = source.length <= size ? [0] : [0, Math.floor((source.length - size) / 3), Math.floor((source.length - size) * 2 / 3), source.length - size];
+  return positions.map((start, index) => {
+    const sample = source.slice(start, start + size);
+    return { start, end: start + sample.length, purpose: ["开篇", "前期", "中期", "后期"][index] || "原文证据", hash: createHash("sha256").update(sample, "utf8").digest("hex") };
+  });
+}
+
 async function resolveNuwaDistillationSource(
   payload: SkillRunRequest,
   context: WorkflowRunContext
-): Promise<{ text: string; bookTitle: string; sourcePath: string; summary: string }> {
-  const direct = String(payload.text || "").trim();
+): Promise<{ text: string; bookTitle: string; sourcePath: string; summary: string; sourceBookId: string }> {
   const explicitTitle = String((payload as any).book_title || "").trim();
+  const sourceBookId = String((payload as any).source_book_id || "").trim();
+  if (sourceBookId) {
+    const book = (await listDisassembleBooks(context, { includeLegacy: false })).find((item) => item.id === sourceBookId);
+    if (!book) throw new Error("未找到所选拆书作品");
+    if (book.status !== "ready") throw new Error("所选作品尚未完成拆解，不能执行蒸馏");
+    const original = await readDisassembleBookText(book, "source", context);
+    if (!original.trim()) throw new Error("所选作品缺少已归档原文，已阻止仅凭拆解摘要蒸馏");
+    return {
+      text: original,
+      bookTitle: explicitTitle || book.title,
+      sourcePath: book.paths.source || book.source_path,
+      summary: book.source_summary || summarizeSource(original),
+      sourceBookId: book.id
+    };
+  }
+  const direct = String(payload.text || "").trim();
   if (direct) {
     const sourcePath = String(payload.source_path || "").trim();
     return {
       text: direct,
       bookTitle: explicitTitle || inferBookTitle(sourcePath, "当前文档"),
       sourcePath,
-      summary: summarizeSource(direct)
+      summary: summarizeSource(direct),
+      sourceBookId: ""
     };
   }
 
@@ -213,7 +271,8 @@ async function resolveNuwaDistillationSource(
         text,
         bookTitle: explicitTitle || parts[0]!.name.replace(/\.[^.]+$/, ""),
         sourcePath: parts.map((item) => item.name).join(", "),
-        summary: summarizeSource(text)
+        summary: summarizeSource(text),
+        sourceBookId: ""
       };
     }
   }
@@ -227,7 +286,8 @@ async function resolveNuwaDistillationSource(
           text,
           bookTitle: explicitTitle || inferBookTitle(sourcePath, "当前文档"),
           sourcePath,
-          summary: summarizeSource(text)
+          summary: summarizeSource(text),
+          sourceBookId: ""
         };
       }
     } catch {}
@@ -248,7 +308,8 @@ async function resolveNuwaDistillationSource(
     text,
     bookTitle: explicitTitle || "当前拆书书籍",
     sourcePath: fallbackPaths.join(", "),
-    summary: summarizeSource(text)
+    summary: summarizeSource(text),
+    sourceBookId: ""
   };
 }
 

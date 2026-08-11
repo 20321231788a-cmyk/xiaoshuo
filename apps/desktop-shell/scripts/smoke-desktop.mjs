@@ -153,8 +153,10 @@ async function startMockModelServer() {
     }
     const rawBody = Buffer.concat(chunks).toString("utf8");
     let content = "TS本地技能生成结果";
+    let stream = false;
     try {
       const payload = JSON.parse(rawBody);
+      stream = Boolean(payload.stream);
       const promptText = Array.isArray(payload.messages)
         ? payload.messages.map((item) => String(item?.content || "")).join("\n")
         : "";
@@ -165,6 +167,36 @@ async function startMockModelServer() {
       }
     } catch {
       // keep default content
+    }
+
+    if (stream) {
+      response.writeHead(200, {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive"
+      });
+      response.write(`data: ${JSON.stringify({
+        id: "chatcmpl-smoke-stream",
+        object: "chat.completion.chunk",
+        choices: [{ index: 0, delta: { reasoning_content: "先梳理上下文。" }, finish_reason: null }]
+      })}\n\n`);
+      await delay(20);
+      const parts = content.match(/.{1,4}/gu) || [content];
+      for (const part of parts) {
+        response.write(`data: ${JSON.stringify({
+          id: "chatcmpl-smoke-stream",
+          object: "chat.completion.chunk",
+          choices: [{ index: 0, delta: { content: part }, finish_reason: null }]
+        })}\n\n`);
+        await delay(20);
+      }
+      response.write(`data: ${JSON.stringify({
+        id: "chatcmpl-smoke-stream",
+        object: "chat.completion.chunk",
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
+      })}\n\n`);
+      response.end("data: [DONE]\n\n");
+      return;
     }
 
     response.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
@@ -251,6 +283,20 @@ async function cleanupSmokeResources() {
   previousStudioConfigEnv = undefined;
   previousRuntimePortEnv = undefined;
   smokeRuntimePort = "";
+  await cleanupSmokeProjects();
+}
+
+async function cleanupSmokeProjects() {
+  const sandboxRoot = path.join(rootDir, "sandbox-projects");
+  let entries = [];
+  try {
+    entries = await fs.readdir(sandboxRoot, { withFileTypes: true });
+  } catch {
+    return;
+  }
+  await Promise.all(entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith("smoke-project-"))
+    .map((entry) => fs.rm(path.join(sandboxRoot, entry.name), { recursive: true, force: true })));
 }
 
 async function expectMissing(targetPath, message) {
@@ -271,6 +317,68 @@ async function readNdjson(response) {
     .map((line) => JSON.parse(line));
 }
 
+/**
+ * Replays a request through the same preload -> IPC -> authenticated runtime
+ * path used by the packaged Workbench. The Node process intentionally never
+ * receives the runtime session token.
+ */
+async function fetchRuntimeThroughDesktopBridge(page, input, init) {
+  const request = new Request(input, init);
+  const body = request.method === "GET" || request.method === "HEAD"
+    ? null
+    : Array.from(new Uint8Array(await request.arrayBuffer()));
+  const response = await page.evaluate(async (payload) => {
+    const result = await window.xiaoshuoDesktop.runtimeRequest({
+      url: payload.url,
+      method: payload.method,
+      headers: payload.headers,
+      body: payload.body ? new Uint8Array(payload.body) : null
+    });
+    return {
+      status: result.status,
+      statusText: result.statusText,
+      headers: result.headers,
+      body: result.body ? Array.from(result.body) : null
+    };
+  }, {
+    url: request.url,
+    method: request.method,
+    headers: Object.fromEntries(request.headers.entries()),
+    body
+  });
+  return new Response(response.body ? new Uint8Array(response.body) : null, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers
+  });
+}
+
+/**
+ * Keeps the health probe intentionally unauthenticated, while every other
+ * request aimed at this smoke runtime uses the desktop bridge. Calls to the
+ * mock model server and any unrelated origin continue using Node fetch.
+ */
+function installAuthenticatedRuntimeFetch(page, runtimeBaseUrl) {
+  const nodeFetch = globalThis.fetch;
+  const runtimeOrigin = new URL(runtimeBaseUrl).origin;
+  globalThis.fetch = async (input, init) => {
+    const value = input instanceof Request ? input.url : String(input);
+    let target;
+    try {
+      target = new URL(value);
+    } catch {
+      return nodeFetch(input, init);
+    }
+    if (target.origin !== runtimeOrigin || target.pathname === "/health" || target.pathname === "/api/health") {
+      return nodeFetch(input, init);
+    }
+    return fetchRuntimeThroughDesktopBridge(page, input, init);
+  };
+  return () => {
+    globalThis.fetch = nodeFetch;
+  };
+}
+
 try {
   await ensurePreview();
   await prepareSmokeConfig();
@@ -279,7 +387,7 @@ try {
   console.log("[desktop-smoke] launching Electron");
     const electronApp = await electron.launch({
       cwd: desktopDir,
-      args: ["."],
+      args: [".", "--agent-execution-v2=on"],
       env: {
         ...process.env,
         XIAOSHUO_RENDERER_URL: rendererUrl,
@@ -310,6 +418,16 @@ try {
     if (runtimeHealth.runtime !== "typescript-electron" || runtimeHealth.ts_services?.config !== "active") {
       throw new Error("TS runtime health check did not report active migrated services");
     }
+    const unauthenticatedProbe = await fetch(`${backendStatus.url}/api/jobs/_ts-runtime`);
+    if (unauthenticatedProbe.status !== 401) {
+      throw new Error(`Unauthenticated runtime probe returned ${unauthenticatedProbe.status} instead of 401`);
+    }
+    const unauthenticatedPayload = await unauthenticatedProbe.json();
+    if (unauthenticatedPayload.code !== "RUNTIME_SESSION_REQUIRED") {
+      throw new Error("Unauthenticated runtime probe did not return the expected session error");
+    }
+    const restoreRuntimeFetch = installAuthenticatedRuntimeFetch(page, backendStatus.url);
+    try {
     const runtimeJobs = await fetch(`${backendStatus.url}/api/jobs/_ts-runtime`).then((response) => response.json());
     if (!runtimeJobs.active || runtimeJobs.routed !== "local-ts") {
       throw new Error("TS runtime job manager probe did not respond");
@@ -319,7 +437,7 @@ try {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        path: "D:/xiaoshuo/ts-migration/sandbox-projects",
+        path: path.join(rootDir, "sandbox-projects"),
         project_name: smokeProjectName,
         create_in_parent: true
       })
@@ -335,6 +453,61 @@ try {
     if (!manifestStatus.ready || !String(manifestStatus.path || "").includes("project_manifest.json")) {
       throw new Error("TS runtime manifest-status route did not return a ready manifest");
     }
+    const novelProject = await page.evaluate((projectRoot) =>
+      window.xiaoshuoDesktop.novelAgent.identifyProject({ project_root: projectRoot }),
+      createdProject.path
+    );
+    const novelSnapshot = await page.evaluate((project) => window.xiaoshuoDesktop.novelAgent.snapshot(project), novelProject);
+    if (!Array.isArray(novelSnapshot.catalog) || novelSnapshot.catalog.length < 4) {
+      throw new Error("Novel Agent built-in tool catalog was not exposed through the desktop bridge");
+    }
+    const storyIndexTool = novelSnapshot.catalog.find((tool) => tool.tool_id === "novel_story_index");
+    if (!storyIndexTool) {
+      throw new Error("Novel Agent story-index tool is missing from the built-in catalog");
+    }
+    const toolProposal = await page.evaluate(({ project, tool }) => window.xiaoshuoDesktop.novelAgent.proposeTool({
+      ...project,
+      run_id: "smoke-novel-run",
+      budget_id: "smoke-novel-budget",
+      tool_id: tool.tool_id,
+      version: tool.version,
+      reason: "desktop smoke"
+    }), { project: novelProject, tool: storyIndexTool });
+    const installWithoutGesture = await page.evaluate(async ({ proposal, catalogSha }) => {
+      try {
+        await window.xiaoshuoDesktop.novelAgent.installTool({
+          proposal_id: proposal.proposal_id,
+          expected_catalog_sha256: catalogSha,
+          confirmation_id: "smoke-no-gesture"
+        });
+        return "";
+      } catch (error) {
+        return String(error?.code || error?.message || error);
+      }
+    }, { proposal: toolProposal, catalogSha: novelSnapshot.catalog_sha256 });
+    if (!installWithoutGesture.includes("NOVEL_USER_GESTURE_REQUIRED")) {
+      throw new Error("Novel tool activation unexpectedly succeeded without a real user gesture");
+    }
+    await page.getByTestId("novel-install").click();
+    const installedNovelTool = await page.evaluate(({ proposal, catalogSha }) => window.xiaoshuoDesktop.novelAgent.installTool({
+      proposal_id: proposal.proposal_id,
+      expected_catalog_sha256: catalogSha,
+      confirmation_id: "smoke-install-confirmed"
+    }), { proposal: toolProposal, catalogSha: novelSnapshot.catalog_sha256 });
+    if (installedNovelTool.status !== "installed") {
+      throw new Error("Novel built-in tool activation did not complete through typed IPC");
+    }
+    await page.getByTestId("novel-action").click();
+    const novelAction = await page.evaluate((project) => window.xiaoshuoDesktop.novelAgent.runAction({
+      ...project,
+      action: "rebuild_index",
+      confirmation_id: `smoke-index-${crypto.randomUUID()}`,
+      operation_id: `smoke-index-${crypto.randomUUID()}`
+    }), novelProject);
+    if (!novelAction.ok || novelAction.output_path !== "00_设定集/.agent/story-index.md") {
+      throw new Error("Novel typed index action did not complete through the desktop bridge");
+    }
+    await fs.access(path.join(createdProject.path, "00_设定集", ".agent", "story-index.md"));
     const projectChrome = await fetch(`${backendStatus.url}/api/project/chrome?force=1`).then((response) => response.json());
     if (!Array.isArray(projectChrome.tree) || !projectChrome.tree.some((node) => node.path === "01_大纲")) {
       throw new Error("TS runtime project-chrome route did not include the starter tree");
@@ -372,7 +545,7 @@ try {
       })
     }).then((response) => response.json());
     if (!agentPlan.can_execute || !Array.isArray(agentPlan.operations) || agentPlan.operations[0]?.action !== "move_file") {
-      throw new Error("TS runtime agent-plan route did not return the expected rename plan");
+      throw new Error(`TS runtime agent-plan route did not return the expected rename plan: ${JSON.stringify(agentPlan)}`);
     }
     if (agentPlan.operations[0]?.target_path !== "01_大纲/新大纲.txt") {
       throw new Error("TS runtime agent-plan route did not normalize the rename target path");
@@ -424,43 +597,23 @@ try {
       throw new Error("Starter outline on disk did not match the TS runtime save");
     }
     await fs.writeFile(path.join(createdProject.path, "00_设定集", "风格库", "写作风格.txt"), "测试风格内容", "utf8");
-    const executeResults = await fetch(`${backendStatus.url}/api/agent/execute`, {
+    const retiredExecuteResponse = await fetch(`${backendStatus.url}/api/agent/execute`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        confirm_delete: true,
-        operations: [
-          { action: "create_file", path: "02_正文/执行测试.txt", text: "首段", old_text: "", new_text: "", target_path: "", reason: "", requires_confirmation: false },
-          { action: "append_text", path: "02_正文/执行测试.txt", text: "\n尾段", old_text: "", new_text: "", target_path: "", reason: "", requires_confirmation: false },
-          { action: "replace_text", path: "01_大纲/大纲.txt", text: "", old_text: "smoke timeline save", new_text: "smoke execute replace", target_path: "", reason: "", requires_confirmation: false },
-          { action: "move_file", path: "02_正文/执行测试.txt", text: "", old_text: "", new_text: "", target_path: "02_正文/执行测试-已移动.txt", reason: "", requires_confirmation: false },
-          { action: "archive_file", path: "00_设定集/风格库/写作风格.txt", text: "", old_text: "", new_text: "", target_path: "", reason: "", requires_confirmation: true }
-        ]
-      })
-    }).then((response) => response.json());
-    if (!Array.isArray(executeResults) || executeResults.length !== 5 || executeResults.some((item) => !item.ok)) {
-      throw new Error("TS runtime agent-execute route did not report successful operation results");
+      body: JSON.stringify({ operations: [] })
+    });
+    if (retiredExecuteResponse.status !== 410) {
+      throw new Error(`Retired agent-execute route returned ${retiredExecuteResponse.status} instead of 410`);
     }
-    const movedExecuteFile = path.join(createdProject.path, "02_正文", "执行测试-已移动.txt");
-    if ((await fs.readFile(movedExecuteFile, "utf8")) !== "首段\n尾段") {
-      throw new Error("TS runtime agent-execute route did not persist create/append/move file changes");
+    const retiredExecutePayload = await retiredExecuteResponse.json();
+    if (retiredExecutePayload.code !== "AGENT_EXECUTE_RETIRED") {
+      throw new Error("Retired agent-execute route did not return the expected safety code");
     }
-    if ((await fs.readFile(starterOutline, "utf8")) !== "smoke execute replace") {
-      throw new Error("TS runtime agent-execute route did not replace text in the outline");
+    if ((await fs.readFile(starterOutline, "utf8")) !== "smoke timeline save") {
+      throw new Error("Retired agent-execute route modified the outline");
     }
-    await expectMissing(path.join(createdProject.path, "00_设定集", "风格库", "写作风格.txt"), "TS runtime agent-execute archive did not remove the source file");
-    const trashEntries = await fs.readdir(path.join(createdProject.path, "99_回收站"), { withFileTypes: true });
-    const archiveStamp = trashEntries.find((entry) => entry.isDirectory())?.name;
-    if (!archiveStamp) {
-      throw new Error("TS runtime agent-execute route did not create a trash timestamp folder");
-    }
-    const archivedStylePath = path.join(createdProject.path, "99_回收站", archiveStamp, "00_设定集", "风格库", "写作风格.txt");
-    if ((await fs.readFile(archivedStylePath, "utf8")) !== "测试风格内容") {
-      throw new Error("TS runtime agent-execute route did not archive the file content");
-    }
-    const executeTimeline = await fetch(`${backendStatus.url}/api/timeline?limit=8`).then((response) => response.json());
-    if (!Array.isArray(executeTimeline) || !executeTimeline.some((entry) => String(entry.summary || "").includes("创建 02_正文/执行测试.txt"))) {
-      throw new Error("TS runtime timeline route did not include the agent execute batch entry");
+    if ((await fs.readFile(path.join(createdProject.path, "00_设定集", "风格库", "写作风格.txt"), "utf8")) !== "测试风格内容") {
+      throw new Error("Retired agent-execute route modified the style source");
     }
     // DELETE /api/documents/{rel_path} archive smoke test
     await fs.writeFile(path.join(createdProject.path, "02_正文", "待归档.txt"), "归档测试内容", "utf8");
@@ -568,6 +721,15 @@ try {
       );
     }
 
+    const reasoningPreferences = await fetch(`${backendStatus.url}/api/conversations/${smokeConv.id}/model-preferences`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model_override: "", reasoning_enabled: true, reasoning_effort: "medium" })
+    }).then((response) => response.json());
+    if (!reasoningPreferences.reasoning_enabled) {
+      throw new Error("TS runtime did not enable reasoning for the stream smoke conversation");
+    }
+
     const conversationMessageStreamResponse = await fetch(`${backendStatus.url}/api/conversations/${smokeConv.id}/messages`, {
       method: "POST",
       headers: {
@@ -588,11 +750,116 @@ try {
       throw new Error(await conversationMessageStreamResponse.text());
     }
     const conversationMessageEvents = await readNdjson(conversationMessageStreamResponse);
-    if (conversationMessageEvents.map((event) => event.type).join(",") !== "start,delta,final") {
+    if (conversationMessageEvents[0]?.type !== "start" || conversationMessageEvents.at(-1)?.type !== "final") {
       throw new Error("TS runtime conversation-message route did not emit the expected NDJSON sequence");
     }
-    if (conversationMessageEvents[2]?.payload?.conversation?.id !== smokeConv.id) {
+    const streamedConversationReply = conversationMessageEvents
+      .filter((event) => event.type === "delta" && event.channel === "answer")
+      .map((event) => event.text)
+      .join("");
+    const streamedConversationReasoning = conversationMessageEvents
+      .filter((event) => event.type === "delta" && event.channel === "reasoning")
+      .map((event) => event.text)
+      .join("");
+    if (streamedConversationReply !== "TS本地聊天回复" || conversationMessageEvents.filter((event) => event.type === "delta").length < 2) {
+      throw new Error("TS runtime conversation-message route did not preserve multi-part model output");
+    }
+    if (streamedConversationReasoning !== "先梳理上下文。") {
+      throw new Error(`TS runtime conversation-message route did not preserve the reasoning stream channel: ${JSON.stringify(conversationMessageEvents)}`);
+    }
+    if (conversationMessageEvents.at(-1)?.payload?.conversation?.id !== smokeConv.id) {
       throw new Error("TS runtime conversation-message stream final payload did not include the expected conversation");
+    }
+
+    // This must use the preload stream bridge rather than the Node-side
+    // authenticated fetch wrapper, which intentionally buffers regular IPC replies.
+    const desktopStream = await page.evaluate(async ({ runtimeUrl, conversationId, attachmentId }) => {
+      const requestId = `desktop-stream-${crypto.randomUUID()}`;
+      const startedAt = performance.now();
+      return new Promise((resolve, reject) => {
+        const decoder = new TextDecoder();
+        const chunks = [];
+        let firstChunkAt = -1;
+        const stop = window.xiaoshuoDesktop.runtimeStream.onEvent((event) => {
+          if (event.request_id !== requestId) return;
+          if (event.type === "chunk") {
+            if (firstChunkAt < 0) firstChunkAt = performance.now() - startedAt;
+            chunks.push(decoder.decode(event.body, { stream: true }));
+            return;
+          }
+          if (event.type === "error") {
+            clearTimeout(timeout);
+            stop();
+            reject(new Error(event.error));
+            return;
+          }
+          if (event.type === "end") {
+            clearTimeout(timeout);
+            stop();
+            chunks.push(decoder.decode());
+            resolve({ text: chunks.join(""), firstChunkAt, endAt: performance.now() - startedAt });
+          }
+        });
+        const timeout = window.setTimeout(() => {
+          window.xiaoshuoDesktop.runtimeStream.cancel(requestId);
+          stop();
+          reject(new Error("Desktop runtime stream timed out"));
+        }, 15_000);
+        void window.xiaoshuoDesktop.runtimeStream.start({
+          request_id: requestId,
+          url: `${runtimeUrl}/api/conversations/${conversationId}/messages`,
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/x-ndjson"
+          },
+          body: new TextEncoder().encode(JSON.stringify({
+            content: "请通过桌面 IPC 分段回复",
+            skill_id: "",
+            agent_name: "smoke-agent",
+            write_target: "",
+            insert_mode: "none",
+            runtime_context: "桌面流式测试",
+            attachment_ids: [attachmentId]
+          }))
+        }).then((response) => {
+          if (response.status >= 400) {
+            clearTimeout(timeout);
+            stop();
+            reject(new Error(`Desktop runtime stream returned ${response.status}`));
+          }
+        }).catch((error) => {
+          clearTimeout(timeout);
+          stop();
+          reject(error);
+        });
+      });
+    }, { runtimeUrl: backendStatus.url, conversationId: smokeConv.id, attachmentId: uploadedAttachment.id });
+    const desktopStreamEvents = String(desktopStream.text || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    const desktopStreamReply = desktopStreamEvents
+      .filter((event) => event.type === "delta" && event.channel === "answer")
+      .map((event) => event.text)
+      .join("");
+    const desktopStreamReasoning = desktopStreamEvents
+      .filter((event) => event.type === "delta" && event.channel === "reasoning")
+      .map((event) => event.text)
+      .join("");
+    if (desktopStreamReply !== "TS本地聊天回复" || desktopStreamEvents.filter((event) => event.type === "delta").length < 2) {
+      throw new Error("Desktop preload stream bridge did not forward each model delta");
+    }
+    if (desktopStreamReasoning !== "先梳理上下文。") {
+      throw new Error("Desktop preload stream bridge did not forward the reasoning channel");
+    }
+    if (!(desktopStream.firstChunkAt >= 0 && desktopStream.firstChunkAt < desktopStream.endAt)) {
+      throw new Error("Desktop preload stream bridge delivered its first chunk only after the stream ended");
+    }
+    const persistedReasoningConversation = await fetch(`${backendStatus.url}/api/conversations/${smokeConv.id}`).then((response) => response.json());
+    if (persistedReasoningConversation.messages?.at(-1)?.reasoning_content !== "先梳理上下文。") {
+      throw new Error("Desktop reasoning stream was not persisted with the assistant message");
     }
 
     const agentRunConv = await fetch(`${backendStatus.url}/api/conversations`, {
@@ -647,16 +914,20 @@ try {
       throw new Error(await streamResponse.text());
     }
     const streamEvents = await readNdjson(streamResponse);
-    if (streamEvents.map((event) => event.type).join(",") !== "start,delta,final") {
+    if (streamEvents[0]?.type !== "start" || streamEvents.at(-1)?.type !== "final") {
       throw new Error("TS runtime agent-run-stream route did not emit the expected NDJSON sequence");
     }
     if (streamEvents[0]?.intent !== "chat" || streamEvents[0]?.conversation_id !== agentRunConv.id) {
       throw new Error("TS runtime agent-run-stream route did not emit the expected start event");
     }
-    if (streamEvents[1]?.text !== "TS本地聊天回复") {
-      throw new Error("TS runtime agent-run-stream route did not emit the expected fallback delta");
+    const streamedAgentReply = streamEvents
+      .filter((event) => event.type === "delta" && event.channel === "answer")
+      .map((event) => event.text)
+      .join("");
+    if (streamedAgentReply !== "TS本地聊天回复" || streamEvents.filter((event) => event.type === "delta").length < 2) {
+      throw new Error("TS runtime agent-run-stream route did not emit the expected multi-part delta");
     }
-    if (streamEvents[2]?.payload?.intent !== "chat" || streamEvents[2]?.payload?.reply !== "TS本地聊天回复") {
+    if (streamEvents.at(-1)?.payload?.intent !== "chat" || streamEvents.at(-1)?.payload?.reply !== "TS本地聊天回复") {
       throw new Error("TS runtime agent-run-stream route did not emit the expected final payload");
     }
 
@@ -1037,22 +1308,35 @@ try {
     }
 
     await page.getByTestId("terminal-shell").waitFor({ state: "visible", timeout: 15_000 });
-    const terminalOutput = await page.evaluate(
-      (expectedText) =>
+    const terminalWithoutGesture = await page.evaluate(async () => {
+      try {
+        await window.xiaoshuoDesktop.terminal.create({ cols: 100, rows: 24 });
+        return "";
+      } catch (error) {
+        return String(error?.code || error?.message || error);
+      }
+    });
+    if (!terminalWithoutGesture.includes("TERMINAL_USER_GESTURE_REQUIRED")) {
+      throw new Error("Terminal creation unexpectedly succeeded without a user gesture");
+    }
+    const exerciseTerminalSession = async ({ activate, expectedText }) => {
+      await activate();
+      const output = await page.evaluate(
+        (expected) =>
         new Promise(async (resolve, reject) => {
           const session = await window.xiaoshuoDesktop.terminal.create({ cols: 100, rows: 24 });
           let output = "";
-          const timer = window.setTimeout(() => {
+          const timer = window.setTimeout(async () => {
             unsubscribeData();
             unsubscribeExit();
-            void window.xiaoshuoDesktop.terminal.kill({ id: session.id });
-            reject(new Error(`Timed out waiting for terminal output: ${expectedText}`));
+            await window.xiaoshuoDesktop.terminal.kill({ id: session.id });
+            reject(new Error(`Timed out waiting for terminal output: ${expected}`));
           }, 12_000);
-          const finish = (value) => {
+          const finish = async (value) => {
             window.clearTimeout(timer);
             unsubscribeData();
             unsubscribeExit();
-            void window.xiaoshuoDesktop.terminal.kill({ id: session.id });
+            await window.xiaoshuoDesktop.terminal.kill({ id: session.id });
             resolve(value);
           };
           const unsubscribeData = window.xiaoshuoDesktop.terminal.onData((event) => {
@@ -1060,26 +1344,56 @@ try {
               return;
             }
             output += event.data;
-            if (output.includes(expectedText)) {
-              finish(output);
+            if (output.includes(expected)) {
+              void finish(output);
             }
           });
           const unsubscribeExit = window.xiaoshuoDesktop.terminal.onExit((event) => {
-            if (event.id === session.id && !output.includes(expectedText)) {
-              finish(output);
+            if (event.id === session.id && !output.includes(expected)) {
+              void finish(output);
             }
           });
 
-          await window.xiaoshuoDesktop.terminal.write({ id: session.id, data: `echo ${expectedText}\r` });
+          await window.xiaoshuoDesktop.terminal.write({ id: session.id, data: `echo ${expected}\r` });
         }),
-      "XIAOSHUO_TERMINAL_SMOKE"
-    );
-    if (!terminalOutput.includes("XIAOSHUO_TERMINAL_SMOKE")) {
-      throw new Error("Terminal smoke command did not echo the expected marker");
+        expectedText
+      );
+      if (!output.includes(expectedText)) {
+        throw new Error(`Terminal smoke command did not echo the expected marker: ${expectedText}`);
+      }
+    };
+
+    // Only a control carrying the Workbench marker can mint the one-shot
+    // preload lease. The smoke bridge exercises the same pointer/keyboard contract.
+    await exerciseTerminalSession({
+      activate: () => page.getByTestId("terminal-start").click(),
+      expectedText: "XIAOSHUO_TERMINAL_POINTER_SMOKE"
+    });
+    await exerciseTerminalSession({
+      activate: async () => {
+        await page.getByTestId("terminal-start").focus();
+        await page.keyboard.press("Enter");
+      },
+      expectedText: "XIAOSHUO_TERMINAL_KEYBOARD_SMOKE"
+    });
+
+    const terminalAfterConsumedGesture = await page.evaluate(async () => {
+      try {
+        await window.xiaoshuoDesktop.terminal.create({ cols: 100, rows: 24 });
+        return "";
+      } catch (error) {
+        return String(error?.code || error?.message || error);
+      }
+    });
+    if (!terminalAfterConsumedGesture.includes("TERMINAL_USER_GESTURE_REQUIRED")) {
+      throw new Error("Terminal user gesture ticket was not consumed exactly once");
     }
 
     console.log(`[desktop-smoke] ok electron=${versions.electron} terminal=${capabilities.terminal.package} localState=${capabilities.localDatabase.package}`);
     clearTimeout(closeTimer);
+    } finally {
+      restoreRuntimeFetch();
+    }
   } finally {
     await electronApp.close();
   }

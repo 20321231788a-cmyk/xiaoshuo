@@ -1,0 +1,149 @@
+.disassembly-transform-panel {
+  min-width: 0;
+}
+
+.disassembly-action-section {
+  display: grid;
+  gap: 9px;
+  padding: 2px 0 14px;
+}
+
+.disassembly-action-section + .disassembly-action-section {
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
+.disassembly-action-title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+}
+
+.disassembly-action-title svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+.disassembly-action-title strong {
+  min-width: 0;
+  flex: 1;
+  font-size: 13px;
+}
+
+.disassembly-action-title > span {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.disassembly-action-section > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.disassembly-action-section > small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disassembly-action-section > .button {
+  width: 100%;
+  min-height: 32px;
+  margin: 0;
+}
+
+.disassembly-fusion-books {
+  max-height: 142px;
+  overflow-y: auto;
+  border-block: 1px solid var(--line);
+}
+
+.disassembly-fusion-preview {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.disassembly-fusion-preview pre {
+  max-height: 260px;
+  margin: 0;
+  padding: 9px;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+  background: var(--stone-deep);
+  border-radius: 6px;
+}
+
+.extract-panel .disassembly-fusion-books label {
+  min-height: 34px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  padding: 6px 2px;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.extract-panel .disassembly-fusion-books label:last-child {
+  border-bottom: 0;
+}
+
+.disassembly-fusion-books input {
+  flex: 0 0 auto;
+}
+
+.disassembly-fusion-books span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.disassembly-fusion-books > small {
+  display: block;
+  padding: 10px 2px;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.disassembly-panel-divider {
+  height: 1px;
+  margin: 2px -12px 0;
+  background: var(--line);
+}
+
+.disassembly-action-status {
+  margin: 12px 0 0 !important;
+  padding: 8px;
+  border-radius: 5px;
+  background: var(--stone-deep);
+  color: var(--muted);
+  line-height: 1.5 !important;
+}
+
+@media (max-width: 1260px) {
+  .disassembly-layout {
+    grid-template-columns: 185px minmax(360px, 1fr) 235px;
+  }
+}

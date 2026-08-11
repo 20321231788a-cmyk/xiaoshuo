@@ -2,6 +2,7 @@ import { loadPublicConfig, savePublicConfig } from "@xiaoshuo/config-service";
 import type { AiConfigProfile } from "@xiaoshuo/shared";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { loadRuntimeLicenseStatus } from "./license-guard.js";
+import { invalidateManualModelDiscoveryCache } from "./model-discovery-routes.js";
 import type { RuntimeContext } from "./types.js";
 
 type JsonRecord = Record<string, unknown>;
@@ -80,7 +81,9 @@ export async function handleBaseRuntimeRoutes(
     }
 
     const payload = await deps.readJsonBody(request);
-    deps.writeJson(response, 200, await savePublicConfig(payload, { rootDir: context.projectRoot }));
+    const saved = await savePublicConfig(payload, { rootDir: context.projectRoot });
+    invalidateManualModelDiscoveryCache();
+    deps.writeJson(response, 200, saved);
     return true;
   }
 

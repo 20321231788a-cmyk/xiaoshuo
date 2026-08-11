@@ -1,8 +1,82 @@
 import { describe, expect, it } from "vitest";
-import { appConfigSchema } from "@xiaoshuo/shared";
+import { agentRunStateSchema, appConfigSchema } from "@xiaoshuo/shared";
 import { buildApiUrl, createApiClient, extractErrorMessage, parseJsonResponse } from "./client.js";
 
 describe("api-client", () => {
+  it("posts durable run creation payloads through the lifecycle contract", async () => {
+    const requests: Array<{ url: string; method: string; body: string }> = [];
+    const run = agentRunStateSchema.parse({
+      run_id: "run-created",
+      request_id: "request-created",
+      goal: { instruction: "继续写作" },
+      created_at: "2026-07-10T04:00:00.000Z",
+      updated_at: "2026-07-10T04:00:00.000Z"
+    });
+    const client = createApiClient({
+      baseUrl: "http://127.0.0.1:18452",
+      fetchFn: async (input, init) => {
+        requests.push({
+          url: String(input),
+          method: String(init?.method || "GET"),
+          body: String(init?.body || "")
+        });
+        return new Response(JSON.stringify(run), { status: 201, headers: { "Content-Type": "application/json" } });
+      }
+    });
+
+    const created = await client.createAgentRun({ request_id: "request-created", content: "继续写作" });
+
+    expect(created.run_id).toBe("run-created");
+    expect(requests).toEqual([
+      {
+        url: "http://127.0.0.1:18452/api/agent/runs",
+        method: "POST",
+        body: JSON.stringify({
+          request_id: "request-created",
+          autonomy_mode: "plan",
+          conversation_id: "",
+          content: "继续写作",
+          current_path: "",
+          selection: "",
+          project_context_hint: "",
+          skill_id: "",
+          attachment_ids: [],
+          reference_paths: [],
+          confirmed_reference_paths: [],
+          disable_auto_references: false
+        })
+      }
+    ]);
+  });
+
+  it("uses the receipt-bound memory confirmation route instead of a direct confirmed write", async () => {
+    const requests: Array<{ url: string; method: string; body: string }> = [];
+    const client = createApiClient({
+      baseUrl: "http://127.0.0.1:18452",
+      fetchFn: async (input, init) => {
+        requests.push({ url: String(input), method: String(init?.method || "GET"), body: String(init?.body || "") });
+        return new Response(JSON.stringify({
+          confirmation: {
+            confirmation_id: "memconf-1",
+            claim_id: "claim-1",
+            version: 1,
+            status: "requested",
+            expires_at: "2026-07-13T01:00:00.000Z"
+          }
+        }), { status: 201, headers: { "Content-Type": "application/json" } });
+      }
+    });
+
+    const result = await client.requestGovernedMemoryConfirmation("claim-1", 3);
+
+    expect(result.confirmation.status).toBe("requested");
+    expect(requests).toEqual([{
+      url: "http://127.0.0.1:18452/api/memory/claims/claim-1/confirmations",
+      method: "POST",
+      body: JSON.stringify({ source_revision: 3 })
+    }]);
+  });
+
   it("preserves slashes when encoding path placeholders", () => {
     const url = buildApiUrl("http://127.0.0.1:18452", "/api/documents/{rel_path}", {
       rel_path: "01_大纲/章纲.txt"
@@ -27,10 +101,7 @@ describe("api-client", () => {
             base_url: "https://api.openai.com/v1",
             model: "gpt-4.1-mini",
             temp: 0.7,
-            secondary_api_key: "",
-            secondary_base_url: "",
-            secondary_model: "",
-            secondary_temp: 0.5,
+            task_model: "",
             model_thinking_enabled: false,
             enable_consistency_revision: true,
             consistency_revision_score: 80,
@@ -56,10 +127,7 @@ describe("api-client", () => {
         base_url: "https://api.openai.com/v1",
         model: "gpt-4.1-mini",
         temp: 0.7,
-        secondary_api_key: "",
-        secondary_base_url: "",
-        secondary_model: "",
-        secondary_temp: 0.5,
+        task_model: "",
         model_thinking_enabled: false,
         enable_consistency_revision: true,
         consistency_revision_score: 80,
@@ -249,6 +317,213 @@ describe("api-client", () => {
       {
         url: "http://127.0.0.1:18452/api/agent/traces/run-one",
         method: "GET"
+      }
+    ]);
+  });
+
+  it("lists agent runs, gets run detail and confirmations, and replays events", async () => {
+    const requests: Array<{ url: string; method: string }> = [];
+    const run = {
+      run_id: "run-one",
+      goal: { instruction: "续写下一章" },
+      created_at: "2026-07-10T08:00:00.000Z",
+      updated_at: "2026-07-10T08:00:01.000Z"
+    };
+    const client = createApiClient({
+      baseUrl: "http://127.0.0.1:18452",
+      fetchFn: async (input, init) => {
+        const url = new URL(String(input));
+        requests.push({
+          url: url.toString(),
+          method: String(init?.method || "GET")
+        });
+        if (url.pathname.endsWith("/events")) {
+          return new Response(
+            JSON.stringify({
+              events: [
+                {
+                  event_id: "event-four",
+                  run_id: "run-one",
+                  sequence: 4,
+                  event_type: "run.paused",
+                  created_at: "2026-07-10T08:00:02.000Z"
+                }
+              ],
+              next_after: 4
+            }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        const body = url.pathname === "/api/agent/runs"
+          ? { runs: [run], next_cursor: "cursor-two" }
+          : url.pathname.endsWith("/confirmations")
+            ? [{ confirmation_id: "confirmation-one", run_id: "run-one", step_id: "step-one", action: "replace_document", risk_level: "high", status: "pending" }]
+            : run;
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    });
+
+    const list = await client.listAgentRuns({
+      project: "project-one",
+      status: "paused",
+      cursor: "cursor-one",
+      limit: 25
+    });
+    const detail = await client.getAgentRun("run-one");
+    const confirmations = await client.getAgentRunConfirmations("run-one");
+    const replay = await client.getAgentRunEvents("run-one", 3);
+
+    expect(list.runs[0]).toMatchObject({ run_id: "run-one", status: "queued", version: 1 });
+    expect(list.next_cursor).toBe("cursor-two");
+    expect(detail.goal.instruction).toBe("续写下一章");
+    expect(confirmations).toMatchObject([{ confirmation_id: "confirmation-one", status: "pending" }]);
+    expect(replay.events[0]).toMatchObject({ sequence: 4, step_id: "", payload: {} });
+    expect(replay.next_after).toBe(4);
+    expect(requests).toEqual([
+      {
+        url: "http://127.0.0.1:18452/api/agent/runs?project=project-one&status=paused&cursor=cursor-one&limit=25",
+        method: "GET"
+      },
+      {
+        url: "http://127.0.0.1:18452/api/agent/runs/run-one",
+        method: "GET"
+      },
+      {
+        url: "http://127.0.0.1:18452/api/agent/runs/run-one/confirmations",
+        method: "GET"
+      },
+      {
+        url: "http://127.0.0.1:18452/api/agent/runs/run-one/events?after=3",
+        method: "GET"
+      }
+    ]);
+  });
+
+  it("exports and deletes durable runs through typed project-scoped endpoints", async () => {
+    const requests: Array<{ url: string; method: string }> = [];
+    const run = {
+      run_id: "run-export",
+      project_id: "project-one",
+      project_path: "D:\\projects\\demo",
+      goal: { instruction: "导出" },
+      created_at: "2026-07-10T08:00:00.000Z",
+      updated_at: "2026-07-10T08:00:01.000Z"
+    };
+    const client = createApiClient({
+      baseUrl: "http://127.0.0.1:18452",
+      fetchFn: async (input, init) => {
+        const url = String(input);
+        requests.push({ url, method: String(init?.method || "GET") });
+        const body = init?.method === "DELETE"
+          ? {
+              run_id: "run-export", project_id: "project-one", deleted_at: "2026-07-10T08:02:00.000Z",
+              deleted_records: { run: 1, steps: 0, attempts: 0, observations: 0, artifacts: 0, confirmations: 0, events: 0, control_operations: 0, commit_journal: 0, write_leases: 0 },
+              preserved_artifacts: []
+            }
+          : {
+              format_version: 1, exported_at: "2026-07-10T08:02:00.000Z", project_id: "project-one", project_path: "D:\\projects\\demo",
+              run, steps: [], attempts: [], observations: [], artifacts: [], confirmations: [], events: [], control_operations: [], commit_journal: []
+            };
+        return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+    });
+
+    const exported = await client.exportAgentRun("run-export");
+    const deleted = await client.deleteAgentRun("run-export");
+
+    expect(exported).toMatchObject({ format_version: 1, run: { run_id: "run-export" } });
+    expect(deleted).toMatchObject({ run_id: "run-export", deleted_records: { run: 1 } });
+    expect(requests).toEqual([
+      { url: "http://127.0.0.1:18452/api/agent/runs/run-export/export", method: "GET" },
+      { url: "http://127.0.0.1:18452/api/agent/runs/run-export", method: "DELETE" }
+    ]);
+  });
+
+  it("posts agent run lifecycle commands with idempotency and CAS bodies", async () => {
+    const requests: Array<{ url: string; method: string; body: string }> = [];
+    const run = {
+      run_id: "run-one",
+      goal: { instruction: "续写下一章" },
+      created_at: "2026-07-10T08:00:00.000Z",
+      updated_at: "2026-07-10T08:00:01.000Z"
+    };
+    const client = createApiClient({
+      baseUrl: "http://127.0.0.1:18452",
+      fetchFn: async (input, init) => {
+        const url = String(input);
+        requests.push({
+          url,
+          method: String(init?.method || "GET"),
+          body: String(init?.body || "")
+        });
+        const confirmationStatus = url.endsWith("/approve") ? "approved" : url.endsWith("/reject") ? "rejected" : null;
+        const body = confirmationStatus
+          ? {
+              confirmation_id: "confirmation-one",
+              run_id: "run-one",
+              step_id: "step-one",
+              action: "replace_document",
+              risk_level: "high",
+              status: confirmationStatus
+            }
+          : run;
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }
+    });
+
+    const paused = await client.pauseAgentRun("run-one", { operation_id: " operation-pause ", expected_version: 1 });
+    await client.resumeAgentRun("run-one", { operation_id: "operation-resume", expected_version: 2 });
+    await client.cancelAgentRun("run-one", { operation_id: "operation-cancel", expected_version: 3 });
+    await client.retryAgentRunStep("run-one", "step-one", { operation_id: "operation-retry", expected_version: 4 });
+    const approved = await client.approveAgentConfirmation("confirmation-one", {
+      operation_id: "operation-approve",
+      expected_version: 5,
+      expected_scope_fingerprint: "scope-fingerprint-1"
+    });
+    const rejected = await client.rejectAgentConfirmation("confirmation-one", {
+      operation_id: "operation-reject",
+      expected_version: 6
+    });
+
+    expect(paused).toMatchObject({ run_id: "run-one", status: "queued", version: 1 });
+    expect(approved.status).toBe("approved");
+    expect(rejected.status).toBe("rejected");
+    expect(requests).toEqual([
+      {
+        url: "http://127.0.0.1:18452/api/agent/runs/run-one/pause",
+        method: "POST",
+        body: JSON.stringify({ operation_id: "operation-pause", expected_version: 1 })
+      },
+      {
+        url: "http://127.0.0.1:18452/api/agent/runs/run-one/resume",
+        method: "POST",
+        body: JSON.stringify({ operation_id: "operation-resume", expected_version: 2 })
+      },
+      {
+        url: "http://127.0.0.1:18452/api/agent/runs/run-one/cancel",
+        method: "POST",
+        body: JSON.stringify({ operation_id: "operation-cancel", expected_version: 3 })
+      },
+      {
+        url: "http://127.0.0.1:18452/api/agent/runs/run-one/steps/step-one/retry",
+        method: "POST",
+        body: JSON.stringify({ operation_id: "operation-retry", expected_version: 4 })
+      },
+      {
+        url: "http://127.0.0.1:18452/api/agent/confirmations/confirmation-one/approve",
+        method: "POST",
+        body: JSON.stringify({ operation_id: "operation-approve", expected_version: 5, expected_scope_fingerprint: "scope-fingerprint-1" })
+      },
+      {
+        url: "http://127.0.0.1:18452/api/agent/confirmations/confirmation-one/reject",
+        method: "POST",
+        body: JSON.stringify({ operation_id: "operation-reject", expected_version: 6, expected_scope_fingerprint: "" })
       }
     ]);
   });
@@ -723,6 +998,39 @@ describe("api-client", () => {
     );
 
     expect(events).toEqual(["start:chat", "delta:你好", "final:你好，世界"]);
+  });
+
+  it("consumes durable run event stream records after a sequence", async () => {
+    const received: string[] = [];
+    const requests: string[] = [];
+    const client = createApiClient({
+      baseUrl: "http://127.0.0.1:18452",
+      fetchFn: async (input) => {
+        requests.push(String(input));
+        return new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode([
+                JSON.stringify({ type: "event", event: { event_id: "event-4", run_id: "run-one", sequence: 4, event_type: "run.resumed", created_at: "2026-07-10T08:00:04.000Z" } }),
+                JSON.stringify({ type: "heartbeat", run_id: "run-one", after: 4, at: "2026-07-10T08:00:05.000Z" }),
+                JSON.stringify({ type: "end", run_id: "run-one", after: 4, status: "completed" })
+              ].join("\n")));
+              controller.close();
+            }
+          }),
+          { status: 200, headers: { "Content-Type": "application/x-ndjson" } }
+        );
+      }
+    });
+
+    await client.streamAgentRunEvents("run-one", {
+      onEvent: (event) => { received.push(`event:${event.sequence}`); },
+      onHeartbeat: (event) => { received.push(`heartbeat:${event.after}`); },
+      onEnd: (event) => { received.push(`end:${event.status}`); }
+    }, 3);
+
+    expect(received).toEqual(["event:4", "heartbeat:4", "end:completed"]);
+    expect(requests).toEqual(["http://127.0.0.1:18452/api/agent/runs/run-one/events/stream?after=3"]);
   });
 
   it("posts conversation message payloads and parses the returned reply", async () => {

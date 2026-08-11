@@ -12,7 +12,30 @@ export type PendingGeneratedSave = {
   defaultMode: "replace" | "append";
   source: "chat" | "skill";
   savePlan?: GeneratedSavePlan;
+  /** The message which owns the preview. Optional for caches created by older versions. */
+  conversationId?: string;
+  messageId?: string;
+  runId?: string;
+  createdAt?: string;
+  error?: string;
 };
+
+export type PendingLibraryDraftGroup = {
+  groupId: string;
+  conversationId?: string;
+  messageId?: string;
+  runId?: string;
+  createdAt?: string;
+  mode: "replace" | "merge";
+  domains: Array<"lore" | "style" | "genre">;
+  draftIds: string[];
+  source?: string;
+  error?: string;
+};
+
+export type PendingReviewItem =
+  | { kind: "generated_file"; id: string; pending: PendingGeneratedSave }
+  | { kind: "library_group"; id: string; pending: PendingLibraryDraftGroup };
 
 export type UnsavedWorkbenchStateInput = {
   dirtyDocumentCount: number;

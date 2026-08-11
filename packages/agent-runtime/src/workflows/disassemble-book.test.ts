@@ -1,14 +1,18 @@
 import { ConversationService } from "@xiaoshuo/conversation-service";
 import { DocumentService } from "@xiaoshuo/document-service";
 import { GeneratedCacheService } from "@xiaoshuo/generated-cache";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { GeneratedSavePlanner } from "../generated-save-planner.js";
-import { AgentRuntimeService } from "../runtime.js";
+import { RunCoordinator } from "../kernel/run-coordinator.js";
+import { DurableWorkflowCheckpointStore } from "../kernel/workflow-checkpoint.js";
+import { AgentRuntimeService, closeAllAgentRuntimeServices } from "../runtime.js";
 import { PromptSkillRunner } from "../skill-runner.js";
 import { DisassembleBookWorkflow } from "./disassemble-book.js";
+import { readDisassembleBookManifest } from "./disassemble-library.js";
 import type { WorkflowRunContext } from "./types.js";
 
 let tempDir = "";
@@ -21,6 +25,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  closeAllAgentRuntimeServices();
   if (tempDir) {
     await fs.rm(tempDir, { recursive: true, force: true });
   }
@@ -63,7 +68,9 @@ describe("DisassembleBookWorkflow", () => {
       },
       createWorkflowContext({
         requestCompletion: async (_config, messages) => {
-          prompts.push(messages.map((message) => message.content).join("\n"));
+          const prompt = messages.map((message) => message.content).join("\n");
+          prompts.push(prompt);
+          if (prompt.includes("只根据本批原文输出 JSON")) return validBatchJson();
           return responses.shift() || "";
         }
       })
@@ -75,19 +82,19 @@ describe("DisassembleBookWorkflow", () => {
 
     expect(result.intent).toBe("skill");
     expect(book?.dir).toContain("00_设定集/拆书库/");
-    expect(result.saved_paths).toEqual([`${book?.dir}/拆书设定提取.txt`, `${book?.dir}/反向细纲.txt`]);
+    expect(result.saved_paths).toEqual([`${book?.dir}/拆书设定提取.txt`, `${book?.dir}/反向细纲.txt`, `${book?.dir}/拆书报告.md`]);
     expect(book?.paths?.lore).toBe(`${book?.dir}/拆书设定提取.txt`);
     expect(book?.paths?.reverse_outline).toBe(`${book?.dir}/反向细纲.txt`);
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "设定集", "拆书设定提取.txt"), "utf8")).toContain("林默");
-    expect(await fs.readFile(path.join(tempDir, "01_大纲", "反向细纲.txt"), "utf8")).toContain("第一章");
+    await expect(fs.readFile(path.join(tempDir, "00_设定集", "设定集", "拆书设定提取.txt"), "utf8")).rejects.toThrow();
     expect(loreText).toContain(`# 《${title}》拆书设定提取`);
     expect(loreText).toContain("## 人物设定");
     expect(loreText).toContain("## 伏笔与可复用素材");
     expect(reverseText).toContain(`# 《${title}》详细剧情发展`);
     expect(reverseText).toContain("## 逐章速览");
     expect(reverseText).toContain("## 大事件拆解");
-    expect(prompts[0]).toContain(`文件首行必须是：# 《${title}》拆书设定提取`);
-    expect(prompts[1]).toContain(`文件首行必须是：# 《${title}》详细剧情发展`);
+    expect(prompts[0]).toContain("只根据本批原文输出 JSON");
+    expect(prompts.some((prompt) => prompt.includes(`文件首行必须是：# 《${title}》拆书设定提取`))).toBe(true);
+    expect(prompts.some((prompt) => prompt.includes(`文件首行必须是：# 《${title}》详细剧情发展`))).toBe(true);
   });
 
   it("imports long disassemble source text beyond the previous 60000 character cap", async () => {
@@ -108,7 +115,9 @@ describe("DisassembleBookWorkflow", () => {
         attachment_ids: []
       },
       createWorkflowContext({
-        requestCompletion: async () => "原文未明确。"
+        requestCompletion: async (_config, messages) => messages.map((message) => message.content).join("\n").includes("只根据本批原文输出 JSON")
+          ? validBatchJson()
+          : "原文未明确。"
       })
     );
     const book = result.skill_result?.data?.book as { dir?: string } | undefined;
@@ -116,6 +125,157 @@ describe("DisassembleBookWorkflow", () => {
 
     expect(archived).toContain("超过旧上限标记");
     expect(archived.length).toBeGreaterThan(100_000);
+  });
+
+  it("only analyzes the first 200000 effective characters and includes the full boundary chapter", async () => {
+    const source = [
+      "第1章 起点",
+      "甲".repeat(120_000),
+      "第2章 跨界章",
+      "乙".repeat(120_000),
+      "第3章 未纳入范围",
+      "后续未纳入拆解标记".repeat(200)
+    ].join("\n");
+    const batchPrompts: string[] = [];
+    const workflow = new DisassembleBookWorkflow();
+    const result = await workflow.runAgent(
+      {
+        conversation_id: "",
+        content: "请拆书",
+        current_path: "",
+        selection: source,
+        project_context_hint: "",
+        skill_id: "disassemble_book",
+        attachment_ids: []
+      },
+      createWorkflowContext({
+        requestCompletion: async (_config, messages) => {
+          const prompt = messages.map((message) => message.content).join("\n");
+          if (prompt.includes("只根据本批原文输出 JSON")) {
+            batchPrompts.push(prompt);
+            return '{"chapter_range":"第1-2章","plot_events":["因果事件"],"characters":["主角"],"world_rules":[],"items_and_factions":[],"foreshadowing":[],"pacing_style":["快节奏"]}';
+          }
+          if (prompt.includes("拆书设定提取.txt")) return "## 人物设定\n主角：测试人物。";
+          return "## 逐章速览\n第1-2章：测试剧情。";
+        }
+      })
+    );
+    const book = result.skill_result?.data?.book as { dir?: string } | undefined;
+    const manifest = await readDisassembleBookManifest(book?.dir || "", createWorkflowContext({ requestCompletion: async () => "unused" }));
+
+    expect(manifest.analysis_scope).toMatchObject({
+      mode: "prefix_chars",
+      requested_chars: 200_000,
+      first_chapter: 1,
+      last_chapter: 2,
+      truncated: true
+    });
+    expect(manifest.analysis_scope?.actual_chars).toBeGreaterThan(200_000);
+    expect(manifest.coverage.analyzed_chapters).toEqual([1, 2]);
+    expect(batchPrompts).not.toHaveLength(0);
+    expect(batchPrompts.join("\n")).not.toContain("后续未纳入拆解标记");
+  });
+
+  it("retries a transient batch failure and keeps the completed output", async () => {
+    let batchAttempts = 0;
+    const workflow = new DisassembleBookWorkflow();
+    const result = await workflow.runAgent({
+      conversation_id: "",
+      content: "请拆书",
+      current_path: "",
+      selection: "第1章 起点\n林默踏入宗门。",
+      project_context_hint: "",
+      skill_id: "disassemble_book",
+      attachment_ids: []
+    }, createWorkflowContext({
+      requestCompletion: async (_config, messages) => {
+        const prompt = messages.map((message) => message.content).join("\n");
+        if (prompt.includes("只根据本批原文输出 JSON")) {
+          batchAttempts += 1;
+          if (batchAttempts === 1) throw new Error("ECONNRESET");
+          return validBatchJson();
+        }
+        return prompt.includes("拆书设定提取.txt")
+          ? "## 人物设定\n林默：主角。"
+          : "## 逐章速览\n第1章：林默入宗。";
+      }
+    }));
+
+    expect(batchAttempts).toBe(2);
+    expect(result.saved_paths).toHaveLength(3);
+  });
+
+  it("keeps a useful partial batch response instead of failing on omitted empty categories", async () => {
+    const workflow = new DisassembleBookWorkflow();
+    const batchSystemPrompts: string[] = [];
+    const result = await workflow.runAgent({
+      conversation_id: "",
+      content: "请拆书",
+      current_path: "",
+      selection: "第1章 起点\n林默踏入宗门。",
+      project_context_hint: "",
+      skill_id: "disassemble_book",
+      attachment_ids: []
+    }, createWorkflowContext({
+      requestCompletion: async (_config, messages) => {
+        const prompt = messages.map((message) => message.content).join("\n");
+        if (prompt.includes("只根据本批原文输出 JSON")) {
+          batchSystemPrompts.push(messages.find((message) => message.role === "system")?.content || "");
+          return JSON.stringify({ "章节范围": "第1章", "情节因果": "林默踏入宗门", "人物关系": ["林默：初入宗门"] });
+        }
+        return prompt.includes("拆书设定提取.txt")
+          ? "## 人物设定\n林默：初入宗门。"
+          : "## 逐章速览\n第1章：林默踏入宗门。";
+      }
+    }));
+
+    expect(result.saved_paths).toHaveLength(3);
+    const batchPath = `${(result.skill_result?.data?.book as { dir?: string } | undefined)?.dir || ""}/批次分析/第001批.md`;
+    expect(await fs.readFile(path.join(tempDir, batchPath), "utf8")).toContain('"world_rules":[]');
+    expect(batchSystemPrompts).toEqual([expect.stringContaining("只输出一个 JSON 对象")]);
+    expect(batchSystemPrompts.join("\n")).not.toContain("严格按人物设定、体系设定、地图设定、道具设定四段输出");
+  });
+
+  it("keeps an interrupted book resumable instead of marking it as failed", async () => {
+    const workflow = new DisassembleBookWorkflow();
+    const archiveContext = createWorkflowContext({ requestCompletion: async () => "unused" });
+    const archived = await workflow.runAgent({
+      conversation_id: "task-conversation",
+      content: "",
+      current_path: "",
+      selection: "第一章内容。\n\n第二章内容。",
+      project_context_hint: "",
+      skill_id: "disassemble_book",
+      attachment_ids: [],
+      action: "archive_source"
+    } as any, archiveContext);
+    const book = archived.skill_result?.data?.book as { id: string; dir: string };
+    const abortController = new AbortController();
+    const cancelledContext: WorkflowRunContext = {
+      ...createWorkflowContext({
+        requestCompletion: async () => {
+          abortController.abort();
+          return "不会被写入";
+        }
+      }),
+      signal: abortController.signal
+    };
+
+    await expect(workflow.runAgent({
+      conversation_id: "task-conversation",
+      content: "请继续拆解",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "disassemble_book",
+      attachment_ids: [],
+      source_book_id: book.id
+    } as any, cancelledContext)).rejects.toMatchObject({ name: "AbortError" });
+
+    const manifest = await readDisassembleBookManifest(book.dir, archiveContext);
+    expect(manifest.status).toBe("cancelled");
+    expect(manifest.error).toBe("");
+    expect(manifest.progress.stage).toBe("cancelled");
   });
 
   it("lists existing disassemble books", async () => {
@@ -187,4 +347,156 @@ describe("DisassembleBookWorkflow", () => {
     expect(result.saved_paths).toEqual([`${book?.dir}/原文.txt`]);
     expect(await fs.readFile(path.join(tempDir, book?.dir || "", "原文.txt"), "utf8")).toContain("归档的拆书原文");
   });
+
+  it("commits every durable disassemble output with its run, step, and attempt identity", async () => {
+    const runtime = new AgentRuntimeService({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async (_config, messages) => {
+          const prompt = messages.map((message) => message.content).join("\n");
+          if (prompt.includes("只根据本批原文输出 JSON")) return validBatchJson();
+          return prompt.includes("拆书设定提取.txt")
+            ? "## 人物设定\n林默：主角。"
+            : "## 逐章速览\n第 1 章：林默入宗门。";
+        }
+      }
+    });
+
+    const response = await runtime.runAgent({
+      request_id: "durable-disassemble-journal",
+      conversation_id: "",
+      content: "请拆书",
+      current_path: "",
+      selection: "林默从寒门少年一路成长为宗门天骄。",
+      project_context_hint: "",
+      skill_id: "disassemble_book",
+      attachment_ids: []
+    });
+    const journal = runtime.listDurableCommitJournal(response.run_id);
+    const actions = journal.map((entry) => entry.action).sort();
+
+    expect(journal.length).toBeGreaterThanOrEqual(10);
+    expect(journal).toEqual(expect.arrayContaining([
+      expect.objectContaining({ action: "workflow.disassemble_book.book.source", run_id: response.run_id, stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.disassemble_book.book.manifest.initial", run_id: response.run_id, stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.disassemble_book.book.manifest.lore", run_id: response.run_id, stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.disassemble_book.book.manifest.reverse_outline", run_id: response.run_id, stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.disassemble_book.lore.output", run_id: response.run_id, stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.disassemble_book.reverse_outline.output", run_id: response.run_id, stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.disassemble_book.report.output", run_id: response.run_id, stage: "finalized" }),
+      expect.objectContaining({ action: "workflow.disassemble_book.book.manifest.ready", run_id: response.run_id, stage: "finalized" })
+    ]));
+    expect(actions.length).toBeGreaterThanOrEqual(10);
+    expect(new Set(journal.map((entry) => `${entry.run_id}:${entry.step_id}:${entry.attempt_id}`)).size).toBe(1);
+
+    // A journaled action is only useful if it is the durable commit for the
+    // output that the workflow actually leaves on disk. The manifest is
+    // deliberately rewritten throughout this workflow, so verify its final
+    // write alongside every final generated and legacy-sync document.
+    const book = response.skill_result?.data?.book as { dir?: string } | undefined;
+    const expectedFinalWrites = [
+      { action: "workflow.disassemble_book.book.source", relativePath: `${book?.dir}/原文.txt` },
+      { action: "workflow.disassemble_book.book.manifest.ready", relativePath: `${book?.dir}/manifest.jsonl` },
+      { action: "workflow.disassemble_book.lore.output", relativePath: `${book?.dir}/拆书设定提取.txt` },
+      { action: "workflow.disassemble_book.reverse_outline.output", relativePath: `${book?.dir}/反向细纲.txt` },
+      { action: "workflow.disassemble_book.report.output", relativePath: `${book?.dir}/拆书报告.md` }
+    ];
+    for (const expected of expectedFinalWrites) {
+      const entry = journal.find((item) => item.action === expected.action);
+      expect(entry).toBeDefined();
+      expect(path.relative(tempDir, entry!.target_path).replace(/\\/g, "/")).toBe(expected.relativePath);
+      const content = await fs.readFile(entry!.target_path, "utf8");
+      expect(entry!.new_hash).toBe(`sha256:${createHash("sha256").update(content, "utf8").digest("hex")}`);
+    }
+  });
+
+  it("resumes the same durable run without recomputing its persisted lore output after a SQLite restart", async () => {
+    const request = {
+      request_id: "disassemble-checkpoint-recovery",
+      conversation_id: "",
+      content: "请拆书",
+      current_path: "",
+      selection: "林默从寒门少年一路成长为宗门天骄。",
+      project_context_hint: "",
+      skill_id: "disassemble_book",
+      attachment_ids: []
+    };
+    const workflow = new DisassembleBookWorkflow();
+    const calls: string[] = [];
+    let failReverseOutline = true;
+    const modelClient = {
+      requestCompletion: async (_config: unknown, messages: Array<{ content: string }>) => {
+        const prompt = messages.map((message) => message.content).join("\n");
+        if (prompt.includes("只根据本批原文输出 JSON")) {
+          calls.push("batch");
+          return '{"chapter_range":"第1章","plot_events":["林默入宗"],"characters":["林默"],"world_rules":[],"items_and_factions":[],"foreshadowing":[],"pacing_style":[]}';
+        }
+        if (prompt.includes("拆书设定提取.txt")) {
+          calls.push("lore");
+          return "【人物设定】\n林默：主角，出身寒门。";
+        }
+        calls.push("reverse_outline");
+        if (failReverseOutline) {
+          failReverseOutline = false;
+          throw new Error("simulated runtime interruption");
+        }
+        return "第一章：林默入宗门。";
+      }
+    };
+    const coordinator = new RunCoordinator({ projectRoot: tempDir, autoHeartbeat: false });
+    const firstExecution = coordinator.beginRun(request, { stepType: "workflow", retryable: true });
+    const firstContext = createWorkflowContext(modelClient);
+    firstContext.checkpoint = new DurableWorkflowCheckpointStore(coordinator.store, {
+      runId: firstExecution.run_id,
+      stepId: firstExecution.step_id,
+      attemptId: firstExecution.attempt_id
+    });
+
+    await expect(workflow.runAgent(request, firstContext)).rejects.toThrow("simulated runtime interruption");
+    const failed = coordinator.failRun(firstExecution, new Error("simulated runtime interruption"));
+    expect(coordinator.listEvents(firstExecution.run_id)
+      .filter((event) => event.event_type === "workflow.unit.completed")
+      .map((event) => event.payload.unit_id)).toEqual(expect.arrayContaining(["book", "lore"]));
+    coordinator.close();
+
+    const recovered = new RunCoordinator({ projectRoot: tempDir, autoHeartbeat: false });
+    try {
+      const resumed = recovered.resumeRun(firstExecution.run_id, "resume-disassemble-checkpoint", failed.version);
+      const resumedContext = createWorkflowContext(modelClient);
+      resumedContext.checkpoint = new DurableWorkflowCheckpointStore(recovered.store, {
+        runId: resumed.run_id,
+        stepId: resumed.step_id,
+        attemptId: resumed.attempt_id
+      });
+
+      const response = await workflow.runAgent(request, resumedContext);
+      recovered.completeRun(resumed, response);
+
+      const book = response.skill_result?.data?.book as { dir?: string } | undefined;
+      const library = await fs.readdir(path.join(tempDir, "00_设定集", "拆书库"), { withFileTypes: true });
+      expect(calls).toEqual(["batch", "lore", "reverse_outline", "reverse_outline"]);
+      expect(library.filter((entry) => entry.isDirectory())).toHaveLength(1);
+      expect(await fs.readFile(path.join(tempDir, book?.dir || "", "拆书设定提取.txt"), "utf8")).toContain("林默：主角");
+      expect(response.saved_paths).toEqual([`${book?.dir}/拆书设定提取.txt`, `${book?.dir}/反向细纲.txt`, `${book?.dir}/拆书报告.md`]);
+      expect(recovered.getRun(firstExecution.run_id)).toMatchObject({ run_id: firstExecution.run_id, status: "completed" });
+      expect(recovered.store.listEvents(firstExecution.run_id)
+        .filter((event) => event.event_type === "workflow.unit.completed")
+        .map((event) => event.payload.unit_id)).toEqual(expect.arrayContaining(["book", "lore", "reverse_outline"]));
+    } finally {
+      recovered.close();
+    }
+  });
 });
+
+function validBatchJson() {
+  return JSON.stringify({
+    chapter_range: "第1章",
+    plot_events: ["林默入宗"],
+    characters: ["林默"],
+    world_rules: [],
+    items_and_factions: [],
+    foreshadowing: [],
+    pacing_style: ["快节奏"]
+  });
+}

@@ -206,6 +206,26 @@ const BUILTIN_SKILLS: SkillDefinition[] = [
     writable: true
   },
   {
+    id: "style_genre_generate",
+    name: "创建风格与题材库",
+    description: "同时生成写作风格库和题材规则库；明确保存时原子写入两个资料库。",
+    input_mode: "text",
+    context_requirements: ["project_state", "style", "genre"],
+    handler_type: "workflow",
+    linked_targets: [
+      "00_设定集/风格库/写作风格.txt",
+      "00_设定集/风格库/风格示例.txt",
+      "00_设定集/风格库/参考素材.txt",
+      "00_设定集/题材库/题材规则.txt",
+      "00_设定集/题材库/题材素材.txt",
+      "00_设定集/题材库/战斗模板.txt",
+      "00_设定集/题材库/违禁词.txt"
+    ],
+    prompt: "",
+    imported_from: "",
+    writable: true
+  },
+  {
     id: "batch_generate",
     name: "批量续写",
     description: "按章节范围连续生成正文。",
@@ -766,7 +786,7 @@ export class SkillService {
       next.linked_targets = [...(payload.linked_targets || [])];
     }
     if (hasOwn(payload, "model_policy")) {
-      next.model_policy = skillModelPolicySchema.parse(payload.model_policy || {});
+      next.model_policy = normalizeTaskModelPolicy(payload.model_policy);
     }
     if (hasOwn(payload, "save_policy")) {
       next.save_policy = skillSavePolicySchema.parse(payload.save_policy || {});
@@ -833,7 +853,7 @@ export class SkillService {
       handler_type: handlerType,
       linked_targets: normalizeStringArray(skill.linked_targets ?? skill.manifest?.linked_targets, 12, []),
       tools: normalizeStringArray(skill.tools ?? skill.manifest?.tools, 12, []),
-      model_policy: recordField(skill.model_policy ?? skill.manifest?.model_policy),
+      model_policy: normalizeTaskModelPolicy(skill.model_policy ?? skill.manifest?.model_policy),
       save_policy: recordField(skill.save_policy ?? skill.manifest?.save_policy),
       eval_cases: normalizeStringArray(skill.eval_cases ?? skill.manifest?.eval_cases, 20, [])
     });
@@ -974,7 +994,7 @@ export class SkillService {
       handler_type: "prompt",
       linked_targets: normalizeStringArray(manifestMetadata.linked_targets ?? metadata.linked_targets, 8, []),
       tools: normalizeStringArray(manifestMetadata.tools ?? metadata.tools, 12, []),
-      model_policy: recordField(manifestMetadata.model_policy ?? metadata.model_policy),
+      model_policy: normalizeTaskModelPolicy(manifestMetadata.model_policy ?? metadata.model_policy),
       save_policy: {
         ...savePolicy,
         requires_confirmation: booleanField(savePolicy.requires_confirmation ?? metadata.requires_confirmation, true)
@@ -1064,12 +1084,20 @@ function buildSkillManifest(input: Record<string, unknown> & { id: unknown; name
     context_requirements: normalizeStringArray(input.context_requirements, 12, ["project_state", "conversation"]),
     linked_targets: normalizeStringArray(input.linked_targets, 12, []),
     tools: normalizeStringArray(input.tools, 12, []),
-    model_policy: recordField(input.model_policy),
+    model_policy: normalizeTaskModelPolicy(input.model_policy),
     save_policy: {
       ...recordField(input.save_policy),
       requires_confirmation: booleanField(recordField(input.save_policy).requires_confirmation, true)
     },
     eval_cases: normalizeStringArray(input.eval_cases, 20, [])
+  });
+}
+
+function normalizeTaskModelPolicy(value: unknown) {
+  const policy = recordField(value);
+  return skillModelPolicySchema.parse({
+    ...policy,
+    ...(policy.line === "secondary" ? { line: "task-model" } : {})
   });
 }
 

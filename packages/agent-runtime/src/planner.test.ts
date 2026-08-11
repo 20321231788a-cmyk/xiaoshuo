@@ -94,4 +94,46 @@ describe("agent-planner", () => {
       text: "\n追加设定"
     });
   });
+
+  it("accepts null placeholders for fields that do not apply to archive operations", async () => {
+    await fs.writeFile(configPath, JSON.stringify({ api_key: "demo-key", model: "demo-model" }), "utf8");
+    const planner = new AgentPlanner({
+      projectRoot: tempDir,
+      config: { configPath },
+      modelClient: {
+        requestCompletion: async () =>
+          JSON.stringify({
+            summary: "归档当前大纲",
+            operations: [{
+              action: "archive_file",
+              path: "01_大纲/大纲.txt",
+              text: null,
+              old_text: null,
+              new_text: null,
+              target_path: null,
+              reason: null
+            }]
+          })
+      }
+    });
+
+    const plan = await planner.buildPlan({
+      instruction: "删除现在的大纲",
+      current_path: "",
+      selection: "",
+      project_context_hint: ""
+    });
+
+    expect(plan.can_execute).toBe(true);
+    expect(plan.operations).toEqual([expect.objectContaining({
+      action: "archive_file",
+      path: "01_大纲/大纲.txt",
+      text: "",
+      old_text: "",
+      new_text: "",
+      target_path: "",
+      reason: "",
+      requires_confirmation: true
+    })]);
+  });
 });

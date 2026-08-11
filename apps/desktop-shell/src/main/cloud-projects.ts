@@ -3,28 +3,41 @@ import type {
   CloudProjectDeleteResponse,
   CloudProjectDownloadRequest,
   CloudProjectDownloadResponse,
+  CloudProjectInspectRequest,
+  CloudProjectInspectResponse,
   CloudProjectListResponse,
   CloudProjectSlot,
   CloudProjectUploadRequest,
   CloudProjectUploadResponse
 } from "../shared/channels.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
+  CLOUD_CORE_DATA_LIMIT_BYTES,
   defaultProjectArchiveName,
+  exportCloudCoreArchiveToTemp,
   exportProjectArchive,
-  exportProjectArchiveToTemp,
-  importProjectArchiveToExisting
+  importCloudCoreArchiveToExisting,
+  inspectCloudCoreProject
 } from "./project-archive.js";
 import { loadLicenseStatusForRoot } from "./runtime/license-guard.js";
 
 const DEFAULT_WEBSITE_BASE_URL = "https://matian.online";
-export const CLOUD_PROJECT_UPLOAD_LIMIT_BYTES = 20 * 1024 * 1024;
+export const CLOUD_PROJECT_UPLOAD_LIMIT_BYTES = CLOUD_CORE_DATA_LIMIT_BYTES;
 
 export type CloudProjectServiceOptions = {
   appRoot: string;
   tempRoot: string;
+  stateRoot?: string;
+};
+
+type CloudSyncStateRecord = {
+  key: string;
+  slot_id: number;
+  remote_id: string;
+  remote_updated_at: string;
+  content_digest: string;
 };
 
 type WebsiteJsonRecord = Record<string, unknown>;
@@ -40,6 +53,18 @@ export class CloudProjectService {
     return normalizeListResponse(payload);
   }
 
+  async inspect(request: CloudProjectInspectRequest): Promise<CloudProjectInspectResponse> {
+    const inspection = await inspectCloudCoreProject(path.resolve(request.project_path));
+    return {
+      ok: true,
+      project_path: path.resolve(request.project_path),
+      core_bytes: inspection.total_bytes,
+      file_count: inspection.file_count,
+      max_upload_bytes: CLOUD_PROJECT_UPLOAD_LIMIT_BYTES,
+      largest_files: inspection.largest_files
+    };
+  }
+
   async upload(request: CloudProjectUploadRequest): Promise<CloudProjectUploadResponse> {
     const projectPath = path.resolve(request.project_path);
     const projectName = request.project_name || path.basename(projectPath);
@@ -48,22 +73,53 @@ export class CloudProjectService {
     const tempDir = await fs.mkdtemp(path.join(this.options.tempRoot, "arcwriter-cloud-upload-"));
     let archivePath = "";
     try {
-      archivePath = await exportProjectArchiveToTemp({
+      const projectId = request.project_id || await readProjectId(projectPath);
+      const exported = await exportCloudCoreArchiveToTemp({
         projectPath,
         tempDir,
-        fileName: defaultProjectArchiveName(projectName, projectPath)
+        fileName: defaultProjectArchiveName(projectName, projectPath),
+        projectId,
+        projectName
       });
+      archivePath = exported.archivePath;
       const stats = await fs.stat(archivePath);
       if (!stats.isFile() || stats.size <= 0) {
         throw new Error("项目归档为空，无法上传。");
       }
       if (stats.size > CLOUD_PROJECT_UPLOAD_LIMIT_BYTES) {
-        throw new Error("云项目上传上限为 20MB。");
+        throw new Error("单本小说的云同步数据上限为 30MB。");
+      }
+
+      const contentDigest = createHash("sha256")
+        .update(exported.inspection.files.map((entry) => `${entry.path}\0${entry.size}\0${entry.sha256}`).join("\n"))
+        .digest("hex");
+      const syncKey = projectId || projectPath.toLocaleLowerCase("en-US");
+      const remoteList = normalizeListResponse(await this.fetchWebsiteJson<CloudProjectListResponse>(`${websiteBaseUrl}/api/arcwriter/cloud-projects`, {
+        headers: this.authHeaders(tokenKey)
+      }));
+      const remoteSlot = remoteList.slots.find((slot) => slot.slot_id === request.slot_id);
+      const syncState = await this.readSyncState();
+      const previous = syncState.find((entry) => entry.key === syncKey && entry.slot_id === request.slot_id);
+      if (remoteSlot && previous && previous.remote_id === remoteSlot.id && previous.remote_updated_at === remoteSlot.updated_at && previous.content_digest === contentDigest) {
+        return {
+          ok: true,
+          slot: remoteSlot,
+          uploaded_bytes: 0,
+          daily_upload_limit: remoteList.daily_upload_limit,
+          today_upload_count: remoteList.today_upload_count,
+          today_upload_remaining: remoteList.today_upload_remaining,
+          core_bytes: exported.inspection.total_bytes,
+          unchanged: true
+        };
       }
 
       const form = new FormData();
       form.set("slot_id", String(request.slot_id));
       form.set("project_name", projectName);
+      form.set("project_id", projectId);
+      form.set("sync_mode", request.sync_mode || "manual");
+      form.set("core_bytes", String(exported.inspection.total_bytes));
+      form.set("content_digest", contentDigest);
       form.set("project", new Blob([await fs.readFile(archivePath)], { type: "application/zip" }), path.basename(archivePath));
 
       const payload = await this.fetchWebsiteJson<CloudProjectUploadResponse>(`${websiteBaseUrl}/api/arcwriter/cloud-projects`, {
@@ -71,13 +127,20 @@ export class CloudProjectService {
         headers: this.authHeaders(tokenKey),
         body: form
       });
+      const normalizedSlot = normalizeSlot(payload.slot);
+      await this.writeSyncState([
+        ...syncState.filter((entry) => entry.key !== syncKey && entry.slot_id !== request.slot_id),
+        { key: syncKey, slot_id: request.slot_id, remote_id: normalizedSlot.id, remote_updated_at: normalizedSlot.updated_at, content_digest: contentDigest }
+      ]);
       return {
         ok: Boolean(payload.ok ?? true),
-        slot: normalizeSlot(payload.slot),
+        slot: normalizedSlot,
         uploaded_bytes: Number(payload.uploaded_bytes || stats.size),
         daily_upload_limit: numberValue(payload.daily_upload_limit) || 10,
         today_upload_count: numberValue(payload.today_upload_count),
-        today_upload_remaining: numberValue(payload.today_upload_remaining)
+        today_upload_remaining: numberValue(payload.today_upload_remaining),
+        core_bytes: numberValue(payload.core_bytes) || exported.inspection.total_bytes,
+        unchanged: Boolean(payload.unchanged)
       };
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true }).catch(() => undefined);
@@ -107,17 +170,19 @@ export class CloudProjectService {
         throw new Error("云项目下载为空。");
       }
       if (data.length > CLOUD_PROJECT_UPLOAD_LIMIT_BYTES) {
-        throw new Error("云项目文件超过 20MB，已停止同步。");
+        throw new Error("云项目文件超过 30MB，已停止同步。");
       }
       await fs.writeFile(archivePath, data);
-      await importProjectArchiveToExisting({
+      const restored = await importCloudCoreArchiveToExisting({
         archivePath,
         targetProjectPath
       });
       return {
         ok: true,
         project_path: targetProjectPath,
-        backup_path: backupPath
+        backup_path: backupPath,
+        restored_files: restored.restored_files,
+        restored_bytes: restored.restored_bytes
       };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -136,6 +201,8 @@ export class CloudProjectService {
         headers: this.authHeaders(tokenKey)
       }
     );
+    const syncState = await this.readSyncState();
+    await this.writeSyncState(syncState.filter((entry) => entry.remote_id !== request.id));
     return {
       ok: Boolean(payload.ok ?? true),
       deleted_id: String(payload.deleted_id || request.id)
@@ -168,6 +235,36 @@ export class CloudProjectService {
     await fs.mkdir(backupDir, { recursive: true });
     const stem = defaultProjectArchiveName(projectName, projectPath).replace(/\.zip$/i, "");
     return path.join(backupDir, `${stem}.cloud-backup-${formatTimestamp(new Date())}.zip`);
+  }
+
+  private async readSyncState(): Promise<CloudSyncStateRecord[]> {
+    const raw = await fs.readFile(this.syncStatePath(), "utf8").catch(() => "");
+    if (!raw.trim()) return [];
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) return [];
+      return parsed.flatMap((entry) => {
+        if (!entry || typeof entry !== "object") return [];
+        const value = entry as Partial<CloudSyncStateRecord>;
+        return typeof value.key === "string" && typeof value.remote_id === "string" && typeof value.content_digest === "string"
+          ? [{ key: value.key, slot_id: Number(value.slot_id || 0), remote_id: value.remote_id, remote_updated_at: String(value.remote_updated_at || ""), content_digest: value.content_digest }]
+          : [];
+      });
+    } catch {
+      return [];
+    }
+  }
+
+  private async writeSyncState(records: CloudSyncStateRecord[]): Promise<void> {
+    const targetPath = this.syncStatePath();
+    await fs.mkdir(path.dirname(targetPath), { recursive: true });
+    const temporaryPath = `${targetPath}.${randomUUID()}.tmp`;
+    await fs.writeFile(temporaryPath, JSON.stringify(records), "utf8");
+    await fs.rename(temporaryPath, targetPath);
+  }
+
+  private syncStatePath(): string {
+    return path.join(this.options.stateRoot || this.options.tempRoot, "arcwriter-cloud-sync-state.json");
   }
 
   private authHeaders(tokenKey: string): Headers {
@@ -215,7 +312,17 @@ function normalizeListResponse(payload: CloudProjectListResponse): CloudProjectL
     max_upload_bytes: Number(payload.max_upload_bytes || CLOUD_PROJECT_UPLOAD_LIMIT_BYTES),
     daily_upload_limit: numberValue(payload.daily_upload_limit) || 10,
     today_upload_count: numberValue(payload.today_upload_count),
-    today_upload_remaining: numberValue(payload.today_upload_remaining)
+    today_upload_remaining: numberValue(payload.today_upload_remaining),
+    daily_upload_bytes_limit: numberValue(payload.daily_upload_bytes_limit),
+    daily_upload_bytes_used: numberValue(payload.daily_upload_bytes_used),
+    daily_upload_bytes_remaining: numberValue(payload.daily_upload_bytes_remaining),
+    monthly_upload_bytes_limit: numberValue(payload.monthly_upload_bytes_limit),
+    monthly_upload_bytes_used: numberValue(payload.monthly_upload_bytes_used),
+    monthly_upload_bytes_remaining: numberValue(payload.monthly_upload_bytes_remaining),
+    monthly_download_bytes_limit: numberValue(payload.monthly_download_bytes_limit),
+    monthly_download_bytes_used: numberValue(payload.monthly_download_bytes_used),
+    monthly_download_bytes_remaining: numberValue(payload.monthly_download_bytes_remaining),
+    quota_resets_at: String(payload.quota_resets_at || "")
   };
 }
 
@@ -225,12 +332,26 @@ function normalizeSlot(value: unknown): CloudProjectSlot {
     id: String(record.id || ""),
     slot_id: clampSlotId(record.slot_id ?? record.slotId),
     project_name: String(record.project_name || record.projectName || ""),
+    project_id: String(record.project_id || record.projectId || ""),
     file_name: String(record.file_name || record.fileName || ""),
     size: numberValue(record.size),
+    core_size: numberValue(record.core_size || record.core_bytes),
+    revision: numberValue(record.revision),
     sha256: String(record.sha256 || ""),
     created_at: String(record.created_at || record.createdAt || ""),
     updated_at: String(record.updated_at || record.updatedAt || "")
   };
+}
+
+async function readProjectId(projectRoot: string): Promise<string> {
+  const raw = await fs.readFile(path.join(projectRoot, "00_设定集", ".agent", "project_manifest.json"), "utf8").catch(() => "");
+  if (!raw.trim()) return "";
+  try {
+    const value = JSON.parse(raw) as { project_id?: unknown };
+    return typeof value.project_id === "string" ? value.project_id.trim() : "";
+  } catch {
+    return "";
+  }
 }
 
 function clampSlotId(value: unknown): 1 | 2 | 3 {

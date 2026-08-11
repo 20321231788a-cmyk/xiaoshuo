@@ -167,4 +167,62 @@ describe("GraphMemory", () => {
       extractor.close();
     }
   });
+
+  it("should incrementally update paths and mark outdated claims as superseded", async () => {
+    insertChunk({
+      path: "00_设定集/设定库/角色设定.md",
+      sourceType: "lore",
+      title: "角色设定",
+      text: "### 陆尘\n青云宗大弟子，修为通天。"
+    });
+
+    memory!.rebuild();
+
+    const claimsBefore = db!.db.prepare(`
+      SELECT predicate, status, object_text FROM graph_claims WHERE subject_entity_id = 'character:陆尘'
+    `).all() as Array<{ predicate: string; status: string; object_text: string }>;
+    
+    expect(claimsBefore).toContainEqual(expect.objectContaining({
+      predicate: "description",
+      status: "confirmed",
+      object_text: "青云宗大弟子，修为通天。"
+    }));
+
+    db!.db.prepare("DELETE FROM chunks WHERE path = ?").run("00_设定集/设定库/角色设定.md");
+    insertChunk({
+      path: "00_设定集/设定库/角色设定.md",
+      sourceType: "lore",
+      title: "角色设定",
+      text: "### 陆尘\n青云宗弃徒，修为被废。"
+    });
+
+    memory!.updatePaths(["00_设定集/设定库/角色设定.md"]);
+
+    const claimsAfter = db!.db.prepare(`
+      SELECT predicate, status, object_text FROM graph_claims WHERE subject_entity_id = 'character:陆尘' ORDER BY id ASC
+    `).all() as Array<{ predicate: string; status: string; object_text: string }>;
+
+    expect(claimsAfter).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          predicate: "description",
+          status: "superseded",
+          object_text: "青云宗大弟子，修为通天。"
+        }),
+        expect.objectContaining({
+          predicate: "description",
+          status: "confirmed",
+          object_text: "青云宗弃徒，修为被废。"
+        })
+      ])
+    );
+
+
+    const result1 = await memory!.checkDraftConsistency("陆尘不是青云宗弃徒。");
+    expect(result1.score).toBeLessThan(100);
+
+    const result2 = await memory!.checkDraftConsistency("陆尘不是青云宗大弟子。");
+    expect(result2.score).toBe(100);
+  });
 });
+

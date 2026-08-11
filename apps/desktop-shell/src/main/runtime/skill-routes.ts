@@ -1,4 +1,3 @@
-import { AgentRuntimeService } from "@xiaoshuo/agent-runtime";
 import { SkillService } from "@xiaoshuo/skill-service";
 import {
   skillDraftFromUrlRequestSchema,
@@ -15,8 +14,18 @@ import {
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { writeAiLicenseRequiredIfNeeded } from "./license-guard.js";
 import type { RuntimeContext } from "./types.js";
+import { getProjectAgentRuntime } from "./agent-runtime-registry.js";
 
 type JsonRecord = Record<string, unknown>;
+type SkillRunPayload = ReturnType<typeof skillRunRequestSchema.parse>;
+type DurableSkillRuntime = {
+  runDurableSkill?: (skillId: string, payload: SkillRunPayload) => Promise<{
+    data?: Record<string, unknown>;
+  }>;
+  runSkill: (skillId: string, payload: SkillRunPayload) => Promise<{
+    data?: Record<string, unknown>;
+  }>;
+};
 
 type SkillRouteMatch =
   | {
@@ -181,10 +190,7 @@ export async function handleSkillRoutes(
     }
     const rawBody = await deps.readRawBody(request);
     const payload = skillDraftFromUrlRequestSchema.parse(deps.parseJsonRecord(rawBody));
-    const runtime = new AgentRuntimeService({
-      projectRoot: currentProject.path,
-      config: { rootDir: context.projectRoot, env: process.env }
-    });
+    const runtime = await getProjectAgentRuntime(context, currentProject.path);
     try {
       deps.writeJson(response, 200, await runtime.draftSkillFromUrl(payload));
     } catch (error) {
@@ -199,10 +205,7 @@ export async function handleSkillRoutes(
     }
     const rawBody = await deps.readRawBody(request);
     const payload = skillDraftRequestSchema.parse(deps.parseJsonRecord(rawBody));
-    const runtime = new AgentRuntimeService({
-      projectRoot: currentProject.path,
-      config: { rootDir: context.projectRoot, env: process.env }
-    });
+    const runtime = await getProjectAgentRuntime(context, currentProject.path);
     try {
       deps.writeJson(response, 200, await runtime.draftSkill(payload));
     } catch (error) {
@@ -217,13 +220,25 @@ export async function handleSkillRoutes(
     }
     const rawBody = await deps.readRawBody(request);
     const payload = skillRunRequestSchema.parse(deps.parseJsonRecord(rawBody));
-    const runtime = new AgentRuntimeService({
-      projectRoot: currentProject.path,
-      config: { rootDir: context.projectRoot, env: process.env }
-    });
+    const runtime = await getProjectAgentRuntime(context, currentProject.path) as DurableSkillRuntime;
 
     try {
-      const result = await runtime.runSkill(skillRoute.id, payload);
+      const skill = await skills.getSkill(skillRoute.id);
+      if (!skill) {
+        deps.writeJson(response, 400, { detail: "skill 不存在" });
+        return true;
+      }
+      const requiresDurableRun = skill.handler_type === "prompt" && (skill.writable || payload.write_result);
+      if (requiresDurableRun && !runtime.runDurableSkill) {
+        deps.writeJson(response, 503, {
+          detail: "当前运行时尚未提供可恢复的 Prompt Skill 执行能力",
+          code: "DURABLE_SKILL_RUNTIME_UNAVAILABLE"
+        });
+        return true;
+      }
+      const result = requiresDurableRun
+        ? await runtime.runDurableSkill!(skillRoute.id, payload)
+        : await runtime.runSkill(skillRoute.id, payload);
       const savedPaths = Array.isArray(result.data?.saved_paths)
         ? result.data.saved_paths.map(String).filter(Boolean)
         : [];

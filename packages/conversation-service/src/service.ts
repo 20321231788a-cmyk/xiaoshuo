@@ -1,10 +1,15 @@
 import {
   conversationDetailSchema,
+  conversationCreateRequestSchema,
+  conversationModelPreferencesSchema,
   type ConversationDetail,
+  type ConversationModelPreferences,
   type ConversationMessage,
   type ConversationSummary,
   type PinnedContextItem,
-  type ConversationAttachment
+  type ConversationAttachment,
+  type ConversationTaskMetadata,
+  type ConversationType
 } from "@xiaoshuo/shared";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -25,11 +30,14 @@ export type ConversationCreatePayload = {
   title?: string;
   skill_id?: string;
   agent_name?: string;
+  conversation_type?: ConversationType;
+  task_metadata?: Partial<ConversationTaskMetadata>;
 };
 
 export type AppendMessagePayload = {
   role: ConversationMessage["role"];
   content: string;
+  reasoning_content?: string;
   metadata?: Record<string, unknown>;
 };
 
@@ -78,20 +86,26 @@ export class ConversationService {
   }
 
   async createConversation(payload: ConversationCreatePayload = {}): Promise<ConversationDetail> {
+    const normalizedPayload = conversationCreateRequestSchema.parse(payload);
     const timestamp = this.now();
     const detail: ConversationDetail = {
       id: this.idFactory(),
-      title: (payload.title || "").trim() || "新对话",
+      title: normalizedPayload.title.trim() || "新对话",
       created_at: timestamp,
       updated_at: timestamp,
-      current_skill: payload.skill_id || "",
-      current_agent: payload.agent_name || "",
+      current_skill: normalizedPayload.skill_id,
+      current_agent: normalizedPayload.agent_name,
       summary: "",
       pinned_context: [],
       attachments: [],
       messages: [],
       message_count: 0,
-      attachment_count: 0
+      attachment_count: 0,
+      model_override: "",
+      reasoning_enabled: false,
+      reasoning_effort: "medium",
+      conversation_type: normalizedPayload.conversation_type,
+      task_metadata: normalizedPayload.task_metadata
     };
     await this.saveDetail(detail);
     return detail;
@@ -112,6 +126,36 @@ export class ConversationService {
     return this.saveDetail(detail);
   }
 
+  async updateModelPreferences(
+    conversationId: string,
+    preferences: Omit<ConversationModelPreferences, "reasoning_enabled"> & Partial<Pick<ConversationModelPreferences, "reasoning_enabled">>
+  ): Promise<ConversationDetail> {
+    const detail = await this.loadDetail(conversationId);
+    const normalized = conversationModelPreferencesSchema.parse(preferences);
+    detail.model_override = normalized.model_override;
+    detail.reasoning_enabled = normalized.reasoning_enabled;
+    detail.reasoning_effort = normalized.reasoning_effort;
+    detail.updated_at = this.now();
+    return this.saveDetail(detail);
+  }
+
+  async deleteConversation(conversationId: string): Promise<{ id: string; deleted: true }> {
+    const detail = await this.loadDetail(conversationId);
+    const conversationPath = await this.conversationPath(detail.id);
+    const backupPath = await this.conversationBackupPath(detail.id);
+    const attachmentRoot = path.resolve(await this.agentRoot(), "attachments");
+    const attachmentPath = path.resolve(attachmentRoot, detail.id);
+    if (attachmentPath !== attachmentRoot && !attachmentPath.startsWith(`${attachmentRoot}${path.sep}`)) {
+      throw new Error("会话附件路径越界");
+    }
+    await Promise.all([
+      fs.rm(conversationPath, { force: true }),
+      fs.rm(backupPath, { force: true }),
+      fs.rm(attachmentPath, { recursive: true, force: true })
+    ]);
+    return { id: detail.id, deleted: true };
+  }
+
   async appendMessage(conversationId: string, payload: AppendMessagePayload): Promise<ConversationDetail> {
     const detail = await this.loadDetail(conversationId);
     const content = (payload.content || "").trim();
@@ -125,6 +169,7 @@ export class ConversationService {
       id: this.idFactory(),
       role: payload.role,
       content,
+      reasoning_content: String(payload.reasoning_content || "").trim(),
       created_at: this.now(),
       metadata: payload.metadata || {}
     });
@@ -430,7 +475,12 @@ export class ConversationService {
       current_skill: detail.current_skill,
       current_agent: detail.current_agent,
       message_count: detail.messages.length,
-      attachment_count: detail.attachments.length
+      attachment_count: detail.attachments.length,
+      model_override: detail.model_override,
+      reasoning_enabled: detail.reasoning_enabled,
+      reasoning_effort: detail.reasoning_effort,
+      conversation_type: detail.conversation_type,
+      task_metadata: detail.task_metadata
     };
   }
 

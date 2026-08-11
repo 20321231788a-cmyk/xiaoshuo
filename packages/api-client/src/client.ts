@@ -1,19 +1,31 @@
 import {
   type AgentStreamEvent,
+  type AgentRunEvent,
   agentStreamEventSchema,
+  agentRunEventSchema,
+  agentConfirmationResolveRequestSchema,
   agentPlanResponseSchema,
+  agentRunRequestSchema,
+  agentRunControlRequestSchema,
   agentRunTraceSchema,
+  agentStepRetryRequestSchema,
   apiContracts,
   appConfigSchema,
   conversationMessageRequestSchema,
   conversationAttachmentSchema,
   conversationDetailSchema,
+  conversationModelPreferencesSchema,
+  coverGenerationRequestSchema,
+  coverHistoryResponseSchema,
+  coverOpenFolderResponseSchema,
+  coverRecordSchema,
   documentContentSchema,
-  executePlanResponseSchema,
   generatedCacheDetailSchema,
   generatedSaveResponseSchema,
   jobInfoSchema,
   licenseAccountKeyResponseSchema,
+  manualModelDiscoveryRequestSchema,
+  manualModelDiscoveryResponseSchema,
   ledgerItemSchema,
   currentProjectSchema,
   cardDrawRequestSchema,
@@ -51,12 +63,13 @@ import {
   websiteAiRechargeOrderResponseSchema,
   websiteAiRedeemRequestSchema,
   websiteAiRedeemResponseSchema,
+  websiteImageConfigRequestSchema,
   type ApiContractName,
+  type AgentRunStatus,
   type AgentRunRequest,
   type AgentPlanRequest,
   type ConversationMessageRequest,
-  type ExecutePlanResponse,
-  type FileOperation,
+  type ConversationModelPreferences,
   type GeneratedSaveResponse,
   type ApiResponseFor
 } from "@xiaoshuo/shared";
@@ -70,6 +83,13 @@ export type QueryParams = Record<string, QueryValue>;
 export type ApiClientOptions = {
   baseUrl: string;
   fetchFn?: FetchLike;
+};
+
+export type AgentRunListParams = {
+  project?: string;
+  status?: AgentRunStatus;
+  cursor?: string;
+  limit?: number;
 };
 
 export type RequestOptions = Omit<RequestInit, "body"> & {
@@ -102,6 +122,44 @@ export type AgentStreamHandlers = {
   onFinal?: (event: AgentStreamFinalEvent) => void | Promise<void>;
   onError?: (event: AgentStreamErrorEvent) => void | Promise<void>;
 };
+
+export type AgentRunEventStreamHandlers = {
+  onEvent?: (event: AgentRunEvent) => void | Promise<void>;
+  onHeartbeat?: (event: { run_id: string; after: number; at: string }) => void | Promise<void>;
+  onGap?: (event: { run_id: string; after: number; earliest_available_sequence: number }) => void | Promise<void>;
+  onEnd?: (event: { run_id: string; after: number; status?: string; reason?: string }) => void | Promise<void>;
+};
+
+const governedMemoryClaimSchema = z.object({
+  id: z.string(),
+  subject: z.string(),
+  predicate: z.string(),
+  object: z.string(),
+  status: z.enum(["draft", "proposed", "confirmed", "planned", "rejected", "superseded"]),
+  revision: z.number().int().nonnegative(),
+  sourceRef: z.string().optional(),
+  sourceRevision: z.string().optional(),
+  perspective: z.enum(["objective", "narrator", "character", "rumor"]).optional(),
+  confidence: z.number().min(0).max(1).optional()
+}).passthrough();
+
+const governedMemoryConfirmationSchema = z.object({
+  confirmation_id: z.string(),
+  claim_id: z.string(),
+  version: z.number().int().positive(),
+  status: z.enum(["requested", "approved", "rejected", "expired", "consumed"]),
+  expires_at: z.string()
+}).passthrough();
+
+export type GovernedMemoryClaim = z.infer<typeof governedMemoryClaimSchema>;
+export type GovernedMemoryConfirmation = z.infer<typeof governedMemoryConfirmationSchema>;
+
+const agentRunEventStreamLineSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("event"), event: agentRunEventSchema }),
+  z.object({ type: z.literal("heartbeat"), run_id: z.string(), after: z.number().int().nonnegative(), at: z.string() }),
+  z.object({ type: z.literal("gap"), run_id: z.string(), after: z.number().int().nonnegative(), earliest_available_sequence: z.number().int().positive() }),
+  z.object({ type: z.literal("end"), run_id: z.string(), after: z.number().int().nonnegative(), status: z.string().optional(), reason: z.string().optional() })
+]);
 
 export function encodePathValue(value: string | number): string {
   return String(value)
@@ -206,6 +264,11 @@ export function createApiClient(options: ApiClientOptions) {
     getHealth: () => requestContract("health"),
     getLicenseStatus: () => requestContract("licenseStatus"),
     getConfig: () => requestContract("config"),
+    discoverManualModels: (payload: z.input<typeof manualModelDiscoveryRequestSchema>) =>
+      requestWithSchema("/api/config/models/discover", manualModelDiscoveryResponseSchema, {
+        method: "POST",
+        body: JSON.stringify(manualModelDiscoveryRequestSchema.parse(payload))
+      }),
     putConfig: (config: unknown) =>
       requestWithSchema(apiContracts.setConfig.path, appConfigSchema, {
         method: apiContracts.setConfig.method,
@@ -227,6 +290,11 @@ export function createApiClient(options: ApiClientOptions) {
         method: apiContracts.websiteAiApply.method,
         body: JSON.stringify(websiteAiApplyRequestSchema.parse(payload))
       }),
+    applyWebsiteImageConfig: (payload: z.input<typeof websiteImageConfigRequestSchema>) =>
+      requestWithSchema("/api/website-ai/image-config", websiteAiDashboardSchema, {
+        method: "PUT",
+        body: JSON.stringify(websiteImageConfigRequestSchema.parse(payload))
+      }),
     redeemWebsiteAiCode: (payload: z.input<typeof websiteAiRedeemRequestSchema>) =>
       requestWithSchema(apiContracts.websiteAiRedeem.path, websiteAiRedeemResponseSchema, {
         method: apiContracts.websiteAiRedeem.method,
@@ -242,6 +310,26 @@ export function createApiClient(options: ApiClientOptions) {
         pathParams: { order_id: orderId }
       }),
     getCurrentProject: () => requestContract("currentProject"),
+    getCovers: () => requestWithSchema("/api/covers", coverHistoryResponseSchema, { method: "GET" }),
+    generateCover: (payload: z.input<typeof coverGenerationRequestSchema>, signal?: AbortSignal) =>
+      requestWithSchema("/api/covers/generate", coverRecordSchema, {
+        method: "POST",
+        body: JSON.stringify(coverGenerationRequestSchema.parse(payload)),
+        signal
+      }),
+    deleteCover: (coverId: string) => requestWithSchema("/api/covers/{cover_id}", z.object({ ok: z.boolean(), deleted_id: z.string() }), {
+      method: "DELETE",
+      pathParams: { cover_id: coverId }
+    }),
+    openCoverFolder: () => requestWithSchema("/api/covers/open-folder", coverOpenFolderResponseSchema, { method: "POST" }),
+    getCoverImage: async (coverId: string, variant: "original" | "final" = "final") => {
+      const response = await fetchFn(buildApiUrl(options.baseUrl, "/api/covers/{cover_id}/image", { cover_id: coverId }, { variant }));
+      if (!response.ok) {
+        const text = await response.text();
+        throw new ApiError(extractErrorMessage(text) || response.statusText, response.status, parseErrorPayload(text));
+      }
+      return response.blob();
+    },
     openProject: (path: string) =>
       requestWithSchema("/api/projects/open", currentProjectSchema, {
         method: "POST",
@@ -328,13 +416,27 @@ export function createApiClient(options: ApiClientOptions) {
       requestContract("conversation", {
         pathParams: { conversation_id: conversationId }
       }),
-    createConversation: (payload: { title?: string; skill_id?: string; agent_name?: string } = {}) =>
+    createConversation: (payload: {
+      title?: string;
+      skill_id?: string;
+      agent_name?: string;
+      conversation_type?: "assistant" | "disassembly" | "continuation" | "distillation" | "fusion";
+      task_metadata?: {
+        entry?: string;
+        source_path?: string;
+        source_book_id?: string;
+        target_paths?: string[];
+        created_for?: string;
+      };
+    } = {}) =>
       requestWithSchema("/api/conversations", conversationDetailSchema, {
         method: "POST",
         body: JSON.stringify({
           title: payload.title ?? "",
           skill_id: payload.skill_id ?? "",
-          agent_name: payload.agent_name ?? ""
+          agent_name: payload.agent_name ?? "",
+          conversation_type: payload.conversation_type ?? "assistant",
+          task_metadata: payload.task_metadata ?? {}
         })
       }),
     updateConversationTitle: (conversationId: string, title: string) =>
@@ -342,6 +444,20 @@ export function createApiClient(options: ApiClientOptions) {
         method: "PUT",
         pathParams: { conversation_id: conversationId },
         body: JSON.stringify({ title })
+      }),
+    updateConversationModelPreferences: (
+      conversationId: string,
+      preferences: ConversationModelPreferences
+    ) =>
+      requestWithSchema("/api/conversations/{conversation_id}/model-preferences", conversationDetailSchema, {
+        method: "PUT",
+        pathParams: { conversation_id: conversationId },
+        body: JSON.stringify(conversationModelPreferencesSchema.parse(preferences))
+      }),
+    deleteConversation: (conversationId: string) =>
+      requestWithSchema("/api/conversations/{conversation_id}", z.object({ id: z.string(), deleted: z.literal(true) }), {
+        method: "DELETE",
+        pathParams: { conversation_id: conversationId }
       }),
     summarizeConversation: (conversationId: string, useModel = false) =>
       requestWithSchema("/api/conversations/{conversation_id}/summarize", conversationDetailSchema, {
@@ -457,6 +573,95 @@ export function createApiClient(options: ApiClientOptions) {
         method: "POST",
         body: JSON.stringify(payload)
       }),
+    createAgentRun: (payload: z.input<typeof agentRunRequestSchema>) =>
+      requestContract("createAgentRun", {
+        body: JSON.stringify(agentRunRequestSchema.parse(payload))
+      }),
+    listAgentRuns: (params: AgentRunListParams = {}) =>
+      requestContract("agentRuns", {
+        query: {
+          project: params.project,
+          status: params.status,
+          cursor: params.cursor,
+          limit: params.limit
+        }
+      }),
+    getAgentRun: (runId: string) =>
+      requestContract("agentRun", {
+        pathParams: { run_id: runId }
+      }),
+    exportAgentRun: (runId: string) =>
+      requestContract("agentRunExport", {
+        pathParams: { run_id: runId }
+      }),
+    deleteAgentRun: (runId: string) =>
+      requestContract("deleteAgentRun", {
+        pathParams: { run_id: runId }
+      }),
+    getAgentRunConfirmations: (runId: string) =>
+      requestContract("agentRunConfirmations", {
+        pathParams: { run_id: runId }
+      }),
+    getAgentRunEvents: (runId: string, after = 0, limit?: number) =>
+      requestContract("agentRunEvents", {
+        pathParams: { run_id: runId },
+        query: { after, limit }
+      }),
+    streamAgentRunEvents: async (
+      runId: string,
+      handlers: AgentRunEventStreamHandlers,
+      after = 0,
+      signal?: AbortSignal
+    ) => {
+      const response = await fetchFn(
+        buildApiUrl(options.baseUrl, "/api/agent/runs/{run_id}/events/stream", { run_id: runId }, { after }),
+        { method: "GET", headers: { Accept: "application/x-ndjson" }, signal }
+      );
+      if (!response.ok) {
+        const text = await response.text();
+        throw new ApiError(extractErrorMessage(text) || response.statusText, response.status, parseErrorPayload(text));
+      }
+      if (!response.body) {
+        throw new Error("浏览器不支持流式响应");
+      }
+      await consumeNdjson(response.body, (line) => dispatchAgentRunEventStreamLine(line, handlers));
+    },
+    pauseAgentRun: (runId: string, payload: z.input<typeof agentRunControlRequestSchema>) =>
+      requestContract("pauseAgentRun", {
+        pathParams: { run_id: runId },
+        body: JSON.stringify(agentRunControlRequestSchema.parse(payload))
+      }),
+    resumeAgentRun: (runId: string, payload: z.input<typeof agentRunControlRequestSchema>) =>
+      requestContract("resumeAgentRun", {
+        pathParams: { run_id: runId },
+        body: JSON.stringify(agentRunControlRequestSchema.parse(payload))
+      }),
+    cancelAgentRun: (runId: string, payload: z.input<typeof agentRunControlRequestSchema>) =>
+      requestContract("cancelAgentRun", {
+        pathParams: { run_id: runId },
+        body: JSON.stringify(agentRunControlRequestSchema.parse(payload))
+      }),
+    retryAgentRunStep: (runId: string, stepId: string, payload: z.input<typeof agentStepRetryRequestSchema>) =>
+      requestContract("retryAgentRunStep", {
+        pathParams: { run_id: runId, step_id: stepId },
+        body: JSON.stringify(agentStepRetryRequestSchema.parse(payload))
+      }),
+    approveAgentConfirmation: (
+      confirmationId: string,
+      payload: z.input<typeof agentConfirmationResolveRequestSchema>
+    ) =>
+      requestContract("approveAgentConfirmation", {
+        pathParams: { confirmation_id: confirmationId },
+        body: JSON.stringify(agentConfirmationResolveRequestSchema.parse(payload))
+      }),
+    rejectAgentConfirmation: (
+      confirmationId: string,
+      payload: z.input<typeof agentConfirmationResolveRequestSchema>
+    ) =>
+      requestContract("rejectAgentConfirmation", {
+        pathParams: { confirmation_id: confirmationId },
+        body: JSON.stringify(agentConfirmationResolveRequestSchema.parse(payload))
+      }),
     getAgentTraces: (limit = 50) =>
       requestWithSchema(apiContracts.agentTraces.path, apiContracts.agentTraces.response, {
         method: apiContracts.agentTraces.method,
@@ -466,6 +671,52 @@ export function createApiClient(options: ApiClientOptions) {
       requestWithSchema(apiContracts.agentTrace.path, agentRunTraceSchema, {
         method: apiContracts.agentTrace.method,
         pathParams: { run_id: runId }
+      }),
+    listGovernedMemoryClaims: () =>
+      requestWithSchema("/api/memory/claims", z.object({ claims: z.array(governedMemoryClaimSchema) }), { method: "GET" }),
+    exportGovernedMemory: () =>
+      requestWithSchema("/api/memory/export", z.object({
+        project_id: z.string(),
+        memory_revision: z.number().int().nonnegative(),
+        claims: z.array(governedMemoryClaimSchema)
+      }).passthrough(), { method: "GET" }),
+    rebuildGovernedMemoryProjections: () =>
+      requestWithSchema("/api/memory/projections/rebuild", z.object({
+        memory_revision: z.number().int().nonnegative(),
+        projection_path: z.string(),
+        statuses: z.array(z.object({ projection_name: z.string(), status: z.string(), memory_revision: z.number().int().nonnegative() }).passthrough())
+      }), { method: "POST" }),
+    requestGovernedMemoryConfirmation: (claimId: string, sourceRevision: number) =>
+      requestWithSchema("/api/memory/claims/{claim_id}/confirmations", z.object({ confirmation: governedMemoryConfirmationSchema }), {
+        method: "POST",
+        pathParams: { claim_id: claimId },
+        body: JSON.stringify({ source_revision: sourceRevision })
+      }),
+    resolveGovernedMemoryConfirmation: (
+      confirmationId: string,
+      expectedVersion: number,
+      decision: "approved" | "rejected"
+    ) =>
+      requestWithSchema("/api/memory/confirmations/{confirmation_id}/resolve", z.object({ confirmation: governedMemoryConfirmationSchema }), {
+        method: "POST",
+        pathParams: { confirmation_id: confirmationId },
+        body: JSON.stringify({ expected_version: expectedVersion, decision })
+      }),
+    confirmGovernedMemoryClaim: (claimId: string, confirmationId: string, expectedVersion: number) =>
+      requestWithSchema("/api/memory/claims/{claim_id}/confirm", z.object({ claim: governedMemoryClaimSchema }), {
+        method: "POST",
+        pathParams: { claim_id: claimId },
+        body: JSON.stringify({ confirmation_id: confirmationId, expected_version: expectedVersion })
+      }),
+    forgetGovernedMemoryClaim: (claimId: string) =>
+      requestWithSchema("/api/memory/claims/{claim_id}", z.object({ claim: governedMemoryClaimSchema }), {
+        method: "DELETE",
+        pathParams: { claim_id: claimId }
+      }),
+    createGovernedMemoryOverride: (claimId: string, object: string) =>
+      requestWithSchema("/api/memory/overrides", z.object({ override: z.object({ override_id: z.string(), claimId: z.string() }).passthrough() }), {
+        method: "POST",
+        body: JSON.stringify({ claim_id: claimId, override_object: object })
       }),
     resolveProjectFiles: (payload: z.input<typeof projectFileResolveRequestSchema>) =>
       requestWithSchema("/api/project/resolve-files", projectFileResolveResponseSchema, {
@@ -590,11 +841,6 @@ export function createApiClient(options: ApiClientOptions) {
         method: "POST",
         pathParams: { job_id: jobId }
       }),
-    executeOperations: (operations: FileOperation[], confirmDelete = false) =>
-      requestWithSchema("/api/agent/execute", executePlanResponseSchema, {
-        method: "POST",
-        body: JSON.stringify({ operations, confirm_delete: confirmDelete })
-      }),
     saveGeneratedResult: (payload: {
       skill_id: string;
       content: string;
@@ -604,6 +850,7 @@ export function createApiClient(options: ApiClientOptions) {
       target_paths?: string[];
       chapter?: number;
       save_plan?: unknown;
+      expected_target_hashes?: Record<string, string>;
     }) =>
       requestWithSchema("/api/agent/generated/save", generatedSaveResponseSchema, {
         method: "POST",
@@ -614,6 +861,28 @@ export function createApiClient(options: ApiClientOptions) {
         method: apiContracts.generatedCache.method,
         pathParams: { cache_id: cacheId }
       }),
+    previewGeneratedCache: (cacheId: string, payload: {
+      mode?: "replace" | "append";
+      target_paths?: string[];
+      save_plan?: unknown;
+    }) =>
+      requestWithSchema(`/api/agent/generated/cache/{cache_id}/preview`, z.object({
+        cache_id: z.string(),
+        targets: z.array(z.object({
+          target_path: z.string(),
+          mode: z.enum(["replace", "append"]),
+          before_content: z.string(),
+          after_content: z.string(),
+          before_hash: z.string(),
+          before_chars: z.number(),
+          after_chars: z.number(),
+          change: z.enum(["create", "append", "replace"])
+        }))
+      }).passthrough(), {
+        method: "POST",
+        pathParams: { cache_id: cacheId },
+        body: JSON.stringify(payload)
+      }),
     discardGeneratedCache: (cacheId: string) =>
       requestWithSchema("/api/agent/generated/cache/{cache_id}", z.object({}).passthrough(), {
         method: "DELETE",
@@ -622,7 +891,7 @@ export function createApiClient(options: ApiClientOptions) {
     streamAgentRun: async (payload: AgentRunRequest, handlers: AgentStreamHandlers, signal?: AbortSignal) => {
       const response = await fetchFn(buildApiUrl(options.baseUrl, "/api/agent/run-stream"), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", Accept: "application/x-ndjson" },
         body: JSON.stringify(payload),
         signal
       });
@@ -717,4 +986,42 @@ async function dispatchAgentStreamLine(line: string, handlers: AgentStreamHandle
     return;
   }
   await handlers.onError?.(event);
+}
+
+async function dispatchAgentRunEventStreamLine(line: string, handlers: AgentRunEventStreamHandlers): Promise<void> {
+  const trimmed = line.trim();
+  if (!trimmed) {
+    return;
+  }
+  const event = agentRunEventStreamLineSchema.parse(JSON.parse(trimmed));
+  if (event.type === "event") {
+    await handlers.onEvent?.(event.event);
+  } else if (event.type === "heartbeat") {
+    await handlers.onHeartbeat?.(event);
+  } else if (event.type === "gap") {
+    await handlers.onGap?.(event);
+  } else {
+    await handlers.onEnd?.(event);
+  }
+}
+
+async function consumeNdjson(body: ReadableStream<Uint8Array>, dispatchLine: (line: string) => Promise<void>): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    buffer += decoder.decode(value || new Uint8Array(), { stream: !done });
+    const lines = buffer.split(/\r?\n/);
+    buffer = lines.pop() || "";
+    for (const line of lines) {
+      await dispatchLine(line);
+    }
+    if (done) {
+      break;
+    }
+  }
+  if (buffer.trim()) {
+    await dispatchLine(buffer);
+  }
 }

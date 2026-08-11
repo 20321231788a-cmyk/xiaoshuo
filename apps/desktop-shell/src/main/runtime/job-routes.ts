@@ -8,6 +8,7 @@ import { cardDrawRequestSchema, novelCrawlRequestSchema, type CurrentProject, ty
 import { VectorIndex } from "@xiaoshuo/vector-service";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { writeAiLicenseRequiredIfNeeded } from "./license-guard.js";
+import { mapLegacyJobToRun } from "./legacy-job-run-mapping.js";
 import type { RuntimeContext, RuntimeServerState } from "./types.js";
 import { randomUUID } from "node:crypto";
 
@@ -30,10 +31,12 @@ export async function handleJobRoutes(
   deps: RuntimeJobRouteDeps
 ): Promise<boolean> {
   if (pathname === "/api/jobs/_ts-runtime" && request.method === "GET") {
+    const jobs = context.jobManager.list();
     deps.writeJson(response, 200, {
       active: true,
       routed: "local-ts",
-      jobs: context.jobManager.list()
+      jobs,
+      legacy_run_mappings: jobs.map(mapLegacyJobToRun)
     });
     return true;
   }
@@ -43,6 +46,29 @@ export async function handleJobRoutes(
   }
 
   const segments = pathname.split("/").filter(Boolean);
+  if (request.method === "GET" && pathname === "/api/jobs/legacy-runs") {
+    deps.writeJson(response, 200, { mappings: context.jobManager.list().map(mapLegacyJobToRun) });
+    return true;
+  }
+
+  if (request.method === "GET" && segments.length === 4 && segments[3] === "legacy-run") {
+    const jobId = segments[2] || "";
+    try {
+      deps.writeJson(response, 200, mapLegacyJobToRun(context.jobManager.get(jobId)));
+    } catch (error) {
+      deps.writeJson(response, error instanceof KeyError ? 404 : 400, { detail: error instanceof Error ? error.message : String(error) });
+    }
+    return true;
+  }
+
+  if (segments[2] === "legacy-runs" && request.method !== "GET") {
+    deps.writeJson(response, 405, {
+      detail: "Legacy JobManager 映射为只读，不能作为可恢复 Agent run 控制",
+      code: "LEGACY_RUN_READ_ONLY"
+    });
+    return true;
+  }
+
   if (request.method === "GET" && segments.length === 2) {
     deps.writeJson(response, 200, context.jobManager.list().slice(-50));
     return true;

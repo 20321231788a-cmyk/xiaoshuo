@@ -11,11 +11,7 @@ describe("normalizeConfigDraft", () => {
       model: "gpt-4.1-mini",
       temp: 9,
       top_p: 9,
-      secondary_api_key: "",
-      secondary_base_url: "",
-      secondary_model: "",
-      secondary_temp: -5,
-      secondary_top_p: -5,
+      task_model: "review-model",
       model_thinking_enabled: false,
       enable_consistency_revision: true,
       consistency_revision_score: 999,
@@ -36,13 +32,13 @@ describe("normalizeConfigDraft", () => {
       web_search_timeout: 1,
       web_search_context_chars: 99,
       auto_lore_extract_enabled: true,
+      project_file_permission_mode: "direct_save_delete",
       humanizer_enabled: true
     });
 
     expect(normalized.temp).toBe(2);
     expect(normalized.top_p).toBe(1);
-    expect(normalized.secondary_temp).toBe(0);
-    expect(normalized.secondary_top_p).toBe(0);
+    expect(normalized.task_model).toBe("review-model");
     expect(normalized.consistency_revision_score).toBe(100);
     expect(normalized.context_limit_chars).toBe(8192);
     expect(normalized.embedding_timeout).toBe(300);
@@ -54,6 +50,7 @@ describe("normalizeConfigDraft", () => {
     expect(normalized.web_search_timeout).toBe(3);
     expect(normalized.web_search_context_chars).toBe(800);
     expect(normalized.auto_lore_extract_enabled).toBe(true);
+    expect(normalized.project_file_permission_mode).toBe("direct_save_delete");
     expect(normalized.humanizer_enabled).toBe(true);
   });
 
@@ -108,11 +105,7 @@ function makeConfig() {
     model: "",
     temp: 0.7,
     top_p: 1,
-    secondary_api_key: "",
-    secondary_base_url: "",
-    secondary_model: "",
-    secondary_temp: 0.5,
-    secondary_top_p: 1,
+    task_model: "",
     model_thinking_enabled: false,
     enable_consistency_revision: true,
     consistency_revision_score: 80,
@@ -133,6 +126,7 @@ function makeConfig() {
     web_search_timeout: 10,
     web_search_context_chars: 3000,
     auto_lore_extract_enabled: false,
+    project_file_permission_mode: "default" as const,
     humanizer_enabled: false
   };
 }

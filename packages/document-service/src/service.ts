@@ -22,6 +22,7 @@ import {
 } from "@xiaoshuo/shared";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { CanonicalProjectPathGuard } from "./canonical-project-path-guard.js";
 
 const ALLOWED_EXTENSIONS = new Set([".txt", ".md", ".jsonl"]);
 const BLOCKED_SUFFIXES = new Set([".py", ".exe", ".json", ".db", ".sqlite", ".dat", ".dll", ".pyd"]);
@@ -41,6 +42,9 @@ export type DocumentServiceOptions = {
   projectRoot: string;
   now?: () => string;
   idFactory?: () => string;
+  pathGuard?: CanonicalProjectPathGuard;
+  /** Injectable for fault-injection tests of the archive transaction. */
+  renameFile?: (source: string, target: string) => Promise<void>;
 };
 
 export type SaveDocumentOptions = {
@@ -50,6 +54,29 @@ export type SaveDocumentOptions = {
   baseUpdatedAt?: string;
   baseUpdatedAtMs?: number;
   force?: boolean;
+  /**
+   * Reserved for durable callers that record a filesystem commit journal.
+   * The paths must be siblings of the document so rename stays on one volume.
+   */
+  atomicWrite?: DocumentAtomicWriteOptions;
+};
+
+export type AtomicDocumentSaveInput = {
+  path: string;
+  content: string;
+};
+
+export type ArchivedDocument = {
+  path: string;
+  archived_path: string;
+};
+
+export type DocumentAtomicWriteStage = "temp_written" | "before_replace" | "file_replaced";
+
+export type DocumentAtomicWriteOptions = {
+  tempPath: string;
+  backupPath: string;
+  onStage?: (stage: DocumentAtomicWriteStage) => void | Promise<void>;
 };
 
 export class DocumentSaveConflictError extends Error {
@@ -68,18 +95,25 @@ export class DocumentService {
   readonly projectRoot: string;
   private readonly now: () => string;
   private readonly idFactory: () => string;
+  private readonly pathGuard: CanonicalProjectPathGuard;
+  private readonly renameFile: (source: string, target: string) => Promise<void>;
 
   constructor(options: DocumentServiceOptions) {
     this.projectRoot = path.resolve(options.projectRoot);
     this.now = options.now || (() => formatTimestamp(new Date()));
     this.idFactory = options.idFactory || (() => randomUUID().replace(/-/g, ""));
+    this.pathGuard = options.pathGuard || new CanonicalProjectPathGuard(this.projectRoot);
+    this.renameFile = options.renameFile || ((source, target) => fs.rename(source, target));
   }
 
   normalizeRelativePath(relativePath: string): string {
-    let normalized = String(relativePath || "")
+    const requestedPath = String(relativePath || "").trim();
+    if (path.isAbsolute(requestedPath) || /^[/\\]/.test(requestedPath) || /^[a-zA-Z]:[/\\]/.test(requestedPath)) {
+      throw new Error("非法项目路径");
+    }
+    let normalized = requestedPath
       .replace(/\\/g, "/")
-      .trim()
-      .replace(/^\/+/, "");
+      .trim();
     normalized = path.posix.normalize(normalized);
     if (!normalized || normalized === "." || normalized === ".." || normalized.startsWith("../")) {
       throw new Error("非法项目路径");
@@ -108,6 +142,7 @@ export class DocumentService {
       throw new Error("Agent 文件管家只允许操作 .txt / .md 文档和 .jsonl 记录");
     }
 
+    await this.pathGuard.assertPath(target, { allowMissing: true });
     if (!options.allowMissing) {
       const stats = await fs.stat(target).catch(() => null);
       if (!stats?.isFile()) {
@@ -115,6 +150,20 @@ export class DocumentService {
       }
     }
     return target;
+  }
+
+  async revalidateWritePath(relativePath: string): Promise<string> {
+    const normalized = this.normalizeRelativePath(relativePath);
+    const target = path.resolve(this.projectRoot, normalized);
+    return this.pathGuard.assertPath(target, { allowMissing: true });
+  }
+
+  async revalidateAbsoluteProjectPath(targetPath: string, allowMissing = true): Promise<string> {
+    return this.pathGuard.assertPath(targetPath, { allowMissing });
+  }
+
+  async canonicalProjectRoot(): Promise<string> {
+    return this.pathGuard.canonicalRoot();
   }
 
   async readDocument(relativePath: string): Promise<DocumentContent> {
@@ -160,7 +209,12 @@ export class DocumentService {
     const beforeChange = await this.snapshotChange(normalized, "save_document");
 
     await fs.mkdir(path.dirname(target), { recursive: true });
-    await fs.writeFile(target, nextContent, "utf8");
+    await this.revalidateAbsoluteProjectPath(target);
+    if (options.atomicWrite) {
+      await this.writeTextAtomically(target, nextContent, options.atomicWrite);
+    } else {
+      await this.writeTextWithManagedAtomicReplace(target, nextContent);
+    }
 
     const afterChange = await this.completeChange(beforeChange);
     await this.appendTimelineEvent({
@@ -195,6 +249,112 @@ export class DocumentService {
     });
   }
 
+  /**
+   * Commits a related set of text documents as one filesystem transaction and
+   * records one timeline event. This is used by structured project libraries
+   * whose JSONL source and searchable text projections must never diverge.
+   */
+  async saveDocumentsAtomically(entries: AtomicDocumentSaveInput[], options: SaveDocumentOptions = {}): Promise<DocumentContent[]> {
+    const normalizedEntries = entries.map((entry) => ({
+      path: this.normalizeRelativePath(entry.path),
+      content: entry.content || ""
+    }));
+    const seen = new Set<string>();
+    for (const entry of normalizedEntries) {
+      if (seen.has(entry.path)) {
+        throw new Error(`重复原子保存路径: ${entry.path}`);
+      }
+      seen.add(entry.path);
+    }
+    if (!normalizedEntries.length) {
+      return [];
+    }
+
+    const changed = [] as Array<{ path: string; content: string; target: string; before: TimelineFileChange }>;
+    for (const entry of normalizedEntries) {
+      const target = await this.resolveSafePath(entry.path, { allowMissing: true });
+      const current = await fs.readFile(target, "utf8").catch(() => null);
+      if (current === entry.content) {
+        continue;
+      }
+      changed.push({
+        path: entry.path,
+        content: entry.content,
+        target,
+        before: await this.snapshotChange(entry.path, "save_document")
+      });
+    }
+    if (!changed.length) {
+      return Promise.all(normalizedEntries.map((entry) => this.readDocument(entry.path)));
+    }
+
+    const token = this.idFactory();
+    const staged: Array<{ path: string; content: string; target: string; before: TimelineFileChange; temp: string; backup: string; hadOriginal: boolean; committed: boolean }> = [];
+    try {
+      for (const item of changed) {
+        await fs.mkdir(path.dirname(item.target), { recursive: true });
+        await this.revalidateAbsoluteProjectPath(item.target);
+        const basename = path.basename(item.target);
+        const stagedItem = {
+          ...item,
+          temp: path.join(path.dirname(item.target), `.${basename}.arcwriter-${token}.tmp`),
+          backup: path.join(path.dirname(item.target), `.${basename}.arcwriter-${token}.bak`),
+          hadOriginal: Boolean(await fs.stat(item.target).catch(() => null)),
+          committed: false
+        };
+        await fs.writeFile(stagedItem.temp, item.content, "utf8");
+        staged.push(stagedItem);
+      }
+
+      for (const item of staged) {
+        if (item.hadOriginal) {
+          await fs.rename(item.target, item.backup);
+        }
+        await fs.rename(item.temp, item.target);
+        item.committed = true;
+      }
+    } catch (error) {
+      for (const item of [...staged].reverse()) {
+        if (item.committed) {
+          await fs.rm(item.target, { force: true }).catch(() => undefined);
+        }
+        if (item.hadOriginal) {
+          const hasBackup = await fs.stat(item.backup).catch(() => null);
+          if (hasBackup) {
+            await fs.rename(item.backup, item.target).catch(() => undefined);
+          }
+        }
+      }
+      throw error;
+    } finally {
+      await Promise.all(staged.flatMap((item) => [
+        fs.rm(item.temp, { force: true }).catch(() => undefined),
+        fs.rm(item.backup, { force: true }).catch(() => undefined)
+      ]));
+    }
+
+    const completed = await Promise.all(changed.map((item) => this.completeChange(item.before)));
+    await this.appendTimelineEvent({
+      source: options.source || "editor",
+      summary: options.summary || `原子保存 ${changed.length} 个文件`,
+      files: completed,
+      operations: [],
+      session: options.session
+    });
+
+    return Promise.all(normalizedEntries.map(async (entry) => {
+      const target = await this.resolveSafePath(entry.path);
+      const stats = await fs.stat(target);
+      return documentContentSchema.parse({
+        path: entry.path,
+        content: entry.content,
+        updated_at: formatTimestamp(stats.mtime),
+        updated_at_ms: stats.mtimeMs,
+        changed: changed.some((item) => item.path === entry.path)
+      });
+    }));
+  }
+
   async archiveDocument(relativePath: string, options: SaveDocumentOptions = {}): Promise<{ path: string; archived_path: string }> {
     const normalized = this.normalizeRelativePath(relativePath);
     const beforeChange = await this.snapshotChange(normalized, "archive_file");
@@ -219,9 +379,8 @@ export class DocumentService {
       return [];
     }
 
-    const beforeChanges = await Promise.all(normalized.map((relativePath) => this.snapshotChange(relativePath, "archive_file")));
-    const archived = await Promise.all(normalized.map((relativePath) => this.archiveFile(relativePath)));
-    const completed = await Promise.all(beforeChanges.map((change) => this.completeChange(change)));
+    const archived = await this.archiveDocumentsAtomically(normalized);
+    const completed = await Promise.all(archived.map((item) => this.completeChange(item.before)));
     await this.appendTimelineEvent({
       source: options.source || "agent",
       summary: options.summary || `归档 ${archived.length} 个文件`,
@@ -229,7 +388,7 @@ export class DocumentService {
       operations: [],
       session: options.session
     });
-    return archived;
+    return archived.map((item) => item.archived_path);
   }
 
   async executeOperations(
@@ -238,6 +397,13 @@ export class DocumentService {
   ): Promise<ExecutePlanResponse> {
     if (this.operationsRequireDeleteConfirmation(operations) && !options.confirmDelete) {
       throw new Error("删除/归档文件需要用户确认");
+    }
+
+    // A confirmation for a group of archive operations means the whole group is
+    // approved. Keep that promise: do not archive one file at a time and leave
+    // the project in a half-deleted state when a later move fails.
+    if (operations.length > 0 && operations.every((operation) => operation.action === "archive_file")) {
+      return this.executeArchiveOperationsAtomically(operations, options);
     }
 
     const beforeChanges = await this.snapshotOperations(operations);
@@ -310,7 +476,7 @@ export class DocumentService {
   }
 
   async deleteTimelineEntry(entryId: string): Promise<TimelineDeleteResult> {
-    const timelinePath = this.timelinePath();
+    const timelinePath = await this.resolveInternalPath(TIMELINE_PATH);
     const raw = await fs.readFile(timelinePath, "utf8").catch(() => "");
     if (!raw.trim()) {
       throw new Error("未找到时间线记录");
@@ -339,6 +505,7 @@ export class DocumentService {
       throw new Error("未找到时间线记录");
     }
 
+    await this.revalidateAbsoluteProjectPath(timelinePath);
     await fs.writeFile(timelinePath, kept.length ? `${kept.join("\n")}\n` : "", "utf8");
     return timelineDeleteResultSchema.parse({ ok: true, deleted_id: entryId });
   }
@@ -360,10 +527,12 @@ export class DocumentService {
       const target = await this.resolveSafePath(change.path, { allowMissing: true });
       if (change.before_exists) {
         await fs.mkdir(path.dirname(target), { recursive: true });
+        await this.revalidateAbsoluteProjectPath(target);
         await fs.writeFile(target, change.before_content || "", "utf8");
       } else {
         const stats = await fs.stat(target).catch(() => null);
         if (stats?.isFile()) {
+          await this.revalidateAbsoluteProjectPath(target, false);
           await fs.unlink(target);
         }
       }
@@ -386,7 +555,7 @@ export class DocumentService {
   }
 
   async getLedger(): Promise<LedgerItem[]> {
-    const raw = await fs.readFile(this.ledgerPath(), "utf8").catch(() => "");
+    const raw = await fs.readFile(await this.resolveInternalPath(LEDGER_PATH), "utf8").catch(() => "");
     if (!raw.trim()) {
       return [];
     }
@@ -397,7 +566,10 @@ export class DocumentService {
       }
       return parsed.flatMap((item) => {
         const result = ledgerItemSchema.safeParse(item);
-        return result.success ? [result.data] : [];
+        return result.success ? [ledgerItemSchema.parse({
+          ...result.data,
+          phase: result.data.phase || (result.data.status === "closed" ? "resolved" : "planted")
+        })] : [];
       });
     } catch {
       return [];
@@ -414,6 +586,7 @@ export class DocumentService {
       id: this.idFactory(),
       desc: text,
       status: "open",
+      phase: "planned",
       created_at: this.now(),
       updated_at: this.now()
     });
@@ -432,6 +605,7 @@ export class DocumentService {
     const updated = ledgerItemSchema.parse({
       ...current,
       status: current.status === "open" ? "closed" : "open",
+      phase: current.status === "open" ? "resolved" : "planned",
       updated_at: this.now()
     });
     items[index] = updated;
@@ -440,7 +614,7 @@ export class DocumentService {
   }
 
   async listRevisionLogs(): Promise<RevisionLogEntry[]> {
-    const text = await readText(this.revisionLogPath());
+    const text = await readText(await this.resolveInternalPath(REVISION_LOG_PATH));
     if (!text.trim()) {
       return [];
     }
@@ -474,8 +648,9 @@ export class DocumentService {
     if (!confirmDelete) {
       throw new Error("清空修正日志需要用户确认");
     }
-    const target = this.revisionLogPath();
+    const target = await this.resolveInternalPath(REVISION_LOG_PATH);
     await fs.mkdir(path.dirname(target), { recursive: true });
+    await this.revalidateAbsoluteProjectPath(target);
     await fs.writeFile(target, "", "utf8");
   }
 
@@ -483,15 +658,109 @@ export class DocumentService {
     const normalized = this.normalizeRelativePath(relativePath);
     const target = await this.resolveSafePath(normalized);
     const archivePath = this.archiveRelativePath(normalized);
-    const archiveTarget = path.join(this.projectRoot, archivePath);
+    const archiveTarget = await this.resolveSafePath(archivePath, { allowMissing: true });
     await fs.mkdir(path.dirname(archiveTarget), { recursive: true });
-    await fs.rename(target, archiveTarget);
+    await this.revalidateAbsoluteProjectPath(target, false);
+    await this.revalidateAbsoluteProjectPath(archiveTarget);
+    await this.renameFile(target, archiveTarget);
     return archivePath;
   }
 
-  private archiveRelativePath(relativePath: string): string {
-    const stamp = this.now().replace(/[-: ]/g, "").replace(/^(\d{8})(\d{6})$/, "$1_$2");
+  private archiveRelativePath(relativePath: string, stamp = this.archiveBatchStamp()): string {
     return path.posix.join(TRASH_DIR, stamp, relativePath);
+  }
+
+  private archiveBatchStamp(): string {
+    return this.now().replace(/[-: ]/g, "").replace(/^(\d{8})(\d{6})$/, "$1_$2");
+  }
+
+  private async executeArchiveOperationsAtomically(
+    operations: FileOperation[],
+    options: SaveDocumentOptions & { confirmDelete?: boolean }
+  ): Promise<ExecutePlanResponse> {
+    try {
+      const archived = await this.archiveDocumentsAtomically(operations.map((operation) => operation.path));
+      const results = archived.map((item) => operationResultSchema.parse({
+        action: "archive_file",
+        path: item.path,
+        ok: true,
+        message: "已移入项目回收站"
+      }));
+      const completed = await Promise.all(archived.map((item) => this.completeChange(item.before)));
+      await this.appendOperationLog(operations, results);
+      await this.appendTimelineEvent({
+        source: options.source || "agent",
+        summary: options.summary || `归档 ${archived.length} 个文件`,
+        files: completed,
+        operations,
+        session: options.session
+      });
+      return executePlanResponseSchema.parse(results);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      const message = `整组归档失败，文件保持原样：${detail}`;
+      const results = operations.map((operation) => operationResultSchema.parse({
+        action: "archive_file",
+        path: operation.path,
+        ok: false,
+        message
+      }));
+      await this.appendOperationLog(operations, results);
+      return executePlanResponseSchema.parse(results);
+    }
+  }
+
+  private async archiveDocumentsAtomically(relativePaths: string[]): Promise<Array<ArchivedDocument & { before: TimelineFileChange; source: string; target: string }>> {
+    const normalized = uniqueNormalizedPaths(this, relativePaths);
+    const stamp = this.archiveBatchStamp();
+    const prepared: Array<ArchivedDocument & { before: TimelineFileChange; source: string; target: string }> = [];
+
+    // Complete every validation before the first rename, so a missing file or a
+    // colliding recycle target can never leave the earlier files moved away.
+    for (const relativePath of normalized) {
+      const source = await this.resolveSafePath(relativePath);
+      const archivedPath = this.archiveRelativePath(relativePath, stamp);
+      const target = await this.resolveSafePath(archivedPath, { allowMissing: true });
+      if (await fs.lstat(target).catch(() => null)) {
+        throw new Error(`回收站目标已存在: ${archivedPath}`);
+      }
+      prepared.push({
+        path: relativePath,
+        archived_path: archivedPath,
+        before: await this.snapshotChange(relativePath, "archive_file"),
+        source,
+        target
+      });
+    }
+
+    const moved: typeof prepared = [];
+    try {
+      for (const item of prepared) {
+        await fs.mkdir(path.dirname(item.target), { recursive: true });
+        await this.revalidateAbsoluteProjectPath(item.source, false);
+        await this.revalidateAbsoluteProjectPath(item.target);
+        await this.renameFile(item.source, item.target);
+        moved.push(item);
+      }
+      return prepared;
+    } catch (error) {
+      const rollbackErrors: string[] = [];
+      for (const item of [...moved].reverse()) {
+        try {
+          await fs.mkdir(path.dirname(item.source), { recursive: true });
+          await this.revalidateAbsoluteProjectPath(item.target, false);
+          await this.revalidateAbsoluteProjectPath(item.source);
+          await this.renameFile(item.target, item.source);
+        } catch (rollbackError) {
+          rollbackErrors.push(`${item.path}: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+        }
+      }
+      const detail = error instanceof Error ? error.message : String(error);
+      if (rollbackErrors.length) {
+        throw new Error(`归档批次失败，恢复过程中出现异常：${detail}；${rollbackErrors.join("；")}`);
+      }
+      throw new Error(`归档批次失败，已恢复已移动文件：${detail}`);
+    }
   }
 
   private async executeOperation(operation: FileOperation): Promise<void> {
@@ -530,6 +799,8 @@ export class DocumentService {
         throw new Error("目标文件已存在");
       }
       await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await this.revalidateAbsoluteProjectPath(sourcePath, false);
+      await this.revalidateAbsoluteProjectPath(targetPath);
       await fs.rename(sourcePath, targetPath);
       return;
     }
@@ -543,7 +814,58 @@ export class DocumentService {
   private async writeText(relativePath: string, content: string): Promise<void> {
     const target = await this.resolveSafePath(relativePath, { allowMissing: true });
     await fs.mkdir(path.dirname(target), { recursive: true });
+    await this.revalidateAbsoluteProjectPath(target);
     await fs.writeFile(target, content, "utf8");
+  }
+
+  private async writeTextAtomically(
+    target: string,
+    content: string,
+    options: DocumentAtomicWriteOptions
+  ): Promise<void> {
+    const targetDirectory = path.dirname(target);
+    const tempPath = path.resolve(options.tempPath);
+    const backupPath = path.resolve(options.backupPath);
+    if (
+      path.dirname(tempPath) !== targetDirectory ||
+      path.dirname(backupPath) !== targetDirectory ||
+      tempPath === target ||
+      backupPath === target ||
+      tempPath === backupPath
+    ) {
+      throw new Error("原子保存临时文件必须与目标文件位于同一目录");
+    }
+
+    await this.revalidateAbsoluteProjectPath(target);
+    await this.revalidateAbsoluteProjectPath(tempPath);
+    await this.revalidateAbsoluteProjectPath(backupPath);
+
+    const current = await fs.stat(target).catch(() => null);
+    if (current?.isFile()) {
+      await fs.copyFile(target, backupPath);
+    }
+    await fs.writeFile(tempPath, content, "utf8");
+    await options.onStage?.("temp_written");
+    await options.onStage?.("before_replace");
+    await this.revalidateAbsoluteProjectPath(target);
+    await this.revalidateAbsoluteProjectPath(tempPath, false);
+    await this.revalidateAbsoluteProjectPath(backupPath);
+    await fs.rename(tempPath, target);
+    await options.onStage?.("file_replaced");
+  }
+
+  private async writeTextWithManagedAtomicReplace(target: string, content: string): Promise<void> {
+    const suffix = randomUUID().replace(/-/g, "");
+    const tempPath = path.join(path.dirname(target), `.${path.basename(target)}.arcwriter-${suffix}.tmp`);
+    const backupPath = path.join(path.dirname(target), `.${path.basename(target)}.arcwriter-${suffix}.bak`);
+    try {
+      await this.writeTextAtomically(target, content, { tempPath, backupPath });
+    } finally {
+      await Promise.all([
+        fs.rm(tempPath, { force: true }).catch(() => undefined),
+        fs.rm(backupPath, { force: true }).catch(() => undefined)
+      ]);
+    }
   }
 
   private async assertSaveBaseIsCurrent(target: string, options: SaveDocumentOptions): Promise<void> {
@@ -607,8 +929,9 @@ export class DocumentService {
     operations: FileOperation[];
     session?: DocumentTimelineSession;
   }): Promise<TimelineEntry> {
-    const timelinePath = this.timelinePath();
+    const timelinePath = await this.resolveInternalPath(TIMELINE_PATH);
     await fs.mkdir(path.dirname(timelinePath), { recursive: true });
+    await this.revalidateAbsoluteProjectPath(timelinePath);
     const session = input.session || {
       id: this.idFactory(),
       startedAt: this.now()
@@ -629,8 +952,9 @@ export class DocumentService {
   }
 
   private async appendOperationLog(operations: FileOperation[], results: OperationResult[]): Promise<void> {
-    const target = path.join(this.projectRoot, OPERATION_LOG_PATH);
+    const target = await this.resolveInternalPath(OPERATION_LOG_PATH);
     await fs.mkdir(path.dirname(target), { recursive: true });
+    await this.revalidateAbsoluteProjectPath(target);
     const record = {
       time: this.now(),
       operations,
@@ -665,20 +989,8 @@ export class DocumentService {
     return changes;
   }
 
-  private timelinePath(): string {
-    return path.join(this.projectRoot, TIMELINE_PATH);
-  }
-
-  private ledgerPath(): string {
-    return path.join(this.projectRoot, LEDGER_PATH);
-  }
-
-  private revisionLogPath(): string {
-    return path.join(this.projectRoot, REVISION_LOG_PATH);
-  }
-
   private async readTimelineEntries(): Promise<TimelineEntry[]> {
-    const raw = await fs.readFile(this.timelinePath(), "utf8").catch(() => "");
+    const raw = await fs.readFile(await this.resolveInternalPath(TIMELINE_PATH), "utf8").catch(() => "");
     if (!raw.trim()) {
       return [];
     }
@@ -716,9 +1028,15 @@ export class DocumentService {
   }
 
   private async saveLedger(items: LedgerItem[]): Promise<void> {
-    const target = this.ledgerPath();
+    const target = await this.resolveInternalPath(LEDGER_PATH);
     await fs.mkdir(path.dirname(target), { recursive: true });
+    await this.revalidateAbsoluteProjectPath(target);
     await fs.writeFile(target, `${JSON.stringify(items, null, 2)}\n`, "utf8");
+  }
+
+  private async resolveInternalPath(relativePath: string): Promise<string> {
+    const target = path.resolve(this.projectRoot, relativePath);
+    return this.pathGuard.assertPath(target, { allowMissing: true });
   }
 }
 

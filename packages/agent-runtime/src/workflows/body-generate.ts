@@ -1,9 +1,9 @@
-import { loadModelConfig, loadWebSearchConfig, readRawConfig, type ModelConfig } from "@xiaoshuo/config-service";
+import { loadModelConfig, loadTaskModelConfig, loadWebSearchConfig, type ModelConfig } from "@xiaoshuo/config-service";
 import { buildProjectContinuityContext } from "@xiaoshuo/project-session";
 import type { ChatCompletionMessage } from "@xiaoshuo/model-client";
 import type { AgentRunRequest, AgentRunResponse } from "@xiaoshuo/shared";
 import { GraphMemory, type CheckGraphDraftConsistencyResult } from "@xiaoshuo/vector-service";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { applyHumanizerIfEnabled } from "../humanizer.js";
 import {
   buildBodyChapterSystemPrompt,
@@ -15,6 +15,7 @@ import {
 import { clipForConsistency } from "../prompts/consistency.js";
 import { buildStyleGenreConstraintBlock } from "../style-genre-context.js";
 import { formatWebSearchContext, shouldUseWebSearch, summarizeWebSearchSources, type WebSearchSource } from "../web-search.js";
+import { commitGeneratedBodySummary } from "../generated-story-planning.js";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
 import { isCancellationError, throwIfAborted } from "../cancellation.js";
 
@@ -162,8 +163,19 @@ export class BodyGenerateWorkflow implements WorkflowHandler {
     }
 
     throwIfAborted(context.signal);
-    const savedPaths = await context.cache.commitSavePlan(entry.cache_id, savePlan, { cleanupContent: true });
+    const savedPaths = await commitBodyGeneratedCache(entry.cache_id, savePlan, context);
     throwIfAborted(context.signal);
+    const bodyPlanning = savedPaths.includes(outputPath)
+      ? await commitGeneratedBodySummary({
+        projectRoot: context.projectRoot,
+        content: text,
+        chapter,
+        outputPath,
+        modelClient: context.modelClient,
+        config: context.config,
+        signal: context.signal
+      }).catch(() => null)
+      : null;
     const graphUpdateError = await updateGraphMemoryForSavedPaths(savedPaths, context);
     if (savedPaths.includes(outputPath)) {
       await appendHandoff(chapter, outputPath, text, chapterOutline, check, context);
@@ -195,6 +207,15 @@ export class BodyGenerateWorkflow implements WorkflowHandler {
           ...graphCheckData(check),
           ...(generated.graph_error ? { graph_context_error: generated.graph_error } : {}),
           ...(graphUpdateError ? { graph_update_error: graphUpdateError } : { graph_updated_paths: savedPaths }),
+          ...(bodyPlanning ? {
+            story_planning: {
+              revision: bodyPlanning.revision,
+              nodes: bodyPlanning.nodes,
+              classified: bodyPlanning.classified,
+              projection_paths: bodyPlanning.savedPaths,
+              body_summary_only: true
+            }
+          } : {}),
           target_paths: savePlan.target_paths,
           saved_paths: savedPaths,
           save_plan: savePlan,
@@ -342,8 +363,8 @@ async function runConsistencyCheckForText(
     score: clampScore(Number(parsed.score || 0)),
     risks: Array.isArray(parsed.risks) ? parsed.risks.map((item) => String(item)).slice(0, 12) : [],
     reason:
-      assistantConfig.line === "primary-fallback"
-        ? `副线路未配置，已由主线路辅助代理完成评分。${String(parsed.reason || String(raw || "").slice(0, 1000))}`
+      assistantConfig.line === "current-model-fallback"
+        ? `未选择轻量任务模型，已使用当前模型完成评分。${String(parsed.reason || String(raw || "").slice(0, 1000))}`
         : String(parsed.reason || String(raw || "").slice(0, 1000)),
     ...(graph.error ? { graph_error: graph.error } : {})
   };
@@ -442,24 +463,17 @@ function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.map((item) => String(item || "").trim()).filter(Boolean))];
 }
 
-async function loadAssistantModelConfig(context: WorkflowRunContext): Promise<{ config: ModelConfig; line: "secondary" | "primary-fallback" }> {
-  const rawConfig = await readRawConfig(context.config);
-  const hasExplicitSecondary = Boolean(String(rawConfig.secondary_api_key || "").trim() && String(rawConfig.secondary_model || "").trim());
-  if (hasExplicitSecondary) {
-    const secondary = await loadModelConfig(context.config, "secondary");
-    return { config: secondary, line: "secondary" };
+async function loadAssistantModelConfig(
+  context: WorkflowRunContext
+): Promise<{ config: ModelConfig; line: "task-model" | "current-model-fallback" }> {
+  const taskConfig = await loadTaskModelConfig(context.config);
+  if (!taskConfig.configured) {
+    throw new Error("未配置当前主路线 API Key 或模型名。");
   }
-  const primary = await loadModelConfig(context.config, "primary");
-  if (primary.configured) {
-    return {
-      config: {
-        ...primary,
-        temperature: Math.min(primary.temperature, 0.2)
-      },
-      line: "primary-fallback"
-    };
-  }
-  throw new Error("未配置主线路或副线路 API Key / 模型名。");
+  return {
+    config: { ...taskConfig, temperature: Math.min(taskConfig.temperature, 0.2) },
+    line: taskConfig.model_source === "task-model" ? "task-model" : "current-model-fallback"
+  };
 }
 
 async function runBodyChapterRevision(
@@ -631,10 +645,13 @@ async function appendRevisionLog(
   }
   lines.push("", "修正说明:", (revisionLog || "模型未返回修正说明").trim(), "");
 
-  await context.documents.appendDocument("00_设定集/修正日志/正文二次修正日志.txt", lines.join("\n"), {
-    source: "generation",
-    summary: `追加第 ${chapter} 章修正日志`
-  });
+  await appendBodyDocument(
+    "00_设定集/修正日志/正文二次修正日志.txt",
+    lines.join("\n"),
+    `追加第 ${chapter} 章修正日志`,
+    `revision-log:${chapter}`,
+    context
+  );
 }
 
 async function appendHandoff(
@@ -664,9 +681,70 @@ async function appendHandoff(
     risks: checkResult.risks
   };
 
-  await context.documents.appendDocument("00_设定集/章节交接摘要.jsonl", JSON.stringify(record) + "\n", {
+  await appendBodyDocument(
+    "00_设定集/章节交接摘要.jsonl",
+    JSON.stringify(record) + "\n",
+    `追加第 ${chapter} 章交接摘要`,
+    `handoff:${chapter}`,
+    context
+  );
+}
+
+async function commitBodyGeneratedCache(
+  cacheId: string,
+  savePlan: Parameters<WorkflowRunContext["cache"]["prepareSavePlanCommit"]>[1],
+  context: WorkflowRunContext
+): Promise<string[]> {
+  const durable = context.durableExecution;
+  if (!durable || !context.commitJournal) {
+    return context.cache.commitSavePlan(cacheId, savePlan, { cleanupContent: true });
+  }
+
+  const commits = await context.cache.prepareSavePlanCommit(cacheId, savePlan, { cleanupContent: true });
+  for (const commit of commits) {
+    await context.commitJournal.write({
+      runId: durable.runId,
+      stepId: durable.stepId,
+      attemptId: durable.attemptId,
+      action: `workflow.body_generate.${commit.action_key}`,
+      targetPath: commit.target_path,
+      content: commit.content,
+      idempotencyKey: createHash("sha256")
+        .update(JSON.stringify({ kind: "body_generated_cache", cache_id: cacheId, action_key: commit.action_key, run_id: durable.runId, step_id: durable.stepId, target_path: commit.target_path }), "utf8")
+        .digest("hex"),
+      source: "skill",
+      summary: `正文生成提交：${commit.target_path}`
+    });
+  }
+  await context.cache.markCommitted(cacheId, commits.map((commit) => commit.target_path), { cleanupContent: true });
+  return commits.map((commit) => commit.target_path);
+}
+
+async function appendBodyDocument(
+  targetPath: string,
+  appendedText: string,
+  summary: string,
+  writeKey: string,
+  context: WorkflowRunContext
+): Promise<void> {
+  const durable = context.durableExecution;
+  if (!durable || !context.commitJournal) {
+    await context.documents.appendDocument(targetPath, appendedText, { source: "generation", summary });
+    return;
+  }
+  const current = await context.documents.readRawText(targetPath).catch(() => "");
+  await context.commitJournal.write({
+    runId: durable.runId,
+    stepId: durable.stepId,
+    attemptId: durable.attemptId,
+    action: `workflow.body_generate.${writeKey}`,
+    targetPath,
+    content: current + appendedText,
+    idempotencyKey: createHash("sha256")
+      .update(JSON.stringify({ kind: "body_document_append", write_key: writeKey, run_id: durable.runId, step_id: durable.stepId, target_path: targetPath }), "utf8")
+      .digest("hex"),
     source: "generation",
-    summary: `追加第 ${chapter} 章交接摘要`
+    summary
   });
 }
 
