@@ -1,0 +1,1203 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import AdmZip from "adm-zip";
+import * as cheerio from "cheerio";
+import {
+  skillDefinitionSchema,
+  skillManifestSchema,
+  skillModelPolicySchema,
+  skillSavePolicySchema,
+  type SkillCloneRequest,
+  type SkillDefinition,
+  type SkillImportDraftRequest,
+  type SkillImportRequest,
+  type SkillManifest,
+  type SkillPatchRequest,
+  type SkillPatchResponse,
+  type SkillRollbackRequest,
+  type SkillVersionsResponse
+} from "@xiaoshuo/shared";
+import { createSkillDiff } from "./skill-diff.js";
+import { SkillVersionStore } from "./skill-version-store.js";
+
+const AGENT_DIR = "00_设定集/.agent";
+const MAX_SKILL_UPLOAD_BYTES = 5 * 1024 * 1024;
+const MAX_SKILL_TEXT_CHARS = 120000;
+const MAX_SKILL_ZIP_FILES = 40;
+const STORY_DESLOP_SOURCE = "builtin:story-deslop";
+const HUMANIZER_ZH_SOURCE = "builtin:humanizer-zh";
+const DISABLED_BUILTINS_FILE = "disabled-builtins.json";
+const BUILTIN_PATCH_ERROR = "默认技能不能直接修改，请先复制为自定义技能";
+const PATCHABLE_SKILL_FIELDS = new Set([
+  "description",
+  "prompt",
+  "context_requirements",
+  "linked_targets",
+  "model_policy",
+  "save_policy",
+  "writable"
+]);
+const PATCH_CONTROL_FIELDS = new Set(["change_reason", "expected_version", "dry_run"]);
+
+const BUILTIN_SKILLS: SkillDefinition[] = [
+  {
+    id: "outline_generate",
+    name: "灵感转大纲",
+    description: "把灵感或要求扩展成完整小说大纲。",
+    input_mode: "text",
+    context_requirements: ["project_state", "style", "genre"],
+    handler_type: "prompt",
+    linked_targets: ["01_大纲/大纲.txt"],
+    prompt: "你是资深网文主编。请把用户灵感扩展成完整、可执行的小说大纲，保留核心卖点、主线冲突、人物关系和阶段推进。",
+    imported_from: "",
+    writable: true
+  },
+  {
+    id: "detail_outline_generate",
+    name: "大纲转细纲",
+    description: "把大纲扩展为更细的剧情细纲。",
+    input_mode: "text",
+    context_requirements: ["project_state", "outline"],
+    handler_type: "prompt",
+    linked_targets: ["01_大纲/细纲.txt"],
+    prompt: "请把已有大纲扩展为更细的剧情细纲，强调因果、冲突和承接，不要写成正文。",
+    imported_from: "",
+    writable: true
+  },
+  {
+    id: "chapter_outline_generate",
+    name: "细纲转章纲",
+    description: "把细纲拆成可直接执行的章节章纲。",
+    input_mode: "text",
+    context_requirements: ["project_state", "detailed_outline"],
+    handler_type: "prompt",
+    linked_targets: ["01_大纲/章纲.txt"],
+    prompt: "请把细纲继续拆成章节章纲。每章写清目标、冲突、关键场景、人物变化和结尾钩子。",
+    imported_from: "",
+    writable: true
+  },
+  {
+    id: "body_generate",
+    name: "章纲转正文",
+    description: "依据章纲与项目上下文生成正文。",
+    input_mode: "text",
+    context_requirements: ["project_state", "chapter_outline", "style", "genre"],
+    handler_type: "job",
+    linked_targets: ["02_正文"],
+    prompt: "",
+    imported_from: "",
+    writable: true
+  },
+  {
+    id: "polish_text",
+    name: "正文润色",
+    description: "在不改剧情事实的前提下优化正文表达。",
+    input_mode: "text",
+    context_requirements: ["project_state", "style"],
+    handler_type: "prompt",
+    linked_targets: ["02_正文/润色结果.txt"],
+    prompt: "你是严格的小说编辑。不要改剧情事实，只优化句子流畅度、动作承接、画面感和对白自然度，直接输出润色后的正文。",
+    imported_from: "",
+    writable: true
+  },
+  {
+    id: "story_deslop",
+    name: "去AI味",
+    description: "story-deslop：检测并清除 AI 写作痕迹，让细纲、章纲和正文更自然。",
+    input_mode: "text",
+    context_requirements: ["project_state", "style", "genre"],
+    handler_type: "prompt",
+    linked_targets: ["02_正文/去AI味结果.txt"],
+    prompt: "你是小说文字编辑。请去除模板感、重复表达和生硬总结，让文本保留剧情事实但更自然顺滑。",
+    imported_from: STORY_DESLOP_SOURCE,
+    writable: true
+  },
+  {
+    id: "humanizer_zh",
+    name: "去AI味",
+    description: "Humanizer-zh：去除 AI 写作痕迹，让生成文本更自然、更像人类书写。",
+    input_mode: "text",
+    context_requirements: ["project_state", "style", "genre"],
+    handler_type: "prompt",
+    linked_targets: ["02_正文/去AI味结果.txt"],
+    prompt: [
+      "你是 Humanizer-zh 中文文本编辑。请识别并去除 AI 生成痕迹，让文本更自然、更有人味。",
+      "保留核心含义、剧情事实、人设、世界观、章节目标、伏笔和格式层级。",
+      "重点清理：空泛升华、宣传腔、三段式排比、模糊归因、过度书面化、AI 高频词、公式化结尾、机械连接词。",
+      "输出时只给处理后的文本本体，不要报告、解释、标题、免责声明或修改说明。"
+    ].join("\n"),
+    imported_from: HUMANIZER_ZH_SOURCE,
+    writable: true
+  },
+  {
+    id: "reverse_outline_extract",
+    name: "反向细纲提取",
+    description: "从正文中提取真实发生的剧情推进。",
+    input_mode: "text",
+    context_requirements: ["project_state"],
+    handler_type: "prompt",
+    linked_targets: ["01_大纲/反向细纲.txt"],
+    prompt: "请从正文中提取真实发生的剧情推进，整理成反向细纲，按章节或段落归纳。",
+    imported_from: "",
+    writable: true
+  },
+  {
+    id: "lore_extract",
+    name: "设定提取",
+    description: "从正文或资料中提取人物、地名、组织、能力和世界规则。",
+    input_mode: "text",
+    context_requirements: ["project_state", "lore"],
+    handler_type: "prompt",
+    linked_targets: [
+      "00_设定集/设定集/人物设定.txt",
+      "00_设定集/设定集/体系设定.txt",
+      "00_设定集/设定集/地图设定.txt",
+      "00_设定集/设定集/道具设定.txt"
+    ],
+    prompt: "请从文本中提取新出现的设定，并严格按人物设定、体系设定、地图设定、道具设定四段输出。",
+    imported_from: "",
+    writable: true
+  },
+  {
+    id: "style_extract",
+    name: "风格提取",
+    description: "从样文中提取可复用的写作风格规则、风格示例特征和参考素材摘要。",
+    input_mode: "text",
+    context_requirements: ["style"],
+    handler_type: "prompt",
+    linked_targets: [
+      "00_设定集/风格库/写作风格.txt",
+      "00_设定集/风格库/风格示例.txt",
+      "00_设定集/风格库/参考素材.txt"
+    ],
+    prompt: [
+      "你是写作风格分析师。请从输入样文里提炼可复用的写作风格资产，不要复述剧情。",
+      "必须按以下标题输出：",
+      "【写作风格】句长偏好、人称/视角、对白密度、叙事节奏、情绪浓度、常用转场、禁用表达和执行规则。",
+      "【风格示例】抽象出可模仿的段落特征、镜头推进方式、感官描写样式和对白样式；不得照抄原文句子。",
+      "【参考素材】可复用的意象、语感、场景组织方式、资料摘要和素材边界；不得保留可识别剧情桥段。"
+    ].join("\n"),
+    imported_from: "",
+    writable: true
+  },
+  {
+    id: "genre_generate",
+    name: "题材生成",
+    description: "生成题材规则、题材素材、战斗或冲突模板和违禁词。",
+    input_mode: "text",
+    context_requirements: ["project_state", "genre"],
+    handler_type: "prompt",
+    linked_targets: [
+      "00_设定集/题材库/题材规则.txt",
+      "00_设定集/题材库/题材素材.txt",
+      "00_设定集/题材库/战斗模板.txt",
+      "00_设定集/题材库/违禁词.txt"
+    ],
+    prompt: [
+      "你是小说题材设定编辑。请根据用户输入生成可约束后续写作的题材库。",
+      "必须按以下标题输出：",
+      "【题材规则】世界规则、术语体系、爽点边界、能力/科技/制度限制，以及后续生成必须遵守的硬约束。",
+      "【题材素材】可复用桥段、场景、关键词、道具、势力、冲突素材和题材氛围素材。",
+      "【战斗模板】战斗或冲突场景的推进模板、压迫-反转-收束节奏、场面调度和翻盘点；如果题材不以战斗为主，改写为冲突场景模板。",
+      "【违禁词】禁止出现或需要替换的术语、错题材表达、现代违和词、过度血腥/敏感表达，以及替代表达建议。",
+      "题材库中的 XX 是占位符，除非用户明确提供，不要自行猜测具体题材设定。"
+    ].join("\n"),
+    imported_from: "",
+    writable: true
+  },
+  {
+    id: "batch_generate",
+    name: "批量续写",
+    description: "按章节范围连续生成正文。",
+    input_mode: "text",
+    context_requirements: ["project_state", "chapter_outline", "style", "genre"],
+    handler_type: "job",
+    linked_targets: ["02_正文"],
+    prompt: "",
+    imported_from: "",
+    writable: true
+  },
+  {
+    id: "disassemble_book",
+    name: "一键拆书",
+    description: "从上传文本里提取设定和反向细纲。",
+    input_mode: "text",
+    context_requirements: ["attachments", "project_state"],
+    handler_type: "job",
+    linked_targets: ["01_大纲/反向细纲.txt", "00_设定集/设定集/拆书设定提取.txt"],
+    prompt: "",
+    imported_from: "",
+    writable: true
+  },
+  {
+    id: "continue_disassemble",
+    name: "继续拆细纲",
+    description: "把反向细纲进一步扩展成拆书细纲。",
+    input_mode: "text",
+    context_requirements: ["project_state", "attachments"],
+    handler_type: "job",
+    linked_targets: ["01_大纲/拆书细纲.txt"],
+    prompt: "",
+    imported_from: "",
+    writable: true
+  },
+  {
+    id: "nuwa_style_distill",
+    name: "蒸馏",
+    description: "Nuwa：从拆书原文或拆书产物中蒸馏可复用的小说文风档案。",
+    input_mode: "text",
+    context_requirements: ["attachments", "project_state", "style"],
+    handler_type: "workflow",
+    linked_targets: ["00_设定集/.agent/style_distillation/current.json"],
+    prompt: "",
+    imported_from: "builtin:nuwa-skill",
+    writable: true
+  },
+  {
+    id: "book_fusion",
+    name: "融梗",
+    description: "从三本以上已拆书籍中抽象融合核心设定和剧情骨架，生成原创候选方案。",
+    input_mode: "text",
+    context_requirements: ["project_state", "genre", "disassemble_library"],
+    handler_type: "workflow",
+    linked_targets: ["00_设定集/融梗方案"],
+    prompt: "",
+    imported_from: "builtin:book-fusion",
+    writable: true
+  },
+  {
+    id: "scan_pits",
+    name: "扫描伏笔",
+    description: "从正文中提取需要跟踪的伏笔并写入账本。",
+    input_mode: "text",
+    context_requirements: ["project_state", "ledger"],
+    handler_type: "job",
+    linked_targets: [],
+    prompt: "",
+    imported_from: "",
+    writable: true
+  },
+  {
+    id: "consistency_check",
+    name: "一致性检查",
+    description: "检查正文是否违背设定、章纲、风格和题材约束。",
+    input_mode: "text",
+    context_requirements: ["project_state", "style", "genre"],
+    handler_type: "workflow",
+    linked_targets: [],
+    prompt: "",
+    imported_from: "",
+    writable: false
+  },
+  {
+    id: "continue_text",
+    name: "正文续写",
+    description: "基于当前段落、章纲和项目上下文，在光标位置自然续写。",
+    input_mode: "text",
+    context_requirements: ["project_state", "chapter_outline", "style", "genre"],
+    handler_type: "prompt",
+    linked_targets: ["02_正文/续写结果.txt"],
+    prompt: "你是长篇网文续写助手。请严格沿着当前剧情、章纲和人物状态继续往下写，约 500 字，不要总结，不要跳出当前场景。",
+    imported_from: "",
+    writable: true
+  }
+];
+
+export type SkillServiceOptions = {
+  projectRoot: string;
+  now?: () => string;
+};
+
+export class SkillService {
+  private readonly projectRoot: string;
+  private readonly now: () => string;
+  private readonly versionStore: SkillVersionStore;
+  private readonly builtins = new Map(BUILTIN_SKILLS.map((skill) => [skill.id, { ...skill }]));
+
+  constructor(options: SkillServiceOptions) {
+    this.projectRoot = path.resolve(options.projectRoot);
+    this.now = options.now ?? (() => formatNow(new Date()));
+    this.versionStore = new SkillVersionStore(this.projectRoot, AGENT_DIR, this.now);
+  }
+
+  async listSkills(): Promise<SkillDefinition[]> {
+    const imported = await this.loadImportedSkills();
+    const disabledBuiltins = await this.loadDisabledBuiltins();
+    const merged = new Map<string, SkillDefinition>(
+      [...this.builtins.entries()].map(([id, skill]) => [
+        id,
+        this.withManifest({
+          ...skill,
+          builtin: true,
+          disabled: disabledBuiltins.has(id)
+        })
+      ])
+    );
+    for (const skill of imported) {
+      merged.set(skill.id, this.withManifest({ ...skill, builtin: false, disabled: false }, { forcePrompt: true }));
+    }
+    return [...merged.values()].sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
+  }
+
+  async getSkill(skillId: string): Promise<SkillDefinition | null> {
+    if (!skillId.trim()) {
+      return null;
+    }
+    const skills = await this.listSkills();
+    return skills.find((skill) => skill.id === skillId) ?? null;
+  }
+
+  async importSkill(payload: SkillImportRequest): Promise<SkillDefinition> {
+    const source = path.resolve(payload.path);
+    let stat: Awaited<ReturnType<typeof fs.stat>>;
+    try {
+      stat = await fs.stat(source);
+    } catch {
+      throw new Error(`skill 路径不存在: ${source}`);
+    }
+    const skillFile = stat.isDirectory()
+      ? path.join(source, "SKILL.md")
+      : (path.basename(source).toLowerCase() === "skill.md" ? source : path.join(source, "SKILL.md"));
+    try {
+      await fs.access(skillFile);
+    } catch {
+      throw new Error("未找到 SKILL.md");
+    }
+    const raw = await fs.readFile(skillFile, "utf8");
+    const skill = this.parseExternalSkill(source, raw);
+    return this.saveImportedSkill(skill, {
+      sourceName: source,
+      sourceText: raw
+    });
+  }
+
+  async importUploadedSkill(filename: string, content: Buffer, mediaType = ""): Promise<SkillDefinition> {
+    if (!content.length) {
+      throw new Error("上传文件为空");
+    }
+    if (content.length > MAX_SKILL_UPLOAD_BYTES) {
+      throw new Error("上传文件过大，单个 skill 文件或 zip 不能超过 5MB");
+    }
+    const safeName = this.safeSourceName(filename || "uploaded-skill.md");
+    const suffix = path.extname(safeName).toLowerCase();
+    let raw = "";
+    let sourceName = safeName;
+    if (suffix === ".zip" || mediaType.toLowerCase().includes("zip")) {
+      ({ raw, sourceName } = this.readSkillFromZip(content));
+    } else if (suffix === ".md" || suffix === ".markdown" || suffix === ".txt" || safeName.toLowerCase() === "skill.md") {
+      raw = this.decodeText(content);
+    } else {
+      throw new Error("只支持上传 SKILL.md、Markdown、txt 或 zip");
+    }
+    const skill = this.parseExternalSkillSource(sourceName, raw, `upload:${safeName}`);
+    return this.saveImportedSkill(skill, {
+      sourceName,
+      sourceText: raw
+    });
+  }
+
+  async importSkillDraft(payload: SkillImportDraftRequest): Promise<SkillDefinition> {
+    const normalized = this.normalizeSkill(payload.skill, payload.source_url || payload.source_name || "draft");
+    const existingIds = new Set((await this.listSkills()).map((skill) => skill.id));
+    const targetId = nextAvailableSkillId(normalized.id, existingIds);
+    const draftSkill = targetId === normalized.id
+      ? normalized
+      : this.withManifest(skillDefinitionSchema.parse({
+          ...normalized,
+          id: targetId,
+          manifest: {
+            ...normalized.manifest,
+            id: targetId
+          }
+        }), { forcePrompt: true });
+    return this.saveImportedSkill(draftSkill, {
+      sourceName: payload.source_name || payload.source_url || normalized.name,
+      sourceText: payload.source_text || normalized.prompt
+    });
+  }
+
+  async importedSkillDirectory(): Promise<string> {
+    const dir = path.dirname(await this.importedSkillsPath());
+    await fs.mkdir(dir, { recursive: true });
+    return dir;
+  }
+
+  async deleteSkill(skillId: string): Promise<{ ok: boolean; deleted: boolean; disabled: boolean; skill_id: string }> {
+    const id = normalizeSkillId(skillId);
+    if (!id) {
+      throw new Error("skill id 不能为空");
+    }
+    const imported = await this.loadImportedSkills();
+    if (imported.some((skill) => skill.id === id)) {
+      await this.saveImportedSkills(imported.filter((skill) => skill.id !== id));
+      await fs.rm(path.join(await this.importedSkillDirectory(), "sources", id), { recursive: true, force: true }).catch(() => {});
+      return { ok: true, deleted: true, disabled: false, skill_id: id };
+    }
+    if (this.builtins.has(id)) {
+      const disabled = await this.setBuiltinDisabled(id, true);
+      return { ok: true, deleted: false, disabled, skill_id: id };
+    }
+    throw new Error("skill 不存在");
+  }
+
+  async toggleBuiltinSkill(skillId: string, disabled?: boolean): Promise<SkillDefinition> {
+    const id = normalizeSkillId(skillId);
+    if (!this.builtins.has(id)) {
+      throw new Error("只能禁用或恢复默认技能");
+    }
+    const nextDisabled = await this.setBuiltinDisabled(id, disabled);
+    const skill = await this.getSkill(id);
+    if (!skill) {
+      throw new Error("skill 不存在");
+    }
+    return { ...skill, builtin: true, disabled: nextDisabled };
+  }
+
+  async updateSkillDescription(skillId: string, description: string): Promise<SkillDefinition> {
+    const id = normalizeSkillId(skillId);
+    if (!id) {
+      throw new Error("skill id 不能为空");
+    }
+    if (this.builtins.has(id)) {
+      throw new Error("默认技能简介不能直接修改");
+    }
+    const imported = await this.loadImportedSkills();
+    const index = imported.findIndex((skill) => skill.id === id);
+    if (index < 0) {
+      throw new Error("导入技能不存在");
+    }
+    const currentSkill = imported[index];
+    if (!currentSkill) {
+      throw new Error("导入技能不存在");
+    }
+    const nextDescription = normalizeSkillDescription(description);
+    const nextSkill: SkillDefinition = {
+      ...currentSkill,
+      description: nextDescription || "导入的外部 skill"
+    };
+    imported[index] = nextSkill;
+    await this.saveImportedSkills(imported);
+    return { ...nextSkill, builtin: false, disabled: false };
+  }
+
+  async patchSkill(skillId: string, payload: SkillPatchRequest): Promise<SkillPatchResponse> {
+    const id = normalizeSkillId(skillId);
+    if (!id) {
+      throw new Error("skill id 不能为空");
+    }
+    assertAllowedPatchFields(payload);
+    const imported = await this.loadImportedSkills();
+    const index = imported.findIndex((skill) => skill.id === id);
+    if (index < 0) {
+      if (this.builtins.has(id)) {
+        throw new Error(BUILTIN_PATCH_ERROR);
+      }
+      throw new Error("导入技能不存在");
+    }
+    const current = this.asImportedSkill(imported[index]);
+    const expectedVersion = String(payload.expected_version || "").trim();
+    if (expectedVersion && expectedVersion !== (current.version || current.manifest?.version || "")) {
+      throw new Error("skill 版本已变化，请刷新后重试");
+    }
+    const nextSkill = this.applySkillPatch(current, payload);
+    const diff = createSkillDiff(current, nextSkill);
+    if (payload.dry_run) {
+      return {
+        skill: nextSkill,
+        previous_skill: current,
+        diff,
+        version_id: "",
+        dry_run: true,
+        warnings: []
+      };
+    }
+    if (!diff) {
+      return {
+        skill: current,
+        previous_skill: current,
+        diff: "",
+        version_id: "",
+        dry_run: false,
+        warnings: []
+      };
+    }
+    const version = await this.versionStore.append(id, current, payload.change_reason || "patch");
+    imported[index] = nextSkill;
+    await this.saveImportedSkills(imported);
+    return {
+      skill: nextSkill,
+      previous_skill: current,
+      diff,
+      version_id: version.version_id,
+      dry_run: false,
+      warnings: []
+    };
+  }
+
+  async cloneSkill(skillId: string, payload: SkillCloneRequest): Promise<SkillDefinition> {
+    const sourceId = normalizeSkillId(skillId);
+    if (!sourceId) {
+      throw new Error("skill id 不能为空");
+    }
+    const source = await this.getSkill(sourceId);
+    if (!source) {
+      throw new Error("skill 不存在");
+    }
+    if (source.handler_type !== "prompt") {
+      throw new Error("只能复制 prompt 型技能；workflow/job 技能请通过专门模板或源码升级");
+    }
+    const existingIds = new Set((await this.listSkills()).map((skill) => skill.id));
+    const requestedId = normalizeSkillId(payload.target_id || "");
+    const targetId = nextAvailableSkillId(requestedId || `custom_${source.id}`, existingIds);
+    const targetName = (payload.target_name || "").trim().slice(0, 80) || `${source.name}（自定义）`;
+    const prompt = (source.prompt || source.description || source.name).trim();
+    const cloned = this.normalizeSkill({
+      ...source,
+      id: targetId,
+      version: "1.0.0",
+      name: targetName,
+      prompt,
+      imported_from: `clone:${source.id}`,
+      builtin: false,
+      disabled: false,
+      manifest: buildSkillManifest({
+        ...source.manifest,
+        id: targetId,
+        version: "1.0.0",
+        name: targetName,
+        description: source.description,
+        handler_type: "prompt"
+      })
+    }, `clone:${source.id}`);
+    const imported = await this.loadImportedSkills();
+    imported.push(cloned);
+    await this.saveImportedSkills(imported);
+    await this.versionStore.append(targetId, cloned, payload.instruction || `clone:${source.id}`);
+    return cloned;
+  }
+
+  async listSkillVersions(skillId: string): Promise<SkillVersionsResponse> {
+    const id = normalizeSkillId(skillId);
+    if (!id) {
+      throw new Error("skill id 不能为空");
+    }
+    return {
+      skill_id: id,
+      versions: await this.versionStore.list(id)
+    };
+  }
+
+  async rollbackSkill(skillId: string, payload: SkillRollbackRequest): Promise<SkillPatchResponse> {
+    const id = normalizeSkillId(skillId);
+    if (!id) {
+      throw new Error("skill id 不能为空");
+    }
+    const imported = await this.loadImportedSkills();
+    const index = imported.findIndex((skill) => skill.id === id);
+    if (index < 0) {
+      if (this.builtins.has(id)) {
+        throw new Error(BUILTIN_PATCH_ERROR);
+      }
+      throw new Error("导入技能不存在");
+    }
+    const versions = await this.versionStore.list(id);
+    const targetVersionId = String(payload.version_id || "").trim();
+    const targetVersion = versions.find((version) => version.version_id === targetVersionId);
+    if (!targetVersion) {
+      throw new Error("skill 版本不存在");
+    }
+    const current = this.asImportedSkill(imported[index]);
+    const restored = this.normalizeSkill({
+      ...targetVersion.snapshot,
+      id,
+      imported_from: targetVersion.snapshot.imported_from || current.imported_from,
+      builtin: false,
+      disabled: false
+    }, targetVersion.snapshot.imported_from || current.imported_from);
+    const diff = createSkillDiff(current, restored);
+    if (!diff) {
+      return {
+        skill: current,
+        previous_skill: current,
+        diff: "",
+        version_id: "",
+        dry_run: false,
+        warnings: []
+      };
+    }
+    const version = await this.versionStore.append(id, current, payload.change_reason || `rollback:${targetVersionId}`);
+    imported[index] = restored;
+    await this.saveImportedSkills(imported);
+    return {
+      skill: restored,
+      previous_skill: current,
+      diff,
+      version_id: version.version_id,
+      dry_run: false,
+      warnings: []
+    };
+  }
+
+  private async importedSkillsPath(): Promise<string> {
+    const filePath = path.join(this.projectRoot, AGENT_DIR, "skills", "imported.json");
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    return filePath;
+  }
+
+  private async loadImportedSkills(): Promise<SkillDefinition[]> {
+    const filePath = await this.importedSkillsPath();
+    let raw = "";
+    try {
+      raw = await fs.readFile(filePath, "utf8");
+    } catch {
+      return [];
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      return [];
+    }
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    const skills: SkillDefinition[] = [];
+    for (const item of parsed) {
+      try {
+        skills.push(this.normalizeSkill(item as SkillDefinition, (item as SkillDefinition).imported_from || ""));
+      } catch {
+        continue;
+      }
+    }
+    return skills;
+  }
+
+  private async saveImportedSkills(skills: SkillDefinition[]): Promise<void> {
+    const filePath = await this.importedSkillsPath();
+    await fs.writeFile(filePath, `${JSON.stringify(skills, null, 2)}\n`, "utf8");
+  }
+
+  private async disabledBuiltinsPath(): Promise<string> {
+    const filePath = path.join(this.projectRoot, AGENT_DIR, "skills", DISABLED_BUILTINS_FILE);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    return filePath;
+  }
+
+  private async loadDisabledBuiltins(): Promise<Set<string>> {
+    const filePath = await this.disabledBuiltinsPath();
+    const raw = await fs.readFile(filePath, "utf8").catch(() => "");
+    if (!raw.trim()) {
+      return new Set();
+    }
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) {
+        return new Set();
+      }
+      return new Set(parsed.map((item) => normalizeSkillId(String(item || ""))).filter((id) => this.builtins.has(id)));
+    } catch {
+      return new Set();
+    }
+  }
+
+  private async saveDisabledBuiltins(ids: Set<string>): Promise<void> {
+    const filePath = await this.disabledBuiltinsPath();
+    const values = [...ids].filter((id) => this.builtins.has(id)).sort();
+    await fs.writeFile(filePath, `${JSON.stringify(values, null, 2)}\n`, "utf8");
+  }
+
+  private async setBuiltinDisabled(skillId: string, disabled?: boolean): Promise<boolean> {
+    const id = normalizeSkillId(skillId);
+    if (!this.builtins.has(id)) {
+      throw new Error("只能禁用或恢复默认技能");
+    }
+    const disabledBuiltins = await this.loadDisabledBuiltins();
+    const nextDisabled = disabled === undefined ? !disabledBuiltins.has(id) : Boolean(disabled);
+    if (nextDisabled) {
+      disabledBuiltins.add(id);
+    } else {
+      disabledBuiltins.delete(id);
+    }
+    await this.saveDisabledBuiltins(disabledBuiltins);
+    return nextDisabled;
+  }
+
+  private async saveImportedSkill(
+    skill: SkillDefinition,
+    options: {
+      sourceName: string;
+      sourceText: string;
+    }
+  ): Promise<SkillDefinition> {
+    const normalized = this.normalizeSkill(skill, skill.imported_from || options.sourceName);
+    const current = new Map((await this.loadImportedSkills()).map((item) => [item.id, item]));
+    current.set(normalized.id, normalized);
+    await this.saveImportedSkills([...current.values()]);
+    if (options.sourceText.trim()) {
+      await this.saveSkillSourceSnapshot(normalized, options.sourceName, options.sourceText);
+    }
+    return normalized;
+  }
+
+  private asImportedSkill(skill: SkillDefinition | undefined): SkillDefinition {
+    if (!skill) {
+      throw new Error("导入技能不存在");
+    }
+    return this.withManifest({ ...skill, builtin: false, disabled: false }, { forcePrompt: true });
+  }
+
+  private applySkillPatch(current: SkillDefinition, payload: SkillPatchRequest): SkillDefinition {
+    const next: SkillDefinition = {
+      ...current,
+      manifest: current.manifest ? { ...current.manifest } : undefined,
+      builtin: false,
+      disabled: false
+    };
+    if (hasOwn(payload, "description")) {
+      next.description = normalizeSkillDescription(payload.description || "") || "导入的外部 skill";
+    }
+    if (hasOwn(payload, "prompt")) {
+      next.prompt = String(payload.prompt || "").trim().slice(0, 12000);
+    }
+    if (hasOwn(payload, "context_requirements")) {
+      next.context_requirements = [...(payload.context_requirements || [])];
+    }
+    if (hasOwn(payload, "linked_targets")) {
+      next.linked_targets = [...(payload.linked_targets || [])];
+    }
+    if (hasOwn(payload, "model_policy")) {
+      next.model_policy = skillModelPolicySchema.parse(payload.model_policy || {});
+    }
+    if (hasOwn(payload, "save_policy")) {
+      next.save_policy = skillSavePolicySchema.parse(payload.save_policy || {});
+    }
+    if (hasOwn(payload, "writable")) {
+      next.writable = Boolean(payload.writable);
+    }
+    const normalized = this.normalizeSkill(next, current.imported_from || "");
+    if (!createSkillDiff(current, normalized)) {
+      return current;
+    }
+    const nextVersion = bumpSkillVersion(current.version || current.manifest?.version || "1.0.0");
+    return this.withManifest(skillDefinitionSchema.parse({
+      ...normalized,
+      version: nextVersion,
+      manifest: {
+        ...normalized.manifest,
+        version: nextVersion
+      }
+    }), { forcePrompt: true });
+  }
+
+  public normalizeSkill(skill: SkillDefinition, importedFrom: string): SkillDefinition {
+    const skillId = normalizeSkillId(skill.id || skill.name || "imported_skill");
+    const prompt = (skill.prompt || "").trim().slice(0, 12000);
+    if (!prompt) {
+      throw new Error("skill prompt 不能为空");
+    }
+    return this.withManifest({
+      id: skillId || "imported_skill",
+      name: (skill.name || skillId || "imported_skill").trim().slice(0, 80),
+      description: normalizeSkillDescription(skill.description || "导入的外部 skill"),
+      input_mode: skill.input_mode || "text",
+      input_schema: skill.input_schema,
+      output_schema: skill.output_schema,
+      context_requirements: normalizeStringArray(skill.context_requirements, 12, ["project_state", "conversation"]),
+      handler_type: "prompt",
+      linked_targets: normalizeStringArray(skill.linked_targets, 8, []),
+      tools: normalizeStringArray(skill.tools, 12, []),
+      model_policy: skill.model_policy,
+      save_policy: skill.save_policy,
+      eval_cases: normalizeStringArray(skill.eval_cases, 20, []),
+      manifest: skill.manifest,
+      prompt,
+      imported_from: (importedFrom || skill.imported_from || "").trim().slice(0, 500),
+      writable: Boolean(skill.writable),
+      builtin: false,
+      disabled: false
+    }, { forcePrompt: true });
+  }
+
+  private withManifest(skill: SkillDefinition, options: { forcePrompt?: boolean } = {}): SkillDefinition {
+    const handlerType = options.forcePrompt ? "prompt" : normalizeHandlerType(skill.handler_type, "prompt");
+    const manifest = buildSkillManifest({
+      ...skill.manifest,
+      id: skill.id || skill.manifest?.id || skill.name || "imported_skill",
+      version: skill.version || skill.manifest?.version || "1.0.0",
+      name: skill.name || skill.manifest?.name || skill.id || "imported_skill",
+      description: skill.description || skill.manifest?.description || "导入的外部 skill",
+      input_mode: skill.input_mode || skill.manifest?.input_mode || "text",
+      input_schema: recordField(skill.input_schema ?? skill.manifest?.input_schema),
+      output_schema: recordField(skill.output_schema ?? skill.manifest?.output_schema),
+      context_requirements: normalizeStringArray(skill.context_requirements ?? skill.manifest?.context_requirements, 12, ["project_state", "conversation"]),
+      handler_type: handlerType,
+      linked_targets: normalizeStringArray(skill.linked_targets ?? skill.manifest?.linked_targets, 12, []),
+      tools: normalizeStringArray(skill.tools ?? skill.manifest?.tools, 12, []),
+      model_policy: recordField(skill.model_policy ?? skill.manifest?.model_policy),
+      save_policy: recordField(skill.save_policy ?? skill.manifest?.save_policy),
+      eval_cases: normalizeStringArray(skill.eval_cases ?? skill.manifest?.eval_cases, 20, [])
+    });
+    return {
+      ...skill,
+      id: manifest.id,
+      version: manifest.version,
+      name: manifest.name,
+      description: manifest.description,
+      input_mode: manifest.input_mode,
+      input_schema: manifest.input_schema,
+      output_schema: manifest.output_schema,
+      context_requirements: manifest.context_requirements,
+      handler_type: handlerType,
+      linked_targets: manifest.linked_targets,
+      tools: manifest.tools,
+      model_policy: manifest.model_policy,
+      save_policy: manifest.save_policy,
+      eval_cases: manifest.eval_cases,
+      manifest: {
+        ...manifest,
+        handler_type: handlerType
+      }
+    };
+  }
+
+  private async saveSkillSourceSnapshot(skill: SkillDefinition, sourceName: string, sourceText: string): Promise<void> {
+    const base = path.join(await this.importedSkillDirectory(), "sources", skill.id);
+    await fs.mkdir(base, { recursive: true });
+    await fs.writeFile(path.join(base, "source.md"), sourceText.slice(0, MAX_SKILL_TEXT_CHARS), "utf8");
+    await fs.writeFile(
+      path.join(base, "metadata.json"),
+      `${JSON.stringify(
+        {
+          skill_id: skill.id,
+          skill_name: skill.name,
+          source_name: sourceName,
+          imported_from: skill.imported_from,
+          saved_at: this.now()
+        },
+        null,
+        2
+      )}\n`,
+      "utf8"
+    );
+  }
+
+  private parseExternalSkillSource(sourceName: string, raw: string, importedFrom: string): SkillDefinition {
+    const source = this.safeSourceName(sourceName) || "SKILL.md";
+    const parsed = this.parseExternalSkill(source, raw);
+    return {
+      ...parsed,
+      imported_from: importedFrom || parsed.imported_from
+    };
+  }
+
+  private safeSourceName(value: string): string {
+    const name = path.basename((value || "skill.md").replace(/\\/g, "/"));
+    return name.replace(/[^\w.\-\u4e00-\u9fff]+/g, "_").replace(/^[._]+|[._]+$/g, "") || "skill.md";
+  }
+
+  private decodeText(content: Buffer): string {
+    const encodings: BufferEncoding[] = ["utf8", "utf16le"];
+    for (const encoding of encodings) {
+      try {
+        return content.toString(encoding);
+      } catch {
+        continue;
+      }
+    }
+    return content.toString("utf8");
+  }
+
+  private readSkillFromZip(content: Buffer): { raw: string; sourceName: string } {
+    let archive: AdmZip;
+    try {
+      archive = new AdmZip(content);
+    } catch (error) {
+      throw new Error("zip 文件无效");
+    }
+    const entries = archive.getEntries();
+    if (entries.length > MAX_SKILL_ZIP_FILES) {
+      throw new Error("zip 内文件过多");
+    }
+    let skillEntry: AdmZip.IZipEntry | null = null;
+    let totalSize = 0;
+    for (const entry of entries) {
+      const normalized = entry.entryName.replace(/\\/g, "/");
+      const parts = normalized.split("/").filter(Boolean);
+      if (normalized.startsWith("/") || parts.includes("..")) {
+        throw new Error("zip 内包含不安全路径");
+      }
+      totalSize += Math.max(0, entry.header.size);
+      if (totalSize > MAX_SKILL_UPLOAD_BYTES) {
+        throw new Error("zip 解压后内容过大");
+      }
+      if (parts.at(-1)?.toLowerCase() === "skill.md") {
+        skillEntry = entry;
+      }
+    }
+    if (!skillEntry) {
+      throw new Error("zip 中未找到 SKILL.md");
+    }
+    return {
+      raw: this.decodeText(skillEntry.getData()),
+      sourceName: skillEntry.entryName
+    };
+  }
+
+  public parseExternalSkill(source: string, raw: string): SkillDefinition {
+    const metadata: Record<string, unknown> = {};
+    let body = raw;
+    const frontmatter = raw.match(/^---\s*\n(.*?)\n---\s*\n(.*)$/s);
+    if (frontmatter) {
+      body = frontmatter[2] || "";
+      for (const line of (frontmatter[1] || "").split(/\r?\n/)) {
+        const index = line.indexOf(":");
+        if (index < 0) {
+          continue;
+        }
+        const key = line.slice(0, index).trim();
+        metadata[key] = parseFrontmatterValue(line.slice(index + 1).trim());
+      }
+    }
+    const manifestMetadata = isRecord(metadata.manifest) ? metadata.manifest : {};
+    const baseName = stringField(manifestMetadata.name ?? metadata.name) || path.basename(source);
+    const skillId = normalizeSkillId(stringField(manifestMetadata.id ?? metadata.id) || baseName) || `imported_${Math.abs(hashString(source))}`;
+    const savePolicy = recordField(manifestMetadata.save_policy ?? metadata.save_policy);
+    const manifest = buildSkillManifest({
+      id: skillId,
+      version: stringField(manifestMetadata.version ?? metadata.version) || "1.0.0",
+      name: baseName,
+      description: normalizeSkillDescription(stringField(manifestMetadata.description ?? metadata.description) || "导入的外部 skill"),
+      input_mode: stringField(manifestMetadata.input_mode ?? metadata.input_mode) || "text",
+      input_schema: recordField(manifestMetadata.input_schema ?? metadata.input_schema),
+      output_schema: recordField(manifestMetadata.output_schema ?? metadata.output_schema),
+      context_requirements: normalizeStringArray(manifestMetadata.context_requirements ?? metadata.context_requirements, 12, ["project_state", "conversation"]),
+      handler_type: "prompt",
+      linked_targets: normalizeStringArray(manifestMetadata.linked_targets ?? metadata.linked_targets, 8, []),
+      tools: normalizeStringArray(manifestMetadata.tools ?? metadata.tools, 12, []),
+      model_policy: recordField(manifestMetadata.model_policy ?? metadata.model_policy),
+      save_policy: {
+        ...savePolicy,
+        requires_confirmation: booleanField(savePolicy.requires_confirmation ?? metadata.requires_confirmation, true)
+      },
+      eval_cases: normalizeStringArray(manifestMetadata.eval_cases ?? metadata.eval_cases, 20, [])
+    });
+    return this.withManifest({
+      id: manifest.id,
+      version: manifest.version,
+      name: manifest.name,
+      description: manifest.description,
+      input_mode: manifest.input_mode,
+      input_schema: manifest.input_schema,
+      output_schema: manifest.output_schema,
+      context_requirements: manifest.context_requirements,
+      handler_type: "prompt",
+      linked_targets: manifest.linked_targets,
+      tools: manifest.tools,
+      model_policy: manifest.model_policy,
+      save_policy: manifest.save_policy,
+      eval_cases: manifest.eval_cases,
+      manifest,
+      prompt: body.trim().slice(0, 12000),
+      imported_from: source,
+      writable: false
+    }, { forcePrompt: true });
+  }
+
+  public async fetchUrlText(url: string): Promise<{ text: string; sourceName: string }> {
+    const headers = { "User-Agent": "XiaoShuo-Agent-Skill-Importer/1.0" };
+    const response = await fetch(url, { headers });
+    if (!response.ok) {
+      throw new Error(`抓取失败: ${response.statusText}`);
+    }
+    const buffer = await response.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    let text = "";
+    for (const candidate of ["utf-8", "gb18030", "utf-16le"]) {
+      try {
+        const decoder = new TextDecoder(candidate, { fatal: true });
+        text = decoder.decode(bytes);
+        break;
+      } catch {}
+    }
+    if (!text) {
+      text = new TextDecoder("utf-8", { fatal: false }).decode(bytes);
+    }
+    
+    let sourceName = this.safeSourceName(new URL(url).pathname.split("/").pop() || "web-skill-source.md");
+    if (this.looksLikeHtml(text)) {
+      text = this.htmlToText(text);
+      if (!sourceName || !sourceName.includes(".")) {
+        sourceName = "web-skill-source.md";
+      }
+    }
+    return { text: text.trim(), sourceName };
+  }
+
+  public looksLikeHtml(text: string): boolean {
+    const sample = (text || "").slice(0, 500).toLowerCase();
+    return sample.includes("<html") || sample.includes("<!doctype html") || sample.includes("<body");
+  }
+
+  public htmlToText(text: string): string {
+    const $ = cheerio.load(text || "");
+    $("script, style, iframe, noscript, form").remove();
+    const rawText = $.text()
+      .replace(/&nbsp;/g, " ")
+      .replace(/&amp;/g, "&")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/\u00a0/g, " ");
+    return rawText.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+  }
+}
+
+function buildSkillManifest(input: Record<string, unknown> & { id: unknown; name: unknown; description: unknown; handler_type: unknown }): SkillManifest {
+  return skillManifestSchema.parse({
+    id: normalizeSkillId(stringField(input.id)) || "imported_skill",
+    version: stringField(input.version) || "1.0.0",
+    name: stringField(input.name).slice(0, 80) || "imported_skill",
+    description: normalizeSkillDescription(stringField(input.description) || "导入的外部 skill"),
+    handler_type: normalizeHandlerType(input.handler_type, "prompt"),
+    input_mode: stringField(input.input_mode) || "text",
+    input_schema: recordField(input.input_schema),
+    output_schema: recordField(input.output_schema),
+    context_requirements: normalizeStringArray(input.context_requirements, 12, ["project_state", "conversation"]),
+    linked_targets: normalizeStringArray(input.linked_targets, 12, []),
+    tools: normalizeStringArray(input.tools, 12, []),
+    model_policy: recordField(input.model_policy),
+    save_policy: {
+      ...recordField(input.save_policy),
+      requires_confirmation: booleanField(recordField(input.save_policy).requires_confirmation, true)
+    },
+    eval_cases: normalizeStringArray(input.eval_cases, 20, [])
+  });
+}
+
+function normalizeStringArray(values: unknown, limit: number, fallback: string[]): string[] {
+  const source = Array.isArray(values)
+    ? values
+    : typeof values === "string"
+      ? values.split(",")
+      : [];
+  const list = source.map((item) => String(item).trim().replace(/^"|"$/g, "")).filter(Boolean).slice(0, limit);
+  return list.length ? list : [...fallback];
+}
+
+function normalizeSkillDescription(value: string): string {
+  return String(value || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim()
+    .slice(0, 1000);
+}
+
+function normalizeSkillId(value: string): string {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/-/g, "_")
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function normalizeHandlerType(value: unknown, fallback: SkillDefinition["handler_type"]): SkillDefinition["handler_type"] {
+  const normalized = stringField(value).toLowerCase();
+  return normalized === "prompt" || normalized === "workflow" || normalized === "job" || normalized === "external" ? normalized : fallback;
+}
+
+function assertAllowedPatchFields(payload: SkillPatchRequest): void {
+  for (const key of Object.keys(payload)) {
+    if (PATCHABLE_SKILL_FIELDS.has(key) || PATCH_CONTROL_FIELDS.has(key)) {
+      continue;
+    }
+    throw new Error(`不允许修改 skill 字段: ${key}`);
+  }
+}
+
+function hasOwn<T extends object>(value: T, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function nextAvailableSkillId(baseId: string, existingIds: Set<string>): string {
+  const normalized = normalizeSkillId(baseId) || "custom_skill";
+  if (!existingIds.has(normalized)) {
+    return normalized;
+  }
+  for (let index = 2; index < 1000; index += 1) {
+    const candidate = `${normalized}_${index}`;
+    if (!existingIds.has(candidate)) {
+      return candidate;
+    }
+  }
+  throw new Error("无法生成唯一 skill id");
+}
+
+function bumpSkillVersion(version: string): string {
+  const parts = String(version || "1.0.0")
+    .split(".")
+    .map((part) => Number.parseInt(part, 10));
+  const major = Number.isFinite(parts[0]) ? parts[0]! : 1;
+  const minor = Number.isFinite(parts[1]) ? parts[1]! : 0;
+  const patch = Number.isFinite(parts[2]) ? parts[2]! : 0;
+  return `${major}.${minor}.${patch + 1}`;
+}
+
+function parseFrontmatterValue(value: string): unknown {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+    try {
+      return JSON.parse(trimmed) as unknown;
+    } catch {
+      if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+        return trimmed.slice(1, -1).split(",").map((item) => item.trim().replace(/^"|"$/g, "")).filter(Boolean);
+      }
+    }
+  }
+  const unquoted = trimmed.replace(/^"|"$/g, "");
+  if (/^(true|false)$/i.test(unquoted)) {
+    return unquoted.toLowerCase() === "true";
+  }
+  return unquoted;
+}
+
+function stringField(value: unknown): string {
+  return value === undefined || value === null ? "" : String(value).trim();
+}
+
+function recordField(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? { ...value } : {};
+}
+
+function booleanField(value: unknown, fallback: boolean): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  const normalized = stringField(value).toLowerCase();
+  if (["1", "true", "yes", "on"].includes(normalized)) {
+    return true;
+  }
+  if (["0", "false", "no", "off"].includes(normalized)) {
+    return false;
+  }
+  return fallback;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hashString(value: string): number {
+  let hash = 0;
+  for (let index = 0; index < value.length; index += 1) {
+    hash = ((hash << 5) - hash + value.charCodeAt(index)) | 0;
+  }
+  return hash;
+}
+
+function formatNow(value: Date): string {
+  const pad = (part: number) => String(part).padStart(2, "0");
+  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())} ${pad(value.getHours())}:${pad(value.getMinutes())}:${pad(value.getSeconds())}`;
+}

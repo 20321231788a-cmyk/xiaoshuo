@@ -1,0 +1,49 @@
+name: Release Desktop
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    name: Windows installer
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck --workspaces --if-present
+
+      - name: Build workbench
+        run: npm run build:workbench
+
+      - name: Build desktop
+        run: npm run build:desktop
+
+      - name: Package installer
+        run: npm run dist -w @xiaoshuo/desktop-shell
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          make_latest: true
+          files: |
+            apps/desktop-shell/release/ArcWriter-Setup-*.exe
+            apps/desktop-shell/release/ArcWriter-Setup-*.exe.blockmap
+            apps/desktop-shell/release/latest.yml
