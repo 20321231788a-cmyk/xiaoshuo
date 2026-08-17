@@ -481,24 +481,8 @@ function SettingsSecondaryPage({ controller, section, automaticBusy, onToggleAut
           </div>
         </section>
         <section className="settings-section">
-          <div className="settings-section-title"><div><h2>项目文件权限</h2><p>控制明确提出的保存、覆盖、追加与删除操作如何执行。</p></div></div>
-          <div className="settings-control-list">
-            <label className="xw-setting-field">
-              <span>文件操作确认</span>
-              <select
-                value={config.project_file_permission_mode || "default"}
-                onChange={(event) => controller.patchConfig({ project_file_permission_mode: event.target.value === "direct_save_delete" ? "direct_save_delete" : "default" })}
-              >
-                <option value="default">默认，按现有规则确认</option>
-                <option value="direct_save_delete">无需确认直接保存删除</option>
-              </select>
-            </label>
-            <p className="settings-inline-note">
-              {config.project_file_permission_mode === "direct_save_delete"
-                ? "已启用直接执行。删除仍会移入项目 99_回收站，可从时间线恢复；版本冲突与路径校验仍会阻止写入。"
-                : "普通生成仍先预览。删除与需要确认的项目文件操作会保留确认步骤。"}
-            </p>
-          </div>
+          <div className="settings-section-title"><div><h2>项目文件权限</h2><p>工具只能操作当前项目。创建、追加、局部修改与设定合并会直接执行；覆盖已有文件及移入回收站会在展示范围后请求确认。</p></div></div>
+          <p className="settings-inline-note">历史版本中的“无需确认直接保存删除”开关已停用，不能再绕过项目内的覆盖与回收站确认。</p>
         </section>
         <section className="settings-section">
           <div className="settings-section-title"><div><h2>敏感配置</h2><p>密钥默认遮蔽显示，并保存在本机配置中。</p></div></div>

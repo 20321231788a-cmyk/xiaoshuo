@@ -49,12 +49,73 @@ export const pinnedContextItemSchema = z
   })
   .passthrough();
 
+/**
+ * A conversation is stored as independently renderable parts rather than as
+ * one opaque assistant string.  This is deliberately compatible with the
+ * legacy `content` and `reasoning_content` fields: old conversations are
+ * projected into text/reasoning parts when they are read, while old clients
+ * can continue to render the two legacy fields unchanged.
+ */
+const conversationPartBaseSchema = z.object({
+  id: z.string(),
+  created_at: z.string().optional(),
+  status: z.enum(["pending", "running", "completed", "error", "cancelled"]).optional()
+});
+
+export const conversationMessagePartSchema = z.union([
+  conversationPartBaseSchema.extend({
+    type: z.literal("text"),
+    text: z.string()
+  }),
+  conversationPartBaseSchema.extend({
+    type: z.literal("reasoning"),
+    text: z.string()
+  }),
+  conversationPartBaseSchema.extend({
+    type: z.literal("attachment"),
+    attachment_id: z.string(),
+    name: z.string(),
+    media_type: z.string().optional()
+  }),
+  conversationPartBaseSchema.extend({
+    type: z.literal("skill"),
+    skill_id: z.string(),
+    label: z.string()
+  }),
+  conversationPartBaseSchema.extend({
+    type: z.literal("tool"),
+    tool_call_id: z.string(),
+    tool_name: z.string(),
+    title: z.string(),
+    input: z.record(z.unknown()).optional(),
+    output: z.string().optional(),
+    error: z.string().optional()
+  }),
+  conversationPartBaseSchema.extend({
+    type: z.literal("step"),
+    stage: z.string(),
+    message: z.string()
+  }),
+  conversationPartBaseSchema.extend({
+    type: z.literal("retry"),
+    attempt: z.number().int().positive(),
+    message: z.string(),
+    retry_after_ms: z.number().int().nonnegative().optional()
+  }),
+  conversationPartBaseSchema.extend({
+    type: z.literal("error"),
+    message: z.string(),
+    code: z.string().optional()
+  })
+]);
+
 export const conversationMessageSchema = z
   .object({
     id: z.string(),
     role: z.enum(["user", "assistant", "system"]),
     content: z.string(),
     reasoning_content: z.string().optional(),
+    parts: z.array(conversationMessagePartSchema).optional(),
     created_at: z.string(),
     metadata: z.record(z.unknown())
   })
@@ -95,6 +156,7 @@ export const conversationDetailSchema = conversationSummarySchema
 
 export type ConversationAttachment = z.infer<typeof conversationAttachmentSchema>;
 export type PinnedContextItem = z.infer<typeof pinnedContextItemSchema>;
+export type ConversationMessagePart = z.infer<typeof conversationMessagePartSchema>;
 export type ConversationMessage = z.infer<typeof conversationMessageSchema>;
 export type ConversationSummary = z.infer<typeof conversationSummarySchema>;
 export type ConversationDetail = z.infer<typeof conversationDetailSchema>;

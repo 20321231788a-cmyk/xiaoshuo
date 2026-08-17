@@ -193,6 +193,13 @@
   transition: border-color 180ms ease-out, box-shadow 180ms ease-out;
 }
 .assistant-composer:focus-within { border-color: var(--aw-focus); box-shadow: 0 0 0 2px oklch(63% .08 335 / .16); }
+.assistant-composer.dragging-files { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-soft); }
+.assistant-attachment-chips { display: flex; flex-wrap: wrap; gap: 6px; padding: 9px 10px 0; }
+.assistant-attachment-chip { max-width: 100%; min-height: 27px; display: inline-flex; align-items: center; gap: 5px; padding: 3px 4px 3px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--stone); color: var(--text); font-size: 11px; }
+.assistant-attachment-chip > svg { flex: none; color: var(--accent); }
+.assistant-attachment-chip > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.assistant-attachment-chip > button { width: 20px; height: 20px; flex: none; display: grid; place-items: center; padding: 0; border: 0; border-radius: 4px; background: transparent; color: var(--muted); }
+.assistant-attachment-chip > button:hover:not(:disabled) { background: var(--paper); color: var(--danger); }
 .assistant-reference-confirm { display: grid; gap: 9px; padding: 10px 11px; border-bottom: 1px solid var(--line); background: var(--stone); }
 .assistant-reference-confirm-head,
 .assistant-reference-actions { min-width: 0; display: flex; align-items: center; justify-content: space-between; gap: 8px; }

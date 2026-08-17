@@ -1272,7 +1272,7 @@ describe("agent-runtime chat flow", () => {
     });
   });
 
-  it("executes a resolved AI archive operation directly when the global permission allows it", async () => {
+  it("does not let the legacy global permission bypass archive confirmation", async () => {
     await fs.mkdir(path.join(tempDir, "01_大纲"), { recursive: true });
     await fs.writeFile(path.join(tempDir, "01_大纲", "大纲.txt"), "待归档大纲", "utf8");
     await fs.writeFile(configPath, JSON.stringify({ api_key: "demo-key", model: "demo-model", project_file_permission_mode: "direct_save_delete" }), "utf8");
@@ -1297,9 +1297,9 @@ describe("agent-runtime chat flow", () => {
       attachment_ids: []
     });
 
-    expect(result.requires_confirmation).toBe(false);
-    expect(result.reply).toBe("已将 1 个文件移入项目回收站，可在项目时间线恢复。");
-    await expect(fs.access(path.join(tempDir, "01_大纲", "大纲.txt"))).rejects.toThrow();
+    expect(result.requires_confirmation).toBe(true);
+    expect(result.reply).toContain("移入项目回收站");
+    await expect(fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).resolves.toBe("待归档大纲");
   });
 
   it("streams chat locally with attachment-backed context", async () => {

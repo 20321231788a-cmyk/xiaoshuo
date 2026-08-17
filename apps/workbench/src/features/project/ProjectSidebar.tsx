@@ -513,7 +513,6 @@ export function ProjectSidebar({
                   node={node}
                   activePath={controller.activeDocumentPath}
                   busy={controller.projectBusy || controller.documentBusy}
-                  directFileOperations={controller.configDraft?.project_file_permission_mode === "direct_save_delete"}
                   onOpenDocument={onOpenDocument}
                   onCreateFile={controller.createProjectTreeFile}
                   onDeleteFile={controller.deleteProjectTreeFile}

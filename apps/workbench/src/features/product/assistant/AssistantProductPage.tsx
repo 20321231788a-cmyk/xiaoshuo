@@ -40,6 +40,26 @@ function executionTraceFromMetadata(metadata: unknown): Array<{ stage: string; m
   }).slice(-80);
 }
 
+function executionTraceFromParts(parts: unknown): Array<{ stage: string; message: string }> {
+  if (!Array.isArray(parts)) return [];
+  return parts.flatMap((part) => {
+    const value = part && typeof part === "object" && !Array.isArray(part) ? part as Record<string, unknown> : {};
+    if (value.type === "step") {
+      const message = String(value.message || "").trim();
+      return message ? [{ stage: String(value.stage || "working"), message }] : [];
+    }
+    if (value.type === "skill" || value.type === "tool") {
+      const message = String(value.title || value.label || value.tool_name || "").trim();
+      return message ? [{ stage: value.type, message }] : [];
+    }
+    if (value.type === "retry" || value.type === "error") {
+      const message = String(value.message || "").trim();
+      return message ? [{ stage: String(value.type), message }] : [];
+    }
+    return [];
+  }).slice(-80);
+}
+
 function inlinePlanRunId(metadata: unknown): string {
   const source = metadata && typeof metadata === "object" && !Array.isArray(metadata)
     ? metadata as Record<string, unknown>
@@ -525,7 +545,11 @@ export function AssistantProductPage({ controller, onSelectFeature }: { controll
                   const userMessage = entry.role === "user";
                   const lastAssistantId = [...messages].reverse().find((message) => message.role === "assistant")?.id;
                   const isLastAssistant = entry.id === lastAssistantId;
-                  const executionTrace = userMessage ? [] : executionTraceFromMetadata(entry.metadata);
+                  const executionTrace = userMessage
+                    ? []
+                    : [...executionTraceFromMetadata(entry.metadata), ...executionTraceFromParts(entry.parts)]
+                      .filter((step, index, list) => list.findIndex((item) => item.stage === step.stage && item.message === step.message) === index)
+                      .slice(-80);
                   const showReasoning = !userMessage && (
                     Boolean(entry.reasoning_content) ||
                     (isLastAssistant && !sendingMessage && controller.conversationModelPreferences.reasoning_enabled)

@@ -4592,16 +4592,14 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     if (!options.skipReferenceResolution && !disableAutoReferences) {
       const resolvedReferences = await resolveConversationReferenceIntent(trimmed);
       if (resolvedReferences?.ambiguous && resolvedReferences.candidates.length) {
-        setPendingReferenceResolution({
-          content: trimmed,
-          references: resolvedReferences.references,
-          candidates: resolvedReferences.candidates,
-          selectedPaths: [],
-          warnings: resolvedReferences.warnings
-        });
-        setConversationMessage(`找到 ${resolvedReferences.candidates.length} 个可能的参考文件，请确认后发送。`);
-        setActiveTab("conversations");
-        return;
+        // References are read-only context. Do not make an ordinary question
+        // wait behind a confirmation card: include the strongest bounded set
+        // and show the selected paths in the run trace instead.
+        referencePaths = uniquePaths([
+          ...referencePaths,
+          ...referenceCandidatePaths(resolvedReferences.references),
+          ...referenceCandidatePaths(resolvedReferences.candidates.slice(0, 3))
+        ]);
       }
       if (resolvedReferences?.references.length) {
         referencePaths = uniquePaths([...referencePaths, ...referenceCandidatePaths(resolvedReferences.references)]);
@@ -4755,8 +4753,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
   }
 
-  async function sendMessage() {
-    const content = messageInput.trim();
+  async function sendMessage(content = messageInput.trim()) {
     await sendConversationPrompt(content, { checkActiveDocument: true });
   }
 

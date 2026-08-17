@@ -122,6 +122,32 @@ describe("conversation-service", () => {
     await expect(conversations.appendMessage(detail.id, { role: "tool" as any, content: "x" })).rejects.toThrow("消息角色无效");
   });
 
+  it("projects legacy messages into renderable parts and preserves explicit tool lifecycle parts", async () => {
+    const conversations = service();
+    const detail = await conversations.createConversation();
+    const withParts = await conversations.appendMessage(detail.id, {
+      role: "assistant",
+      content: "已经读取大纲。",
+      parts: [
+        { id: "tool_1", type: "tool", tool_call_id: "call_1", tool_name: "read_project_file", title: "读取主线大纲", status: "completed" },
+        { id: "text_1", type: "text", text: "已经读取大纲。", status: "completed" }
+      ]
+    });
+
+    expect(withParts.messages[0]?.parts).toMatchObject([
+      { type: "tool", tool_name: "read_project_file", status: "completed" },
+      { type: "text", text: "已经读取大纲。" }
+    ]);
+
+    const raw = JSON.parse(await fs.readFile(conversationFile(detail.id), "utf8"));
+    delete raw.messages[0].parts;
+    await fs.writeFile(conversationFile(detail.id), JSON.stringify(raw), "utf8");
+    const restored = await conversations.getConversation(detail.id);
+    expect(restored.messages[0]?.parts).toEqual([
+      expect.objectContaining({ type: "text", text: "已经读取大纲。", id: "legacy-text" })
+    ]);
+  });
+
   it("pins text and document context, then removes it", async () => {
     await fs.mkdir(path.join(tempDir, "01_大纲"), { recursive: true });
     await fs.writeFile(path.join(tempDir, "01_大纲", "大纲.txt"), "这是 文档\n\n内容", "utf8");

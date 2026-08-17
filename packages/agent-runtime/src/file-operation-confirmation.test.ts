@@ -14,7 +14,7 @@ afterEach(async () => {
 });
 
 describe("AgentFileOperationRunner confirmation receipts", () => {
-  it("seals the durable direct-save preview used by the confirmation E2E flow", async () => {
+  it("executes append-only direct saves without a confirmation preview", async () => {
     const fixture = await createFixture();
 
     const preview = await fixture.runner.runAgent({
@@ -25,28 +25,16 @@ describe("AgentFileOperationRunner confirmation receipts", () => {
     }, fixture.previewContext);
 
     expect(fixture.buildPlan).not.toHaveBeenCalled();
-    expect(preview.requires_confirmation).toBe(true);
+    expect(preview.requires_confirmation).toBe(false);
     expect(preview.plan).toMatchObject({
       operations: [expect.objectContaining({
         action: "append_text",
         path: "01_大纲/大纲.txt"
       })]
     });
-    expect(preview.confirmation_scope).toMatchObject({
-      project_id: "project-1",
-      plan_version: 1,
-      action_id: "execute_file_plan",
-      action_payload: preview.plan
-    });
-    expect(preview.confirmation_scope?.scope_fingerprint).toMatch(/^[a-f0-9]{64}$/);
-    expect(preview.confirmation_scope?.target_bindings).toEqual([
-      expect.objectContaining({
-        path: "01_大纲/大纲.txt",
-        canonical_path: expect.stringMatching(/01_大纲[\\/]大纲\.txt$/),
-        base_hash: expect.any(String),
-        proposed_hash: expect.any(String)
-      })
-    ]);
+    expect(preview.confirmation_scope).toBeUndefined();
+    expect(await fs.readFile(path.join(fixture.projectRoot, "01_大纲", "大纲.txt"), "utf8"))
+      .toContain("E2E durable confirmation content.");
   });
 
   it("executes the persisted preview without replanning and consumes before writing", async () => {
@@ -140,7 +128,7 @@ describe("AgentFileOperationRunner confirmation receipts", () => {
     }
   });
 
-  it("allows an explicitly trusted global direct-file policy to archive a resolved group", async () => {
+  it("does not let the legacy direct-file flag bypass archive confirmation", async () => {
     const fixture = await createArchiveFixture();
 
     const result = await fixture.runner.runAgent(fixture.request, {
@@ -149,11 +137,10 @@ describe("AgentFileOperationRunner confirmation receipts", () => {
       directProjectFilePermission: true
     });
 
-    expect(result.requires_confirmation).toBe(false);
-    expect(result.reply).toBe("已将 5 个文件移入项目回收站，可在项目时间线恢复。");
-    expect(result.results.every((item) => item.ok)).toBe(true);
+    expect(result.requires_confirmation).toBe(true);
+    expect(result.results).toEqual([]);
     for (const relativePath of fixture.paths) {
-      await expect(fs.access(path.join(fixture.projectRoot, ...relativePath.split("/")))).rejects.toThrow();
+      await expect(fs.readFile(path.join(fixture.projectRoot, ...relativePath.split("/")), "utf8")).resolves.toContain("大纲资料");
     }
   });
 });

@@ -1,5 +1,5 @@
 import { ArrowUp, Check, FileText, Paperclip, Plus, Square, X } from "lucide-react";
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ClipboardEvent, type DragEvent, type KeyboardEvent } from "react";
 import type { WorkbenchController } from "../../../hooks/useWorkbenchController.js";
 import { AssistantModelControls } from "./AssistantModelControls.js";
 import { formatAssistantAttachmentSize, shouldSubmitAssistantMessage } from "./assistantComposerUtils.js";
@@ -9,6 +9,7 @@ const MAX_TEXTAREA_HEIGHT = 160;
 
 export function AssistantComposer({ controller }: { controller: WorkbenchController }) {
   const [contextOpen, setContextOpen] = useState(false);
+  const [draggingFiles, setDraggingFiles] = useState(false);
   const [visibleStatus, setVisibleStatus] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const attachmentInputRef = useRef<HTMLInputElement | null>(null);
@@ -64,8 +65,30 @@ export function AssistantComposer({ controller }: { controller: WorkbenchControl
   }, [controller.conversationMessage]);
 
   function send() {
-    if (!controller.messageInput.trim() || controller.sendingMessage || sendLocked) return;
+    if ((!controller.messageInput.trim() && !attachments.length) || controller.sendingMessage || sendLocked) return;
+    if (!controller.messageInput.trim() && attachments.length) {
+      void controller.sendMessage("请阅读我刚添加的资料，并按其中内容继续协助我。");
+      return;
+    }
     void controller.sendMessage();
+  }
+
+  function uploadFiles(files: FileList | File[]) {
+    if (!files.length || sendLocked) return;
+    void controller.uploadConversationAttachment(files);
+  }
+
+  function handleDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setDraggingFiles(false);
+    uploadFiles(event.dataTransfer.files);
+  }
+
+  function handlePaste(event: ClipboardEvent<HTMLTextAreaElement>) {
+    const files = event.clipboardData.files;
+    if (!files.length) return;
+    event.preventDefault();
+    uploadFiles(files);
   }
 
   function handleKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
@@ -83,7 +106,19 @@ export function AssistantComposer({ controller }: { controller: WorkbenchControl
 
   return (
     <div className="assistant-composer-wrap">
-      <div className="assistant-composer">
+      <div
+        className={`assistant-composer${draggingFiles ? " dragging-files" : ""}`}
+        onDragEnter={(event) => {
+          if (event.dataTransfer.types.includes("Files")) setDraggingFiles(true);
+        }}
+        onDragOver={(event) => {
+          if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+        }}
+        onDragLeave={(event) => {
+          if (event.currentTarget === event.target) setDraggingFiles(false);
+        }}
+        onDrop={handleDrop}
+      >
         {pendingReferences && (
           <section className="assistant-reference-confirm" aria-label="确认参考文件">
             <div className="assistant-reference-confirm-head">
@@ -160,12 +195,25 @@ export function AssistantComposer({ controller }: { controller: WorkbenchControl
           </section>
         )}
 
+        {attachments.length > 0 && (
+          <div className="assistant-attachment-chips" aria-label="已附加资料">
+            {attachments.map((item) => (
+              <span className="assistant-attachment-chip" key={item.id} title={`${item.name} · ${formatAssistantAttachmentSize(item.size)}`}>
+                <Paperclip size={13} />
+                <span>{item.name}</span>
+                <button type="button" aria-label={`移除附件${item.name}`} disabled={actionBusy} onClick={() => void controller.deleteConversationAttachment(item.id)}><X size={13} /></button>
+              </span>
+            ))}
+          </div>
+        )}
+
         <textarea
           ref={textareaRef}
           aria-label="消息内容"
           value={controller.messageInput}
           onChange={(event) => controller.setMessageInput(event.target.value)}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
           placeholder="继续提问，或描述你想要的修改……"
         />
 
@@ -185,6 +233,7 @@ export function AssistantComposer({ controller }: { controller: WorkbenchControl
               ref={attachmentInputRef}
               type="file"
               multiple
+              accept=".txt,.md,.markdown,.docx,.pdf,text/plain,text/markdown,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
               hidden
               onChange={(event) => {
                 void controller.uploadConversationAttachment(event.target.files);
@@ -257,7 +306,7 @@ export function AssistantComposer({ controller }: { controller: WorkbenchControl
                 <Square size={14} fill="currentColor" />
               </button>
             ) : (
-              <button className="assistant-send-button" type="button" title="发送" aria-label="发送" onClick={send} disabled={!controller.messageInput.trim() || sendLocked}>
+              <button className="assistant-send-button" type="button" title="发送" aria-label="发送" onClick={send} disabled={(!controller.messageInput.trim() && !attachments.length) || sendLocked}>
                 <ArrowUp size={17} />
               </button>
             )}

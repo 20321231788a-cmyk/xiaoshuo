@@ -34,6 +34,7 @@ import type {
   SkillRunResponse,
   ConversationMessageRequest,
   ConversationDetail,
+  ConversationMessagePart,
   CardDrawRequest,
   CardDrawResult,
   CardDrawSelectRequest,
@@ -2438,6 +2439,7 @@ export class AgentRuntimeService {
       }
       return [{
         ...message,
+        parts: this.assistantConversationParts(message, this.executionTraceForRun(runId)),
         metadata: {
           ...message.metadata,
           inline_plan: inlinePlan,
@@ -2491,6 +2493,14 @@ export class AgentRuntimeService {
       role: "assistant",
       content: "正在执行…",
       created_at: createdAt,
+      parts: [{
+        id: `step_${inlinePlan.run_id}_created`,
+        type: "step",
+        stage: "created",
+        message: "任务已创建，正在识别请求并准备执行。",
+        created_at: createdAt,
+        status: "running"
+      }],
       metadata: {
         intent: "skill",
         inline_plan: inlinePlan,
@@ -2548,6 +2558,27 @@ export class AgentRuntimeService {
     return trace.slice(-80);
   }
 
+  private assistantConversationParts(
+    message: ConversationDetail["messages"][number],
+    executionTrace: Array<{ stage: string; message: string }>
+  ): ConversationMessagePart[] {
+    const createdAt = message.created_at || new Date().toISOString();
+    const text = String(message.content || "").trim();
+    const reasoning = String(message.reasoning_content || "").trim();
+    const parts: ConversationMessagePart[] = [];
+    if (text) parts.push({ id: `${message.id}_text`, type: "text", text, created_at: createdAt, status: "completed" });
+    if (reasoning) parts.push({ id: `${message.id}_reasoning`, type: "reasoning", text: reasoning, created_at: createdAt, status: "completed" });
+    executionTrace.forEach((step, index) => parts.push({
+      id: `${message.id}_step_${index}`,
+      type: "step",
+      stage: step.stage,
+      message: step.message,
+      created_at: createdAt,
+      status: step.stage === "failed" ? "error" : step.stage === "cancelled" ? "cancelled" : "completed"
+    }));
+    return parts;
+  }
+
   private async persistInlinePlanFailure(
     request: AgentRunRequest,
     runId: string,
@@ -2579,6 +2610,7 @@ export class AgentRuntimeService {
     const messages = conversation.messages.map((item, messageIndex) => messageIndex === index ? {
       ...message,
       content,
+      parts: this.assistantConversationParts({ ...message, content }, this.executionTraceForRun(runId)),
       metadata: {
         ...message.metadata,
         inline_plan: inlinePlan,
@@ -2639,11 +2671,11 @@ export class AgentRuntimeService {
           : "chat";
     const writeRequested = hasExplicitWriteIntent(request.content || "");
     const retryable = initialIntent !== "file_operation" || !writeRequested;
-    const directProjectFilePermission = initialIntent === "file_operation" && await this.hasDirectProjectFilePermission();
-    const requiresConfirmation = options.requiresConfirmation !== false
-      && initialIntent === "file_operation"
-      && !writeRequested
-      && !directProjectFilePermission;
+    // The operation plan, rather than a global UI setting or a text heuristic,
+    // decides whether a confirmation is needed. The runner confirms only an
+    // archive or a whole-file overwrite after it has resolved project paths.
+    const directProjectFilePermission = false;
+    const requiresConfirmation = false;
     const projectId = await this.projectManifest.getProjectId();
     return this.runCoordinator.beginRun(request, {
       projectId,
@@ -2658,8 +2690,9 @@ export class AgentRuntimeService {
   }
 
   private async hasDirectProjectFilePermission(): Promise<boolean> {
-    const settings = await loadPublicConfig(this.config).catch(() => null);
-    return settings?.project_file_permission_mode === "direct_save_delete";
+    // Retained as a compatibility seam for old persisted runs. New runs never
+    // bypass archive/overwrite confirmation through a renderer preference.
+    return false;
   }
 
   private async writePreparedGeneratedCacheCommit(

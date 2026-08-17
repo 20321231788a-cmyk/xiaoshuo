@@ -5,6 +5,7 @@ import {
   type ConversationDetail,
   type ConversationModelPreferences,
   type ConversationMessage,
+  type ConversationMessagePart,
   type ConversationSummary,
   type PinnedContextItem,
   type ConversationAttachment,
@@ -38,6 +39,7 @@ export type AppendMessagePayload = {
   role: ConversationMessage["role"];
   content: string;
   reasoning_content?: string;
+  parts?: ConversationMessagePart[];
   metadata?: Record<string, unknown>;
 };
 
@@ -159,7 +161,8 @@ export class ConversationService {
   async appendMessage(conversationId: string, payload: AppendMessagePayload): Promise<ConversationDetail> {
     const detail = await this.loadDetail(conversationId);
     const content = (payload.content || "").trim();
-    if (!content) {
+    const parts = normalizeMessageParts(payload.parts, content, String(payload.reasoning_content || "").trim(), this.now());
+    if (!content && !parts.some((part) => part.type === "text" && part.text.trim())) {
       throw new Error("消息内容不能为空");
     }
     if (!["user", "assistant", "system"].includes(payload.role)) {
@@ -170,6 +173,7 @@ export class ConversationService {
       role: payload.role,
       content,
       reasoning_content: String(payload.reasoning_content || "").trim(),
+      parts,
       created_at: this.now(),
       metadata: payload.metadata || {}
     });
@@ -531,9 +535,27 @@ function normalizeDetail(value: unknown): ConversationDetail {
   const parsed = conversationDetailSchema.parse(value);
   return {
     ...parsed,
+    messages: parsed.messages.map((message) => ({
+      ...message,
+      parts: normalizeMessageParts(message.parts, message.content, message.reasoning_content || "", message.created_at)
+    })),
     message_count: parsed.messages.length,
     attachment_count: parsed.attachments.length
   };
+}
+
+function normalizeMessageParts(
+  parts: ConversationMessagePart[] | undefined,
+  content: string,
+  reasoning: string,
+  createdAt: string
+): ConversationMessagePart[] {
+  const normalized = Array.isArray(parts) ? parts.filter((part) => Boolean(part && part.id && part.type)) : [];
+  if (normalized.length) return normalized;
+  const legacy: ConversationMessagePart[] = [];
+  if (content.trim()) legacy.push({ id: "legacy-text", type: "text", text: content, created_at: createdAt, status: "completed" });
+  if (reasoning.trim()) legacy.push({ id: "legacy-reasoning", type: "reasoning", text: reasoning, created_at: createdAt, status: "completed" });
+  return legacy;
 }
 
 function summarizeDeterministic(detail: ConversationDetail): string {

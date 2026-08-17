@@ -6,7 +6,11 @@ import { hasSkillAction, rankSkillRoutes, type RankedSkillRoute } from "./intent
 import { isCancellationError, type AgentRunOptions } from "./cancellation.js";
 
 const MAX_PLAN_STEPS = 4;
-const MAX_CANDIDATES = 8;
+// Keep the catalogue compact enough for a fast planning call, but do not make
+// a regex hit a prerequisite for a skill being discoverable.  The old router
+// could only offer skills it had already guessed; that made natural requests
+// silently fall through to ordinary chat.
+const MAX_CANDIDATES = 24;
 const MODEL_PLAN_CONFIDENCE = 0.62;
 const DIRECT_ROUTE_CONFIDENCE = 0.78;
 
@@ -54,7 +58,15 @@ export class SmartSkillOrchestrator {
     }
 
     const candidateRoutes = this.pickCandidateRoutes(content, enabledSkills, String((request as any).current_skill || ""));
-    const candidates = candidateRoutes.map((candidate) => candidate.skill).filter((skill): skill is SkillDefinition => Boolean(skill));
+    // A normal conversation must remain one model turn.  The bounded catalogue
+    // is only opened after the lightweight route detector sees a real skill
+    // signal (or the caller explicitly selected one); it then replaces the
+    // old rule's final decision rather than making every chat message pay for
+    // an extra planning call.
+    if (!candidateRoutes.length && !explicitSkillId) {
+      return emptyPlan();
+    }
+    const candidates = this.pickPlannerCatalog(enabledSkills, candidateRoutes);
     const routedCandidate = candidateRoutes[0];
     const routedSkillId = routedCandidate?.skillId || "";
     if (!candidates.length && !routedSkillId) {
@@ -90,6 +102,24 @@ export class SmartSkillOrchestrator {
     }
 
     return emptyPlan(modelPlan?.selected_reason || "");
+  }
+
+  /**
+   * OpenCode-style skill discovery: the model sees a bounded catalogue of
+   * small descriptions, then the existing runner loads only the selected
+   * skill. Rule ranking is kept solely as a deterministic fallback.
+   */
+  private pickPlannerCatalog(skills: SkillDefinition[], routed: RankedSkillRoute[]): SkillDefinition[] {
+    const selected = new Map<string, SkillDefinition>();
+    for (const candidate of routed) {
+      if (candidate.skill && isRunnableByAgent(candidate.skill)) selected.set(candidate.skill.id, candidate.skill);
+    }
+    for (const skill of skills) {
+      if (!isRunnableByAgent(skill)) continue;
+      selected.set(skill.id, skill);
+      if (selected.size >= MAX_CANDIDATES) break;
+    }
+    return [...selected.values()].slice(0, MAX_CANDIDATES);
   }
 
   private pickCandidateRoutes(text: string, skills: SkillDefinition[], currentSkillId = ""): RankedSkillRoute[] {

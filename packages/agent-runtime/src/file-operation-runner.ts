@@ -120,12 +120,8 @@ export class AgentFileOperationRunner {
         requires_confirmation: false
       };
     }
-    if (this.documents.operationsRequireDeleteConfirmation(plan.operations) && !durable?.directProjectFilePermission) {
-      return this.confirmationPreview(plan, "已生成删除/归档类文件操作预览，请确认后执行。", durable);
-    }
-
-    if (durable?.requiresConfirmation) {
-      return this.confirmationPreview(plan, "已生成文件操作预览，请确认后执行。", durable);
+    if (await this.operationsRequireConfirmation(plan.operations)) {
+      return this.confirmationPreview(plan, "此操作会覆盖已有文件或移入项目回收站。请确认后执行。", durable);
     }
 
     const results = await this.executePlanOperations(plan.operations, plan.summary, durable);
@@ -524,8 +520,8 @@ export class AgentFileOperationRunner {
       warnings: [],
       can_execute: true
     };
-    if (durable?.requiresConfirmation) {
-      return this.confirmationPreview(plan, "已生成文件操作预览，请确认后执行。", durable);
+    if (await this.operationsRequireConfirmation(plan.operations)) {
+      return this.confirmationPreview(plan, "此操作会覆盖已有文件。请确认后执行。", durable);
     }
     const results = await this.executeContentOperation(operation, plan.summary, durable);
     const reply = this.summarizeOperationResults(results);
@@ -708,8 +704,8 @@ export class AgentFileOperationRunner {
     }
 
     const scopePath = /(当前文档|当前文件|这篇|这章|打开的文档|正在编辑)/.test(request.content || "") ? (request.current_path || "").trim() : "";
-    if (durable?.requiresConfirmation) {
-      const operations = await this.buildBatchReplacePlan(oldText, newText, scopePath);
+    const operations = await this.buildBatchReplacePlan(oldText, newText, scopePath);
+    if (await this.operationsRequireConfirmation(operations)) {
       const plan: AgentPlanResponse = {
         operations,
         summary: `批量替换：${oldText} -> ${newText}`,
@@ -869,6 +865,17 @@ export class AgentFileOperationRunner {
     return operations;
   }
 
+  /** Only irreversible-in-practice project operations pause the workflow. */
+  private async operationsRequireConfirmation(operations: readonly FileOperation[]): Promise<boolean> {
+    if (operations.some((operation) => operation.action === "archive_file")) return true;
+    for (const operation of operations) {
+      if (operation.action !== "replace_text") continue;
+      const current = await this.documents.readRawText(operation.path).catch(() => "");
+      if (current && operation.old_text && current === operation.old_text) return true;
+    }
+    return false;
+  }
+
   private async executePlanOperations(
     operations: FileOperation[],
     summary: string,
@@ -887,7 +894,7 @@ export class AgentFileOperationRunner {
         source: "agent",
         summary,
         // Only a validated, consumed durable receipt may cross this boundary.
-        confirmDelete: Boolean(durable?.confirmationActionPayload || durable?.directProjectFilePermission)
+        confirmDelete: Boolean(durable?.confirmationActionPayload)
       });
     }
 
@@ -918,7 +925,7 @@ export class AgentFileOperationRunner {
           const res = await this.documents.executeOperations([operation], {
             source: "agent",
             summary,
-            confirmDelete: Boolean(durable?.confirmationActionPayload || durable?.directProjectFilePermission)
+            confirmDelete: Boolean(durable?.confirmationActionPayload)
           });
           results.push(...res);
         }
