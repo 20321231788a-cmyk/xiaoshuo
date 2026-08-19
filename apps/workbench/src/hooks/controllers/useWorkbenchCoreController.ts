@@ -60,6 +60,7 @@ import {
   extractPathsFromUnknownResult,
   messageRequiresActiveDocument,
   pendingSaveFromSkill,
+  pendingSavesFromSkill,
   resolveAssistantReply,
   shouldPollJob,
   skillRequiresActiveDocument,
@@ -152,7 +153,18 @@ export type DisassemblyBookSummary = {
   source: { path: string; hash: string; chars: number; chapter_count: number; import_complete: boolean };
   progress: { stage: string; completed_chapters: number; total_chapters: number; last_error: string; completed_batches?: number; total_batches?: number; message?: string };
   coverage: { first_chapter: number; last_chapter: number; analyzed_chapters: number[]; missing_chapters: number[] };
-  analysis_scope?: { mode: "prefix_chars"; requested_chars: number; actual_chars: number; source_chars: number; first_chapter: number; last_chapter: number; truncated: boolean };
+  analysis_scope?: {
+    mode: "prefix_chars" | "prefix_chapters";
+    requested_chars?: number;
+    requested_chapters?: number;
+    actual_chars: number;
+    actual_chapters?: number;
+    source_chars: number;
+    source_chapters?: number;
+    first_chapter: number;
+    last_chapter: number;
+    truncated: boolean;
+  };
   legacy?: boolean;
   paths: {
     source?: string;
@@ -564,7 +576,11 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [conversationMessage, setConversationMessage] = useState("");
   const [uploadingAttachment, setUploadingAttachment] = useState(false);
   const [messageInput, setMessageInput] = useState("");
-  const [sendingMessage, setSendingMessage] = useState(false);
+  // A renderer can display one conversation while other conversations keep
+  // running in the durable runtime.  Never let their busy state leak into the
+  // visible composer or its stop button.
+  const [sendingConversationIds, setSendingConversationIds] = useState<string[]>([]);
+  const sendingMessage = Boolean(conversationDetail?.id && sendingConversationIds.includes(conversationDetail.id));
   const [conversationModelPreferences, setConversationModelPreferences] = useState<ConversationModelPreferences>({
     model_override: "",
     reasoning_enabled: false,
@@ -605,10 +621,11 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   const [disassemblyBooks, setDisassemblyBooks] = useState<DisassemblyBookSummary[]>([]);
   const [disassemblyLibraryBusy, setDisassemblyLibraryBusy] = useState(false);
   const [longTasks, setLongTasks] = useState<LongTaskProgress[]>([]);
-  const assistantAbortRef = useRef<AbortController | null>(null);
+  const assistantAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const taskAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const longTaskSubscriptionsRef = useRef<Map<string, () => void>>(new Map());
-  const activeConversationRunIdRef = useRef("");
+  const activeConversationRunIdsRef = useRef<Map<string, string>>(new Map());
+  const activeConversationIdRef = useRef("");
   const liveJobIdsRef = useRef<Set<string>>(new Set());
   const selectedJobIdRef = useRef("");
   const lastSyncedProjectRef = useRef<CurrentProject>({ path: "", name: "" });
@@ -680,13 +697,18 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   }, [conversationModelPreferences]);
 
   useEffect(() => {
+    activeConversationIdRef.current = conversationDetail?.id || "";
+  }, [conversationDetail?.id]);
+
+  useEffect(() => {
     if (pendingReferenceResolution && messageInput.trim() !== pendingReferenceResolution.content) {
       setPendingReferenceResolution(null);
     }
   }, [messageInput, pendingReferenceResolution]);
 
   useEffect(() => () => {
-    assistantAbortRef.current?.abort();
+    for (const controller of assistantAbortControllersRef.current.values()) controller.abort();
+    assistantAbortControllersRef.current.clear();
     for (const controller of taskAbortControllersRef.current.values()) controller.abort();
     taskAbortControllersRef.current.clear();
     for (const unsubscribe of longTaskSubscriptionsRef.current.values()) unsubscribe();
@@ -1354,12 +1376,12 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   }
 
   function clearProjectScopedState(nextProject: CurrentProject) {
-    assistantAbortRef.current?.abort();
-    assistantAbortRef.current = null;
+    for (const controller of assistantAbortControllersRef.current.values()) controller.abort();
+    assistantAbortControllersRef.current.clear();
     for (const controller of taskAbortControllersRef.current.values()) controller.abort();
     taskAbortControllersRef.current.clear();
     liveJobIdsRef.current.clear();
-    setSendingMessage(false);
+    setSendingConversationIds([]);
     setOpenDocuments([]);
     setActiveDocumentPath("");
     setDocumentBusy(false);
@@ -1540,6 +1562,12 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     return message;
   }
 
+  function setConversationMessageFor(conversationId: string, message: string) {
+    if (activeConversationIdRef.current === conversationId) {
+      setConversationMessage(message);
+    }
+  }
+
   function upsertLocalMessage(conversationId: string, message: ConversationMessage) {
     setConversationDetail((current) => {
       if (!current || current.id !== conversationId) {
@@ -1579,8 +1607,9 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       return;
     }
 
-    setConversationMessage(message);
-    setActiveTab("conversations");
+    if (pendingSave.conversationId && activeConversationIdRef.current === pendingSave.conversationId) {
+      setConversationMessage(message);
+    }
   }
 
   async function syncChangedPaths(paths: string[], options: { openFirst?: boolean } = {}) {
@@ -1700,7 +1729,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   }
 
   async function handleAgentRunPayload(conversationId: string, reply: string, payload: AgentRunResponse) {
-    const rawPendingSave = pendingSaveFromSkill(payload.skill_result, "chat");
+    const rawPendingSaves = pendingSavesFromSkill(payload.skill_result, "chat");
+    const rawPendingSave = rawPendingSaves[0] || null;
     const skillResultData = payload.skill_result?.data || {};
     const libraryDraftGroup = pendingLibraryDraftGroupFromUnknown(skillResultData.library_draft_group);
     const libraryDraft = skillResultData.library_draft && typeof skillResultData.library_draft === "object" && !Array.isArray(skillResultData.library_draft)
@@ -1728,23 +1758,24 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
             ? "已创建后台任务，工作台会继续追踪它"
             : reply || payload.reply || "智能体已完成";
 
-    if (payload.conversation) {
-      setConversationDetail(payload.conversation);
+    const payloadConversation = payload.conversation;
+    if (payloadConversation) {
+      setConversationDetail((current) => current?.id === payloadConversation.id ? payloadConversation : current);
       await refreshConversationsList();
     }
 
-    const persistedConversation = payload.conversation;
+    const persistedConversation = payloadConversation;
     const ownerConversationId = persistedConversation?.id || conversationId;
-    const ownerMessageId = [...(persistedConversation?.messages || [])].reverse().find((message) => message.role === "assistant")?.id || "";
-    const pendingSave = rawPendingSave
-      ? {
-          ...rawPendingSave,
+    const ownerMessageId = [...(persistedConversation?.messages || [])].reverse().find((message) =>
+      message.role === "assistant" && (!payload.run_id || message.run_id === payload.run_id || String(message.metadata?.run_id || "") === payload.run_id)
+    )?.id || [...(persistedConversation?.messages || [])].reverse().find((message) => message.role === "assistant")?.id || "";
+    const pendingSaves = rawPendingSaves.map((item) => ({
+          ...item,
           conversationId: ownerConversationId || undefined,
           messageId: ownerMessageId || undefined,
           runId: payload.run_id || undefined,
           createdAt: new Date().toISOString()
-        }
-      : null;
+        }));
 
     if (payload.requires_confirmation && payload.run_id) {
       try {
@@ -1752,7 +1783,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
         setPendingAgentConfirmations(confirmations.filter((item) => item.status === "pending"));
       } catch (nextError) {
         setPendingAgentConfirmations([]);
-        setConversationMessage(`已生成待确认操作，但读取确认详情失败：${nextError instanceof Error ? nextError.message : "未知错误"}`);
+        setConversationMessageFor(conversationId, `已生成待确认操作，但读取确认详情失败：${nextError instanceof Error ? nextError.message : "未知错误"}`);
       }
     } else if (!payload.requires_confirmation) {
       setPendingAgentConfirmations([]);
@@ -1782,10 +1813,12 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       await refreshSkillCatalog();
     }
 
-    if (pendingSave) {
-      upsertPendingGeneratedSave(pendingSave);
-      void trackDesktopGeneratedCache(pendingSave, "pending");
-      publishPendingSaveMessage(pendingSave, completionMessage);
+    if (pendingSaves.length) {
+      for (const pendingSave of pendingSaves) {
+        upsertPendingGeneratedSave(pendingSave);
+        void trackDesktopGeneratedCache(pendingSave, "pending");
+      }
+      publishPendingSaveMessage(pendingSaves[0]!, completionMessage);
       return;
     }
 
@@ -1806,7 +1839,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     }
 
     const postprocessWarning = String(skillResultData.postprocess_warning || "").trim();
-    setConversationMessage(postprocessWarning ? `${completionMessage}；大纲结构整理待重试：${postprocessWarning}` : completionMessage);
+    setConversationMessageFor(conversationId, postprocessWarning ? `${completionMessage}；大纲结构整理待重试：${postprocessWarning}` : completionMessage);
   }
 
   async function refreshAll() {
@@ -2830,10 +2863,15 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   async function controlConversationPlanRun(
     runId: string,
     action: "pause" | "resume" | "cancel" | "retry",
-    stepId = ""
+    stepId = "",
+    expectedConversationId = ""
   ): Promise<{ run: AgentRunState; conflict: boolean }> {
     const latest = await client.getAgentRun(runId);
-    const payload = { operation_id: `op_inline_${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Date.now()}`, expected_version: latest.version };
+    const payload = {
+      operation_id: `op_inline_${typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Date.now()}`,
+      expected_version: latest.version,
+      ...(expectedConversationId ? { expected_conversation_id: expectedConversationId } : {})
+    };
     try {
       const run = action === "pause"
         ? await client.pauseAgentRun(runId, payload)
@@ -4621,8 +4659,8 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
     const controller = new AbortController();
     const assistantMessage = makeLocalMessage("assistant", "");
 
-    assistantAbortRef.current = controller;
-    setSendingMessage(true);
+    assistantAbortControllersRef.current.set(conversationId, controller);
+    setSendingConversationIds((current) => current.includes(conversationId) ? current : [...current, conversationId]);
     appendLocalMessage(conversationId, "user", trimmed);
     setMessageInput("");
 
@@ -4678,10 +4716,15 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
           onStart: (event) => {
             const currentSkill = event.current_skill || event.skill_id || "";
             updateActiveConversationSkill(conversationId, event.skill_id || "", "");
-            setConversationMessage(currentSkill ? `正在调用技能：${currentSkill}` : "正在判断当前技能...");
+            setConversationMessageFor(conversationId, currentSkill ? `正在调用技能：${currentSkill}` : "正在判断当前技能...");
             streamedAssistantMetadata = { ...streamedAssistantMetadata, intent: currentSkill ? "skill" : "chat" };
             if (event.inline_plan) {
-              activeConversationRunIdRef.current = event.inline_plan.run_id;
+              // Long workflows own a dedicated task card.  The chat stop
+              // control may end its renderer stream, but must never cancel
+              // that child task's durable run.
+              if (!longTaskSkillIds.has(currentSkill as LongTaskProgress["skill_id"])) {
+                activeConversationRunIdsRef.current.set(conversationId, event.inline_plan.run_id);
+              }
               streamedAssistantMetadata = {
                 ...streamedAssistantMetadata,
                 inline_plan: event.inline_plan,
@@ -4694,12 +4737,12 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
           onDelta: (event) => {
             if (event.stage === "workflow_start" || event.stage === "workflow_progress") {
               recordExecutionStep(event.stage === "workflow_start" ? "starting" : "working", event.text || (event.stage === "workflow_start" ? "正在启动任务…" : "正在处理…"));
-              setConversationMessage(String(event.text || "正在执行任务…").trim());
+              setConversationMessageFor(conversationId, String(event.text || "正在执行任务…").trim());
               return;
             }
             if (event.stage === "humanizer_start") {
               recordExecutionStep("polishing", "正在进行去AI味润色…");
-              setConversationMessage("正在进行去AI味润色...");
+              setConversationMessageFor(conversationId, "正在进行去AI味润色...");
               return;
             }
             if (!event.text) {
@@ -4714,7 +4757,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
             scheduleStreamFlush();
           },
           onFinal: async (event) => {
-            activeConversationRunIdRef.current = "";
+            activeConversationRunIdsRef.current.delete(conversationId);
             flushStream();
             const reply = resolveAssistantReply(event.payload, streamedText);
             recordExecutionStep("completed", "任务已完成。");
@@ -4724,7 +4767,7 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
             await handleAgentRunPayload(conversationId, reply, event.payload);
           },
           onError: async (event) => {
-            activeConversationRunIdRef.current = "";
+            activeConversationRunIdsRef.current.delete(conversationId);
             throw new Error(event.message || "发送失败");
           }
         },
@@ -4734,22 +4777,22 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       flushStream();
       if (controller.signal.aborted) {
         recordExecutionStep("cancelled", "已请求停止任务。");
-        setConversationMessage(describeStoppedConversationResponse(streamedText));
+        setConversationMessageFor(conversationId, describeStoppedConversationResponse(streamedText));
       } else {
         recordExecutionStep("failed", `任务未完成：${nextError instanceof Error ? nextError.message : "未知错误"}`);
-        setConversationMessage(describeActionableError(nextError, "发送失败", "请检查模型配置或稍后重试；本次不会自动写入文件。"));
+        setConversationMessageFor(conversationId, describeActionableError(nextError, "发送失败", "请检查模型配置或稍后重试；本次不会自动写入文件。"));
       }
       const persisted = await client.getConversation(conversationId).catch(() => null);
-      if (persisted) setConversationDetail(persisted);
+      if (persisted) setConversationDetail((current) => current?.id === conversationId ? persisted : current);
     } finally {
       if (streamFlushTimer) {
         clearTimeout(streamFlushTimer);
         streamFlushTimer = null;
       }
-      if (assistantAbortRef.current === controller) {
-        assistantAbortRef.current = null;
+      if (assistantAbortControllersRef.current.get(conversationId) === controller) {
+        assistantAbortControllersRef.current.delete(conversationId);
       }
-      setSendingMessage(false);
+      setSendingConversationIds((current) => current.filter((id) => id !== conversationId));
     }
   }
 
@@ -4775,20 +4818,30 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
   }
 
   function stopMessage() {
-    const controller = assistantAbortRef.current;
+    const conversationId = conversationDetail?.id || "";
+    const controller = assistantAbortControllersRef.current.get(conversationId);
     if (!controller) {
       return;
     }
 
-    setConversationMessage("正在停止响应...");
+    setConversationMessageFor(conversationId, "正在停止响应...");
     controller.abort();
-    const runId = activeConversationRunIdRef.current;
-    activeConversationRunIdRef.current = "";
+    const runId = activeConversationRunIdsRef.current.get(conversationId) || "";
+    activeConversationRunIdsRef.current.delete(conversationId);
     if (runId) {
-      void controlConversationPlanRun(runId, "cancel").then(() => {
-        setConversationMessage("已请求取消当前运行。");
+      void getConversationPlanRun(runId).then((run) => {
+        // A stale renderer must never turn a normal chat stop into a control
+        // action for a workflow owned by another conversation.
+        if (run.conversation_id !== conversationId || workflowSkillIdFromRun(run)) {
+          setConversationMessageFor(conversationId, "当前对话没有可终止的普通回复；后台任务请在其任务卡中控制。");
+          return null;
+        }
+        return controlConversationPlanRun(runId, "cancel", "", conversationId);
+      }).then((result) => {
+        if (!result) return;
+        setConversationMessageFor(conversationId, "已请求取消当前运行。");
       }).catch((error) => {
-        setConversationMessage(describeActionableError(error, "取消运行失败", "请在执行计划卡中重试取消。"));
+        setConversationMessageFor(conversationId, describeActionableError(error, "取消运行失败", "请在执行计划卡中重试取消。"));
       });
     }
   }
@@ -4841,16 +4894,18 @@ export function useWorkbenchController(runtime: WorkbenchRuntime) {
       await refreshDisassemblyLibrary();
     }
 
-    const rawPendingSave = pendingSaveFromSkill(result, "skill");
-    if (rawPendingSave) {
-      const pendingSave: PendingGeneratedSave = {
+    const rawPendingSaves = pendingSavesFromSkill(result, "skill");
+    if (rawPendingSaves.length) {
+      const pendingSaves: PendingGeneratedSave[] = rawPendingSaves.map((rawPendingSave) => ({
         ...rawPendingSave,
         conversationId: conversationDetail?.id || undefined,
         createdAt: new Date().toISOString()
-      };
-      upsertPendingGeneratedSave(pendingSave);
-      void trackDesktopGeneratedCache(pendingSave, "pending");
-      publishPendingSaveMessage(pendingSave, "技能已生成内容，等待选择写入方式");
+      }));
+      for (const pendingSave of pendingSaves) {
+        upsertPendingGeneratedSave(pendingSave);
+        void trackDesktopGeneratedCache(pendingSave, "pending");
+      }
+      publishPendingSaveMessage(pendingSaves[0]!, "技能已生成内容，等待选择写入方式");
       return;
     }
 

@@ -31,6 +31,13 @@ export type TrustedActionExecutionScope = {
     input: ConsumeConfirmationReceiptInput
   ) => ExecutionCasResult<StoredAgentConfirmation> | Promise<ExecutionCasResult<StoredAgentConfirmation>>;
   targetProjectId?: string;
+  /**
+   * A skill step belongs to the enclosing durable conversation run.  Keep
+   * these opaque here so the sandbox does not depend on the runtime class,
+   * but pass them through when invoking a project skill.
+   */
+  runOptions?: unknown;
+  execution?: unknown;
 };
 
 export class ActionExecutor {
@@ -81,7 +88,12 @@ export class ActionExecutor {
       case "resolve_project_references":
         return args.paths || [];
       case "run_skill":
-        return await this.runtimeContext.runSkillInternal(args.skill_id, args.request);
+        return await this.runtimeContext.runSkillInternal(
+          args.skill_id,
+          args.request,
+          this.executionScope.runOptions,
+          this.executionScope.execution
+        );
       case "search_web_material":
         return { sources: [] };
       case "propose_save": {

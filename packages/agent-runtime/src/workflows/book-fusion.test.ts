@@ -81,6 +81,34 @@ async function writeReadyBook(index: number): Promise<string> {
   return id;
 }
 
+async function writeFastReadyBook(index: number): Promise<string> {
+  const id = `极速书${index}-2026060912100${index}-abcd123${index}`;
+  const relDir = `00_设定集/拆书库/${id}`;
+  const bookDir = path.join(tempDir, relDir);
+  await fs.mkdir(bookDir, { recursive: true });
+  await fs.writeFile(path.join(bookDir, "manifest.jsonl"), `${JSON.stringify({
+    id,
+    title: `极速书${index}`,
+    dir: relDir,
+    created_at: "2026-06-09T12:10:00.000Z",
+    updated_at: "2026-06-09T12:10:00.000Z",
+    origin: "document",
+    source_path: `${relDir}/原文.txt`,
+    source_summary: "前100章",
+    chars: 12,
+    status: "ready",
+    analysis_scope: { mode: "prefix_chapters", requested_chapters: 100, actual_chapters: 100, actual_chars: 12, source_chars: 20, source_chapters: 120, first_chapter: 1, last_chapter: 100, truncated: true },
+    paths: { source: `${relDir}/原文.txt`, report: `${relDir}/拆书报告.md` }
+  })}\n`, "utf8");
+  await fs.writeFile(path.join(bookDir, "原文.txt"), `原文${index}`, "utf8");
+  await fs.writeFile(path.join(bookDir, "拆书报告.md"), `## 前100章剧情\n极速报告${index}`, "utf8");
+  // A re-run may leave these history files in the folder.  They must not be
+  // read for a report-only manifest.
+  await fs.writeFile(path.join(bookDir, "拆书设定提取.txt"), `过期设定${index}`, "utf8");
+  await fs.writeFile(path.join(bookDir, "反向细纲.txt"), `过期细纲${index}`, "utf8");
+  return id;
+}
+
 describe("BookFusionWorkflow", () => {
   it("rejects fewer than three source books", async () => {
     const workflow = new BookFusionWorkflow();
@@ -137,5 +165,30 @@ describe("BookFusionWorkflow", () => {
     expect(saved?.[3]).toMatch(/^00_设定集\/融梗方案\/.+\/manifest\.jsonl$/);
     expect(await fs.readFile(path.join(tempDir, saved?.[0] || ""), "utf8")).toContain("融合候选方案");
     expect(await fs.readFile(path.join(tempDir, saved?.[1] || ""), "utf8")).toContain("保留升级节奏");
+  });
+
+  it("accepts report-only fast books and excludes their stale legacy artefacts", async () => {
+    const ids = [await writeFastReadyBook(1), await writeFastReadyBook(2), await writeFastReadyBook(3)];
+    let prompt = "";
+    const workflow = new BookFusionWorkflow();
+    await workflow.runAgent({
+      conversation_id: "",
+      content: "",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "book_fusion",
+      attachment_ids: [],
+      source_book_ids: ids
+    } as any, createWorkflowContext({
+      requestCompletion: async (_config, messages) => {
+        prompt = messages.at(-1)?.content || "";
+        return "融合候选方案";
+      }
+    }));
+
+    expect(prompt).toContain("极速报告1");
+    expect(prompt).not.toContain("过期设定1");
+    expect(prompt).not.toContain("过期细纲1");
   });
 });

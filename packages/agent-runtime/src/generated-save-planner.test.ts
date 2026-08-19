@@ -21,7 +21,7 @@ afterEach(async () => {
 });
 
 describe("GeneratedSavePlanner", () => {
-  it("maps explicit outline save requests to the legacy outline path and auto-commits old-project style", async () => {
+  it("maps explicit outline save requests to the legacy outline path but still requires cache confirmation", async () => {
     const planner = new GeneratedSavePlanner({ projectRoot: tempDir });
 
     const plan = await planner.planGeneratedSave({
@@ -34,11 +34,11 @@ describe("GeneratedSavePlanner", () => {
 
     expect(plan.target_paths).toEqual(["01_大纲/大纲.txt"]);
     expect(plan.mode).toBe("replace");
-    expect(plan.requires_confirmation).toBe(false);
-    expect(plan.should_auto_commit).toBe(true);
+    expect(plan.requires_confirmation).toBe(true);
+    expect(plan.should_auto_commit).toBe(false);
   });
 
-  it("auto-commits explicit body generation when the chapter file does not exist", async () => {
+  it("keeps explicit body generation cache-first when the chapter file does not exist", async () => {
     const planner = new GeneratedSavePlanner({ projectRoot: tempDir });
 
     const plan = await planner.planGeneratedSave({
@@ -51,8 +51,8 @@ describe("GeneratedSavePlanner", () => {
     });
 
     expect(plan.target_paths).toEqual(["02_正文/第001章.txt"]);
-    expect(plan.requires_confirmation).toBe(false);
-    expect(plan.should_auto_commit).toBe(true);
+    expect(plan.requires_confirmation).toBe(true);
+    expect(plan.should_auto_commit).toBe(false);
   });
 
   it("keeps generated content pending when there is no write intent", async () => {
@@ -88,7 +88,7 @@ describe("GeneratedSavePlanner", () => {
     expect(plan.should_auto_commit).toBe(false);
   });
 
-  it("only auto-commits when saving is explicit, not merely because replacement was requested", async () => {
+  it("records explicit saving intent while still requiring review", async () => {
     const planner = new GeneratedSavePlanner({ projectRoot: tempDir });
 
     const plan = await planner.planGeneratedSave({
@@ -98,8 +98,8 @@ describe("GeneratedSavePlanner", () => {
       skillId: "outline_generate"
     });
 
-    expect(plan.write_authorization).toBe("explicit_commit");
-    expect(plan.requires_confirmation).toBe(false);
-    expect(plan.should_auto_commit).toBe(true);
+    expect(plan.write_authorization).toBe("preview_required");
+    expect(plan.requires_confirmation).toBe(true);
+    expect(plan.should_auto_commit).toBe(false);
   });
 });

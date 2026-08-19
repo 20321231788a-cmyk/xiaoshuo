@@ -58,16 +58,16 @@ export class BatchGenerateWorkflow implements WorkflowHandler {
         total: totalChapters
       });
       const originalInstruction = (request.content || "").trim();
-      const chapterInstruction = shouldWriteSkillResult(originalInstruction)
-        ? `生成第${chapter}章正文并写入文件`
-        : `生成第${chapter}章正文`;
+      // Generation is always cache-first. Wording this as a direct write made
+      // body_generate bypass the preview group in older runs.
+      const chapterInstruction = `生成第${chapter}章正文`;
       const chapterRequest: AgentRunRequest = {
         ...request,
         content: originalInstruction ? `${chapterInstruction}。原始批量指令：${originalInstruction}` : chapterInstruction,
         skill_id: "body_generate",
         selection: ""
       };
-      const result = await this.bodyHandler.runAgent(chapterRequest, context);
+      const result = await runChapterWithRetries(this.bodyHandler, chapterRequest, context, chapter);
       throwIfAborted(context.signal);
       savedPaths.push(...result.saved_paths);
       webSearchSources.push(...(result.web_search_sources || []));
@@ -93,11 +93,20 @@ export class BatchGenerateWorkflow implements WorkflowHandler {
         completed: completedChapters,
         total: totalChapters
       });
+      if (Boolean((request as any).pause_each) && chapter < endChapter && context.requestPause) {
+        const message = `第${chapter}章已生成缓存，已暂停等待预览确认。`;
+        context.reportProgress?.({
+          stage: "batch_paused_for_review",
+          message,
+          completed: completedChapters,
+          total: totalChapters
+        });
+        context.requestPause(message);
+        throw new Error(message);
+      }
     }
 
-    const reply = savedPaths.length
-      ? `已写入 ${savedPaths.length} 个文件：\n${savedPaths.join("\n")}`
-      : `已生成 ${results.length} 章正文，等待保存确认。`;
+    const reply = `已生成 ${results.length} 章正文缓存，等待整组保存确认。`;
     const batchWebSearchSources = uniqueWebSearchSources(webSearchSources);
     const conversation = await recordSkillExchange(
       request,
@@ -118,10 +127,12 @@ export class BatchGenerateWorkflow implements WorkflowHandler {
           skill_id: this.id,
           chapters: Array.from({ length: endChapter - startChapter + 1 }, (_, index) => startChapter + index),
           results,
+          batch_group_id: String((request as any).batch_group_id || context.durableExecution?.runId || ""),
+          pending_review: true,
           web_search_sources: batchWebSearchSources
         }
       },
-      saved_paths: savedPaths,
+      saved_paths: [],
       requires_confirmation: false,
       web_search_sources: batchWebSearchSources
     };
@@ -194,8 +205,47 @@ function resolveChapterNumber(text: string): number {
   return 0;
 }
 
-function shouldWriteSkillResult(text: string): boolean {
-  return /(同步|写入|保存|更新|替换|覆盖|落到|写回|补充|补全|完善|补齐|填充|配置|设置|设定|建立|创建)/.test(text);
+async function runChapterWithRetries(
+  handler: WorkflowHandler,
+  request: AgentRunRequest,
+  context: WorkflowRunContext,
+  chapter: number
+): Promise<AgentRunResponse> {
+  const attempts = Math.min(3, Math.max(1, Number((request as any).max_attempts || 1)));
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    throwIfAborted(context.signal);
+    try {
+      return await handler.runAgent(request, context);
+    } catch (error) {
+      lastError = error;
+      if (!isTransientError(error) || attempt >= attempts) {
+        throw error;
+      }
+      const delayMs = attempt === 1 ? 500 : 1_500;
+      context.reportProgress?.({
+        stage: "batch_retrying",
+        message: `第${chapter}章临时失败，正在第 ${attempt + 1}/${attempts} 次重试。`
+      });
+      await delay(delayMs, context.signal);
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("批量章节生成失败");
+}
+
+function isTransientError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error || "");
+  return /(timeout|timed out|网络|network|socket|429|rate.?limit|5\d{2}|服务端|temporary|temporar)/i.test(message);
+}
+
+async function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(resolve, milliseconds);
+    signal?.addEventListener("abort", () => {
+      clearTimeout(timer);
+      reject(signal.reason instanceof Error ? signal.reason : new Error("操作已取消"));
+    }, { once: true });
+  });
 }
 
 function uniqueWebSearchSources(sources: WebSearchSource[]): WebSearchSource[] {
@@ -244,22 +294,30 @@ async function recordSkillExchange(
   const shouldAppendUser = !recentMessages.some((item) => item.role === "user" && item.content === userText);
 
   const nextMessages = [...detail.messages];
+  let parentMessageId = [...nextMessages].reverse().find((item) => item.role === "user" && item.content === userText)?.id || "";
   if (shouldAppendUser) {
+    const userId = randomUUID().replace(/-/g, "");
     nextMessages.push({
-      id: randomUUID().replace(/-/g, ""),
+      id: userId,
       role: "user",
       content: userText,
       created_at: createdAt,
       metadata: userMetadata
     });
+    parentMessageId = userId;
   }
   if (String(reply || "").trim()) {
     nextMessages.push({
       id: randomUUID().replace(/-/g, ""),
       role: "assistant",
+      parent_message_id: parentMessageId,
+      run_id: context.durableExecution?.runId || "",
+      turn_id: parentMessageId || context.durableExecution?.runId || "",
+      status: "completed",
+      finish_reason: "stop",
       content: String(reply || "").trim(),
       created_at: createdAt,
-      metadata: replyMetadata
+      metadata: { ...replyMetadata, ...(context.durableExecution ? { run_id: context.durableExecution.runId } : {}) }
     });
   }
 

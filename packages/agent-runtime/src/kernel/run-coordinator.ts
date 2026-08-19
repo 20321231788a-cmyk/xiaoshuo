@@ -318,7 +318,12 @@ export class RunCoordinator {
     if (!step) {
       throw Object.assign(new Error(`Step ${execution.step_id} does not exist in run ${execution.run_id}`), { code: "STEP_NOT_FOUND" });
     }
-    if (step.requires_confirmation || response.requires_confirmation) {
+    // A generated result's cache preview is confirmed later against its
+    // target hashes.  It must not turn the producing model run itself into a
+    // file-operation confirmation checkpoint; no destructive file action has
+    // happened yet and the scope is intentionally not sealed until commit.
+    const cacheReview = response.skill_result?.data?.pending_save === true;
+    if (step.requires_confirmation || (response.requires_confirmation && !cacheReview)) {
       return this.waitForConfirmation(active, step, response);
     }
 

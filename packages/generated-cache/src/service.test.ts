@@ -41,9 +41,22 @@ describe("generated-cache-service", () => {
     expect(meta.target_paths).toEqual(["02_正文/第一章.txt"]);
     expect(meta.created_at).toBe("2026-06-01 12:00:00");
     expect(meta.updated_at).toBe("2026-06-01 12:00:00");
+    await expect(fs.access(path.join(tempDir, "00_设定集", ".agent", "generated_cache", meta.cache_id, "content.md"))).resolves.toBeUndefined();
 
     const content = await service.readContent("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6");
     expect(content).toBe("");
+  });
+
+  it("reads a legacy content.txt cache after the content.md migration", async () => {
+    const service = new GeneratedCacheService({ projectRoot: tempDir });
+    const cache = await service.create({ source: "chat" });
+    const cacheDirectory = path.join(tempDir, "00_设定集", ".agent", "generated_cache", cache.cache_id);
+    await fs.rename(path.join(cacheDirectory, "content.md"), path.join(cacheDirectory, "content.txt"));
+    await fs.writeFile(path.join(cacheDirectory, "content.txt"), "旧缓存仍可读取", "utf8");
+
+    expect(await service.readContent(cache.cache_id)).toBe("旧缓存仍可读取");
+    await service.append(cache.cache_id, "。新的续写");
+    expect(await service.readContent(cache.cache_id)).toBe("旧缓存仍可读取。新的续写");
   });
 
   it("appends and replaces cache content and updates characters count", async () => {
@@ -355,6 +368,37 @@ describe("generated-cache-service", () => {
     expect(failed.status).toBe("failed");
     expect(failed.error).toBe("API Timeout");
     expect(failed.failed_at).toBe("2026-06-01 12:40:00");
+  });
+
+  it("binds a pending cache to its durable conversation run and lists it for recovery", async () => {
+    const service = new GeneratedCacheService({
+      projectRoot: tempDir,
+      idFactory: () => "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6"
+    });
+    await service.create({ source: "skill_result", skill_id: "outline_generate" });
+    await service.replace("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6", "可恢复的大纲缓存");
+
+    const bound = await service.associate("a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6", {
+      conversation_id: "conversation_a",
+      message_id: "assistant_a",
+      run_id: "run_a"
+    });
+
+    expect(bound).toMatchObject({ conversation_id: "conversation_a", message_id: "assistant_a", run_id: "run_a" });
+    await expect(service.list()).resolves.toEqual([
+      expect.objectContaining({ cache_id: bound.cache_id, run_id: "run_a", status: "pending" })
+    ]);
+    await expect(service.associate(bound.cache_id, {
+      conversation_id: "conversation_a",
+      message_id: "assistant_a_final",
+      run_id: "run_a"
+    })).resolves.toMatchObject({ message_id: "assistant_a_final" });
+    await expect(service.associate(bound.cache_id, { run_id: "run_b" })).rejects.toThrow("run_id");
+    await expect(service.associate(bound.cache_id, {
+      conversation_id: "conversation_b",
+      message_id: "assistant_b",
+      run_id: "run_a"
+    })).rejects.toThrow("conversation_id");
   });
 
   it("cleans up expired cache directories but keeps active ones", async () => {

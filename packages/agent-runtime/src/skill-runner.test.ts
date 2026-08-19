@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { existsSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -125,7 +126,7 @@ describe("prompt-skill-runner", () => {
     }));
   });
 
-  it("writes the generated result directly when write_result=true", async () => {
+  it("stages the generated result even when write_result=true", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
       config: { configPath },
@@ -147,12 +148,16 @@ describe("prompt-skill-runner", () => {
       attachment_ids: []
     });
 
-    expect(result.saved_path).toBe("01_大纲/大纲.txt");
-    expect(result.data.saved_paths).toEqual(["01_大纲/大纲.txt"]);
-    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("可直接写入的大纲");
+    expect(result.saved_path).toBe("");
+    expect(result.data).toMatchObject({
+      pending_save: true,
+      target_path: "01_大纲/大纲.txt",
+      cache_id: expect.any(String)
+    });
+    expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("旧大纲");
   });
 
-  it("directly merges validated automatic lore after saving an outline", async () => {
+  it("does not extract lore until the outline cache itself is confirmed", async () => {
     await fs.writeFile(configPath, JSON.stringify({ api_key: "demo-key", model: "demo-model", auto_lore_extract_enabled: true }), "utf8");
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
@@ -181,10 +186,11 @@ describe("prompt-skill-runner", () => {
     });
 
     expect(result.data).toMatchObject({
-      saved_paths: ["01_大纲/大纲.txt"],
-      library_draft: { domain: "lore", requires_confirmation: false, direct_saved: true }
+      saved_paths: [],
+      pending_save: true,
+      cache_id: expect.any(String)
     });
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "设定集", "人物设定.txt"), "utf8")).toContain("林默");
+    expect(existsSync(path.join(tempDir, "00_设定集", "设定集", "人物设定.txt"))).toBe(false);
   });
 
   it("keeps replace-only outline generation in the preview cache", async () => {
@@ -252,7 +258,7 @@ describe("prompt-skill-runner", () => {
     expect(result.data).toMatchObject({ pending_save: true });
   });
 
-  it("defers an otherwise automatic prompt-skill commit without writing its target", async () => {
+  it("keeps a durable prompt-skill result in its cache without writing the target", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
       config: { configPath },
@@ -279,14 +285,7 @@ describe("prompt-skill-runner", () => {
       pending_save: true,
       saved_paths: [],
       target_path: "01_大纲/大纲.txt",
-      deferred_commit: {
-        kind: "prompt_skill_generated_cache",
-        skill_id: "outline_generate",
-        mode: "replace",
-        target_paths: ["01_大纲/大纲.txt"],
-        source: "prompt_skill",
-        requires_confirmation: false
-      }
+      cache_id: expect.any(String)
     });
     expect(await fs.readFile(path.join(tempDir, "01_大纲", "大纲.txt"), "utf8")).toBe("旧大纲");
 
@@ -408,7 +407,7 @@ describe("prompt-skill-runner", () => {
     expect(capturedPrompt).not.toContain("SOURCE_TAIL_SHOULD_BE_TRIMMED");
   });
 
-  it("creates a confirmable style library draft instead of writing TXT projections", async () => {
+  it("stages style generation in a Markdown cache instead of writing projections", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
       config: { configPath },
@@ -431,13 +430,14 @@ describe("prompt-skill-runner", () => {
     });
 
     expect(result.data).toMatchObject({
-      pending_save: false,
-      requires_confirmation: true,
-      library_draft: { domain: "style", records: 3, requires_confirmation: true }
+      pending_save: true,
+      target_paths: expect.arrayContaining(["00_设定集/风格库/写作风格.txt"]),
+      cache_id: expect.any(String)
     });
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toBe("克制冷静");
   });
 
-  it("writes a style library when the request explicitly asks to write it", async () => {
+  it("still stages style generation when the request explicitly asks to write it", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
       config: { configPath },
@@ -460,16 +460,13 @@ describe("prompt-skill-runner", () => {
     });
 
     expect(result.data).toMatchObject({
-      pending_save: false,
-      requires_confirmation: false,
-      library: { domain: "style", records: expect.any(Number), mode: "merge" }
+      pending_save: true,
+      cache_id: expect.any(String)
     });
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toContain("风格规则");
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "风格示例.txt"), "utf8")).toContain("示例特征");
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "参考素材.txt"), "utf8")).toContain("素材摘要");
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toBe("克制冷静");
   });
 
-  it("honors an explicit style save for durable callers too", async () => {
+  it("keeps durable style generation cache-first too", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
       config: { configPath },
@@ -492,13 +489,10 @@ describe("prompt-skill-runner", () => {
     }, { deferAutoCommit: true });
 
     expect(result.data).toMatchObject({
-      pending_save: false,
-      requires_confirmation: false,
-      library: { domain: "style", records: expect.any(Number), mode: "merge" }
+      pending_save: true,
+      cache_id: expect.any(String)
     });
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toContain("风格规则");
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "风格示例.txt"), "utf8")).toContain("示例特征");
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "参考素材.txt"), "utf8")).toContain("素材摘要");
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "风格库", "写作风格.txt"), "utf8")).toBe("克制冷静");
   });
 
   it("defers auto-commit after a streamed skill result", async () => {
@@ -532,7 +526,7 @@ describe("prompt-skill-runner", () => {
         skill_result: {
           data: {
             pending_save: true,
-            deferred_commit: expect.objectContaining({ skill_id: "outline_generate" })
+            cache_id: expect.any(String)
           }
         }
       }
@@ -698,7 +692,7 @@ describe("prompt-skill-runner", () => {
     expect(capturedSystemPrompt).toContain("只改“怎么说”，不改“说什么”");
   });
 
-  it("creates a confirmable genre library draft", async () => {
+  it("stages genre generation in a Markdown cache", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
       config: { configPath },
@@ -721,13 +715,13 @@ describe("prompt-skill-runner", () => {
     });
 
     expect(result.data).toMatchObject({
-      pending_save: false,
-      requires_confirmation: true,
-      library_draft: { domain: "genre", records: 4, requires_confirmation: true }
+      pending_save: true,
+      target_paths: expect.arrayContaining(["00_设定集/题材库/题材规则.txt"]),
+      cache_id: expect.any(String)
     });
   });
 
-  it("writes a genre library when the request explicitly asks to write it", async () => {
+  it("still stages genre generation when the request explicitly asks to write it", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
       config: { configPath },
@@ -750,15 +744,13 @@ describe("prompt-skill-runner", () => {
     });
 
     expect(result.data).toMatchObject({
-      pending_save: false,
-      requires_confirmation: false,
-      library: { domain: "genre", records: expect.any(Number), mode: "merge" }
+      pending_save: true,
+      cache_id: expect.any(String)
     });
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "题材库", "题材规则.txt"), "utf8")).toContain("规则内容");
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "题材库", "题材素材.txt"), "utf8")).toContain("素材内容");
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "题材库", "题材规则.txt"), "utf8")).toBe("升级流");
   });
 
-  it("creates a confirmable lore library draft", async () => {
+  it("stages manual lore extraction in a Markdown cache", async () => {
     const runner = new PromptSkillRunner({
       projectRoot: tempDir,
       config: { configPath },
@@ -781,13 +773,12 @@ describe("prompt-skill-runner", () => {
     });
 
     expect(result.data).toMatchObject({
-      pending_save: false,
-      requires_confirmation: true,
-      library_draft: { domain: "lore", records: 2, requires_confirmation: true }
+      pending_save: true,
+      cache_id: expect.any(String)
     });
   });
 
-  it("merges lore into the project when the request explicitly asks to write it", async () => {
+  it("keeps manual lore extraction cache-first even when the prompt says write", async () => {
     await fs.mkdir(path.join(tempDir, "00_设定集", "设定集"), { recursive: true });
     await fs.writeFile(path.join(tempDir, "00_设定集", "设定集", "人物设定.txt"), "林默：主角，出身寒门。", "utf8");
 
@@ -813,13 +804,10 @@ describe("prompt-skill-runner", () => {
     });
 
     expect(result.data).toMatchObject({
-      pending_save: false,
-      requires_confirmation: false,
-      library: { domain: "lore", records: expect.any(Number), mode: "merge" }
+      pending_save: true,
+      cache_id: expect.any(String)
     });
-    const mergedLore = await fs.readFile(path.join(tempDir, "00_设定集", "设定集", "人物设定.txt"), "utf8");
-    expect(mergedLore).toContain("简介：主角，出身寒门。");
-    expect(await fs.readFile(path.join(tempDir, "00_设定集", "设定集", "体系设定.txt"), "utf8")).toContain("修炼分九境");
+    expect(await fs.readFile(path.join(tempDir, "00_设定集", "设定集", "人物设定.txt"), "utf8")).toBe("林默：主角，出身寒门。");
   });
 
   it("drafts a skill from a URL using AI when configured", async () => {

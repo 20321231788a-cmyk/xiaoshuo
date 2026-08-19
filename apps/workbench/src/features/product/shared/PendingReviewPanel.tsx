@@ -96,7 +96,7 @@ function GeneratedFileReview({ pending, controller, compact, onOpenTarget, onOpe
       </header>
       <div className="pending-review-meta">
         <strong>{describeTarget(pending)}</strong>
-        <span>{mode === "replace" ? "覆盖写入" : "追加写入"} · 已生成约 {pending.cacheChars || pending.content.length} 字</span>
+        <span>{pending.groupId ? "联合生成" : mode === "replace" ? "覆盖写入" : "追加写入"} · 已生成约 {pending.cacheChars || pending.content.length} 字</span>
       </div>
       {mode === "replace" && targets.some((target) => target.change === "replace") && <p className="pending-review-warning"><AlertTriangle size={14} />确认后会替换所列目标的原内容，请先核对差异。</p>}
       <div className="pending-review-tabs" role="tablist" aria-label="生成结果预览">

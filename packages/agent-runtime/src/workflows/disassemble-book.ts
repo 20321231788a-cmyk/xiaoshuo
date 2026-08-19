@@ -47,7 +47,7 @@ export class DisassembleBookWorkflow implements WorkflowHandler {
       return archiveDisassembleSource(request, context);
     }
     try {
-      return await runFullDisassemble(request, context);
+      return await runFastDisassemble(request, context);
     } catch (error) {
       const book = await resolveDisassembleBookForRequest(request, context).catch(() => null);
       if (book && !book.legacy && book.dir) {
@@ -151,6 +151,24 @@ const DISASSEMBLY_BATCH_SYSTEM_PROMPT = [
   "plot_events 写因果、冲突和结果；characters 写人物事实与关系变化；world_rules 写世界或体系规则；items_and_factions 写道具、势力与组织；foreshadowing 写伏笔；pacing_style 写节奏与叙事风格。"
 ].join("\n");
 
+// Version 3 is intentionally a separate, small workflow from the legacy
+// 20 万字 pipeline below.  It never invokes a digest, lore, or reverse-outline
+// pass: the model only extracts each input batch and the application merges
+// those facts deterministically into one report.
+const FAST_DISASSEMBLY_PREFIX_CHAPTERS = 100;
+const FAST_DISASSEMBLY_BATCH_CHARS = 16_000;
+const FAST_DISASSEMBLY_CONCURRENCY = 4;
+const FAST_DISASSEMBLY_ANALYSIS_VERSION = 3;
+const FAST_DISASSEMBLY_SYSTEM_PROMPT = [
+  "你是小说前100章极速拆书的结构化分析器。",
+  "只根据给定原文中明确出现的事实分析，不得推测后续剧情，不得把原文改写为原创大纲。",
+  "只输出一个 JSON 对象，不要 Markdown、代码块、标题、解释或额外文字。",
+  "JSON 必须包含 chapter_summaries、stage_summary、protagonist_arc、major_characters、major_settings。",
+  "chapter_summaries 必须覆盖本批指定的每一个章节或段落键；每项使用 {chapter, summary}，summary 为一句中文剧情。",
+  "stage_summary 为本批目标、冲突、转折与结果的简要字符串。其余三项必须是数组；没有明确事实时使用空数组，绝不能返回 null。",
+  "protagonist_arc 写主角的身份、目标、能力、关系或心理变化；major_characters 写身份、动机、与主角关系和剧情作用；major_settings 写世界规则、能力体系、势力、地点、道具及限制。"
+].join("\n");
+
 type DisassemblyBatch = {
   id: string;
   index: number;
@@ -166,6 +184,231 @@ type DisassemblyBatchCheckpoint = {
   batch: Pick<DisassemblyBatch, "id" | "index" | "start" | "end" | "chapterStart" | "chapterEnd">;
   result: string;
 };
+
+type FastDisassemblyEntry = {
+  key: string;
+  number: number;
+  label: string;
+  start: number;
+  end: number;
+  synthetic: boolean;
+};
+
+type FastDisassemblyBatch = {
+  id: string;
+  index: number;
+  start: number;
+  end: number;
+  firstLabel: string;
+  lastLabel: string;
+  entryKeys: string[];
+  text: string;
+};
+
+type FastDisassemblyBatchResult = {
+  chapter_summaries: Array<{ chapter: string; summary: string }>;
+  stage_summary: string;
+  protagonist_arc: string[];
+  major_characters: string[];
+  major_settings: string[];
+};
+
+type FastDisassemblyBatchCheckpoint = {
+  fingerprint: string;
+  batch: Pick<FastDisassemblyBatch, "id" | "index" | "start" | "end" | "firstLabel" | "lastLabel" | "entryKeys">;
+  result: FastDisassemblyBatchResult;
+};
+
+async function runFastDisassemble(request: AgentRunRequest, context: WorkflowRunContext): Promise<AgentRunResponse> {
+  throwIfAborted(context.signal);
+  const completed = new Map(
+    (context.checkpoint?.listCompletedUnits("disassemble_book") || []).map((checkpoint) => [checkpoint.unit_id, checkpoint.payload])
+  );
+  let book = restoreCheckpointBook(completed.get("book"));
+  let source = "";
+
+  reportDisassemblyProgress(context, "preparing", "正在读取拆书原文并确定前100章范围…", 0, 1);
+  if (!book) {
+    const existingBook = await resolveDisassembleBookForRequest(request, context);
+    const directSource = await resolveWorkflowSourceText(request, context);
+    source = directSource.trim() || (existingBook ? await readDisassembleBookText(existingBook, "source", context) : "");
+    if (!source.trim()) throw new Error("拆书需要上传文件、来源文件或直接输入文本");
+    book = existingBook && !existingBook.legacy
+      ? await writeDisassembleBookManifest({
+        ...existingBook,
+        conversation_id: existingBook.conversation_id || request.conversation_id || "",
+        status: "analyzing",
+        error: "",
+        progress: disassemblyProgress("preparing", 0)
+      }, context, { writeKey: "book.manifest.fast.analyzing" })
+      : await createDisassembleBook({
+        title: String((request as any).book_title || existingBook?.title || "").trim() || (await inferDisassembleBookTitle(request, source)),
+        sourceText: source,
+        sourcePath: existingBook?.source_path || request.current_path || "",
+        origin: request.attachment_ids?.length ? "upload" : request.current_path ? "document" : existingBook?.origin || "input",
+        conversationId: request.conversation_id || ""
+      }, context);
+    context.checkpoint?.completeUnit({ workflow_id: "disassemble_book", unit_id: "book", payload: { book } });
+  }
+
+  if (!book) throw new Error("未能恢复拆书书籍记录");
+  source = source || await readDisassembleBookText(book, "source", context);
+  if (!source.trim()) throw new Error("拆书原文为空，无法继续分析");
+  const sourceHash = createHash("sha256").update(source, "utf8").digest("hex");
+  if (book.source_hash && book.source_hash !== sourceHash) {
+    book = await writeDisassembleBookManifest({
+      ...book,
+      status: "stale",
+      error: "拆书原文已变化，旧批次检查点不能继续使用，请重新拆解。",
+      progress: { ...book.progress, stage: "stale", message: "原文已变化，需要重新拆解", last_error: "拆书原文已变化，旧批次检查点不能继续使用。" }
+    }, context, { writeKey: "book.manifest.fast.stale" });
+    throw new Error("拆书原文已变化，旧批次检查点不能继续使用，请重新拆解。");
+  }
+
+  let activeBook: DisassembleBookManifest = book;
+  const plan = await buildFastDisassemblyPlan(activeBook, source, context);
+  const fingerprint = buildFastDisassemblyPlanFingerprint(sourceHash, plan);
+  const restored = new Map<string, FastDisassemblyBatchResult>();
+  for (const batch of plan.batches) {
+    const checkpoint = restoreFastBatchCheckpoint(completed.get(`fast-batch:${batch.id}`), fingerprint, batch);
+    if (checkpoint) restored.set(batch.id, checkpoint.result);
+  }
+  const batchTotal = plan.batches.length;
+  let completedBatches = restored.size;
+  let completedEntries = countCompletedFastEntries(plan, restored);
+  activeBook = await writeDisassembleBookManifest({
+    ...activeBook,
+    analysis_version: FAST_DISASSEMBLY_ANALYSIS_VERSION,
+    analysis_fingerprint: fingerprint,
+    analysis_batch_chars: FAST_DISASSEMBLY_BATCH_CHARS,
+    status: "analyzing",
+    error: "",
+    analysis_scope: plan.scope,
+    coverage: {
+      first_chapter: plan.scope.first_chapter,
+      last_chapter: plan.scope.last_chapter,
+      analyzed_chapters: plan.entries.filter((entry) => !entry.synthetic).map((entry) => entry.number),
+      missing_chapters: []
+    },
+    progress: {
+      stage: "batching",
+      completed_chapters: completedEntries,
+      total_chapters: plan.entries.length,
+      completed_batches: completedBatches,
+      total_batches: batchTotal,
+      message: `已确定拆解前${FAST_DISASSEMBLY_PREFIX_CHAPTERS}章（实际 ${plan.entries.length} ${plan.synthetic ? "段" : "章"}）`,
+      last_error: ""
+    }
+  }, context, { writeKey: "book.manifest.fast.scope" });
+
+  const missing = plan.batches.filter((batch) => !restored.has(batch.id));
+  if (restored.size) {
+    reportDisassemblyProgress(context, "batch", `已恢复 ${restored.size}/${batchTotal} 批检查点，正在继续缺失批次…`, restored.size, batchTotal);
+  }
+
+  // Manifest writes are serialized while model requests stay parallel.  This
+  // prevents concurrent completions from overwriting a newer progress count.
+  let manifestQueue = Promise.resolve();
+  const onCompleted = async (batch: FastDisassemblyBatch, result: FastDisassemblyBatchResult) => {
+    restored.set(batch.id, result);
+    context.checkpoint?.completeUnit({
+      workflow_id: "disassemble_book",
+      unit_id: `fast-batch:${batch.id}`,
+      payload: { fingerprint, batch: fastBatchCheckpointShape(batch), result }
+    });
+    completedBatches += 1;
+    completedEntries = countCompletedFastEntries(plan, restored);
+    const message = `已完成 ${completedBatches}/${batchTotal} 批，覆盖 ${batch.firstLabel}-${batch.lastLabel}`;
+    reportDisassemblyProgress(context, "batch", message, completedBatches, batchTotal);
+    manifestQueue = manifestQueue.then(async () => {
+      activeBook = await writeDisassembleBookManifest({
+        ...activeBook,
+        progress: {
+          ...activeBook.progress,
+          stage: "batching",
+          completed_chapters: completedEntries,
+          total_chapters: plan.entries.length,
+          completed_batches: completedBatches,
+          total_batches: batchTotal,
+          message,
+          last_error: ""
+        }
+      }, context, { writeKey: `book.manifest.fast.batch.${batch.id}` });
+    });
+    await manifestQueue;
+  };
+
+  try {
+    await runFastBatchesWithConcurrency(missing, FAST_DISASSEMBLY_CONCURRENCY, async (batch) => {
+      throwIfAborted(context.signal);
+      reportDisassemblyProgress(context, "batch", `正在拆解第 ${batch.index}/${batchTotal} 批（${batch.firstLabel}-${batch.lastLabel}）`, completedBatches, batchTotal);
+      const result = await generateFastBatchWithRetry(activeBook.title, batch, request, context, batchTotal);
+      throwIfAborted(context.signal);
+      await onCompleted(batch, result);
+    });
+    await manifestQueue;
+  } catch (error) {
+    await manifestQueue.catch(() => undefined);
+    const cancelled = Boolean(context.signal?.aborted) && isCancellationError(error, context.signal);
+    await writeDisassembleBookManifest({
+      ...activeBook,
+      status: cancelled ? "cancelled" : "failed",
+      error: cancelled ? "" : (error instanceof Error ? error.message : String(error)),
+      progress: {
+        ...activeBook.progress,
+        stage: cancelled ? "cancelled" : "failed",
+        completed_chapters: completedEntries,
+        total_chapters: plan.entries.length,
+        completed_batches: completedBatches,
+        total_batches: batchTotal,
+        message: cancelled ? "拆书已取消，可从检查点继续" : "拆书批次失败，可从失败批次重试",
+        last_error: cancelled ? "" : (error instanceof Error ? error.message : String(error))
+      }
+    }, context, { writeKey: "book.manifest.fast.failed" }).catch(() => undefined);
+    throw error;
+  }
+
+  if (restored.size !== batchTotal) throw new Error("拆书批次尚未全部完成，请从失败批次重试。");
+  const report = buildFastDisassemblyReport(activeBook, plan, [...restored.entries()].map(([id, result]) => ({ batch: plan.batches.find((item) => item.id === id)!, result })));
+  const reportPath = `${activeBook.dir}/拆书报告.md`;
+  reportDisassemblyProgress(context, "report", "正在整理四板块拆书报告…", batchTotal, batchTotal + 1);
+  await writeDisassembleBookDocument(reportPath, report, "生成前100章拆书报告", context, { writeKey: "fast.report.output" });
+  const updatedBook = await writeDisassembleBookManifest({
+    ...activeBook,
+    status: "ready",
+    error: "",
+    analyzed_at: new Date().toISOString(),
+    // Historical artefacts stay on disk, but a new fast run exposes only the
+    // report as its active analysis result.
+    paths: { ...activeBook.paths, lore: "", reverse_outline: "", detail_outline: "", report: reportPath },
+    progress: {
+      ...activeBook.progress,
+      stage: "completed",
+      completed_chapters: plan.entries.length,
+      total_chapters: plan.entries.length,
+      completed_batches: batchTotal,
+      total_batches: batchTotal,
+      message: `已完成前${FAST_DISASSEMBLY_PREFIX_CHAPTERS}章拆解（实际 ${plan.entries.length}${plan.synthetic ? "段" : "章"}）`,
+      last_error: ""
+    }
+  }, context, { writeKey: "book.manifest.fast.ready" });
+  reportDisassemblyProgress(context, "completed", updatedBook.progress.message || "拆书完成", batchTotal + 1, batchTotal + 1);
+  const reply = `已完成前${FAST_DISASSEMBLY_PREFIX_CHAPTERS}章极速拆书，已自动保存：\n${reportPath}`;
+  return {
+    intent: "skill",
+    reply,
+    conversation: await recordSkillExchange(request, reply, context),
+    results: [],
+    skill_result: {
+      status: "done",
+      result: "",
+      saved_path: reportPath,
+      data: { skill_id: "disassemble_book", saved_paths: [reportPath], report_path: reportPath, book: updatedBook, legacy_saved_paths: [] }
+    },
+    saved_paths: [reportPath],
+    requires_confirmation: false
+  };
+}
 
 async function runFullDisassemble(request: AgentRunRequest, context: WorkflowRunContext): Promise<AgentRunResponse> {
   throwIfAborted(context.signal);
@@ -549,6 +792,385 @@ async function runLegacyDisassemble(request: AgentRunRequest, context: WorkflowR
   };
 }
 
+async function buildFastDisassemblyPlan(
+  book: DisassembleBookManifest,
+  source: string,
+  context: WorkflowRunContext
+): Promise<{
+  entries: FastDisassemblyEntry[];
+  batches: FastDisassemblyBatch[];
+  scope: NonNullable<DisassembleBookManifest["analysis_scope"]>;
+  synthetic: boolean;
+}> {
+  const segments = await readAnalysisSegments(book, source, context);
+  if (!segments.length) throw new Error("未找到可分析的拆书内容");
+  const hasChapterTitles = segments.some((segment) => segment.recognized || segment.chapter > 0);
+  const selected = segments.slice(0, FAST_DISASSEMBLY_PREFIX_CHAPTERS);
+  const entries = selected.map((segment, index): FastDisassemblyEntry => {
+    const number = hasChapterTitles ? Math.max(1, segment.chapter || index + 1) : index + 1;
+    return {
+      key: `${hasChapterTitles ? "chapter" : "segment"}:${index + 1}`,
+      number,
+      label: hasChapterTitles ? (segment.title || `第${number}章`) : `第${number}段`,
+      start: segment.start,
+      end: segment.end,
+      synthetic: !hasChapterTitles
+    };
+  });
+  const batches = batchFastEntries(source, entries);
+  if (!batches.length) throw new Error("前100章范围内没有可分析的文本");
+  const first = entries[0]!;
+  const last = entries.at(-1)!;
+  return {
+    entries,
+    batches,
+    synthetic: !hasChapterTitles,
+    scope: {
+      mode: "prefix_chapters",
+      requested_chapters: FAST_DISASSEMBLY_PREFIX_CHAPTERS,
+      actual_chapters: entries.length,
+      actual_chars: entries.reduce((total, entry) => total + visibleLength(source.slice(entry.start, entry.end)), 0),
+      source_chars: visibleLength(source),
+      source_chapters: hasChapterTitles ? segments.length : 0,
+      first_chapter: first.number,
+      last_chapter: last.number,
+      truncated: selected.length < segments.length
+    }
+  };
+}
+
+function batchFastEntries(source: string, entries: FastDisassemblyEntry[]): FastDisassemblyBatch[] {
+  type Piece = { entry: FastDisassemblyEntry; start: number; end: number };
+  const pieces = entries.flatMap((entry): Piece[] => splitFastEntry(source, entry).map((range) => ({ entry, ...range })));
+  const batches: FastDisassemblyBatch[] = [];
+  let group: Piece[] = [];
+  let length = 0;
+  const flush = () => {
+    if (!group.length) return;
+    const first = group[0]!;
+    const last = group.at(-1)!;
+    const index = batches.length + 1;
+    const entryKeys = [...new Set(group.map((piece) => piece.entry.key))];
+    batches.push({
+      id: `${String(index).padStart(3, "0")}-${first.start}-${last.end}`,
+      index,
+      start: first.start,
+      end: last.end,
+      firstLabel: first.entry.label,
+      lastLabel: last.entry.label,
+      entryKeys,
+      text: source.slice(first.start, last.end)
+    });
+    group = [];
+    length = 0;
+  };
+  for (const piece of pieces) {
+    const pieceLength = visibleLength(source.slice(piece.start, piece.end));
+    if (group.length && length + pieceLength > FAST_DISASSEMBLY_BATCH_CHARS) flush();
+    group.push(piece);
+    length += pieceLength;
+  }
+  flush();
+  return batches;
+}
+
+function splitFastEntry(source: string, entry: FastDisassemblyEntry): Array<{ start: number; end: number }> {
+  const text = source.slice(entry.start, entry.end);
+  if (visibleLength(text) <= FAST_DISASSEMBLY_BATCH_CHARS) return [{ start: entry.start, end: entry.end }];
+  const paragraphs = [...text.matchAll(/[^\n]+(?:\n|$)/g)];
+  if (!paragraphs.length) {
+    const pieces: Array<{ start: number; end: number }> = [];
+    for (let offset = entry.start; offset < entry.end; offset += FAST_DISASSEMBLY_BATCH_CHARS) {
+      pieces.push({ start: offset, end: Math.min(entry.end, offset + FAST_DISASSEMBLY_BATCH_CHARS) });
+    }
+    return pieces;
+  }
+  const pieces: Array<{ start: number; end: number }> = [];
+  let start = entry.start + (paragraphs[0]?.index || 0);
+  let end = start;
+  let length = 0;
+  for (const paragraph of paragraphs) {
+    const paragraphStart = entry.start + (paragraph.index || 0);
+    const paragraphEnd = paragraphStart + paragraph[0].length;
+    const paragraphLength = visibleLength(paragraph[0]);
+    if (length && length + paragraphLength > FAST_DISASSEMBLY_BATCH_CHARS) {
+      pieces.push({ start, end });
+      start = paragraphStart;
+      length = 0;
+    }
+    if (paragraphLength > FAST_DISASSEMBLY_BATCH_CHARS) {
+      for (let offset = paragraphStart; offset < paragraphEnd; offset += FAST_DISASSEMBLY_BATCH_CHARS) {
+        pieces.push({ start: offset, end: Math.min(paragraphEnd, offset + FAST_DISASSEMBLY_BATCH_CHARS) });
+      }
+      start = paragraphEnd;
+      end = paragraphEnd;
+      length = 0;
+      continue;
+    }
+    end = paragraphEnd;
+    length += paragraphLength;
+  }
+  if (end > start) pieces.push({ start, end });
+  return pieces;
+}
+
+async function runFastBatchesWithConcurrency<T>(
+  items: T[],
+  maxConcurrency: number,
+  worker: (item: T) => Promise<void>
+): Promise<void> {
+  let cursor = 0;
+  let failure: unknown = null;
+  const runWorker = async () => {
+    while (!failure) {
+      const index = cursor;
+      cursor += 1;
+      if (index >= items.length) return;
+      try {
+        await worker(items[index]!);
+      } catch (error) {
+        failure = error;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(maxConcurrency, items.length) }, () => runWorker()));
+  if (failure) throw failure;
+}
+
+async function generateFastBatchWithRetry(
+  bookTitle: string,
+  batch: FastDisassemblyBatch,
+  request: AgentRunRequest,
+  context: WorkflowRunContext,
+  batchTotal: number
+): Promise<FastDisassemblyBatchResult> {
+  let lastError: unknown = null;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      throwIfAborted(context.signal);
+      const raw = await context.skillRunner.generateRawSkill("lore_extract", {
+        text: batch.text,
+        chapter: 0,
+        end_chapter: 0,
+        target_words: 1_000,
+        instruction: buildFastBatchInstruction(bookTitle, batch, request, batchTotal),
+        target_path: "",
+        conversation_id: request.conversation_id || "",
+        source_path: "",
+        write_result: false,
+        attachment_ids: []
+      }, { signal: context.signal, systemPromptOverride: FAST_DISASSEMBLY_SYSTEM_PROMPT });
+      return normalizeFastBatchResult(raw, batch);
+    } catch (error) {
+      if (context.signal?.aborted || isCancellationError(error, context.signal)) throw error;
+      lastError = error;
+      if (attempt >= 2) break;
+      const waitMs = isTransientDisassemblyError(error) ? 750 : 0;
+      context.reportProgress?.({
+        stage: "retrying",
+        message: `第 ${batch.index}/${batchTotal} 批结果无效或暂时失败，正在快速重试（第2次）…`,
+        completed: Math.max(0, batch.index - 1),
+        total: batchTotal
+      });
+      if (waitMs) await waitForRetry(waitMs, context.signal);
+    }
+  }
+  const message = lastError instanceof Error ? lastError.message : String(lastError || "未知错误");
+  throw new Error(`拆书第 ${batch.index}/${batchTotal} 批失败：${message}`);
+}
+
+function buildFastBatchInstruction(bookTitle: string, batch: FastDisassemblyBatch, request: AgentRunRequest, total: number): string {
+  const userInstruction = String((request as any).instruction || request.content || "").trim();
+  return [
+    `你正在极速拆解《${bookTitle}》前100章中的第 ${batch.index}/${total} 批。`,
+    `本批范围：${batch.firstLabel}-${batch.lastLabel}；字符 ${batch.start + 1}-${batch.end}。`,
+    `chapter_summaries 必须且只能使用这些 chapter 键：${batch.entryKeys.join("、")}。`,
+    "只根据本批原文输出 JSON，不要寒暄、不要 Markdown、不要杜撰。",
+    "每个 chapter 键都要有一句剧情 summary；若同一章被分段输入，只概括本段明确发生的内容。",
+    "其余字段仅提取本批已出现的事实；没有明确事实用空数组或“原文未明确”。",
+    userInstruction ? `用户补充要求：${userInstruction}` : "用户补充要求：无"
+  ].join("\n");
+}
+
+function normalizeFastBatchResult(value: unknown, batch: FastDisassemblyBatch): FastDisassemblyBatchResult {
+  let parsed: unknown = value;
+  if (typeof value === "string") {
+    const source = value.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "");
+    if (!source) throw new Error("模型未返回本批拆解结果");
+    try {
+      parsed = JSON.parse(extractJsonObject(source));
+    } catch {
+      throw new Error("模型返回的拆书批次不是有效 JSON");
+    }
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("模型返回的拆书批次不是 JSON 对象");
+  const record = nestedAnalysisRecord(parsed as Record<string, unknown>);
+  const summariesRaw = record.chapter_summaries;
+  if (!Array.isArray(summariesRaw)) throw new Error("模型未返回 chapter_summaries");
+  const summaries = new Map<string, string>();
+  for (const item of summariesRaw) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const entry = item as Record<string, unknown>;
+    const key = matchFastChapterKey(String(entry.chapter || entry.key || "").trim(), batch.entryKeys);
+    const summary = String(entry.summary || entry.plot || entry.text || "").trim().replace(/\s+/g, " ");
+    if (key && summary) summaries.set(key, summary);
+  }
+  const missing = batch.entryKeys.filter((key) => !summaries.has(key));
+  if (missing.length) throw new Error(`模型缺少章节摘要：${missing.join("、")}`);
+  return {
+    chapter_summaries: batch.entryKeys.map((key) => ({ chapter: key, summary: summaries.get(key)! })),
+    stage_summary: firstText(record, ["stage_summary", "stageSummary", "阶段总结", "阶段"] ) || "原文未明确",
+    protagonist_arc: fastAnalysisItems(record.protagonist_arc ?? record.protagonistArc ?? record["主角成长"]),
+    major_characters: fastAnalysisItems(record.major_characters ?? record.majorCharacters ?? record["主要人物"]),
+    major_settings: fastAnalysisItems(record.major_settings ?? record.majorSettings ?? record["主要设定"])
+  };
+}
+
+function matchFastChapterKey(value: string, expected: string[]): string {
+  if (expected.includes(value)) return value;
+  const match = /(?:chapter|segment|第)?\s*(\d+)/i.exec(value);
+  const number = Number(match?.[1] || 0);
+  if (!number) return "";
+  const kind = /segment|段/.test(value) ? "segment" : "chapter";
+  return expected.find((key) => key === `${kind}:${number}`) || expected.find((key) => key.endsWith(`:${number}`)) || "";
+}
+
+function fastAnalysisItems(value: unknown): string[] {
+  const items = Array.isArray(value) ? value : value == null ? [] : [value];
+  return items.map((item) => fastFactText(item)).filter(Boolean);
+}
+
+function fastFactText(value: unknown): string {
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value).trim();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+  const record = value as Record<string, unknown>;
+  const parts = Object.entries(record).flatMap(([key, item]) => {
+    if (item == null || item === "") return [];
+    if (typeof item === "object") return [];
+    return [`${key}：${String(item).trim()}`];
+  });
+  return parts.join("；").trim() || JSON.stringify(record);
+}
+
+function restoreFastBatchCheckpoint(value: unknown, fingerprint: string, batch: FastDisassemblyBatch): FastDisassemblyBatchCheckpoint | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  if (String(source.fingerprint || "") !== fingerprint) return null;
+  const rawBatch = source.batch && typeof source.batch === "object" && !Array.isArray(source.batch) ? source.batch as Record<string, unknown> : null;
+  if (!rawBatch || String(rawBatch.id || "") !== batch.id) return null;
+  try {
+    const result = normalizeFastBatchResult(source.result, batch);
+    return { fingerprint, batch: fastBatchCheckpointShape(batch), result };
+  } catch {
+    return null;
+  }
+}
+
+function fastBatchCheckpointShape(batch: FastDisassemblyBatch): FastDisassemblyBatchCheckpoint["batch"] {
+  return {
+    id: batch.id,
+    index: batch.index,
+    start: batch.start,
+    end: batch.end,
+    firstLabel: batch.firstLabel,
+    lastLabel: batch.lastLabel,
+    entryKeys: batch.entryKeys
+  };
+}
+
+function countCompletedFastEntries(
+  plan: { entries: FastDisassemblyEntry[]; batches: FastDisassemblyBatch[] },
+  results: Map<string, FastDisassemblyBatchResult>
+): number {
+  const keys = new Set<string>();
+  for (const result of results.values()) result.chapter_summaries.forEach((item) => keys.add(item.chapter));
+  return plan.entries.filter((entry) => keys.has(entry.key)).length;
+}
+
+function buildFastDisassemblyPlanFingerprint(
+  sourceHash: string,
+  plan: { entries: FastDisassemblyEntry[]; batches: FastDisassemblyBatch[]; scope: NonNullable<DisassembleBookManifest["analysis_scope"]> }
+): string {
+  return createHash("sha256").update(JSON.stringify({
+    analysis_version: FAST_DISASSEMBLY_ANALYSIS_VERSION,
+    source_hash: sourceHash,
+    scope: plan.scope,
+    batch_chars: FAST_DISASSEMBLY_BATCH_CHARS,
+    batches: plan.batches.map((batch) => [batch.id, batch.start, batch.end, batch.entryKeys])
+  }), "utf8").digest("hex");
+}
+
+function buildFastDisassemblyReport(
+  book: DisassembleBookManifest,
+  plan: { entries: FastDisassemblyEntry[]; batches: FastDisassemblyBatch[]; scope: NonNullable<DisassembleBookManifest["analysis_scope"]>; synthetic: boolean },
+  batchResults: Array<{ batch: FastDisassemblyBatch; result: FastDisassemblyBatchResult }>
+): string {
+  const ordered = [...batchResults].sort((left, right) => left.batch.index - right.batch.index);
+  const summaries = new Map<string, string[]>();
+  for (const { result } of ordered) {
+    for (const item of result.chapter_summaries) {
+      const current = summaries.get(item.chapter) || [];
+      if (!current.includes(item.summary)) current.push(item.summary);
+      summaries.set(item.chapter, current);
+    }
+  }
+  const chapterLines = plan.entries.map((entry) => `- ${entry.label}：${(summaries.get(entry.key) || ["原文未明确"]).join("；")}`);
+  const stageLines: string[] = [];
+  for (let start = 0; start < plan.entries.length; start += 10) {
+    const group = plan.entries.slice(start, start + 10);
+    const keys = new Set(group.map((entry) => entry.key));
+    const stages = uniqueFastFacts(ordered.filter(({ batch }) => batch.entryKeys.some((key) => keys.has(key))).map(({ result }) => result.stage_summary));
+    stageLines.push(`### ${group[0]!.label}-${group.at(-1)!.label}阶段总结`);
+    stageLines.push(stages.join("；") || "原文未明确。");
+    stageLines.push("");
+  }
+  const protagonist = uniqueFastFacts(ordered.flatMap(({ result }) => result.protagonist_arc));
+  const characters = uniqueFastFacts(ordered.flatMap(({ result }) => result.major_characters)).slice(0, 15);
+  const settings = uniqueFastFacts(ordered.flatMap(({ result }) => result.major_settings));
+  const settingGroups = {
+    "世界规则": settings.filter((item) => /世界|规则|社会|背景|限制/.test(item)),
+    "能力体系": settings.filter((item) => /能力|体系|修炼|等级|技能|异能/.test(item)),
+    "势力": settings.filter((item) => /势力|组织|宗门|家族|公司|军方|学院/.test(item)),
+    "地点": settings.filter((item) => /地点|城市|区域|山|域|基地|学校/.test(item)),
+    "关键道具": settings.filter((item) => !/世界|规则|社会|背景|限制|能力|体系|修炼|等级|技能|异能|势力|组织|宗门|家族|公司|军方|学院|地点|城市|区域|山|域|基地|学校/.test(item))
+  };
+  return [
+    `# 《${book.title}》拆书报告`,
+    "",
+    `> 分析范围：${plan.synthetic ? "无章节标题，按顺序段落" : "前100个识别章节"}；实际分析 ${plan.entries.length}${plan.synthetic ? "段" : "章"}（${plan.entries[0]!.label}-${plan.entries.at(-1)!.label}）。`,
+    `> 原文字数：${plan.scope.source_chars}；原文哈希：${book.source_hash || "未记录"}；生成时间：${new Date().toISOString()}；分析版本：${FAST_DISASSEMBLY_ANALYSIS_VERSION}。`,
+    "",
+    "## 前100章剧情",
+    ...chapterLines,
+    "",
+    ...stageLines,
+    "## 主角成长弧光",
+    ...(protagonist.length ? protagonist.map((item) => `- ${item}`) : ["- 原文未明确。"]),
+    "",
+    "## 主要角色配置",
+    ...(characters.length ? characters.map((item) => `- ${item}`) : ["- 原文未明确。"]),
+    "",
+    "## 主要设定",
+    ...Object.entries(settingGroups).flatMap(([title, items]) => [
+      `### ${title}`,
+      ...(items.length ? items.map((item) => `- ${item}`) : ["- 原文未明确。"]),
+      ""
+    ]),
+    ""
+  ].join("\n");
+}
+
+function uniqueFastFacts<T extends string | { result: FastDisassemblyBatchResult }>(items: T[]): T[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const value = typeof item === "string" ? item : item.result.stage_summary;
+    const key = value.replace(/\s+/g, "").toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 async function buildDisassemblyBatchPlan(
   book: DisassembleBookManifest,
   source: string,
@@ -587,16 +1209,22 @@ async function readAnalysisSegments(
   book: DisassembleBookManifest,
   source: string,
   context: WorkflowRunContext
-): Promise<Array<{ start: number; end: number; chapter: number }>> {
+): Promise<Array<{ start: number; end: number; chapter: number; title?: string; recognized?: boolean }>> {
   const indexPath = book.paths.chapter_index || `${book.dir}/章节索引.jsonl`;
   const raw = await context.documents.readRawText(indexPath, 2_000_000).catch(() => "");
   const chapters = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).flatMap((line) => {
     try {
-      const value = JSON.parse(line) as { index_type?: string; start?: unknown; end?: unknown; chapter?: unknown };
+      const value = JSON.parse(line) as { index_type?: string; start?: unknown; end?: unknown; chapter?: unknown; title?: unknown };
       const start = Math.max(0, Math.trunc(Number(value.start || 0)));
       const end = Math.min(source.length, Math.max(start, Math.trunc(Number(value.end || 0))));
       if (value.index_type !== "chapter" || end <= start) return [];
-      return [{ start, end, chapter: Math.max(0, Math.trunc(Number(value.chapter || 0))) }];
+      return [{
+        start,
+        end,
+        chapter: Math.max(0, Math.trunc(Number(value.chapter || 0))),
+        title: String(value.title || "").trim(),
+        recognized: true
+      }];
     } catch {
       return [];
     }
@@ -609,22 +1237,17 @@ function paragraphSegments(source: string): Array<{ start: number; end: number; 
   const paragraphs = [...source.matchAll(/[^\n]+(?:\n|$)/g)];
   if (!paragraphs.length) return source.trim() ? [{ start: 0, end: source.length, chapter: 0 }] : [];
   const result: Array<{ start: number; end: number; chapter: number }> = [];
-  let start = paragraphs[0]?.index || 0;
-  let end = start;
-  let length = 0;
   for (const paragraph of paragraphs) {
     const itemStart = paragraph.index || 0;
     const itemEnd = itemStart + paragraph[0].length;
-    const itemLength = visibleLength(paragraph[0]);
-    if (length && length + itemLength > DISASSEMBLY_BATCH_CHARS) {
-      result.push({ start, end, chapter: 0 });
-      start = itemStart;
-      length = 0;
+    if (visibleLength(paragraph[0]) <= FAST_DISASSEMBLY_BATCH_CHARS) {
+      result.push({ start: itemStart, end: itemEnd, chapter: 0 });
+      continue;
     }
-    end = itemEnd;
-    length += itemLength;
+    for (let offset = itemStart; offset < itemEnd; offset += FAST_DISASSEMBLY_BATCH_CHARS) {
+      result.push({ start: offset, end: Math.min(itemEnd, offset + FAST_DISASSEMBLY_BATCH_CHARS), chapter: 0 });
+    }
   }
-  if (end > start) result.push({ start, end, chapter: 0 });
   return result;
 }
 

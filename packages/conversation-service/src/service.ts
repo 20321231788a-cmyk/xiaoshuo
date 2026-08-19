@@ -38,6 +38,11 @@ export type ConversationCreatePayload = {
 export type AppendMessagePayload = {
   role: ConversationMessage["role"];
   content: string;
+  parent_message_id?: string;
+  run_id?: string;
+  turn_id?: string;
+  status?: ConversationMessage["status"];
+  finish_reason?: string;
   reasoning_content?: string;
   parts?: ConversationMessagePart[];
   metadata?: Record<string, unknown>;
@@ -171,6 +176,11 @@ export class ConversationService {
     detail.messages.push({
       id: this.idFactory(),
       role: payload.role,
+      parent_message_id: String(payload.parent_message_id || ""),
+      run_id: String(payload.run_id || ""),
+      turn_id: String(payload.turn_id || ""),
+      status: payload.status || "completed",
+      finish_reason: String(payload.finish_reason || ""),
       content,
       reasoning_content: String(payload.reasoning_content || "").trim(),
       parts,

@@ -855,7 +855,8 @@ export const agentRunDeleteResponseSchema: z.ZodType<AgentRunDeleteResponse> = z
 export const agentRunControlRequestSchema = z
   .object({
     operation_id: z.string().trim().min(1),
-    expected_version: z.number().int().positive()
+    expected_version: z.number().int().positive(),
+    expected_conversation_id: z.string().trim().optional()
   })
   .passthrough();
 
@@ -904,7 +905,11 @@ export const agentRecoverableRequestSchema = z.object({
   conversation_write_target: z.string().optional(),
   conversation_write_mode: z.enum(["append", "replace"]).optional(),
   conversation_confirm_write: z.boolean().optional(),
-  suppress_conversation_record: z.boolean().optional()
+  suppress_conversation_record: z.boolean().optional(),
+  max_attempts: z.number().int().positive().optional(),
+  pause_each: z.boolean().optional(),
+  max_cost_usd: z.number().finite().nonnegative().optional(),
+  batch_group_id: z.string().optional()
 });
 
 export const agentRunRequestSchema = z
@@ -942,7 +947,8 @@ export const agentRunResponseSchema = z
     inline_plan: inlinePlanMetadataSchema.optional(),
     confirmation_scope: agentActionConfirmationScopeSchema.optional(),
     selected_reason: z.string().optional(),
-    confidence: z.number().min(0).max(1).optional()
+    confidence: z.number().min(0).max(1).optional(),
+    finish_reason: z.enum(["stop", "length", "tool_calls", "content_filter", "error", "unknown"]).optional()
   })
   .passthrough();
 
@@ -999,6 +1005,10 @@ export const generatedCacheMetaSchema = z
     status: z.enum(["pending", "committed", "discarded", "failed"]),
     source: z.string().default(""),
     skill_id: z.string().default(""),
+    message_id: z.string().default(""),
+    run_id: z.string().default(""),
+    content_hash: z.string().default(""),
+    target_hashes: z.record(z.string()).default({}),
     mode: z.enum(["replace", "append"]).default("replace"),
     conversation_id: z.string().default(""),
     summary: z.string().default(""),
@@ -1038,6 +1048,8 @@ export const agentStreamEventSchema = z.discriminatedUnion("type", [
     skill_steps: z.array(skillPlanStepSchema).optional(),
     skill_plan: skillPlanSchema.optional(),
     inline_plan: inlinePlanMetadataSchema.optional(),
+    user_message_id: z.string().optional(),
+    assistant_message_id: z.string().optional(),
     selected_reason: z.string().optional(),
     confidence: z.number().min(0).max(1).optional()
   }),

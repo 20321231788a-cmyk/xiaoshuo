@@ -30,6 +30,10 @@ export type ModelRequestOptions = {
 export type ModelStreamChunk = {
   channel: "reasoning" | "answer";
   text: string;
+  /** Normalized provider terminal reason, present on the final stream item. */
+  finish_reason?: "stop" | "length" | "tool_calls" | "content_filter" | "error" | "unknown";
+  /** Original provider value, retained for trace and recovery diagnostics. */
+  provider_finish_reason?: string;
 };
 
 export type ModelCompletionResult = {
@@ -459,14 +463,30 @@ function extractDetailedDelta(payload: unknown): ModelStreamChunk[] {
       ...normalizeContent(message?.content),
       ...normalizeContent(record?.text)
     ].join("");
-    if (reasoning) chunks.push({ channel: "reasoning", text: reasoning });
-    if (answer) chunks.push({ channel: "answer", text: answer });
+    const providerFinishReason = String(record?.finish_reason || "").trim();
+    const finishReason = normalizeFinishReason(providerFinishReason);
+    if (reasoning) chunks.push({ channel: "reasoning", text: reasoning, ...(finishReason ? { finish_reason: finishReason, provider_finish_reason: providerFinishReason } : {}) });
+    if (answer) chunks.push({ channel: "answer", text: answer, ...(finishReason ? { finish_reason: finishReason, provider_finish_reason: providerFinishReason } : {}) });
+    if (!reasoning && !answer && finishReason) {
+      chunks.push({ channel: "answer", text: "", finish_reason: finishReason, provider_finish_reason: providerFinishReason });
+    }
   }
   if (!chunks.length) {
     const answer = extractTopLevelText(payload);
     if (answer) chunks.push({ channel: "answer", text: answer });
   }
   return chunks;
+}
+
+function normalizeFinishReason(value: string): ModelStreamChunk["finish_reason"] | undefined {
+  const normalized = value.toLowerCase();
+  if (!normalized) return undefined;
+  if (["stop", "end_turn", "completed"].includes(normalized)) return "stop";
+  if (["length", "max_tokens", "max_output_tokens"].includes(normalized)) return "length";
+  if (["tool_calls", "function_call"].includes(normalized)) return "tool_calls";
+  if (["content_filter", "safety"].includes(normalized)) return "content_filter";
+  if (["error", "failed"].includes(normalized)) return "error";
+  return "unknown";
 }
 
 function parseStreamLinePayload(line: string): { chunks: ModelStreamChunk[]; usage?: ModelUsage } | null {

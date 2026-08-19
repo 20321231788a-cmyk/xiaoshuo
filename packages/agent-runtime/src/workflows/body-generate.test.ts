@@ -109,7 +109,7 @@ describe("BodyGenerateWorkflow", () => {
     });
   });
 
-  it("commits the generated chapter when write intent is explicit", async () => {
+  it("keeps the generated chapter in a cache even when write intent is explicit", async () => {
     const workflow = new BodyGenerateWorkflow();
     const context = createWorkflowContext([
       "林默沿着石阶一步步向上，听见晨钟在群山间回荡。",
@@ -130,13 +130,13 @@ describe("BodyGenerateWorkflow", () => {
       context
     );
 
-    expect(result.saved_paths).toEqual(["02_正文/第001章.txt"]);
+    expect(result.saved_paths).toEqual([]);
     expect(result.skill_result?.data).toMatchObject({
       score: 88,
-      saved_paths: ["02_正文/第001章.txt"],
+      pending_save: true,
       deslopped: true
     });
-    expect(await fs.readFile(path.join(tempDir, "02_正文", "第001章.txt"), "utf8")).toContain("林默沿着石阶一步步向上");
+    await expect(fs.readFile(path.join(tempDir, "02_正文", "第001章.txt"), "utf8")).rejects.toThrow();
   });
 
   it("revises when GraphMemory reports blocking claims", async () => {

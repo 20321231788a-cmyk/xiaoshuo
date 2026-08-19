@@ -231,11 +231,15 @@ async function loadBooksForFusion(sourceBookIds: string[], context: WorkflowRunC
     if (!isDisassembleBookReadyForFusion(book)) {
       continue;
     }
+    const fastReportOnly = book.analysis_scope?.mode === "prefix_chapters";
     selected.push({
       ...book,
-      lore: await readDisassembleBookText(book, "lore", context, 24_000),
-      reverseOutline: await readDisassembleBookText(book, "reverse_outline", context, 24_000),
-      detailOutline: await readDisassembleBookText(book, "detail_outline", context, 24_000),
+      // A new fast run deliberately leaves legacy artefacts on disk but does
+      // not use them as inputs.  This avoids mixing stale 20 万字 results into
+      // the four-section report after the source has been re-analysed.
+      lore: fastReportOnly ? "" : await readDisassembleBookText(book, "lore", context, 24_000),
+      reverseOutline: fastReportOnly ? "" : await readDisassembleBookText(book, "reverse_outline", context, 24_000),
+      detailOutline: fastReportOnly ? "" : await readDisassembleBookText(book, "detail_outline", context, 24_000),
       report: await readDisassembleBookText(book, "report", context, 80_000)
     });
   }
@@ -245,7 +249,9 @@ async function loadBooksForFusion(sourceBookIds: string[], context: WorkflowRunC
 function isDisassembleBookReadyForFusion(book: DisassembleBookManifest & { legacy?: boolean }): boolean {
   // 旧项目可能只有设定与反向细纲，没有新版本的报告字段；允许其继续融梗，
   // 新导入流程仍只有生成报告后才会把 status 标记为 ready。
-  return book.status === "ready" && Boolean(book.paths.lore && book.paths.reverse_outline);
+  return book.status === "ready" && Boolean(
+    book.paths.report || (book.paths.lore && book.paths.reverse_outline)
+  );
 }
 
 async function recordSkillExchange(

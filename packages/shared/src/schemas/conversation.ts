@@ -113,6 +113,13 @@ export const conversationMessageSchema = z
   .object({
     id: z.string(),
     role: z.enum(["user", "assistant", "system"]),
+    // These are deliberately optional: existing project conversations predate
+    // the run-aware loop and must continue to load without a data migration.
+    parent_message_id: z.string().optional(),
+    run_id: z.string().optional(),
+    turn_id: z.string().optional(),
+    status: z.enum(["pending", "running", "completed", "error", "cancelled"]).optional(),
+    finish_reason: z.string().optional(),
     content: z.string(),
     reasoning_content: z.string().optional(),
     parts: z.array(conversationMessagePartSchema).optional(),

@@ -34,7 +34,7 @@ type AnalysisArtifactId = "report" | "source" | "detail_outline" | "reverse_outl
 type AnalysisArtifact = { id: AnalysisArtifactId; label: string; path: string };
 
 function isReadyForFusion(book: DisassemblyBookSummary): boolean {
-  return Boolean(!book.legacy && book.status === "ready" && book.paths.report && book.paths.reverse_outline && book.paths.lore);
+  return Boolean(book.status === "ready" && (book.paths.report || (book.paths.reverse_outline && book.paths.lore)));
 }
 
 function primaryBookPath(book: DisassemblyBookSummary | null): string {
@@ -64,17 +64,26 @@ export function DisassemblyProductPage({
   const [fusionPreview, setFusionPreview] = useState<{ text: string; fusionId: string } | null>(null);
   const [applyingFusion, setApplyingFusion] = useState(false);
 
-  const books = controller.disassemblyBooks.filter((book) => !book.legacy);
+  // Keep historical split books visible and available to fusion.  A fast run
+  // only changes the active outputs of the book currently being re-analysed.
+  const books = controller.disassemblyBooks;
   const fusionReadyBooks = books.filter(isReadyForFusion);
   const selectedBook = books.find((book) => book.id === disassemblyUi.selectedBookId) || books[0] || null;
   const selectedFusionBooks = fusionReadyBooks.filter((book) => disassemblyUi.fusionBookIds.includes(book.id));
-  const allAnalysisArtifacts: AnalysisArtifact[] = selectedBook ? [
-    { id: "report", label: "拆书报告", path: selectedBook.paths.report || "" },
-    { id: "source", label: "原始文本", path: selectedBook.paths.source || selectedBook.source_path || "" },
-    { id: "detail_outline", label: "章节细纲", path: selectedBook.paths.detail_outline || "" },
-    { id: "reverse_outline", label: "逆向大纲", path: selectedBook.paths.reverse_outline || "" },
-    { id: "lore", label: "设定提取", path: selectedBook.paths.lore || "" }
-  ] : [];
+  const allAnalysisArtifacts: AnalysisArtifact[] = selectedBook
+    ? selectedBook.analysis_scope?.mode === "prefix_chapters"
+      ? [
+        { id: "report", label: "拆书报告", path: selectedBook.paths.report || "" },
+        { id: "source", label: "原始文本", path: selectedBook.paths.source || selectedBook.source_path || "" }
+      ]
+      : [
+        { id: "report", label: "拆书报告", path: selectedBook.paths.report || "" },
+        { id: "source", label: "原始文本", path: selectedBook.paths.source || selectedBook.source_path || "" },
+        { id: "detail_outline", label: "章节细纲", path: selectedBook.paths.detail_outline || "" },
+        { id: "reverse_outline", label: "逆向大纲", path: selectedBook.paths.reverse_outline || "" },
+        { id: "lore", label: "设定提取", path: selectedBook.paths.lore || "" }
+      ]
+    : [];
   const analysisArtifacts = allAnalysisArtifacts.filter((item) => item.path);
 
   useEffect(() => {
@@ -104,7 +113,7 @@ export function DisassemblyProductPage({
       conversation_id: selectedBook.conversation_id || "",
       source_book_id: selectedBook.id,
       book_title: selectedBook.title,
-      instruction: "一键拆解前20万字结构与黄金开篇节奏，包含跨界完整章节",
+      instruction: "一键拆解前100章：逐章一句剧情、每10章阶段总结、主角成长弧光、主要角色配置和主要设定。",
       write_result: true,
       attachment_ids: []
     } as any);
@@ -221,15 +230,15 @@ export function DisassemblyProductPage({
       <div className="content-head">
         <div>
           <h1>拆书工作台</h1>
-          <p>导入参考作品，提取结构、人物、节奏和可迁移的写作方法。</p>
+          <p>导入参考作品，极速拆解前100章的剧情、主角成长、角色配置和主要设定。</p>
         </div>
         <div className="content-actions">
           <label className="button secondary compact" style={{ cursor: "pointer" }}>
             <Upload size={15} /> 导入文本
             <input type="file" onChange={handleUploadBook} style={{ display: "none" }} />
           </label>
-          <button className="button primary" type="button" onClick={() => void runDisassemble()} disabled={!selectedBook || Boolean(disassemblyTask && !isTerminalTask(disassemblyTask.status)) || controller.operationsBusy}>
-            <Sparkles size={15} /> 一键拆解
+          <button className="button primary" type="button" onClick={() => void runDisassemble()} disabled={!selectedBook || selectedBook.legacy || Boolean(disassemblyTask && !isTerminalTask(disassemblyTask.status)) || controller.operationsBusy}>
+            <Sparkles size={15} /> 拆解前100章
           </button>
         </div>
       </div>
@@ -333,7 +342,9 @@ export function DisassemblyProductPage({
                   <h2>{selectedBook.title}</h2>
                     <p style={{ fontSize: "12px", color: "var(--muted)" }}>
                       {selectedBook.analysis_scope
-                        ? `已分析前${Math.round(selectedBook.analysis_scope.requested_chars / 10_000)}万字（实际 ${selectedBook.analysis_scope.actual_chars.toLocaleString()} 字，含跨界完整章）`
+                        ? selectedBook.analysis_scope.mode === "prefix_chapters"
+                          ? `已分析前${selectedBook.analysis_scope.requested_chapters || 100}章（实际 ${selectedBook.analysis_scope.actual_chapters || 0} 章，第${selectedBook.analysis_scope.first_chapter || 1}-${selectedBook.analysis_scope.last_chapter || selectedBook.analysis_scope.actual_chapters || 1}章）`
+                          : `已分析前${Math.round((selectedBook.analysis_scope.requested_chars || 0) / 10_000)}万字（实际 ${selectedBook.analysis_scope.actual_chars.toLocaleString()} 字，含跨界完整章）`
                         : `${analysisArtifacts.length} 份项目资料可用`}
                     </p>
                 </div>
@@ -359,7 +370,9 @@ export function DisassemblyProductPage({
                   <div className="analysis-summary" style={{ background: "var(--stone-deep)", padding: "12px", borderRadius: "6px", marginBottom: "15px" }}>
                     <h3 style={{ fontSize: "14px", marginBottom: "6px" }}>拆解产物</h3>
                     <p style={{ fontSize: "12px", color: "var(--muted)", lineHeight: "1.6" }}>
-                      已生成 {analysisArtifacts.length} 份可用资料。选择上方标签查看文件位置，或直接提取其中可复用的写作方法。
+                      {selectedBook.analysis_scope?.mode === "prefix_chapters"
+                        ? "报告固定包含前100章剧情、主角成长弧光、主要角色配置和主要设定四个板块。"
+                        : `已生成 ${analysisArtifacts.length} 份可用资料。选择上方标签查看文件位置，或直接提取其中可复用的写作方法。`}
                     </p>
                   </div>
                 ) : (() => {
@@ -469,7 +482,12 @@ export function DisassemblyProductPage({
 }
 
 function bookStatusLabel(book: DisassemblyBookSummary): string {
-  if (book.status === "ready") return book.analysis_scope?.truncated ? "已完成前20万字拆解" : "拆解完成";
+  if (book.status === "ready") {
+    if (book.analysis_scope?.mode === "prefix_chapters") {
+      return book.analysis_scope.truncated ? "已完成前100章拆解" : "拆解完成";
+    }
+    return book.analysis_scope?.truncated ? "已完成前20万字拆解" : "拆解完成";
+  }
   if (book.status === "analyzing") return "正在拆解";
   if (book.status === "failed") return book.error ? `拆解失败：${book.error}` : "拆解失败";
   if (book.status === "cancelled") return "拆解已取消，可继续拆解";

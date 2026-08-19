@@ -1,11 +1,16 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { DocumentService } from "@xiaoshuo/document-service";
 import { generatedCacheMetaSchema, generatedSavePlanSchema, type GeneratedCacheMeta, type GeneratedSavePlan } from "@xiaoshuo/shared";
 
 const CACHE_ROOT_REL = "00_设定集/.agent/generated_cache";
-const CONTENT_NAME = "content.txt";
+// Generated material is a recoverable draft, not a project source document.
+// Markdown preserves headings/lists from outlines and makes the cache useful
+// when a run needs to be continued after a transport/model failure.
+const CONTENT_NAME = "content.md";
+const LEGACY_CONTENT_NAME = "content.txt";
 const METADATA_NAME = "metadata.json";
 
 const DEFAULT_SETTLED_CACHE_RETENTION_SECONDS = 7 * 24 * 60 * 60;
@@ -26,9 +31,23 @@ export type CreateCacheOptions = {
   skill_id?: string;
   mode?: "replace" | "append";
   conversation_id?: string;
+  message_id?: string;
+  run_id?: string;
   summary?: string;
   transient?: boolean;
   save_plan?: GeneratedSavePlan;
+};
+
+/**
+ * Links a cache to the durable conversation turn that owns it.  A cache can
+ * be created by a lower-level skill before the outer conversation loop has
+ * persisted its assistant message, so this is intentionally a late binding
+ * operation rather than relying on a renderer-side association.
+ */
+export type CacheAssociation = {
+  conversation_id?: string;
+  message_id?: string;
+  run_id?: string;
 };
 
 export type CommitOptions = {
@@ -94,7 +113,11 @@ export class GeneratedCacheService {
     await fs.writeFile(contentPath, "", "utf8");
 
     const normalizedTargets = this.normalizePaths(options.target_paths || []);
-    const relativeCachePath = path.posix.relative(this.projectRoot, contentPath);
+    const targetHashes = Object.fromEntries(await Promise.all(normalizedTargets.map(async (targetPath) => {
+      const current = await this.documentService.readRawText(targetPath, 5_000_000).catch(() => "");
+      return [targetPath, contentHash(current)] as const;
+    })));
+    const relativeCachePath = path.relative(this.projectRoot, contentPath).replace(/\\/g, "/");
 
     const meta: GeneratedCacheMeta = {
       cache_id: cacheId,
@@ -103,6 +126,10 @@ export class GeneratedCacheService {
       skill_id: options.skill_id || "",
       mode: options.mode || "replace",
       conversation_id: options.conversation_id || "",
+      message_id: options.message_id || "",
+      run_id: options.run_id || "",
+      content_hash: "",
+      target_hashes: targetHashes,
       summary: options.summary || "",
       target_paths: normalizedTargets,
       cache_path: relativeCachePath,
@@ -141,18 +168,31 @@ export class GeneratedCacheService {
     }
   }
 
+  /** Lists readable cache metadata for durable-run recovery and review UI. */
+  async list(): Promise<GeneratedCacheMeta[]> {
+    const root = this.getCacheRoot();
+    const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
+    const records = await Promise.all(entries
+      .filter((entry) => entry.isDirectory() && /^[a-f0-9]{32}$/.test(entry.name))
+      .map((entry) => this.get(entry.name).catch(() => null)));
+    return records
+      .filter((record): record is GeneratedCacheMeta => Boolean(record))
+      .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+  }
+
   async append(cacheId: string, text: string): Promise<GeneratedCacheMeta> {
     if (!text) {
       return this.get(cacheId);
     }
 
     const meta = await this.ensurePending(cacheId);
-    const contentPath = this.getContentPath(cacheId);
+    const contentPath = await this.resolveReadableContentPath(cacheId);
 
     await fs.mkdir(path.dirname(contentPath), { recursive: true });
     await fs.appendFile(contentPath, text, "utf8");
 
     meta.chars = (meta.chars || 0) + text.length;
+    meta.content_hash = contentHash(await fs.readFile(contentPath, "utf8"));
     meta.updated_at = this.now();
 
     await this.writeMeta(cacheId, meta);
@@ -161,11 +201,12 @@ export class GeneratedCacheService {
 
   async replace(cacheId: string, text: string): Promise<GeneratedCacheMeta> {
     const meta = await this.ensurePending(cacheId);
-    const contentPath = this.getContentPath(cacheId);
+    const contentPath = await this.resolveReadableContentPath(cacheId);
 
     await atomicWrite(contentPath, text || "");
 
     meta.chars = (text || "").length;
+    meta.content_hash = contentHash(text || "");
     meta.updated_at = this.now();
 
     await this.writeMeta(cacheId, meta);
@@ -174,7 +215,7 @@ export class GeneratedCacheService {
 
   async readContent(cacheId: string): Promise<string> {
     await this.get(cacheId);
-    const contentPath = this.getContentPath(cacheId);
+    const contentPath = await this.resolveReadableContentPath(cacheId);
     const exists = await fs.stat(contentPath).then((s) => s.isFile()).catch(() => false);
     if (!exists) {
       throw new Error("生成缓存正文不存在或已被清理");
@@ -239,6 +280,55 @@ export class GeneratedCacheService {
     meta.save_plan = normalizedPlan;
     meta.target_paths = normalizedPlan.target_paths;
     meta.mode = normalizedPlan.mode;
+    // A streaming cache is deliberately created before the model has chosen
+    // the final destination. Refresh the optimistic-concurrency baseline once
+    // the real save plan is available, otherwise a later confirmation would
+    // compare the wrong (or empty) target set.
+    const hashTargets = this.normalizePaths([
+      ...normalizedPlan.target_paths,
+      ...normalizedPlan.segments.map((segment) => segment.target_path)
+    ]);
+    meta.target_hashes = Object.fromEntries(await Promise.all(hashTargets.map(async (targetPath) => {
+      const current = await this.documentService.readRawText(targetPath, 5_000_000).catch(() => "");
+      return [targetPath, contentHash(current)] as const;
+    })));
+    meta.updated_at = this.now();
+    await this.writeMeta(cacheId, meta);
+    return meta;
+  }
+
+  async associate(cacheId: string, association: CacheAssociation): Promise<GeneratedCacheMeta> {
+    const meta = await this.get(cacheId);
+    const fields: Array<keyof CacheAssociation> = ["conversation_id", "message_id", "run_id"];
+    // Streaming first binds the provisional assistant message so reloads can
+    // find the cache while a response is in flight. Once that same durable run
+    // finishes, conversation persistence may replace the provisional record
+    // with its final message id. That one identity refresh is safe only when
+    // both the conversation and run are already the same; never let a cache
+    // move across turns merely because a caller supplies another message id.
+    const requestedConversationId = String(association.conversation_id || "").trim();
+    const requestedRunId = String(association.run_id || "").trim();
+    const canRefreshMessageId = Boolean(
+      requestedConversationId
+      && requestedRunId
+      && meta.conversation_id === requestedConversationId
+      && meta.run_id === requestedRunId
+    );
+    for (const field of fields) {
+      const requested = String(association[field] || "").trim();
+      if (!requested) {
+        continue;
+      }
+      const current = String(meta[field] || "").trim();
+      if (current && current !== requested) {
+        if (field === "message_id" && canRefreshMessageId) {
+          (meta as Record<string, unknown>)[field] = requested;
+          continue;
+        }
+        throw new Error(`生成缓存已关联到不同的${field}`);
+      }
+      (meta as Record<string, unknown>)[field] = requested;
+    }
     meta.updated_at = this.now();
     await this.writeMeta(cacheId, meta);
     return meta;
@@ -528,6 +618,19 @@ export class GeneratedCacheService {
     return path.join(this.getCacheDir(cacheId), CONTENT_NAME);
   }
 
+  /** Read old caches created before content.md without migrating user data. */
+  private async resolveReadableContentPath(cacheId: string): Promise<string> {
+    const preferred = this.getContentPath(cacheId);
+    if (await fs.stat(preferred).then((entry) => entry.isFile()).catch(() => false)) {
+      return preferred;
+    }
+    const legacy = path.join(this.getCacheDir(cacheId), LEGACY_CONTENT_NAME);
+    if (await fs.stat(legacy).then((entry) => entry.isFile()).catch(() => false)) {
+      return legacy;
+    }
+    return preferred;
+  }
+
   private getMetaPath(cacheId: string): string {
     return path.join(this.getCacheDir(cacheId), METADATA_NAME);
   }
@@ -548,8 +651,10 @@ export class GeneratedCacheService {
   }
 
   private async deleteContent(cacheId: string): Promise<void> {
-    const contentPath = this.getContentPath(cacheId);
-    await fs.rm(contentPath, { force: true });
+    await Promise.all([
+      fs.rm(this.getContentPath(cacheId), { force: true }),
+      fs.rm(path.join(this.getCacheDir(cacheId), LEGACY_CONTENT_NAME), { force: true })
+    ]);
   }
 
   private async isCacheDirExpired(
@@ -605,6 +710,10 @@ export class GeneratedCacheService {
       return 0;
     }
   }
+}
+
+function contentHash(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 async function atomicWrite(targetPath: string, text: string): Promise<void> {

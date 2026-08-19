@@ -58,7 +58,7 @@ function context(): WorkflowRunContext {
 }
 
 describe("StyleGenreGenerateWorkflow", () => {
-  it("replaces both libraries atomically when the command explicitly asks to save", async () => {
+  it("stages both libraries in markdown caches even when the command asks to save", async () => {
     const oldStylePath = path.join(tempDir, "00_设定集", "风格库", "写作风格.txt");
     await fs.mkdir(path.dirname(oldStylePath), { recursive: true });
     await fs.writeFile(oldStylePath, "错误的大纲文字", "utf8");
@@ -72,10 +72,24 @@ describe("StyleGenreGenerateWorkflow", () => {
       attachment_ids: []
     }, context());
 
-    expect(result.saved_paths).toHaveLength(7);
-    expect(result.skill_result?.data).toMatchObject({ mode: "replace", style_records: expect.any(Number), genre_records: expect.any(Number) });
-    await expect(fs.readFile(oldStylePath, "utf8")).resolves.not.toContain("错误的大纲文字");
-    await expect(fs.readFile(path.join(tempDir, "00_设定集", ".agent", "libraries", "style.v1.jsonl"), "utf8")).resolves.toContain("都市高武");
-    await expect(fs.readFile(path.join(tempDir, "00_设定集", ".agent", "libraries", "genre.v1.jsonl"), "utf8")).resolves.toContain("等级体系");
+    expect(result.saved_paths).toEqual([]);
+    expect(result.skill_result?.data).toMatchObject({
+      mode: "replace",
+      style_records: expect.any(Number),
+      genre_records: expect.any(Number),
+      requires_confirmation: true
+    });
+    const rows = (result.skill_result?.data?.results || []) as Array<Record<string, unknown>>;
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => String(row.skill_id)).sort()).toEqual(["genre_generate", "style_extract"]);
+    const cache = new GeneratedCacheService({ projectRoot: tempDir });
+    for (const row of rows) {
+      const cacheId = String(row.cache_id || "");
+      expect(cacheId).toBeTruthy();
+      await expect(cache.readContent(cacheId)).resolves.toContain(String(row.skill_id) === "style_extract" ? "写作风格" : "题材规则");
+    }
+    await expect(fs.readFile(oldStylePath, "utf8")).resolves.toBe("错误的大纲文字");
+    await expect(fs.access(path.join(tempDir, "00_设定集", ".agent", "libraries", "style.v1.jsonl"))).rejects.toThrow();
+    await expect(fs.access(path.join(tempDir, "00_设定集", ".agent", "libraries", "genre.v1.jsonl"))).rejects.toThrow();
   });
 });

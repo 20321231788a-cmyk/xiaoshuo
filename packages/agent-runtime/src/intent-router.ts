@@ -140,7 +140,7 @@ const BUILTIN_ROUTE_SKILLS: SkillDefinition[] = [
   makeBuiltinSkill("nuwa_style_distill", "女娲风格蒸馏", "蒸馏文风档案并复用写作风格。", "workflow", ["00_设定集/.agent/style_distillation/current.json"]),
   makeBuiltinSkill("book_fusion", "融梗", "从多本已拆书籍中融合核心设定和剧情骨架。", "workflow", ["00_设定集/融梗方案"]),
   makeBuiltinSkill("disassemble_book", "拆书", "拆解原文、样文或小说。", "workflow", ["00_设定集/拆书库"]),
-  makeBuiltinSkill("continue_disassemble", "继续拆书", "继续拆书并扩展拆书细纲。", "workflow", ["01_大纲/拆书细纲.txt"]),
+  makeBuiltinSkill("continue_disassemble", "继续拆书", "从缺失检查点继续前100章拆书报告。", "workflow", ["00_设定集/拆书库"]),
   makeBuiltinSkill("scan_pits", "扫描伏笔", "从正文中提取需要跟踪的伏笔并写入账本。", "job", []),
   makeBuiltinSkill("consistency_check", "一致性检查", "检查正文是否违背设定、章纲、风格和题材约束。", "job", [])
 ];

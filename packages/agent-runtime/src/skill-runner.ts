@@ -13,7 +13,7 @@ import { assembleContext } from "./kernel/context-assembler.js";
 import type { ContextBlock } from "./kernel/context-block.js";
 import { scheduleModelContextBlocks } from "./context-scheduling.js";
 import { ProjectFileResolver } from "./kernel/project-file-resolver.js";
-import { createGeneratedLibraryDraft, recordsFromGeneratedSections } from "./library-draft.js";
+import { recordsFromGeneratedSections } from "./library-draft.js";
 import { commitGeneratedStoryPlanning, isStoryPlanningGeneratedSkillId, type StoryPlanningGeneratedSkillId } from "./generated-story-planning.js";
 import { isSectionedGeneratedSkillId, sectionedGeneratedTargetPaths } from "./sectioned-generated-save.js";
 import { buildStyleGenreConstraintBlock } from "./style-genre-context.js";
@@ -195,7 +195,7 @@ export class PromptSkillRunner {
     const deterministicCacheId = String(options.deterministicCacheId || "").trim();
     let deterministicText = "";
     const initial = deterministicCacheId
-      ? await this.startDeterministicStreamCache(deterministicCacheId, skill, payload, initialTargets)
+      ? await this.startDeterministicStreamCache(deterministicCacheId, skill, payload, initialTargets, options)
       : await session.start({
         source: "skill_stream",
         target_paths: initialTargets,
@@ -300,7 +300,8 @@ export class PromptSkillRunner {
     cacheId: string,
     skill: SkillDefinition,
     payload: SkillRunRequest,
-    targetPaths: string[]
+    targetPaths: string[],
+    options: PromptSkillRunOptions
   ): Promise<{ cache_id: string; cache_path: string; chars: number }> {
     const existing = await this.cache.get(cacheId).catch(() => null);
     if (existing && existing.status !== "pending") {
@@ -312,6 +313,7 @@ export class PromptSkillRunner {
       skill_id: skill.id,
       mode: "replace",
       conversation_id: payload.conversation_id,
+      run_id: options.runId || "",
       summary: `Skill 流式缓存：${skill.name}`
     });
     if (meta.skill_id && meta.skill_id !== skill.id) {
@@ -647,6 +649,7 @@ export class PromptSkillRunner {
                 skill_id: skill.id,
                 mode: savePlan.mode,
                 conversation_id: payload.conversation_id,
+                run_id: options.runId || "",
                 summary: `Skill 结果缓存：${skill.name}`,
                 save_plan: savePlan
               })
@@ -656,6 +659,7 @@ export class PromptSkillRunner {
             skill_id: skill.id,
             mode: savePlan.mode,
             conversation_id: payload.conversation_id,
+            run_id: options.runId || "",
             summary: `Skill 结果缓存：${skill.name}`,
             save_plan: savePlan
               });
@@ -665,7 +669,11 @@ export class PromptSkillRunner {
 
       const shouldAutoCommit = await this.savePlanner.shouldAutoCommit(savePlan);
       if (isSectionedGeneratedSkillId(skill.id)) {
-        const directLibrarySave = Boolean(payload.write_result && shouldAutoCommit && hasExplicitLibrarySave(payload.instruction));
+        // Main style/genre/lore requests are all cache-first.  The sole
+        // exception is the post-save automatic extraction launched by a
+        // confirmed outline/detail/chapter outline; it is a secondary,
+        // idempotent merge rather than a user-facing generation result.
+        const directLibrarySave = isAutomaticLoreExtraction(skill.id, payload);
         if (directLibrarySave) {
           const committed = await this.commitGeneratedLibrary(skill.id, finalResult, payload.instruction);
           savedPaths = committed.projection_paths;
@@ -681,24 +689,16 @@ export class PromptSkillRunner {
           data.requires_confirmation = false;
           await this.cache.markCommitted(entry.cache_id, savedPaths, { cleanupContent: true });
         } else {
-          const draft = await createGeneratedLibraryDraft({
-            projectRoot: this.projectRoot,
-            cacheId: entry.cache_id,
-            skillId: skill.id,
-            result: finalResult,
-            mode: savePlan.mode,
-            source: `prompt_skill:${skill.id}`
-          });
-          const draftPath = draft ? `00_设定集/.agent/library-drafts/${draft.draft_id}.jsonl` : "";
-          await this.cache.markCommitted(entry.cache_id, draftPath ? [draftPath] : [], { cleanupContent: false });
-          data.library_draft = draft ? {
-            draft_id: draft.draft_id,
-            domain: draft.domain,
-            records: draft.records.length,
-            requires_confirmation: true
-          } : undefined;
-          data.pending_save = false;
-          data.requires_confirmation = Boolean(draft);
+          const meta = await this.cache.get(entry.cache_id);
+          data.pending_save = true;
+          data.target_paths = targetPaths;
+          data.target_path = targetPaths[0] || "";
+          data.result = finalResult;
+          data.default_mode = savePlan.mode;
+          data.cache_id = entry.cache_id;
+          data.cache_path = meta.cache_path;
+          data.cache_chars = meta.chars;
+          data.save_plan = meta.save_plan || savePlan;
         }
       } else if (shouldAutoCommit && !options.deferAutoCommit) {
         throwIfAborted(options.signal);
@@ -1173,12 +1173,14 @@ function shouldOverwriteLore(instruction: string): boolean {
   );
 }
 
-function hasExplicitLibrarySave(instruction: string): boolean {
-  return /(保存|保存到|写入|写进|写到|落盘|落到|同步到)/.test(instruction || "");
-}
-
 function isReplaceLibraryInstruction(instruction: string): boolean {
   return /(创建|重建|替换|覆盖)/.test(instruction || "");
+}
+
+function isAutomaticLoreExtraction(skillId: string, payload: SkillRunRequest): boolean {
+  return skillId === "lore_extract"
+    && payload.write_result === true
+    && /自动提取设定并合并写入保存/.test(payload.instruction || "");
 }
 
 function mergeLibraryRecords(existing: ProjectLibraryRecord[], incoming: ProjectLibraryRecord[]): ProjectLibraryRecord[] {

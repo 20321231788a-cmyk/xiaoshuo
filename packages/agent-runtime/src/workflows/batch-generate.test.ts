@@ -97,10 +97,11 @@ describe("BatchGenerateWorkflow", () => {
 
     expect(calls).toHaveLength(2);
     expect(calls.map((item) => item.content)).toEqual([
-      "生成第1章正文并写入文件。原始批量指令：生成第1章到第2章正文并写入文件",
-      "生成第2章正文并写入文件。原始批量指令：生成第1章到第2章正文并写入文件"
+      "生成第1章正文。原始批量指令：生成第1章到第2章正文并写入文件",
+      "生成第2章正文。原始批量指令：生成第1章到第2章正文并写入文件"
     ]);
-    expect(result.saved_paths).toEqual(["02_正文/第001章.txt", "02_正文/第002章.txt"]);
+    expect(result.saved_paths).toEqual([]);
+    expect(result.skill_result?.data).toMatchObject({ pending_review: true });
     expect(result.skill_result?.data?.chapters).toEqual([1, 2]);
     expect(result.web_search_sources).toEqual([{ title: "素材", url: "https://example.test/source" }]);
   });
@@ -151,7 +152,7 @@ describe("BatchGenerateWorkflow", () => {
     ).rejects.toMatchObject({ name: "AbortError" });
 
     expect(calls).toHaveLength(1);
-    expect(calls[0]?.content).toMatch(/^生成第1章正文并写入文件。/);
+    expect(calls[0]?.content).toMatch(/^生成第1章正文。/);
   });
 
   it("resumes the same durable run at the first unchecked chapter", async () => {
@@ -212,12 +213,39 @@ describe("BatchGenerateWorkflow", () => {
       recovered.completeRun(resumed, response);
 
       expect(calls).toEqual([1, 2, 2]);
-      expect(response.saved_paths).toEqual(["02_正文/第001章.txt", "02_正文/第002章.txt"]);
+      expect(response.saved_paths).toEqual([]);
       expect(recovered.getRun(firstExecution.run_id)).toMatchObject({ run_id: firstExecution.run_id, status: "completed" });
       expect(recovered.listEvents(firstExecution.run_id).filter((event) => event.event_type === "workflow.unit.completed")).toHaveLength(2);
     } finally {
       recovered.close();
     }
+  });
+
+  it("retries a transient chapter failure without regenerating completed chapters", async () => {
+    const calls: number[] = [];
+    let retries = 0;
+    const workflow = new BatchGenerateWorkflow({
+      id: "body_generate",
+      async runAgent(request): Promise<AgentRunResponse> {
+        const chapter = Number(/第(\d+)章/.exec(request.content || "")?.[1] || 0);
+        calls.push(chapter);
+        if (chapter === 2 && retries++ === 0) throw new Error("network timeout");
+        return chapterResponse(chapter, `02_正文/第${String(chapter).padStart(3, "0")}章.txt`);
+      }
+    });
+
+    await workflow.runAgent({
+      conversation_id: "",
+      content: "生成第1章到第2章正文",
+      current_path: "",
+      selection: "",
+      project_context_hint: "",
+      skill_id: "batch_generate",
+      attachment_ids: [],
+      max_attempts: 2
+    }, createWorkflowContext());
+
+    expect(calls).toEqual([1, 2, 2]);
   });
 });
 

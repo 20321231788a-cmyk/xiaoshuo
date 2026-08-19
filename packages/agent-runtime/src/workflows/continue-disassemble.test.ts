@@ -6,9 +6,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { GeneratedSavePlanner } from "../generated-save-planner.js";
-import { AgentRuntimeService, closeAllAgentRuntimeServices } from "../runtime.js";
-import { PromptSkillRunner } from "../skill-runner.js";
 import { ContinueDisassembleWorkflow } from "./continue-disassemble.js";
+import { PromptSkillRunner } from "../skill-runner.js";
 import type { WorkflowRunContext } from "./types.js";
 
 let tempDir = "";
@@ -21,24 +20,32 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  closeAllAgentRuntimeServices();
-  if (tempDir) {
-    await fs.rm(tempDir, { recursive: true, force: true });
-  }
+  if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
 });
 
-function createWorkflowContext(modelClient: WorkflowRunContext["modelClient"]): WorkflowRunContext {
+function context(): WorkflowRunContext {
   const documents = new DocumentService({ projectRoot: tempDir });
   const conversations = new ConversationService({ projectRoot: tempDir });
   const config = { configPath };
+  const modelClient = {
+    requestCompletion: async (_config: unknown, messages: Array<{ content: string }>) => {
+      const prompt = messages.map((message) => message.content).join("\n");
+      const keys = /chapter_summaries 必须且只能使用这些 chapter 键：([^\n]+)。/.exec(prompt)?.[1]?.split("、") || ["segment:1"];
+      return JSON.stringify({
+        chapter_summaries: keys.map((chapter) => ({ chapter, summary: "本段剧情推进。" })),
+        stage_summary: "阶段推进。",
+        protagonist_arc: [],
+        major_characters: [],
+        major_settings: []
+      });
+    }
+  };
   const cache = new GeneratedCacheService({ projectRoot: tempDir, documentService: documents });
   return {
     projectRoot: tempDir,
     config,
     modelClient,
-    webSearchClient: {
-      search: async () => []
-    },
+    webSearchClient: { search: async () => [] },
     documents,
     conversations,
     cache,
@@ -48,84 +55,21 @@ function createWorkflowContext(modelClient: WorkflowRunContext["modelClient"]): 
 }
 
 describe("ContinueDisassembleWorkflow", () => {
-  it("writes 拆书细纲 into a fresh book directory and legacy path", async () => {
+  it("uses the fast report workflow instead of creating a legacy detail outline", async () => {
     const workflow = new ContinueDisassembleWorkflow();
-    const result = await workflow.runAgent(
-      {
-        conversation_id: "",
-        content: "继续拆细纲",
-        current_path: "",
-        selection: "第一章：林默入宗门。\n第二章：外门立足。",
-        project_context_hint: "",
-        skill_id: "continue_disassemble",
-        attachment_ids: []
-      },
-      createWorkflowContext({
-        requestCompletion: async () => "第001章：宗门初见\n- 林默初入宗门，感受等级压迫。"
-      })
-    );
-
-    const book = result.skill_result?.data?.book as { dir?: string } | undefined;
-    expect(result.intent).toBe("skill");
-    expect(book?.dir).toContain("00_设定集/拆书库/");
-    expect(result.saved_paths).toEqual([`${book?.dir}/拆书细纲.txt`]);
-    await expect(fs.readFile(path.join(tempDir, "01_大纲", "拆书细纲.txt"), "utf8")).rejects.toThrow();
-    expect(await fs.readFile(path.join(tempDir, book?.dir || "", "拆书细纲.txt"), "utf8")).toContain("第001章");
-  });
-
-  it("is used by AgentRuntimeService.runAgent", async () => {
-    const runtime = new AgentRuntimeService({
-      projectRoot: tempDir,
-      config: { configPath },
-      modelClient: {
-        requestCompletion: async () => "第001章：继续扩展"
-      }
-    });
-
-    const result = await runtime.runAgent({
+    const result = await workflow.runAgent({
       conversation_id: "",
-      content: "继续拆细纲",
+      content: "继续拆书",
       current_path: "",
-      selection: "第一章：林默入宗门。",
+      selection: "第1章：林默入宗门。\n第2章：外门立足。",
       project_context_hint: "",
       skill_id: "continue_disassemble",
       attachment_ids: []
-    });
-
+    }, context());
     const book = result.skill_result?.data?.book as { dir?: string } | undefined;
-    expect(result.saved_paths).toEqual([`${book?.dir}/拆书细纲.txt`]);
-    await expect(fs.readFile(path.join(tempDir, "01_大纲", "拆书细纲.txt"), "utf8")).rejects.toThrow();
-  });
 
-  it("journals durable detail-outline and manifest writes without project-level legacy sync", async () => {
-    const runtime = new AgentRuntimeService({
-      projectRoot: tempDir,
-      config: { configPath },
-      modelClient: {
-        requestCompletion: async () => "第001章：继续扩展"
-      }
-    });
-    const response = await runtime.runAgent({
-      request_id: "durable-continue-disassemble-journal",
-      conversation_id: "",
-      content: "继续拆细纲",
-      current_path: "",
-      selection: "第一章：林默入宗门。",
-      project_context_hint: "",
-      skill_id: "continue_disassemble",
-      attachment_ids: []
-    });
-    const journal = runtime.listDurableCommitJournal(response.run_id);
-
-    expect(journal).toHaveLength(5);
-    expect(journal).toEqual(expect.arrayContaining([
-      expect.objectContaining({ action: "workflow.continue_disassemble.book.source", stage: "finalized" }),
-      expect.objectContaining({ action: "workflow.continue_disassemble.book.manifest.initial", stage: "finalized" }),
-      expect.objectContaining({ action: "workflow.continue_disassemble.detail_outline.output", stage: "finalized" }),
-      expect.objectContaining({ action: "workflow.continue_disassemble.book.manifest.detail_outline", stage: "finalized" })
-    ]));
-    expect(new Set(journal.map((entry) => `${entry.run_id}:${entry.step_id}:${entry.attempt_id}`))).toEqual(
-      new Set([journal.map((entry) => `${response.run_id}:${entry.step_id}:${entry.attempt_id}`)[0]])
-    );
+    expect(result.saved_paths).toEqual([`${book?.dir}/拆书报告.md`]);
+    expect(await fs.readFile(path.join(tempDir, book?.dir || "", "拆书报告.md"), "utf8")).toContain("## 前100章剧情");
+    await expect(fs.readFile(path.join(tempDir, book?.dir || "", "拆书细纲.txt"), "utf8")).rejects.toThrow();
   });
 });

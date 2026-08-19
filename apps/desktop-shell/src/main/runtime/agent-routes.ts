@@ -150,6 +150,11 @@ export async function handleAgentRoutes(
 
       if (runRoute && request.method === "POST" && (runRoute.action === "pause" || runRoute.action === "cancel")) {
         const payload = agentRunControlRequestSchema.parse(await deps.readJsonBody(request));
+        const current = runtime.getDurableRun(runRoute.runId);
+        const expectedConversationId = String(payload.expected_conversation_id || "").trim();
+        if (expectedConversationId && current?.conversation_id !== expectedConversationId) {
+          throw Object.assign(new Error("运行不属于当前对话，已拒绝控制请求。"), { code: "RUN_CONVERSATION_MISMATCH" });
+        }
         const run = runRoute.action === "pause"
           ? runtime.pauseDurableRun(runRoute.runId, payload.operation_id, payload.expected_version)
           : runtime.cancelDurableRun(runRoute.runId, payload.operation_id, payload.expected_version);
@@ -415,6 +420,7 @@ function agentRuntimeErrorStatus(code: string): number {
     code.includes("VERSION") ||
     code.includes("CONFIRMATION_") ||
     code === "RUN_ACTIVE" ||
+    code === "RUN_CONVERSATION_MISMATCH" ||
     code === "RUN_NOT_TERMINAL" ||
     code === "RUN_JOURNAL_PENDING"
   ) {

@@ -130,7 +130,7 @@ export class AgentChatRunner {
       throwIfAborted(options.signal);
       const humanized = await this.humanizeConversationText(state.detail, reply, options);
       throwIfAborted(options.signal);
-      const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized, detailed.reasoning);
+      const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized, detailed.reasoning, state.userMessageId, options.runId, "stop");
       return this.buildResponse(intent, humanized.text, conversation, webSearchSources);
     } catch (error) {
       if (isCancellationError(error, options.signal)) {
@@ -146,7 +146,7 @@ export class AgentChatRunner {
       throwIfAborted(options.signal);
       const humanized = await this.humanizeConversationText(state.detail, reply, options);
       throwIfAborted(options.signal);
-      const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized, detailed.reasoning);
+      const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized, detailed.reasoning, state.userMessageId, options.runId, "stop");
       return this.buildResponse(intent, humanized.text, conversation, webSearchSources);
     }
   }
@@ -163,7 +163,8 @@ export class AgentChatRunner {
       type: "start",
       intent,
       conversation_id: state.detail.id,
-      skill_id: ""
+      skill_id: "",
+      user_message_id: state.userMessageId
     };
 
     const config = await this.requireModelConfig(state.detail);
@@ -175,6 +176,7 @@ export class AgentChatRunner {
     const streamDetailedCompletion = this.modelClient.streamDetailedCompletion?.bind(this.modelClient);
     const reasoningParts: string[] = [];
     const replyParts: string[] = [];
+    let finishReason: NonNullable<AgentRunResponse["finish_reason"]> = "stop";
     let stoppedPersisted = false;
     const persistStoppedReply = async () => {
       if (stoppedPersisted) {
@@ -186,13 +188,14 @@ export class AgentChatRunner {
         return;
       }
       stoppedPersisted = true;
-      await this.persistStoppedAssistantReply(state.detail.id, partial || "已停止。", webSearchSources, reasoning).catch(() => {});
+      await this.persistStoppedAssistantReply(state.detail.id, partial || "已停止。", webSearchSources, reasoning, state.userMessageId, options.runId).catch(() => {});
     };
 
     if (streamDetailedCompletion) {
       try {
         for await (const chunk of streamDetailedCompletion(config, baseMessages, config.temperature, requestOptions)) {
           throwIfAborted(options.signal);
+          if (chunk.finish_reason) finishReason = chunk.finish_reason;
           if (!chunk.text) continue;
           if (chunk.channel === "reasoning") {
             if (!state.detail.reasoning_enabled) continue;
@@ -212,8 +215,8 @@ export class AgentChatRunner {
         }
         const message = error instanceof Error ? error.message : String(error);
         if (replyParts.length || reasoningParts.length) {
-          yield { type: "error", message };
-          return;
+          await this.persistIncompleteAssistantReply(state.detail.id, replyParts.join(""), webSearchSources, reasoningParts.join(""), state.userMessageId, options.runId, message).catch(() => {});
+          throw error;
         }
         try {
           const fallback = looksGatewayTimeout(error)
@@ -264,11 +267,8 @@ export class AgentChatRunner {
         }
         const message = error instanceof Error ? error.message : String(error);
         if (replyParts.length) {
-          yield {
-            type: "error",
-            message
-          };
-          return;
+          await this.persistIncompleteAssistantReply(state.detail.id, replyParts.join(""), webSearchSources, "", state.userMessageId, options.runId, message).catch(() => {});
+          throw error;
         }
         try {
           const fallbackReply = looksGatewayTimeout(error)
@@ -348,6 +348,58 @@ export class AgentChatRunner {
       }
     }
 
+    // A provider length stop is not a completed reply. Continue the same
+    // logical assistant turn from the durable text we already received rather
+    // than re-sending the original user request and producing a duplicate.
+    let continuationAttempts = 0;
+    while (finishReason === "length" && replyParts.join("").trim() && continuationAttempts < 4) {
+      continuationAttempts += 1;
+      const before = replyParts.join("");
+      const continuationMessages = this.buildContinuationMessages(baseMessages, before);
+      let continuationReason: NonNullable<AgentRunResponse["finish_reason"]> = "stop";
+      let addedChars = 0;
+      try {
+        if (!streamDetailedCompletion) {
+          break;
+        }
+        for await (const chunk of streamDetailedCompletion(config, continuationMessages, config.temperature, requestOptions)) {
+          throwIfAborted(options.signal);
+          if (chunk.finish_reason) continuationReason = chunk.finish_reason;
+          if (!chunk.text) continue;
+          if (chunk.channel === "reasoning") {
+            if (state.detail.reasoning_enabled) {
+              reasoningParts.push(chunk.text);
+              yield { type: "delta", channel: "reasoning", text: chunk.text };
+            }
+            continue;
+          }
+          const suffix = removeRepeatedContinuationPrefix(replyParts.join(""), chunk.text);
+          if (!suffix) continue;
+          addedChars += suffix.length;
+          replyParts.push(suffix);
+          for (const visibleChunk of splitVisibleStreamText(suffix)) {
+            yield { type: "delta", channel: "answer", text: visibleChunk };
+          }
+        }
+      } catch (error) {
+        if (isCancellationError(error, options.signal)) {
+          await persistStoppedReply();
+          throw error;
+        }
+        // Keep the completed prefix. The final card can offer a deterministic
+        // “continue from breakpoint” action instead of silently restarting.
+        finishReason = "error";
+        yield { type: "error", message: error instanceof Error ? error.message : String(error) };
+        break;
+      }
+      if (!addedChars) {
+        finishReason = "error";
+        yield { type: "error", message: "续写未产生新内容，已保留现有生成结果。" };
+        break;
+      }
+      finishReason = continuationReason;
+    }
+
     if (!replyParts.length) {
       try {
         const reply = await this.completeOnce(config, baseMessages, options, requestOptions);
@@ -387,10 +439,10 @@ export class AgentChatRunner {
       }
       const humanized = await this.humanizeConversationText(state.detail, reply, options);
       throwIfAborted(options.signal);
-      const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized, reasoningParts.join(""));
+      const conversation = await this.persistAssistantReply(state.detail.id, humanized.text, webSearchSources, humanized, reasoningParts.join(""), state.userMessageId, options.runId, finishReason);
       yield {
         type: "final",
-        payload: this.buildResponse(intent, humanized.text, conversation, webSearchSources)
+        payload: this.buildResponse(intent, humanized.text, conversation, webSearchSources, finishReason)
       };
     } catch (error) {
       if (isCancellationError(error, options.signal)) {
@@ -415,6 +467,18 @@ export class AgentChatRunner {
     return reply;
   }
 
+  private buildContinuationMessages(messages: ChatCompletionMessage[], generated: string): ChatCompletionMessage[] {
+    const tail = generated.length > 12_000 ? generated.slice(-12_000) : generated;
+    return [
+      ...messages,
+      { role: "assistant", content: tail },
+      {
+        role: "user",
+        content: "上一次输出因长度限制中断。只从已有内容的最后一句继续完成，不要复述、不要重新编号，也不要解释续写过程。"
+      }
+    ];
+  }
+
   private async completeDetailedOnce(
     config: ModelConfig,
     messages: ChatCompletionMessage[],
@@ -434,7 +498,7 @@ export class AgentChatRunner {
     return { reasoning: "", answer: await this.completeOnce(config, messages, options, requestOptions) };
   }
 
-  private async prepareConversationState(payload: AgentRunRequest): Promise<{ detail: ConversationDetail }> {
+  private async prepareConversationState(payload: AgentRunRequest): Promise<{ detail: ConversationDetail; userMessageId: string }> {
     const userText = String(payload.content || "").trim();
     if (!userText) {
       throw new Error("消息内容不能为空");
@@ -472,7 +536,7 @@ export class AgentChatRunner {
       }
     });
 
-    return { detail };
+    return { detail, userMessageId: detail.messages.at(-1)?.id || "" };
   }
 
   private async humanizeConversationText(detail: ConversationDetail, reply: string, options: AgentRunOptions = {}) {
@@ -503,10 +567,18 @@ export class AgentChatRunner {
     reply: string,
     webSearchSources: WebSearchSource[] = [],
     humanizer?: { applied: boolean; error?: string },
-    reasoningContent = ""
+    reasoningContent = "",
+    parentMessageId = "",
+    runId = "",
+    finishReason = "stop"
   ): Promise<ConversationDetail> {
     let detail = await this.conversations.appendMessage(conversationId, {
       role: "assistant",
+      parent_message_id: parentMessageId,
+      run_id: runId,
+      turn_id: parentMessageId || runId,
+      status: "completed",
+      finish_reason: finishReason,
       content: String(reply || "").trim() || "已完成。",
       reasoning_content: String(reasoningContent || "").trim(),
       metadata: {
@@ -551,15 +623,49 @@ export class AgentChatRunner {
     conversationId: string,
     partialReply: string,
     webSearchSources: WebSearchSource[] = [],
-    reasoningContent = ""
+    reasoningContent = "",
+    parentMessageId = "",
+    runId = ""
   ): Promise<ConversationDetail> {
     return this.conversations.appendMessage(conversationId, {
       role: "assistant",
+      parent_message_id: parentMessageId,
+      run_id: runId,
+      turn_id: parentMessageId || runId,
+      status: "cancelled",
+      finish_reason: "error",
       content: String(partialReply || "").trim() || "已停止。",
       reasoning_content: String(reasoningContent || "").trim(),
       metadata: {
         stopped: true,
         cancelled: true,
+        ...(webSearchSources.length ? { web_search_sources: webSearchSources } : {})
+      }
+    });
+  }
+
+  private async persistIncompleteAssistantReply(
+    conversationId: string,
+    partialReply: string,
+    webSearchSources: WebSearchSource[] = [],
+    reasoningContent = "",
+    parentMessageId = "",
+    runId = "",
+    error = ""
+  ): Promise<ConversationDetail> {
+    return this.conversations.appendMessage(conversationId, {
+      role: "assistant",
+      parent_message_id: parentMessageId,
+      run_id: runId,
+      turn_id: parentMessageId || runId,
+      status: "error",
+      finish_reason: "error",
+      content: String(partialReply || "").trim() || "生成中断。",
+      reasoning_content: String(reasoningContent || "").trim(),
+      metadata: {
+        incomplete: true,
+        continuation_available: true,
+        error,
         ...(webSearchSources.length ? { web_search_sources: webSearchSources } : {})
       }
     });
@@ -775,7 +881,8 @@ export class AgentChatRunner {
     intent: Extract<AgentIntent, "chat" | "read_context">,
     reply: string,
     conversation: ConversationDetail,
-    webSearchSources: WebSearchSource[] = []
+    webSearchSources: WebSearchSource[] = [],
+    finishReason: NonNullable<AgentRunResponse["finish_reason"]> = "stop"
   ): AgentRunResponse {
     return agentRunResponseSchema.parse({
       intent,
@@ -784,7 +891,8 @@ export class AgentChatRunner {
       results: [],
       saved_paths: [],
       requires_confirmation: false,
-      web_search_sources: webSearchSources
+      web_search_sources: webSearchSources,
+      finish_reason: finishReason
     });
   }
 
@@ -1706,6 +1814,27 @@ function clipText(text: string, limit: number): string {
     return normalized;
   }
   return `${normalized.slice(0, limit).trimEnd()}\n...（已压缩）`;
+}
+
+/** Keep continuation retries from replaying the final paragraph on screen. */
+function removeRepeatedContinuationPrefix(existing: string, incoming: string): string {
+  const next = String(incoming || "");
+  if (!next) return "";
+  const left = String(existing || "");
+  const upper = Math.min(left.length, next.length, 4_000);
+  for (let size = upper; size >= 24; size -= 1) {
+    if (left.slice(-size) === next.slice(0, size)) {
+      return next.slice(size);
+    }
+  }
+  // Some providers restart from the first paragraph after a timeout. Detect
+  // that case without stripping legitimate new prose with only a short match.
+  const prefix = next.slice(0, Math.min(180, next.length));
+  if (prefix.length >= 80 && left.includes(prefix)) {
+    const boundary = next.indexOf("\n\n", 80);
+    return boundary >= 0 ? next.slice(boundary + 2) : "";
+  }
+  return next;
 }
 
 function summarizeTitle(text: string): string {

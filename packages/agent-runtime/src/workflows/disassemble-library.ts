@@ -38,10 +38,14 @@ export type DisassembleBookManifest = {
   progress: { stage: string; completed_chapters: number; total_chapters: number; last_error: string; completed_batches?: number; total_batches?: number; message?: string };
   coverage: { first_chapter: number; last_chapter: number; analyzed_chapters: number[]; missing_chapters: number[] };
   analysis_scope?: {
-    mode: "prefix_chars";
-    requested_chars: number;
+    /** `prefix_chars` is retained for reports created before the fast workflow. */
+    mode: "prefix_chars" | "prefix_chapters";
+    requested_chars?: number;
+    requested_chapters?: number;
     actual_chars: number;
+    actual_chapters?: number;
     source_chars: number;
+    source_chapters?: number;
     first_chapter: number;
     last_chapter: number;
     truncated: boolean;
@@ -67,7 +71,7 @@ export async function createDisassembleBook(
   const bookId = `${sanitizeBookId(input.title)}-${formatBookTimestamp(new Date())}-${randomUUID().replace(/-/g, "").slice(0, 8)}`;
   const dir = `${DISASSEMBLE_LIBRARY_DIR}/${bookId}`;
   const manifest: DisassembleBookManifest = {
-    schema_version: 2,
+    schema_version: 3,
     template_version: "1",
     id: bookId,
     title: input.title || "当前拆书书籍",
@@ -81,7 +85,7 @@ export async function createDisassembleBook(
     conversation_id: String(input.conversationId || "").trim(),
     chars: input.sourceText.length,
     status: "imported",
-    analysis_version: 2,
+    analysis_version: 3,
     error: "",
     analyzed_at: "",
     source: { path: input.sourcePath || `${dir}/原文.txt`, hash: createHash("sha256").update(input.sourceText, "utf8").digest("hex"), chars: input.sourceText.length, chapter_count: countChapters(input.sourceText), import_complete: true },
@@ -239,12 +243,23 @@ export async function readDisassembleBookManifest(bookDir: string, context: Work
 function normalizeAnalysisScope(value: unknown): DisassembleBookManifest["analysis_scope"] | undefined {
   if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
   const source = value as Record<string, unknown>;
-  if (source.mode !== "prefix_chars") return undefined;
+  if (source.mode !== "prefix_chars" && source.mode !== "prefix_chapters") return undefined;
   return {
-    mode: "prefix_chars",
-    requested_chars: Math.max(0, Math.trunc(Number(source.requested_chars || 0))),
+    mode: source.mode,
+    requested_chars: source.mode === "prefix_chars"
+      ? Math.max(0, Math.trunc(Number(source.requested_chars || 0)))
+      : undefined,
+    requested_chapters: source.mode === "prefix_chapters"
+      ? Math.max(0, Math.trunc(Number(source.requested_chapters || 0)))
+      : undefined,
     actual_chars: Math.max(0, Math.trunc(Number(source.actual_chars || 0))),
+    actual_chapters: source.mode === "prefix_chapters"
+      ? Math.max(0, Math.trunc(Number(source.actual_chapters || 0)))
+      : undefined,
     source_chars: Math.max(0, Math.trunc(Number(source.source_chars || 0))),
+    source_chapters: source.mode === "prefix_chapters"
+      ? Math.max(0, Math.trunc(Number(source.source_chapters || 0)))
+      : undefined,
     first_chapter: Math.max(0, Math.trunc(Number(source.first_chapter || 0))),
     last_chapter: Math.max(0, Math.trunc(Number(source.last_chapter || 0))),
     truncated: Boolean(source.truncated)
@@ -491,19 +506,22 @@ function sanitizeBookId(value: string): string {
 }
 
 function countChapters(text: string): number {
-  return String(text || "").match(/(?:^|\n)\s*(?:第\s*\d+\s*章|Chapter\s+\d+)/gi)?.length || 0;
+  return String(text || "").match(/(?:^|\n)\s*(?:第\s*\d+\s*章|Chapter\s+\d+|序章|楔子|前言|引子|番外(?:\s*\d+)?|后记|终章)/gi)?.length || 0;
 }
 
 function buildChapterIndex(text: string): string {
   const source = String(text || "");
-  const matches = [...source.matchAll(/(?:^|\n)\s*(第\s*(\d+)\s*章[^\n]*)/gi)];
+  // A named prologue or extra is still a chapter-sized unit for the fast
+  // prefix workflow.  Keep its original title while leaving the numeric
+  // chapter field at zero when the text does not provide a number.
+  const matches = [...source.matchAll(/(?:^|\n)\s*((?:第\s*(\d+)\s*章|序章|楔子|前言|引子|番外(?:\s*\d+)?|后记|终章)[^\n]*)/gi)];
   if (!matches.length) {
     return `${JSON.stringify({ index_type: "paragraph_window", start: 0, end: source.length, label: "全文" })}\n`;
   }
   return matches.map((match, index) => {
     const start = match.index || 0;
     const end = index + 1 < matches.length ? (matches[index + 1]?.index || source.length) : source.length;
-    return JSON.stringify({ index_type: "chapter", chapter: Number(match[2] || index + 1), title: String(match[1] || "").trim(), start, end });
+    return JSON.stringify({ index_type: "chapter", chapter: Number(match[2] || 0), title: String(match[1] || "").trim(), start, end });
   }).join("\n") + "\n";
 }
 

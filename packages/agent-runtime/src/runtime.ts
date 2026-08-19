@@ -69,7 +69,7 @@ import { SkillDraftService } from "./skill-draft-service.js";
 import { SkillService } from "@xiaoshuo/skill-service";
 import { AgentFileOperationRunner } from "./file-operation-runner.js";
 import { ConversationService } from "@xiaoshuo/conversation-service";
-import { DocumentService } from "@xiaoshuo/document-service";
+import { DocumentService, ProjectLibraryService } from "@xiaoshuo/document-service";
 import { createHash, randomUUID } from "node:crypto";
 import { loadModelConfig, loadPublicConfig, loadWebSearchConfig, type ConfigServiceOptions } from "@xiaoshuo/config-service";
 import {
@@ -126,7 +126,7 @@ import type { CanonClaim } from "./memory-governor.js";
 import { GovernedMemoryProjectionService } from "./governed-memory-projection-service.js";
 import { EvaluatorRegistry } from "./evaluator-registry.js";
 import { FeedbackLearner, type ArtifactFeedback } from "./feedback-learner.js";
-import { createGeneratedLibraryDraft } from "./library-draft.js";
+import { createGeneratedLibraryDraft, recordsFromGeneratedSections } from "./library-draft.js";
 import { commitGeneratedBodySummary, commitGeneratedStoryPlanning, isStoryPlanningGeneratedSkillId, type GeneratedStoryPlanningCommit, type StoryPlanningGeneratedSkillId } from "./generated-story-planning.js";
 import {
   buildSectionedGeneratedSavePlan,
@@ -1173,7 +1173,7 @@ export class AgentRuntimeService {
     execution: DurableRunExecution,
     options: AgentRunOptions = {}
   ): Promise<SkillRunResponse> {
-    const runOptions = { ...options, signal: execution.signal };
+    const runOptions = { ...options, signal: execution.signal, runId: execution.run_id };
     const trace = this.createTraceRecorder({
       conversationId: request.conversation_id || "",
       skillId,
@@ -1356,7 +1356,10 @@ export class AgentRuntimeService {
         ...((request as any).action !== undefined ? { action: (request as any).action } : {}),
         ...((request as any).suppress_conversation_record !== undefined
           ? { suppress_conversation_record: (request as any).suppress_conversation_record }
-          : {})
+          : {}),
+        ...((request as any).max_attempts !== undefined ? { max_attempts: (request as any).max_attempts } : {}),
+        ...((request as any).pause_each !== undefined ? { pause_each: (request as any).pause_each } : {}),
+        ...((request as any).max_cost_usd !== undefined ? { max_cost_usd: (request as any).max_cost_usd } : {})
       } as any;
 
       if (skillId === "body_generate" || skillId === "batch_generate") {
@@ -1500,16 +1503,38 @@ export class AgentRuntimeService {
     const cachedContent = await this.cache.readContent(cacheId);
     const sectionedMode = requestedMode || meta.save_plan?.mode || meta.mode || "replace";
     if (isSectionedGeneratedSkillId(effectiveSkillId)) {
-      const draft = await createGeneratedLibraryDraft({
-        projectRoot: this.projectRoot,
-        cacheId,
-        skillId: effectiveSkillId,
-        result: cachedContent,
-        mode: sectionedMode,
-        source: `generated_cache:${source}`
+      // A normal style/genre/lore result is already the user's confirmed
+      // cache at this point.  Do not turn that one confirmation into a second
+      // hidden library-draft confirmation.  ProjectLibraryService validates
+      // and atomically writes its structured master plus all projections.
+      const records = recordsFromGeneratedSections(effectiveSkillId, cachedContent, sectionedMode);
+      if (!records.length) {
+        throw codedRuntimeError("GENERATED_SECTIONED_CONTENT_INVALID", "生成资料未通过结构校验，未写入资料库。");
+      }
+      const domain = effectiveSkillId === "style_extract"
+        ? "style"
+        : effectiveSkillId === "genre_generate"
+          ? "genre"
+          : "lore";
+      const libraries = new ProjectLibraryService({ projectRoot: this.projectRoot });
+      const current = await libraries.get(domain);
+      const existingRecords = current.status === "migration_required"
+        ? current.migration_preview?.records || []
+        : current.records;
+      const mergeExisting = sectionedMode === "append"
+        || (effectiveSkillId === "lore_extract" && options.sectioned?.loreMergeExisting === true);
+      const saved = await libraries.save(domain, {
+        baseRevision: current.revision,
+        records: mergeExisting ? mergeGeneratedLibraryRecords(existingRecords, records) : records,
+        source: `generated_cache:${source}`,
+        summary: `${mergeExisting ? "合并" : "替换"}已确认 AI 生成${domain === "style" ? "写作风格库" : domain === "genre" ? "题材库" : "设定资料库"}`,
+        allowProjectionDrift: !mergeExisting
       });
-      const draftPath = draft ? `00_设定集/.agent/library-drafts/${draft.draft_id}.jsonl` : "";
-      const committed = await this.cache.markCommitted(cacheId, draftPath ? [draftPath] : [], {
+      const savedPaths = canonicalGeneratedPaths([
+        `00_设定集/.agent/libraries/${domain}.v1.jsonl`,
+        ...saved.projection_paths
+      ]);
+      const committed = await this.cache.markCommitted(cacheId, savedPaths, {
         cleanupContent: input.cleanup_content ?? false,
         commitRunId: options.execution?.run_id,
         commitRequestId: options.execution?.request_id
@@ -1517,7 +1542,7 @@ export class AgentRuntimeService {
       return {
         run_id: options.execution?.run_id || "",
         cache_id: cacheId,
-        saved_paths: [],
+        saved_paths: savedPaths,
         journal_ids: [],
         replayed: false,
         cache: committed
@@ -1856,7 +1881,7 @@ export class AgentRuntimeService {
     execution: DurableRunExecution,
     options: AgentRunOptions = {}
   ): Promise<AgentRunResponse> {
-    const runOptions = { ...options, signal: execution.signal };
+    const runOptions = { ...options, signal: execution.signal, runId: execution.run_id };
     const trace = this.createTraceRecorder({
       conversationId: request.conversation_id || "",
       skillId: request.skill_id || "",
@@ -1888,14 +1913,15 @@ export class AgentRuntimeService {
           durationMs: Date.now() - startedAt,
           streaming: false
         });
-        this.runCoordinator.completeRun(execution, response);
-        response = await this.persistInlinePlanMetadata(response, execution.run_id).catch(() => response);
+        response = await this.persistInlinePlanMetadata(response, execution.run_id, "completed").catch(() => response);
+        await this.bindResponseCachesToRun(response, execution);
         await this.finalizeDeferredGeneratedCache(
           response.skill_result,
           execution.run_id,
           execution.request_id
         );
         await trace.finish({ saved_paths: response.saved_paths || [] });
+        this.runCoordinator.completeRun(execution, response);
         return response;
       } catch (error) {
         const durableState = this.failDurableRun(execution, error);
@@ -1928,6 +1954,12 @@ export class AgentRuntimeService {
     execution?: DurableRunExecution
   ): Promise<AgentRunResponse> {
     throwIfAborted(options.signal);
+    const pendingCacheResponse = execution
+      ? await this.restorePendingRunCache(request, execution)
+      : null;
+    if (pendingCacheResponse) {
+      return pendingCacheResponse;
+    }
     const skillManagementIntent = classifySkillManagementIntent(request.content || "");
     if (skillManagementIntent) {
       trace?.mark("planned", {
@@ -2021,7 +2053,7 @@ export class AgentRuntimeService {
       }
       throw error;
     }
-    const runOptions = { ...options, signal: execution.signal };
+    const runOptions = { ...options, signal: execution.signal, runId: execution.run_id };
     const trace = this.createTraceRecorder({
       conversationId: request.conversation_id || "",
       skillId: request.skill_id || "",
@@ -2034,20 +2066,50 @@ export class AgentRuntimeService {
     try {
       await this.addRoutingTrace(request, trace);
       let finalPayload: AgentRunResponse | null = null;
+      // Chat replies that are really project artifacts are durable from their
+      // first visible answer chunk.  This gives a stopped/disconnected stream
+      // a real Markdown checkpoint instead of leaving its only copy in the
+      // renderer.  Skill/workflow outputs keep their own cache/checkpoint
+      // implementations, so they are intentionally excluded here.
+      let streamingCacheId = "";
       for await (const sourceEvent of this.withDurableRunContext(
         execution,
         this.streamAgentRunInternal(request, trace, runOptions, execution)
       )) {
         const inlinePlan = sourceEvent.type === "start" ? this.inlinePlanMetadata(execution.run_id) : null;
+        let assistantMessageId = "";
         if (sourceEvent.type === "start" && inlinePlan) {
           // Persist a pending assistant message before yielding the stream start.
           // A renderer reload can then recover the real durable run identity
           // instead of depending on an in-memory NDJSON event.
-          await this.persistInlinePlanPlaceholder(sourceEvent.conversation_id || request.conversation_id || "", request, inlinePlan).catch(() => undefined);
+          assistantMessageId = await this.persistInlinePlanPlaceholder(sourceEvent.conversation_id || request.conversation_id || "", request, inlinePlan).catch(() => "");
+        }
+        if (
+          sourceEvent.type === "start" &&
+          (sourceEvent.intent === "chat" || sourceEvent.intent === "read_context") &&
+          (hasExplicitWriteIntent(request.content || "") || isPrimaryGeneratedArtifactRequest(request))
+        ) {
+          streamingCacheId = deterministicGeneratedCacheId(execution, "chat_generated", "chat_auto_save");
+          await this.cache.createWithId(streamingCacheId, {
+            source: "chat",
+            skill_id: "chat_generated",
+            conversation_id: sourceEvent.conversation_id || request.conversation_id || "",
+            message_id: assistantMessageId,
+            run_id: execution.run_id,
+            summary: "AI 会话流式生成缓存"
+          });
+        }
+        if (sourceEvent.type === "delta" && sourceEvent.channel !== "reasoning" && sourceEvent.text && streamingCacheId) {
+          await this.cache.append(streamingCacheId, sourceEvent.text);
         }
         const event: AgentStreamEvent =
           sourceEvent.type === "start"
-            ? { ...sourceEvent, run_id: execution.run_id, ...(inlinePlan ? { inline_plan: inlinePlan } : {}) }
+            ? {
+                ...sourceEvent,
+                run_id: execution.run_id,
+                ...(assistantMessageId ? { assistant_message_id: assistantMessageId } : {}),
+                ...(inlinePlan ? { inline_plan: inlinePlan } : {})
+              }
             : sourceEvent.type === "final"
               ? { ...sourceEvent, payload: { ...sourceEvent.payload, run_id: execution.run_id } }
               : sourceEvent;
@@ -2068,17 +2130,19 @@ export class AgentRuntimeService {
         durationMs: Date.now() - startedAt,
         streaming: true
       });
-      this.runCoordinator.completeRun(execution, completedPayload);
-      const persistedPayload = await this.persistInlinePlanMetadata(completedPayload, execution.run_id).catch(() => completedPayload);
+      const persistedPayload = await this.persistInlinePlanMetadata(completedPayload, execution.run_id, "completed").catch(() => completedPayload);
+      await this.bindResponseCachesToRun(persistedPayload, execution);
       await this.finalizeDeferredGeneratedCache(
         persistedPayload.skill_result,
         execution.run_id,
         execution.request_id
       );
       await trace.finish({ saved_paths: persistedPayload.saved_paths || [] });
+      this.runCoordinator.completeRun(execution, persistedPayload);
       yield { type: "final", payload: persistedPayload };
     } catch (error) {
       const durableState = this.failDurableRun(execution, error);
+      await this.mergeInlinePlanFailure(execution.run_id, error, durableState).catch(() => undefined);
       await this.addModelCallSummaryToTrace(trace, {
         inputChars: agentRequestInputChars(request),
         outputChars: 0,
@@ -2131,6 +2195,19 @@ export class AgentRuntimeService {
     execution?: DurableRunExecution
   ): AsyncGenerator<AgentStreamEvent> {
     throwIfAborted(options.signal);
+    const pendingCacheResponse = execution
+      ? await this.restorePendingRunCache(request, execution)
+      : null;
+    if (pendingCacheResponse) {
+      yield {
+        type: "start",
+        intent: pendingCacheResponse.intent,
+        conversation_id: pendingCacheResponse.conversation?.id || request.conversation_id || "",
+        skill_id: pendingCacheResponse.current_skill || String(pendingCacheResponse.skill_result?.data?.skill_id || "")
+      };
+      yield { type: "final", payload: pendingCacheResponse };
+      return;
+    }
     const skillManagementIntent = classifySkillManagementIntent(request.content || "");
     if (skillManagementIntent) {
       trace?.mark("planned", {
@@ -2394,9 +2471,6 @@ export class AgentRuntimeService {
   }
 
   private inlinePlanMetadata(runId: string): InlinePlanMetadata | null {
-    if (!this.featureFlags.snapshot().agent_inline_plan_ui) {
-      return null;
-    }
     const run = this.runCoordinator.getRun(runId);
     if (!run) {
       return null;
@@ -2410,26 +2484,47 @@ export class AgentRuntimeService {
     };
   }
 
-  private async persistInlinePlanMetadata(response: AgentRunResponse, runId: string): Promise<AgentRunResponse> {
-    const inlinePlan = this.inlinePlanMetadata(runId);
+  private async persistInlinePlanMetadata(
+    response: AgentRunResponse,
+    runId: string,
+    finalStatus?: "completed" | "failed" | "paused" | "cancelled"
+  ): Promise<AgentRunResponse> {
+    const currentInlinePlan = this.inlinePlanMetadata(runId);
+    // Completion is committed after the message/cache have been persisted so
+    // a durable status never races the filesystem cleanup.  Reflect that one
+    // final version increment in the saved card, keeping its optimistic
+    // version aligned with the completed run visible to the renderer.
+    const inlinePlan = currentInlinePlan && finalStatus === "completed"
+      ? { ...currentInlinePlan, run_version: currentInlinePlan.run_version + 1 }
+      : currentInlinePlan;
     const conversation = response.conversation;
     if (!inlinePlan || !conversation) {
       return response;
     }
     let assistantIndex = -1;
+    let fallbackAssistantIndex = -1;
     for (let index = conversation.messages.length - 1; index >= 0; index -= 1) {
-      if (
-        conversation.messages[index]?.role === "assistant"
-        && !this.isInlinePlanPlaceholder(conversation.messages[index]!, runId)
-      ) {
+      const message = conversation.messages[index];
+      if (message?.role !== "assistant" || this.isInlinePlanPlaceholder(message, runId)) {
+        continue;
+      }
+      if (fallbackAssistantIndex < 0) {
+        fallbackAssistantIndex = index;
+      }
+      if (message.run_id === runId || String(isRecord(message.metadata) ? message.metadata.run_id || "" : "") === runId) {
         assistantIndex = index;
         break;
       }
     }
+    // Workflow handlers predating run-aware messages still create their final
+    // assistant record without run_id. Prefer the exact identity when present,
+    // then safely upgrade the nearest non-placeholder reply.
+    if (assistantIndex < 0) assistantIndex = fallbackAssistantIndex;
     if (assistantIndex < 0) {
       return response;
     }
     const assistant = conversation.messages[assistantIndex]!;
+    const placeholderId = conversation.messages.find((message) => this.isInlinePlanPlaceholder(message, runId))?.id || "";
     const messages = conversation.messages.flatMap((message, index) => {
       if (this.isInlinePlanPlaceholder(message, runId)) {
         return [];
@@ -2439,12 +2534,20 @@ export class AgentRuntimeService {
       }
       return [{
         ...message,
+        // The provisional card and the completed message are the same logical
+        // turn. Retain its identity so an in-flight renderer never leaves the
+        // result or a confirmation card under a different assistant bubble.
+        ...(placeholderId ? { id: placeholderId } : {}),
+        parent_message_id: message.parent_message_id || conversation.messages.slice(0, assistantIndex).reverse().find((item) => item.role === "user")?.id || "",
+        run_id: runId,
+        turn_id: message.turn_id || message.parent_message_id || runId,
+        status: "completed" as const,
         parts: this.assistantConversationParts(message, this.executionTraceForRun(runId)),
         metadata: {
           ...message.metadata,
           inline_plan: inlinePlan,
           inline_plan_pending: false,
-          run_status: this.runCoordinator.getRun(runId)?.status || "completed",
+          run_status: finalStatus || this.runCoordinator.getRun(runId)?.status || "completed",
           operation_results: response.results || [],
           execution_trace: this.executionTraceForRun(runId),
           // Keep temporary compatibility for previously rendered cards;
@@ -2459,38 +2562,108 @@ export class AgentRuntimeService {
     return { ...response, conversation: updated };
   }
 
+  private async mergeInlinePlanFailure(runId: string, error: unknown, durableState: string): Promise<void> {
+    const run = this.runCoordinator.getRun(runId);
+    if (!run?.conversation_id) return;
+    const conversation = await this.conversations.getConversation(run.conversation_id);
+    const placeholderIndex = conversation.messages.findIndex((message) =>
+      this.isInlinePlanPlaceholder(message, runId)
+      || (message.role === "assistant" && message.run_id === runId && message.status === "running")
+    );
+    if (placeholderIndex < 0) return;
+    const placeholder = conversation.messages[placeholderIndex]!;
+    const partialIndex = conversation.messages.findIndex((message, index) =>
+      index !== placeholderIndex && message.role === "assistant" && message.run_id === runId
+    );
+    const partial = partialIndex >= 0 ? conversation.messages[partialIndex]! : null;
+    const status = durableState === "cancelled" ? "cancelled" as const : durableState === "paused" ? "pending" as const : "error" as const;
+    const message = partial
+      ? {
+          ...partial,
+          id: placeholder.id,
+          parent_message_id: placeholder.parent_message_id || partial.parent_message_id || "",
+          run_id: runId,
+          turn_id: placeholder.turn_id || partial.turn_id || runId,
+          status,
+          parts: this.assistantConversationParts(partial, this.executionTraceForRun(runId)),
+          metadata: {
+            ...partial.metadata,
+            inline_plan: this.inlinePlanMetadata(runId),
+            inline_plan_pending: false,
+            run_status: durableState,
+            execution_trace: this.executionTraceForRun(runId)
+          }
+        }
+      : {
+          ...placeholder,
+          status,
+          content: durableState === "cancelled" ? "已停止。" : error instanceof Error ? `任务未完成：${error.message}` : "任务未完成。",
+          metadata: {
+            ...placeholder.metadata,
+            inline_plan_pending: false,
+            run_status: durableState,
+            error: error instanceof Error ? error.message : String(error || ""),
+            execution_trace: this.executionTraceForRun(runId)
+          }
+        };
+    const messages = conversation.messages.flatMap((item, index) => {
+      if (index === placeholderIndex) return [message];
+      if (index === partialIndex) return [];
+      return [item];
+    });
+    await this.conversations.saveConversation({
+      ...conversation,
+      messages,
+      message_count: messages.length,
+      updated_at: new Date().toISOString()
+    });
+  }
+
   private async persistInlinePlanPlaceholder(
     conversationId: string,
     request: AgentRunRequest,
     inlinePlan: InlinePlanMetadata
-  ): Promise<void> {
+  ): Promise<string> {
     if (!conversationId) {
-      return;
+      return "";
     }
     const conversation = await this.conversations.getConversation(conversationId);
-    if (conversation.messages.some((message) => this.isInlinePlanPlaceholder(message, inlinePlan.run_id))) {
-      return;
+    const existing = conversation.messages.find((message) => this.isInlinePlanPlaceholder(message, inlinePlan.run_id));
+    if (existing) {
+      return existing.id;
     }
 
     const createdAt = new Date().toISOString();
     const userText = String(request.content || "").trim();
     const recentMessages = conversation.messages.slice(-3);
     const messages = [...conversation.messages];
+    let parentMessageId = "";
+    const matchingUser = [...messages].reverse().find((message) => message.role === "user" && message.content === userText);
+    if (matchingUser) {
+      parentMessageId = matchingUser.id;
+    }
     if (userText && !recentMessages.some((message) => message.role === "user" && message.content === userText)) {
-      messages.push({
+      const userMessage = {
         id: randomUUID().replace(/-/g, ""),
-        role: "user",
+        role: "user" as const,
         content: userText,
         created_at: createdAt,
         metadata: {
           intent: "skill",
           pending_run_id: inlinePlan.run_id
         }
-      });
+      };
+      messages.push(userMessage);
+      parentMessageId = userMessage.id;
     }
+    const assistantMessageId = randomUUID().replace(/-/g, "");
     messages.push({
-      id: randomUUID().replace(/-/g, ""),
+      id: assistantMessageId,
       role: "assistant",
+      parent_message_id: parentMessageId,
+      run_id: inlinePlan.run_id,
+      turn_id: parentMessageId || inlinePlan.run_id,
+      status: "running",
       content: "正在执行…",
       created_at: createdAt,
       parts: [{
@@ -2515,6 +2688,7 @@ export class AgentRuntimeService {
       messages,
       message_count: messages.length
     });
+    return assistantMessageId;
   }
 
   private isInlinePlanPlaceholder(message: ConversationDetail["messages"][number], runId: string): boolean {
@@ -2781,6 +2955,13 @@ export class AgentRuntimeService {
           })
         : undefined,
       reportProgress
+      ,
+      requestPause: execution
+        ? (reason) => {
+            this.runCoordinator.requestPause(execution.run_id, undefined, this.runCoordinator.getRun(execution.run_id)?.version);
+            reportProgress?.({ stage: "workflow_pause_requested", message: reason });
+          }
+        : undefined
     };
   }
 
@@ -3086,6 +3267,61 @@ export class AgentRuntimeService {
     };
   }
 
+  /**
+   * A failed outer run can already have a fully generated cache.  Restore
+   * that exact artifact before planning/routing again; otherwise a retry can
+   * ask the model to generate the whole response a second time.
+   */
+  private async restorePendingRunCache(
+    request: AgentRunRequest,
+    execution: DurableRunExecution
+  ): Promise<AgentRunResponse | null> {
+    if (isWorkflowSkillId(request.skill_id || "")) {
+      return null;
+    }
+    const cache = (await this.cache.list()).find((item) =>
+      item.run_id === execution.run_id
+      && item.status === "pending"
+      && ["chat", "skill_result", "skill_stream", "conversation"].includes(item.source)
+    );
+    if (!cache) return null;
+    const content = await this.cache.readContent(cache.cache_id).catch(() => "");
+    if (!content.trim()) return null;
+    const savePlan = cache.save_plan;
+    const targetPaths = savePlan?.target_paths?.length ? savePlan.target_paths : cache.target_paths;
+    const isChat = cache.skill_id === "chat_generated" || cache.skill_id === "conversation_write_back";
+    const conversation = request.conversation_id
+      ? await this.conversations.getConversation(request.conversation_id).catch(() => undefined)
+      : undefined;
+    return {
+      intent: isChat ? "chat" : "skill",
+      reply: content,
+      conversation,
+      results: [],
+      saved_paths: [],
+      skill_result: {
+        status: "done",
+        result: content,
+        saved_path: "",
+        data: {
+          skill_id: cache.skill_id,
+          saved_paths: [],
+          pending_save: true,
+          target_paths: targetPaths,
+          target_path: targetPaths[0] || "",
+          default_mode: savePlan?.mode || cache.mode,
+          cache_id: cache.cache_id,
+          cache_path: cache.cache_path,
+          cache_chars: cache.chars,
+          save_plan: savePlan,
+          restored_from_cache: true
+        }
+      },
+      requires_confirmation: true,
+      current_skill: isChat ? "" : cache.skill_id
+    };
+  }
+
   private async attachGeneratedSaveDecision(
     request: AgentRunRequest,
     response: AgentRunResponse,
@@ -3099,8 +3335,18 @@ export class AgentRuntimeService {
     if (response.saved_paths.length || response.skill_result?.data?.pending_save) {
       return response;
     }
+    // Conversational answers, summaries and search replies are not artifacts.
+    // Only a named story artifact (or an explicit save request) receives a
+    // cache and confirmation card; otherwise the planner would make a second
+    // model request after every normal chat reply.
+    if (!hasExplicitWriteIntent(request.content || "") && !isPrimaryGeneratedArtifactRequest(request)) {
+      return response;
+    }
     let content = String(response.reply || "").trim();
-    if (!content || (!hasExplicitWriteIntent(request.content || "") && !isLegacyChatArtifactCreation(request.content || ""))) {
+    // A generated result is staged whenever the target resolver can identify
+    // an in-project destination.  “保存” is deliberately not an execution
+    // permission: it only helps the planner select that destination.
+    if (!content) {
       return response;
     }
 
@@ -3114,13 +3360,15 @@ export class AgentRuntimeService {
       ? await this.cache.readContent(existing.cache_id).catch(() => "")
       : "";
     if (cachedContent.trim()) {
-      if (cachedContent !== content) {
+      if (cachedContent !== content && existing?.summary !== "AI 会话流式生成缓存") {
         throw codedRuntimeError(
           "CHAT_GENERATED_CACHE_CONTENT_CONFLICT",
           "同一 durable chat run 已绑定到不同生成结果"
         );
       }
-      content = cachedContent;
+      if (cachedContent === content) {
+        content = cachedContent;
+      }
     }
 
     const plan = existing?.save_plan || await this.savePlanner.planGeneratedSave({
@@ -3130,7 +3378,7 @@ export class AgentRuntimeService {
         skillId: "chat_generated",
         currentPath: request.current_path || "",
         chapter: this.resolveSkillChapter("body_generate", request),
-        writeRequested: true,
+        writeRequested: hasExplicitWriteIntent(request.content || ""),
         defaultMode: "replace"
       }, options);
     throwIfAborted(options.signal);
@@ -3139,12 +3387,16 @@ export class AgentRuntimeService {
       return response;
     }
 
-    const entry = existing || (deterministicCacheId
+    const entry = existing
+      ? await this.cache.updateSavePlan(existing.cache_id, plan)
+      : (deterministicCacheId
       ? await this.cache.createWithId(deterministicCacheId, {
           source: "chat",
           target_paths: plan.target_paths,
           skill_id: "chat_generated",
           conversation_id: response.conversation?.id || request.conversation_id || "",
+          message_id: response.conversation?.messages.at(-1)?.id || "",
+          run_id: execution?.run_id || "",
           mode: plan.mode,
           summary: "AI 会话生成保存计划",
           save_plan: plan
@@ -3154,6 +3406,8 @@ export class AgentRuntimeService {
           target_paths: plan.target_paths,
           skill_id: "chat_generated",
           conversation_id: response.conversation?.id || request.conversation_id || "",
+          message_id: response.conversation?.messages.at(-1)?.id || "",
+          run_id: execution?.run_id || "",
           mode: plan.mode,
           summary: "AI 会话生成保存计划",
           save_plan: plan
@@ -3164,56 +3418,24 @@ export class AgentRuntimeService {
         `Chat 生成缓存状态为 ${entry.status}，不能继续提交`
       );
     }
-    const meta = cachedContent ? entry : await this.cache.replace(entry.cache_id, content);
-    throwIfAborted(options.signal);
-
-    if (await this.savePlanner.shouldAutoCommit(plan)) {
-      throwIfAborted(options.signal);
-      const committed = execution
-        ? await this.commitGeneratedCache({
-            cache_id: entry.cache_id,
-            source: "chat",
-            skill_id: "chat_generated",
-            mode: plan.mode,
-            target_paths: plan.target_paths,
-            save_plan: plan,
-            summary: "Chat generated auto-save",
-            cleanup_content: false
-          }, {
-            ...options,
-            execution
-          })
-        : null;
-      const savedPaths = committed
-        ? committed.saved_paths
-        : await this.cache.commitSavePlan(entry.cache_id, plan, { cleanupContent: true });
-      return {
-        ...response,
-        saved_paths: savedPaths,
-        skill_result: {
-          status: "done",
-          result: content,
-          saved_path: savedPaths[0] || "",
-          data: {
-            skill_id: "chat_generated",
-            result: content,
-            saved_paths: savedPaths,
-            target_paths: plan.target_paths,
-            target_path: plan.target_paths[0] || "",
-            save_plan: plan,
-            cache_id: entry.cache_id,
-            ...(committed
-              ? {
-                  journal_ids: committed.journal_ids,
-                  run_id: execution!.run_id,
-                  request_id: execution!.request_id,
-                  replayed: committed.replayed
-                }
-              : {})
-          }
-        }
-      };
+    // The streaming copy can differ from the final response when the optional
+    // humanizer has polished the completed answer.  It is still the same
+    // durable run, so replace only that explicitly marked streaming draft;
+    // any other pre-existing cache remains a hard conflict.
+    const meta = cachedContent && cachedContent === content
+      ? entry
+      : cachedContent && existing?.summary === "AI 会话流式生成缓存"
+        ? await this.cache.replace(entry.cache_id, content)
+        : cachedContent
+          ? (() => { throw codedRuntimeError("CHAT_GENERATED_CACHE_CONTENT_CONFLICT", "同一 durable chat run 已绑定到不同生成结果"); })()
+          : await this.cache.replace(entry.cache_id, content);
+    if (execution) {
+      await this.cache.associate(entry.cache_id, {
+        conversation_id: request.conversation_id || response.conversation?.id || "",
+        run_id: execution.run_id
+      });
     }
+    throwIfAborted(options.signal);
 
     return {
       ...response,
@@ -3260,8 +3482,8 @@ export class AgentRuntimeService {
       target_paths: [intent.targetPath],
       reason: "显式会话 write_target 写回",
       confidence: 1,
-      requires_confirmation: false,
-      should_auto_commit: true,
+      requires_confirmation: true,
+      should_auto_commit: false,
       source: "conversation",
       skill_id: "conversation_write_back"
     });
@@ -3289,6 +3511,8 @@ export class AgentRuntimeService {
       target_paths: [intent.targetPath],
       skill_id: "conversation_write_back",
       conversation_id: response.conversation?.id || request.conversation_id || "",
+      message_id: response.conversation?.messages.at(-1)?.id || "",
+      run_id: execution.run_id,
       mode: intent.mode,
       summary: "会话显式写回",
       save_plan: savePlan
@@ -3298,38 +3522,15 @@ export class AgentRuntimeService {
     }
     throwIfAborted(options.signal);
 
-    const committed = await this.commitGeneratedCache({
-      cache_id: entry.cache_id,
-      source: "conversation",
-      skill_id: "conversation_write_back",
-      mode: intent.mode,
-      target_paths: [intent.targetPath],
-      save_plan: savePlan,
-      summary: "Conversation write_target write-back",
-      cleanup_content: false
-    }, {
-      ...options,
-      execution
-    });
-    const savedPath = committed.saved_paths[0] || intent.targetPath;
-    const conversation = response.conversation
-      ? await this.appendConversationWriteBackMessage(
-          response.conversation.id,
-          savedPath,
-          intent.mode,
-          execution.run_id,
-          committed.journal_ids
-        )
-      : response.conversation;
     const writeBackDescriptor = {
       cache_id: entry.cache_id,
-      saved_paths: committed.saved_paths,
-      journal_ids: committed.journal_ids,
+      saved_paths: [],
+      journal_ids: [],
       source: "conversation_write_back",
       target_paths: [intent.targetPath],
       run_id: execution.run_id,
       request_id: execution.request_id,
-      replayed: committed.replayed
+      pending_save: true
     };
     const baseSkillResult = response.skill_result || {
       status: "done" as const,
@@ -3343,14 +3544,22 @@ export class AgentRuntimeService {
       : [];
     return {
       ...response,
-      conversation,
-      saved_paths: uniquePaths([...(response.saved_paths || []), ...committed.saved_paths]),
+      conversation: response.conversation,
+      saved_paths: response.saved_paths || [],
       skill_result: skillRunResponseSchema.parse({
         ...baseSkillResult,
-        saved_path: baseSkillResult.saved_path || savedPath,
+        saved_path: baseSkillResult.saved_path || "",
         data: {
           ...baseData,
           conversation_write_back: writeBackDescriptor,
+          pending_save: true,
+          cache_id: entry.cache_id,
+          cache_path: (await this.cache.get(entry.cache_id)).cache_path,
+          cache_chars: content.length,
+          target_paths: [intent.targetPath],
+          target_path: intent.targetPath,
+          default_mode: intent.mode,
+          save_plan: savePlan,
           deferred_generated_caches: [
             ...existingDeferred,
             writeBackDescriptor
@@ -3912,6 +4121,8 @@ export class AgentRuntimeService {
       stepId: execution?.step_id,
       attemptId: execution?.attempt_id,
       planVersion: durableRun?.plan_version,
+      runOptions: options,
+      execution,
       confirmationId: execution?.confirmation_receipt_id,
       ...(execution?.confirmation_receipt_id &&
       execution.confirmation_receipt_version &&
@@ -4175,6 +4386,15 @@ export class AgentRuntimeService {
     execution: DurableRunExecution,
     options: AgentRunOptions = {}
   ): Promise<SkillRunResponse> {
+    // Prompt skills own their streaming cache, while the outer conversation
+    // loop owns the durable run.  Bind them here even when the result only
+    // waits for review (and therefore has no deferred commit descriptor).
+    // This keeps the review card attached to its originating conversation
+    // across a reload and prevents a later conversation from adopting it.
+    const pendingCacheId = String(result.data?.cache_id || "").trim();
+    if (pendingCacheId) {
+      await this.cache.associate(pendingCacheId, { run_id: execution.run_id });
+    }
     const deferred = parseDeferredPromptSkillCommit(result.data?.deferred_commit, skillId);
     if (!deferred || deferred.requires_confirmation) {
       return withDurableSkillIdentity(result, execution.run_id, execution.request_id, false);
@@ -4285,6 +4505,33 @@ export class AgentRuntimeService {
       // The outer run already owns the durable result. A completed-request
       // replay will retry this metadata/content cleanup without rerunning the model.
     }
+  }
+
+  /** Bind every pending cache reported by a response to the durable turn. */
+  private async bindResponseCachesToRun(response: AgentRunResponse, execution: DurableRunExecution): Promise<void> {
+    const data = isRecord(response.skill_result?.data) ? response.skill_result!.data : {};
+    const cacheIds = new Set<string>();
+    const primary = String(data.cache_id || "").trim();
+    if (primary) cacheIds.add(primary);
+    if (Array.isArray(data.deferred_generated_caches)) {
+      for (const item of data.deferred_generated_caches) {
+        if (!isRecord(item)) continue;
+        const cacheId = String(item.cache_id || "").trim();
+        if (cacheId) cacheIds.add(cacheId);
+      }
+    }
+    if (!cacheIds.size) return;
+    const conversation = response.conversation;
+    const conversationId = conversation?.id || this.runCoordinator.getRun(execution.run_id)?.conversation_id || "";
+    const assistantMessage = [...(conversation?.messages || [])]
+      .reverse()
+      .find((message) => message.role === "assistant" && message.run_id === execution.run_id)
+      || [...(conversation?.messages || [])].reverse().find((message) => message.role === "assistant");
+    await Promise.all([...cacheIds].map((cacheId) => this.cache.associate(cacheId, {
+      conversation_id: conversationId,
+      message_id: assistantMessage?.id,
+      run_id: execution.run_id
+    })));
   }
 
   private async runLocalSkillIntent(
@@ -4805,20 +5052,10 @@ export class AgentRuntimeService {
     if (payload.insert_mode === "none") {
       throw new Error("写回目标已设置，但 insert_mode 为 none。请先选择追加或覆盖。");
     }
-    const insertMode = resolveConversationWriteBackMode(payload);
-    if (insertMode !== "replace" || payload.confirm_write) {
-      return;
-    }
-    try {
-      const doc = await this.documents.readDocument(target);
-      if (String(doc.content || "").trim()) {
-        throw new Error("覆盖写入已有文档需要 confirm_write=true。");
-      }
-    } catch (error) {
-      if (error instanceof Error && error.message.includes("confirm_write")) {
-        throw error;
-      }
-    }
+    // This only validates the requested target. The generated response is
+    // always staged in a cache, so replacement confirmation happens later on
+    // the real content preview rather than before the model can generate it.
+    resolveConversationWriteBackMode(payload);
   }
 
   private async appendConversationWriteBackMessage(
@@ -5599,6 +5836,27 @@ function canonicalGeneratedPaths(paths: string[]): string[] {
     .sort();
 }
 
+function mergeGeneratedLibraryRecords<T extends { kind: string; name?: string; status?: string; order?: number }>(
+  existing: T[],
+  incoming: T[]
+): T[] {
+  const merged = existing
+    .filter((record) => record.status === "active")
+    .map((record, index) => ({ ...record, order: index }));
+  const keys = new Set(merged.map(generatedLibraryRecordKey));
+  for (const record of incoming) {
+    const key = generatedLibraryRecordKey(record);
+    if (keys.has(key)) continue;
+    keys.add(key);
+    merged.push({ ...record, order: merged.length });
+  }
+  return merged as T[];
+}
+
+function generatedLibraryRecordKey(record: { kind: string; name?: string }): string {
+  return `${record.kind}:${String(record.name || "").replace(/\s+/g, "").toLowerCase()}`;
+}
+
 function canonicalGeneratedSavePlan(savePlan: GeneratedSavePlan): GeneratedSavePlan {
   return {
     ...savePlan,
@@ -5888,6 +6146,16 @@ function isLegacyChatArtifactCreation(text: string): boolean {
   // Keep this compatibility path limited to generic chat artifacts. Story
   // planning and library skills must still require an explicit save request.
   return !/(大纲|细纲|章纲|正文|风格|题材|设定|章节)/.test(normalized);
+}
+
+function isPrimaryGeneratedArtifactRequest(request: AgentRunRequest): boolean {
+  const skillId = String(request.skill_id || "").trim();
+  if (["outline_generate", "detail_outline_generate", "chapter_outline_generate", "body_generate", "style_genre_generate", "batch_generate"].includes(skillId)) {
+    return true;
+  }
+  const content = String(request.content || "").replace(/\s+/g, "");
+  return /(生成|创作|撰写|续写|扩写|改写|补全|完善|重写).{0,24}(?:大纲|细纲|章纲|正文|章节|风格|题材|设定|人物线|世界观)/.test(content)
+    || /(?:大纲|细纲|章纲|正文|章节|风格|题材|设定|人物线|世界观).{0,24}(生成|创作|撰写|续写|扩写|改写|补全|完善|重写)/.test(content);
 }
 
 function resolveConversationWriteBackMode(payload: ConversationMessageRequest): "append" | "replace" {

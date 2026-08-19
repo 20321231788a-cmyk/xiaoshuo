@@ -272,6 +272,25 @@ describe("agent lifecycle routes", () => {
     expect(runtime.retryDurableRunStep).toHaveBeenCalledWith("run-control", "step-1", "op-retry", 8);
   });
 
+  it("rejects a chat stop when the durable run belongs to another conversation", async () => {
+    const writeJson = vi.fn();
+    runtime.getDurableRun.mockReturnValue({ ...runState("run-other", 2, "running"), conversation_id: "conversation-a" });
+
+    await handleAgentRoutes(
+      request("POST"),
+      response(),
+      "/api/agent/runs/run-other/cancel",
+      context(),
+      deps(writeJson, { operation_id: "op-stop", expected_version: 2, expected_conversation_id: "conversation-b" })
+    );
+
+    expect(runtime.cancelDurableRun).not.toHaveBeenCalled();
+    expect(writeJson).toHaveBeenCalledWith(expect.anything(), 409, {
+      detail: "运行不属于当前对话，已拒绝控制请求。",
+      code: "RUN_CONVERSATION_MISMATCH"
+    });
+  });
+
   it("resolves confirmations and maps version conflicts to 409", async () => {
     const writeJson = vi.fn();
     runtime.resolveDurableConfirmation.mockImplementation(() => {

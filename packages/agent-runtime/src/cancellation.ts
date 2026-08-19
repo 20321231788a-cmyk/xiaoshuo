@@ -1,6 +1,8 @@
 export type AgentRunOptions = {
   signal?: AbortSignal;
   requiresConfirmation?: boolean;
+  /** Durable identity propagated into conversation messages and stream parts. */
+  runId?: string;
 };
 
 export class AgentCancellationError extends Error {

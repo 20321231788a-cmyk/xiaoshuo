@@ -43,6 +43,11 @@ export type WorkflowRunContext = {
   commitJournal?: CommitJournalService;
   /** Ephemeral progress events for the active workflow stream. */
   reportProgress?: (progress: WorkflowProgress) => void;
+  /**
+   * A workflow can request a durable checkpoint pause after it has persisted
+   * its current unit. It is intentionally unavailable to ordinary chat runs.
+   */
+  requestPause?: (reason: string) => void;
 };
 
 export type WorkflowHandler = {

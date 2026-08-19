@@ -1,7 +1,7 @@
-import { ProjectLibraryService } from "@xiaoshuo/document-service";
-import type { AgentRunRequest, AgentRunResponse, ConversationDetail, ProjectLibraryDomain, ProjectLibraryRecord, SkillRunRequest } from "@xiaoshuo/shared";
+import type { AgentRunRequest, AgentRunResponse, ConversationDetail, ProjectLibraryRecord, SkillRunRequest } from "@xiaoshuo/shared";
 import { randomUUID } from "node:crypto";
-import { createGeneratedLibraryDraft, recordsFromGeneratedSections } from "../library-draft.js";
+import { recordsFromGeneratedSections } from "../library-draft.js";
+import { buildSectionedGeneratedSavePlan } from "../sectioned-generated-save.js";
 import type { WorkflowHandler, WorkflowRunContext } from "./types.js";
 import { throwIfAborted } from "../cancellation.js";
 
@@ -14,9 +14,9 @@ type LibraryGeneration = {
 
 /**
  * A compound, all-or-nothing route for requests such as
- * “创建都市高武的风格与题材库并保存”.  Prompt skills are deliberately run
- * without their normal draft side effect so both domains can be validated
- * before a single atomic document transaction commits them.
+ * “创建都市高武的风格与题材库并保存”. The model output is always staged in
+ * normal generated caches. “保存” expresses the intended targets and mode,
+ * never bypasses the user's cache-review confirmation.
  */
 export class StyleGenreGenerateWorkflow implements WorkflowHandler {
   id = "style_genre_generate";
@@ -24,9 +24,7 @@ export class StyleGenreGenerateWorkflow implements WorkflowHandler {
   async runAgent(request: AgentRunRequest, context: WorkflowRunContext): Promise<AgentRunResponse> {
     throwIfAborted(context.signal);
     const instruction = String(request.content || (request as any).instruction || "").trim();
-    const directSave = hasExplicitSaveInstruction(instruction);
     const mode = isReplaceInstruction(instruction) ? "replace" : "merge";
-    const libraries = new ProjectLibraryService({ projectRoot: context.projectRoot });
 
     report(context, "classifying", "已识别为风格与题材联合任务，正在读取项目上下文（1/5）", 1, 5);
     const basePayload: SkillRunRequest = {
@@ -65,86 +63,52 @@ export class StyleGenreGenerateWorkflow implements WorkflowHandler {
     ];
     report(context, "validating", "已完成两套资料生成，正在校验结构（4/5）", 4, 5);
 
-    if (!directSave) {
-      const [currentStyle, currentGenre] = await Promise.all([libraries.get("style"), libraries.get("genre")]);
-      const currentByDomain = { style: currentStyle, genre: currentGenre } as const;
-      const groupId = `style-genre-${randomUUID().replace(/-/g, "")}`;
-      const cacheId = `compound-${groupId}`;
-      const drafts = [] as Array<{ draft_id: string; domain: ProjectLibraryDomain; records: number }>;
-      try {
-        for (const item of generated) {
-          const current = currentByDomain[item.domain];
-          const draft = await createGeneratedLibraryDraft({
-            projectRoot: context.projectRoot,
-            cacheId,
-            skillId: item.skillId,
-            result: item.result,
-            mode: mode === "replace" ? "replace" : "append",
-            source: "workflow:style_genre_generate",
-            groupId,
-            commitMode: mode,
-            baseRevision: current.revision,
-            targetPaths: current.projection_paths,
-            conversationId: request.conversation_id || ""
-          });
-          if (!draft) throw new Error(`${domainLabel(item.domain)}没有生成可确认的资料条目。`);
-          drafts.push({ draft_id: draft.draft_id, domain: draft.domain, records: draft.records.length });
-        }
-      } catch (error) {
-        for (const draft of drafts) await libraries.discardDraft(draft.draft_id).catch(() => undefined);
-        throw error;
-      }
-      report(context, "completed", "风格与题材草稿已生成，等待确认写入（5/5）", 5, 5);
-      const reply = `已生成风格与题材草稿：风格 ${generated[0]!.records.length} 条，题材 ${generated[1]!.records.length} 条。确认前不会修改项目文件。`;
-      return response(request, reply, context, {
-        skill_id: this.id,
-        library_draft_group: {
-          group_id: groupId,
-          mode,
-          domains: ["style", "genre"],
-          draft_ids: drafts.map((draft) => draft.draft_id),
-          source: "workflow:style_genre_generate",
-          conversation_id: request.conversation_id || "",
-          created_at: new Date().toISOString()
-        },
-        style_draft: drafts.find((item) => item.domain === "style"),
-        genre_draft: drafts.find((item) => item.domain === "genre"),
-        requires_confirmation: true
+    const cacheMode = mode === "replace" ? "replace" : "append";
+    const groupId = `style-genre-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    const caches = await Promise.all(generated.map(async (item) => {
+      const savePlan = buildSectionedGeneratedSavePlan({
+        skillId: item.skillId,
+        result: item.result,
+        mode: cacheMode,
+        summaryPrefix: item.domain === "style" ? "写作风格库" : "题材库"
       });
-    }
-
-    const [currentStyle, currentGenre] = await Promise.all([libraries.get("style"), libraries.get("genre")]);
-    const recordsFor = (current: typeof currentStyle, incoming: ProjectLibraryRecord[]) =>
-      mode === "replace" ? incoming : mergeRecords(current.status === "migration_required" ? current.migration_preview?.records || [] : current.records, incoming);
-    report(context, "saving", `正在${mode === "replace" ? "替换" : "合并"}风格与题材库（5/5）`, 5, 5);
-    const saved = await libraries.saveMany([
-      {
-        domain: "style",
-        baseRevision: currentStyle.revision,
-        records: recordsFor(currentStyle, generated[0]!.records),
+      const meta = await context.cache.create({
         source: "workflow:style_genre_generate",
-        summary: `${mode === "replace" ? "替换" : "合并"}AI生成写作风格库`,
-        allowProjectionDrift: mode === "replace"
-      },
-      {
-        domain: "genre",
-        baseRevision: currentGenre.revision,
-        records: recordsFor(currentGenre, generated[1]!.records),
-        source: "workflow:style_genre_generate",
-        summary: `${mode === "replace" ? "替换" : "合并"}AI生成题材库`,
-        allowProjectionDrift: mode === "replace"
-      }
-    ]);
-    const savedPaths = saved.flatMap((item) => item.projection_paths);
-    report(context, "completed", `风格与题材库已${mode === "replace" ? "替换" : "保存"}（5/5）`, 5, 5);
-    const reply = `已${mode === "replace" ? "替换" : "合并保存"}风格库与题材库，共写入 ${savedPaths.length} 个资料文件。`;
+        skill_id: item.skillId,
+        mode: cacheMode,
+        target_paths: savePlan.target_paths,
+        summary: `风格与题材联合生成（${item.domain === "style" ? "写作风格" : "题材规则"}）`,
+        save_plan: savePlan,
+        conversation_id: request.conversation_id || ""
+      });
+      await context.cache.replace(meta.cache_id, item.result);
+      const refreshed = await context.cache.get(meta.cache_id);
+      return {
+        pending_save: true,
+        cache_id: refreshed.cache_id,
+        cache_path: refreshed.cache_path,
+        cache_chars: refreshed.chars,
+        skill_id: item.skillId,
+        result: item.result,
+        target_paths: savePlan.target_paths,
+        default_mode: cacheMode,
+        save_plan: savePlan,
+        group_id: groupId,
+        domain: item.domain
+      };
+    }));
+    report(context, "completed", "风格与题材已生成到缓存，等待确认写入（5/5）", 5, 5);
+    const reply = `已生成风格与题材缓存：风格 ${generated[0]!.records.length} 条，题材 ${generated[1]!.records.length} 条。尚未写入项目，请在预览卡中确认。`;
     return response(request, reply, context, {
       skill_id: this.id,
       mode,
-      saved_paths: savedPaths,
+      batch_group_id: groupId,
+      results: caches,
+      deferred_generated_caches: caches,
       style_records: generated[0]!.records.length,
-      genre_records: generated[1]!.records.length
-    }, savedPaths);
+      genre_records: generated[1]!.records.length,
+      requires_confirmation: true
+    });
   }
 }
 
@@ -166,26 +130,6 @@ function validateGeneration(
   return { domain, skillId, result: text, records };
 }
 
-function mergeRecords(existing: ProjectLibraryRecord[], incoming: ProjectLibraryRecord[]): ProjectLibraryRecord[] {
-  const merged = [...existing.filter((item) => item.status === "active")];
-  const seen = new Set(merged.map(recordKey));
-  for (const record of incoming) {
-    const key = recordKey(record);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    merged.push({ ...record, order: merged.length });
-  }
-  return merged;
-}
-
-function recordKey(record: ProjectLibraryRecord): string {
-  return `${record.kind}:${record.name.replace(/\s+/g, "").toLowerCase()}`;
-}
-
-function hasExplicitSaveInstruction(value: string): boolean {
-  return /(保存|保存到|写入|写进|写到|落盘|落到|同步到)/.test(value);
-}
-
 function isReplaceInstruction(value: string): boolean {
   return /(创建|重建|替换|覆盖)/.test(value);
 }
@@ -194,8 +138,8 @@ function report(context: WorkflowRunContext, stage: string, message: string, com
   context.reportProgress?.({ stage, message, completed, total });
 }
 
-function domainLabel(domain: ProjectLibraryDomain): string {
-  return domain === "style" ? "写作风格库" : domain === "genre" ? "题材库" : "设定资料库";
+function domainLabel(domain: "style" | "genre"): string {
+  return domain === "style" ? "写作风格库" : "题材库";
 }
 
 async function response(
